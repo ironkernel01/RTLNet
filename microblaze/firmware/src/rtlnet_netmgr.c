@@ -14,14 +14,18 @@
 #include "menu.h"
 #include "rtlnet_arp.h"
 #include "rtlnet_board.h"
+#include "rtlnet_cpupath.h"
 #include "rtlnet_dhcp.h"
 #include "rtlnet_eth_mac.h"
 #include "rtlnet_eth_protocol.h"
 #include "rtlnet_fmt.h"
 #include "rtlnet_icmp.h"
 #include "rtlnet_iperf.h"
+#include "rtlnet_lwip.h"
+#include "rtlnet_lwip_netif.h"
 #include "rtlnet_phy_rtl8211e.h"
 #include "rtlnet_platform.h"
+#include "rtlnet_tcp_echo.h"
 #include "rtlnet_udp_echo.h"
 #include "rtlnet_udp_socket.h"
 
@@ -90,6 +94,9 @@ void netmgr_config_defaults(void)
     g_cfg.iperf_port  = NETMGR_IPERF_PORT;
     g_cfg.echo_enable = 1;
     g_cfg.echo_socket = (int)NETMGR_ECHO_SOCKET;
+    g_cfg.tcp_echo_enable = 1;
+    g_cfg.tcp_echo_port = RTLNET_TCP_ECHO_PORT_DEFAULT;
+    cpupath_config_defaults();
     for (unsigned i = 0; i < NETMGR_NUM_SOCKETS; i++) {
         netmgr_socket_cfg_t *k = &g_cfg.sock[i];
         k->open          = 0;
@@ -170,7 +177,8 @@ void netmgr_apply_shutdown(void)
 
 /*
  * netmgr_apply_addresses -- node MAC, static IP, netmask and gateway into the
- * protocol wrapper (the effective address follows a DHCP lease by itself).
+ * protocol wrapper (the effective address follows a DHCP lease by itself),
+ * then into lwIP (InitLWIP compares and reconfigures in place).
  * Returns: nothing.
  */
 void netmgr_apply_addresses(void)
@@ -182,6 +190,17 @@ void netmgr_apply_addresses(void)
     rtlnet_eth_protocol_set_static_ip(RTLNET_PLAT_PROT_BASE, g_cfg.static_ip);
     rtlnet_eth_protocol_set_netmask(RTLNET_PLAT_PROT_BASE, g_cfg.netmask);
     rtlnet_eth_protocol_set_gateway(RTLNET_PLAT_PROT_BASE, g_cfg.gateway);
+    (void)InitLWIP();
+}
+
+/*
+ * netmgr_apply_tcp_echo -- TCP echo server enable and port into the lwIP
+ * application (applied at once when lwIP runs, else when it starts).
+ * Returns: nothing.
+ */
+void netmgr_apply_tcp_echo(void)
+{
+    rtlnet_tcp_echo_config(g_cfg.tcp_echo_enable, (uint16_t)g_cfg.tcp_echo_port);
 }
 
 /*
@@ -318,6 +337,13 @@ void netmgr_init(void)
     g_present.phy_rc = 0;
     phy_bringup();
 
+    /* CPU network path: the classifier leaves DROP-ALL (broadcast storm
+     * default) before lwIP sees any frame; then the DMA netif. */
+    g_present.cpupath_rc = cpupath_init();
+    g_present.cls = cpupath_cls_present();
+    g_present.dma = (rtlnet_netif_hw_init() == 0);
+    netmgr_apply_tcp_echo();
+
     if (g_present.mac) {
         rtlnet_eth_mac_set_link(RTLNET_PLAT_MAC_BASE, 0);
     }
@@ -334,6 +360,7 @@ void netmgr_init(void)
         }
     }
     (void)netmgr_apply_echo();
+    g_present.lwip_rc = InitLWIP();
     g_next_poll_ms = plat_uptime_ms();
 
     if (g_present.mac || g_present.mdio || g_present.prot) {
@@ -342,8 +369,12 @@ void netmgr_init(void)
                    g_present.phy ? ((g_present.phy_rc == 0) ? "ok" : "error") : "absent",
                    (unsigned)g_present.phy_id, (unsigned)g_present.rgmii_before, (unsigned)g_present.rgmii_after,
                    g_present.prot ? "ok" : "absent");
+        fmt_printf("CPU path: DMA %s, classifier %s, lwIP %s\n", g_present.dma ? "ok" : "absent",
+                   g_present.cls ? ((g_present.cpupath_rc == CPUPATH_OK) ? "broadcast storm limit 10/100 ms" :
+                                    cpupath_result_text(g_present.cpupath_rc)) : "absent",
+                   (g_present.lwip_rc >= 0) ? "up (TCP echo port 7)" : "not started");
     } else {
-        fmt_printf("Network cores not in this build.\n");
+        fmt_printf("Network cores not in this build. CPU path: DMA %s.\n", g_present.dma ? "ok" : "absent");
     }
 }
 
@@ -371,6 +402,8 @@ static void link_up(const rtlnet_phy_status_t *st)
                            RTLNET_ETH_MAC_OK);
     }
     plat_led_set(NETMGR_LED_LINK, 1);
+    rtlnet_lwip_set_link(1);
+    (void)InitLWIP();
     fmt_printf("\n%%LINK: eth0 up, %u Mb/s %s duplex, MAC receive %s\n", (unsigned)g_link.speed_mbps,
                g_link.full_duplex ? "full" : "half", g_link.rx_ready ? "ready" : "NOT ready");
     if (g_present.dhcp && g_cfg.dhcp_auto && !g_link.lease) {
@@ -393,6 +426,7 @@ static void link_down(void)
         rtlnet_eth_mac_set_link(RTLNET_PLAT_MAC_BASE, 0);
     }
     plat_led_set(NETMGR_LED_LINK, 0);
+    rtlnet_lwip_set_link(0);
     fmt_printf("\n%%LINK: eth0 down\n");
     event_end();
 }
@@ -411,6 +445,7 @@ static void lease_watch(void)
         g_link.lease = 1;
         g_link.lease_ip = l.lease_ip;
         plat_led_set(NETMGR_LED_LEASE, 1);
+        (void)InitLWIP();
         fmt_printf("\n%%DHCP: bound %u.%u.%u.%u mask %u.%u.%u.%u router %u.%u.%u.%u lease %u s\n",
                    (unsigned)(l.lease_ip >> 24), (unsigned)((l.lease_ip >> 16) & 0xFFu),
                    (unsigned)((l.lease_ip >> 8) & 0xFFu), (unsigned)(l.lease_ip & 0xFFu),
@@ -423,6 +458,7 @@ static void lease_watch(void)
     } else if (!l.bound && g_link.lease) {
         g_link.lease = 0;
         plat_led_set(NETMGR_LED_LEASE, 0);
+        (void)InitLWIP();
         fmt_printf("\n%%DHCP: lease lost, static address in use\n");
         event_end();
     }
@@ -457,6 +493,10 @@ void netmgr_poll(void)
         }
     }
     lease_watch();
+    if (g_present.prot) {
+        /* Consistency check: the RTL identity and lwIP agree (no-op when they do). */
+        (void)InitLWIP();
+    }
 }
 
 /*

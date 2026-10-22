@@ -127,8 +127,10 @@ def parse_syntax(syntax, where):
             out.append(("kw", t))
         if len(t) >= 24:
             raise InputError(f"{where}: token '{t}' longer than 23 characters (MENU_MAX_TOKEN_TEXT)")
-    if len(out) > 8:
-        raise InputError(f"{where}: more than 8 tokens (MENU_MAX_SYNTAX_TOKENS)")
+    if len(out) > 16:
+        raise InputError(f"{where}: more than 16 tokens (MENU_MAX_SYNTAX_TOKENS)")
+    if sum(1 for kind, _ in out if kind != "kw") > 14:
+        raise InputError(f"{where}: more than 14 parameters (MENU_MAX_ARGS)")
     return out
 
 

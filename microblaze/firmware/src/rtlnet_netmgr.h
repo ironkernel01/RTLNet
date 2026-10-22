@@ -9,7 +9,12 @@
  * (cores/<core>/driver): PHY bring-up through rtlnet_mdio /
  * rtlnet_phy_rtl8211e, MAC speed/enable/link through rtlnet_eth_mac, node
  * addresses through rtlnet_eth_protocol, DHCP, iperf, UDP sockets and the UDP
- * echo server. The CLI changes the configuration through this module and
+ * echo server; the CPU network path (classifier configuration through
+ * rtlnet_cpupath, the AXI DMA netif) and lwIP: InitLWIP() copies the node
+ * identity of the protocol wrapper into lwIP at boot (after the protocol
+ * core is probed and the classifier configured), on link up, on every DHCP
+ * lease change, on a CLI change of the static address, mask, gateway or MAC,
+ * and as a consistency check every NETMGR_POLL_MS. The CLI changes the configuration through this module and
  * reads status from the drivers; nothing here prints except link and DHCP
  * events.
  *
@@ -22,7 +27,8 @@
  * gateway 192.169.1.1 (the protocol wrapper's reset values,
  * rtlnet_eth_protocol.h), UDP echo on socket 0 port 7 with connect-on-
  * receive, iperf on 5001, auto-negotiation advertising full duplex
- * 10/100/1000 (the MAC is full duplex only).
+ * 10/100/1000 (the MAC is full duplex only), TCP echo (lwIP) on port 7,
+ * classifier broadcast storm limit 10 frames per 100 ms.
  *
  * This header holds types, constants and signatures; rtlnet_netmgr.c holds
  * the per-function commentary.
@@ -74,6 +80,8 @@ typedef struct {
     uint32_t iperf_port;
     int      echo_enable;
     int      echo_socket;       /* -1 = any socket */
+    int      tcp_echo_enable;   /* lwIP TCP echo server */
+    uint32_t tcp_echo_port;
     netmgr_socket_cfg_t sock[NETMGR_NUM_SOCKETS];
 } netmgr_config_t;
 
@@ -88,6 +96,10 @@ typedef struct {
     int      iperf;
     int      udp;
     int      echo;
+    int      cls;               /* CPU-path classifier answered "CLSF" */
+    int      dma;               /* AXI DMA of the CPU core configured */
+    int      cpupath_rc;        /* cpupath_init() result (CPUPATH_*) */
+    int      lwip_rc;           /* first InitLWIP() result (RTLNET_LWIP_*) */
     uint32_t phy_id;            /* PHYID1 << 16 | PHYID2 as read */
     int      phy_rc;            /* result of the PHY bring-up (RTLNET_PHY_*) */
     uint16_t rgmii_before;      /* page 0xA4 register 28 before / after the RX delay write */
@@ -121,6 +133,7 @@ int                     netmgr_apply_iperf(void);
 int                     netmgr_apply_socket(unsigned index);
 int                     netmgr_apply_echo(void);
 void                    netmgr_apply_dhcp_auto(void);
+void                    netmgr_apply_tcp_echo(void);
 void                    netmgr_config_defaults(void);
 
 #endif /* RTLNET_NETMGR_H */

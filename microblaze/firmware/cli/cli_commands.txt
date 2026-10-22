@@ -13,6 +13,7 @@
 
 REVISION:10-22-2026:Initial hierarchical command set
 REVISION:10-22-2026:Network commands on the core drivers; phy, clear, iperf, advertise, duplex, mac-address
+REVISION:10-22-2026:CPU network path: show tcp, show cpu-path, tcp echo, storm-control, classifier
 
 # ---------------------------------------------------------------------------
 # Modes
@@ -35,6 +36,13 @@ KEYWORD:config:IP:Global IP configuration
 KEYWORD:config:NO:Negate a command or set its default
 KEYWORD:config:NO ECHO:UDP echo server
 KEYWORD:config:ECHO:UDP echo server
+KEYWORD:config:TCP:TCP applications on lwIP (CPU network path)
+KEYWORD:config:TCP ECHO:TCP echo server (lwIP, default port 7)
+KEYWORD:config:CLASSIFIER:CPU-path classifier (filter tables, policers, mode)
+KEYWORD:config:NO CLASSIFIER:Clear a classifier entry or disable a policer
+KEYWORD:config-if:STORM-CONTROL:Broadcast storm limiter (classifier policer 0)
+KEYWORD:config-if:STORM-CONTROL BROADCAST:Broadcast frames to the CPU: rate limit, enable, disable
+KEYWORD:config-if:NO STORM-CONTROL:Disable the broadcast storm limiter
 KEYWORD:config-if:IP:Interface IP configuration
 KEYWORD:config-if:NO:Negate a command or set its default
 KEYWORD:config-if:NO IP:Interface IP configuration
@@ -54,6 +62,10 @@ cli_show_dhcp:exec:SHOW DHCP:DHCP client state, lease and counters
 cli_show_iperf:exec:SHOW IPERF:iperf server port and statistics
 cli_show_sockets:exec:SHOW SOCKETS:UDP socket table, UDP echo and counters
 cli_show_counters:exec:SHOW COUNTERS:Frame counters of every core
+cli_show_tcp:exec:SHOW TCP:lwIP interface, TCP echo server, connections and counters
+cli_show_cpu_path:exec:SHOW CPU-PATH:CPU network path: DMA frames and errors, wrapper CPU-path counters
+cli_show_storm:exec:SHOW STORM-CONTROL:Broadcast storm limiter: policer 0 and its counters
+cli_show_classifier:exec:SHOW CLASSIFIER:CPU-path classifier: mode, tables, ACL, policers, counters
 
 # ---------------------------------------------------------------------------
 # Privileged exec
@@ -79,6 +91,19 @@ cli_echo_enable:config:ECHO ENABLE {SOCKET}:Enable the UDP echo server (configur
 cli_no_echo_enable:config:NO ECHO ENABLE:Disable the UDP echo server
 cli_echo_socket:config:ECHO SOCKET [INDEX]:Echo on socket 0..3, or "any"
 cli_iperf_port:config:IPERF PORT [PORT]:iperf server UDP port (default 5001)
+cli_tcp_echo_enable:config:TCP ECHO ENABLE:Enable the TCP echo server
+cli_tcp_echo_disable:config:TCP ECHO DISABLE:Disable the TCP echo server (open connections stay)
+cli_tcp_echo_port:config:TCP ECHO PORT [PORT]:TCP echo server port (default 7)
+cli_cls_mode:config:CLASSIFIER MODE [MODE]:Mode: drop-all, pass-all, pass-on-match or drop-on-match
+cli_cls_policer:config:CLASSIFIER POLICER [INDEX] [PKTS] [MS] {DISABLE}:Policer 0..3: frames per window in ms (or disable)
+cli_cls_mac:config:CLASSIFIER MAC [ENTRY] [WHICH] [MAC] {W1} {W2} {W3} {W4}:MAC entry: dst|src <mac> [mask <mac>] gate|classify|police <p>
+cli_cls_ethertype:config:CLASSIFIER ETHERTYPE [ENTRY] [TYPE] {W1} {W2} {W3} {W4}:EtherType entry: <type> [to <type>] gate|classify|police <p>
+cli_cls_acl:config:CLASSIFIER ACL [ENTRY] [PROTO] {W1} {W2} {W3} {W4} {W5} {W6} {W7} {W8} {W9} {W10}:ACL entry: tcp|udp|any src <ip>/<len> dst <ip>/<len> [sport <lo>[-<hi>]] [dport <lo>[-<hi>]] gate|classify|police <p>
+cli_cls_defaults:config:CLASSIFIER DEFAULTS:Broadcast storm default (pass-all, broadcast 10 per 100 ms)
+cli_no_cls_mac:config:NO CLASSIFIER MAC [ENTRY]:Clear a MAC entry
+cli_no_cls_ethertype:config:NO CLASSIFIER ETHERTYPE [ENTRY]:Clear an EtherType entry
+cli_no_cls_acl:config:NO CLASSIFIER ACL [ENTRY]:Clear an ACL entry
+cli_no_cls_policer:config:NO CLASSIFIER POLICER [INDEX]:Disable a policer
 
 # ---------------------------------------------------------------------------
 # Interface configuration (eth0)
@@ -95,6 +120,10 @@ cli_if_ip_address:config-if:IP ADDRESS [ADDR] [MASK]:Set the static IPv4 address
 cli_if_no_ip_address:config-if:NO IP ADDRESS:Remove the static IPv4 address (0.0.0.0)
 cli_if_ip_netmask:config-if:IP NETMASK [MASK]:Set the static netmask
 cli_if_mac:config-if:MAC-ADDRESS [MAC]:Set the node MAC address (aa:bb:cc:dd:ee:ff)
+cli_if_storm:config-if:STORM-CONTROL BROADCAST [PKTS] [MS]:Pass at most PKTS broadcast frames per MS milliseconds to the CPU
+cli_if_storm_enable:config-if:STORM-CONTROL BROADCAST ENABLE:Enable the broadcast storm limiter
+cli_if_storm_disable:config-if:STORM-CONTROL BROADCAST DISABLE:Disable the broadcast storm limiter (every broadcast passes)
+cli_if_no_storm:config-if:NO STORM-CONTROL BROADCAST:Disable the broadcast storm limiter
 
 # ---------------------------------------------------------------------------
 # DHCP client configuration

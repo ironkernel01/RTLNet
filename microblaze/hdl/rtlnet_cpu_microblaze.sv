@@ -4,7 +4,7 @@
 //   section 15.6) around the MicroBlaze block design `rtlnet_cpu`
 //   (microblaze/hdl/rtlnet_cpu_bd.tcl).
 // Overview:
-//   * The block design holds MicroBlaze, 256 KiB LMB BRAM, MDM, UART Lite
+//   * The block design holds MicroBlaze, 512 KiB LMB BRAM, MDM, UART Lite
 //     (115200 8N1), AXI Timer, AXI INTC, the AXI DMA with its 128 KiB AXI
 //     BRAM and the interconnects; its exported AXI4-Lite master M_AXI_RTLNET
 //     (0x44A0_0000, 1 MiB) is this core's m_axi_* register master, full

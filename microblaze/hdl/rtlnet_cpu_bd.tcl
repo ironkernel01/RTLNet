@@ -8,7 +8,7 @@
 #     under <bd_dir>, validates and saves it, and returns the .bd file path.
 #   * Contents: classic MicroBlaze 11.0 (32-bit, little endian, no MMU, no
 #     caches, no FPU, barrel shifter, hardware multiplier and divider, pattern
-#     compare, debug enabled), 256 KiB LMB block RAM at 0x0000_0000 for
+#     compare, debug enabled), 512 KiB LMB block RAM at 0x0000_0000 for
 #     instructions and data, MDM (JTAG debug, JTAG UART), AXI UART Lite
 #     115200 8N1, AXI Timer, AXI INTC, the exported AXI4-Lite master
 #     M_AXI_RTLNET (0x44A0_0000, 1 MiB), and the CPU network path: an AXI DMA
@@ -29,7 +29,7 @@
 #     8 = AXI Timer, 9 = UART Lite, 10 = DMA MM2S, 11 = DMA S2MM.
 #   * Address map (documented in documentation/rtlnet_cpu_microblaze.md and
 #     driver/rtlnet_cpu_microblaze.h; keep all three in step):
-#       0x0000_0000  256 KiB  LMB BRAM (ILMB + DLMB)
+#       0x0000_0000  512 KiB  LMB BRAM (ILMB + DLMB)
 #       0x4040_0000   64 KiB  AXI DMA registers
 #       0x4060_0000   64 KiB  AXI UART Lite
 #       0x4120_0000   64 KiB  AXI INTC
@@ -45,7 +45,7 @@
 # Language: Vivado Tcl (2025.2).
 # Revision: 10-22-2026
 #   * 10-22-2026: initial version.
-#   * 10-22-2026: LMB 256 KiB; AXI DMA (simple mode, 64-bit streams) with the
+#   * 10-22-2026: LMB 512 KiB (code, data, stack, lwIP); AXI DMA (simple mode, 64-bit streams) with the
 #     exported S_AXIS_ETH / M_AXIS_ETH, 128 KiB AXI BRAM, axi_mem interconnect,
 #     DMA interrupts on INTC inputs 10 and 11.
 # Clocks: clk (cpu_clk 100 MHz) for every cell.
@@ -53,7 +53,7 @@
 
 namespace eval rtlnet_cpu_bd {
   variable CPU_CLK_HZ     100000000
-  variable LMB_SIZE       256K
+  variable LMB_SIZE       512K
   variable UART_BAUD      115200
   variable RTLNET_BASE    0x44A00000
   variable RTLNET_RANGE   1M

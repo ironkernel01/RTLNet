@@ -10,7 +10,8 @@
  *
  * Address map (processor view):
  *
- *   0x0000_0000  128 KiB  LMB block RAM (code, data, stack)        CPU core
+ *   0x0000_0000  512 KiB  LMB block RAM (code, data, stack, lwIP)  CPU core
+ *   0x4040_0000   64 KiB  AXI DMA (CPU network path, simple mode)  CPU core
  *   0x4060_0000   64 KiB  AXI UART Lite (console, 115200 8N1)      CPU core
  *   0x4120_0000   64 KiB  AXI INTC                                 CPU core
  *   0x4140_0000    4 KiB  MDM JTAG UART                            CPU core
@@ -27,7 +28,9 @@
  *       0x44A1_3000        DHCP leaf                  "DHCP"
  *       0x44A1_4000        iperf leaf                 "IPRF"
  *       0x44A1_5000        UDP socket leaf            "UDPS"
+ *       0x44A1_8000        CPU-path classifier        "CLSF"
  *     0x44A2_0000   4 KiB  CLASSIFIER (reserved, reads 0)
+ *   0xC000_0000  128 KiB  AXI BRAM (DMA frame buffers only)        CPU core
  *
  * The CPU-core part comes from microblaze/driver/
  * rtlnet_cpu_microblaze.h (single definition, matches rtlnet_cpu_bd.tcl);
@@ -48,6 +51,7 @@
 #include "rtlnet_cpu_microblaze.h"
 
 /* CPU-core peripherals. */
+#define RTLNET_PLAT_DMA_BASE        RTLNET_CPU_DMA_BASE
 #define RTLNET_PLAT_UART_BASE       RTLNET_CPU_UART_BASE
 #define RTLNET_PLAT_INTC_BASE       RTLNET_CPU_INTC_BASE
 #define RTLNET_PLAT_MDM_BASE        RTLNET_CPU_MDM_BASE
@@ -66,6 +70,7 @@
 #define RTLNET_PLAT_DHCP_BASE       (RTLNET_PLAT_PROT_BASE + 0x3000u)
 #define RTLNET_PLAT_IPERF_BASE      (RTLNET_PLAT_PROT_BASE + 0x4000u)
 #define RTLNET_PLAT_UDP_BASE        (RTLNET_PLAT_PROT_BASE + 0x5000u)
+#define RTLNET_PLAT_CLS_BASE        (RTLNET_PLAT_PROT_BASE + 0x8000u)   /* CPU-path classifier */
 #define RTLNET_PLAT_CLASSIFIER_BASE (RTLNET_PLAT_WINDOW_BASE + 0x20000u)
 
 /* Core ID codes (four ASCII characters, first character in bits [31:24]). */
@@ -79,6 +84,7 @@
 #define RTLNET_ID_IPERF             0x49505246u   /* "IPRF" */
 #define RTLNET_ID_UDP               0x55445053u   /* "UDPS" */
 #define RTLNET_ID_ECHO              0x4543484Fu   /* "ECHO" */
+#define RTLNET_ID_CLS               0x434C5346u   /* "CLSF" */
 
 /* Firmware identity. */
 #define RTLNET_FW_NAME              "rtlnet-fw"

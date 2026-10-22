@@ -29,7 +29,9 @@
  * Layering: no register access here. Status comes from the core drivers
  * (cores/<core>/driver), configuration goes through the network manager
  * (src/rtlnet_netmgr.c, which owns the running configuration and applies it),
- * board registers through src/rtlnet_board.c. Every network command first
+ * board registers through src/rtlnet_board.c, the CPU network path through
+ * src/rtlnet_cpupath.c (classifier), src/rtlnet_lwip.c (lwIP, InitLWIP) and
+ * src/rtlnet_tcp_echo.c. Every network command first
  * probes its core's ID register; a core absent from the build answers ID 0
  * and the command prints "<core> not present in this build", so the same
  * firmware runs on the CPU-only and the network bitstream. Configuration
@@ -43,6 +45,7 @@
  * ---------------------------------------------------------------------------
  *  10-22-2026  MenuBuilder AI / Steve Spano    Initial hierarchical command set
  *  10-22-2026  MenuBuilder AI / Steve Spano    Network commands on the core drivers; phy, clear, iperf, advertise, duplex, mac-address
+ *  10-22-2026  MenuBuilder AI / Steve Spano    CPU network path: show tcp, show cpu-path, tcp echo, storm-control, classifier
  * ===========================================================================
  */
 #include "cli_commands.h"
@@ -53,15 +56,19 @@
 #include "menu_commands.h"
 #include "rtlnet_arp.h"
 #include "rtlnet_board.h"
+#include "rtlnet_cpupath.h"
 #include "rtlnet_dhcp.h"
 #include "rtlnet_eth_mac.h"
 #include "rtlnet_eth_protocol.h"
 #include "rtlnet_fmt.h"
 #include "rtlnet_icmp.h"
 #include "rtlnet_iperf.h"
+#include "rtlnet_lwip.h"
+#include "rtlnet_lwip_netif.h"
 #include "rtlnet_netmgr.h"
 #include "rtlnet_phy_rtl8211e.h"
 #include "rtlnet_platform.h"
+#include "rtlnet_tcp_echo.h"
 #include "rtlnet_udp_echo.h"
 #include "rtlnet_udp_socket.h"
 
@@ -71,6 +78,8 @@
 #define CLI_PHY_REG_MAX     31u
 
 static unsigned g_cur_sock;
+
+static void cli_print_classifier_config(void);
 
 /* One core of the RTLNet window, for presence probing. */
 typedef struct {
@@ -872,6 +881,27 @@ int cli_show_counters(const MenuCommandContext *ctx)
         fmt_printf("UDP echo          : echoed %u datagrams / %u bytes, discarded %u\n", (unsigned)k.echoed_datagrams,
                    (unsigned)k.echoed_bytes, (unsigned)k.discarded);
     }
+    {
+        const rtlnet_netif_stats_t *n = rtlnet_netif_stats();
+        cpupath_cls_counters_t ck;
+        rtlnet_tcp_echo_status_t e;
+        fmt_printf("CPU path DMA      : rx %u (no pbuf %u, errors %u), tx %u (timeouts %u, errors %u)\n",
+                   (unsigned)n->rx_frames, (unsigned)n->rx_no_pbuf, (unsigned)n->rx_errors, (unsigned)n->tx_frames,
+                   (unsigned)n->tx_timeouts, (unsigned)n->tx_errors);
+        if (cpupath_cls_counters(&ck) == CPUPATH_OK) {
+            fmt_printf("Classifier        : frames %u, passed %u, dropped %u\n", (unsigned)ck.frames,
+                       (unsigned)ck.passed, (unsigned)ck.dropped);
+            fmt_printf("Storm control     : broadcasts seen %u, passed %u, dropped %u\n",
+                       (unsigned)ck.pol_seen[CPUPATH_STORM_POLICER], (unsigned)ck.pol_passed[CPUPATH_STORM_POLICER],
+                       (unsigned)ck.pol_dropped[CPUPATH_STORM_POLICER]);
+        } else {
+            fmt_printf("Classifier        : %s\n", cpupath_cls_present() ? "counters need the classifier driver" :
+                       "not present in this build");
+        }
+        rtlnet_tcp_echo_status(&e);
+        fmt_printf("TCP echo          : connections %u, bytes in %u, out %u\n", (unsigned)e.accepted,
+                   (unsigned)e.bytes_rx, (unsigned)e.bytes_tx);
+    }
     return 0;
 }
 
@@ -908,6 +938,13 @@ int cli_show_running(const MenuCommandContext *ctx)
     } else {
         fmt_printf(" no ip address\n");
     }
+    {
+        const cpupath_policer_t *sp = &cpupath_cls_config()->pol[CPUPATH_STORM_POLICER];
+        fmt_printf(" storm-control broadcast %u %u\n", (unsigned)sp->limit_pkts, (unsigned)sp->window_ms);
+        if (!sp->enabled) {
+            fmt_printf(" no storm-control broadcast\n");
+        }
+    }
     fmt_printf("!\nip default-gateway %s\n!\n", cli_ipv4_text(c->gateway, a));
     fmt_printf("ip dhcp\n %sauto\n!\n", c->dhcp_auto ? "" : "no ");
     for (unsigned i = 0; i < NETMGR_NUM_SOCKETS; i++) {
@@ -934,7 +971,10 @@ int cli_show_running(const MenuCommandContext *ctx)
         fmt_printf("echo socket %d\n", c->echo_socket);
     }
     fmt_printf("%secho enable\n", c->echo_enable ? "" : "no ");
-    fmt_printf("iperf port %u\nend\n", (unsigned)c->iperf_port);
+    fmt_printf("iperf port %u\n!\n", (unsigned)c->iperf_port);
+    fmt_printf("tcp echo port %u\ntcp echo %s\n!\n", (unsigned)c->tcp_echo_port, c->tcp_echo_enable ? "enable" : "disable");
+    cli_print_classifier_config();
+    fmt_printf("end\n");
     return 0;
 }
 
@@ -1130,6 +1170,9 @@ int cli_clear_counters(const MenuCommandContext *ctx)
     if (p->echo) {
         rtlnet_udp_echo_clear_counters(RTLNET_PLAT_ECHO_BASE);
     }
+    (void)cpupath_cls_clear_counters();
+    rtlnet_lwip_clear_counters();
+    rtlnet_tcp_echo_clear_counters();
     fmt_printf("Counters cleared\n");
     return 0;
 }
@@ -1742,4 +1785,807 @@ int cli_sock_no_connect(const MenuCommandContext *ctx)
     (void)ctx;
     netmgr_config()->sock[g_cur_sock].connect_on_rx = 0;
     return cli_apply_socket();
+}
+
+/* ------------------------------------------------------------------------- */
+/* CPU network path: lwIP, TCP echo, DMA, classifier, storm control          */
+/* ------------------------------------------------------------------------- */
+
+/**
+ * @brief Text of an InitLWIP() result.
+ * @param rc RTLNET_LWIP_* code.
+ * @return Description.
+ */
+static const char *cli_lwip_result(int rc)
+{
+    switch (rc) {
+    case RTLNET_LWIP_UNCHANGED:    return "unchanged";
+    case RTLNET_LWIP_STARTED:      return "started";
+    case RTLNET_LWIP_RECONFIGURED: return "reconfigured";
+    case RTLNET_LWIP_NO_PROTOCOL:  return "protocol core not present";
+    case RTLNET_LWIP_NO_DMA:       return "AXI DMA not present";
+    default:                       return "netif_add failed";
+    }
+}
+
+/**
+ * @brief Print an entry action ("gate", "classify", "police <p>").
+ * @param action  CPUPATH_ACT_*.
+ * @param policer Policer index for police.
+ * @return None.
+ */
+static void cli_print_action(unsigned action, unsigned policer)
+{
+    if (action == CPUPATH_ACT_GATE) {
+        fmt_printf("gate");
+    } else if (action == CPUPATH_ACT_CLASSIFY) {
+        fmt_printf("classify");
+    } else {
+        fmt_printf("police %u", policer);
+    }
+}
+
+/**
+ * @brief Report a cpupath result: nothing for success, the reason otherwise.
+ * @param rc CPUPATH_* result.
+ * @return 0 for success and for a setting kept without hardware (absent core
+ *         or driver), -1 for a bad argument or a driver error.
+ */
+static int cli_cpupath_rc(int rc)
+{
+    if (rc == CPUPATH_OK) {
+        return 0;
+    }
+    fmt_printf("%% %s\n", cpupath_result_text(rc));
+    return (rc == CPUPATH_ABSENT || rc == CPUPATH_NO_DRIVER) ? 0 : -1;
+}
+
+/**
+ * @brief Parse "gate", "classify" or "police <p>" from argv[i...].
+ * @param ctx    Command context.
+ * @param i      Index of the action word.
+ * @param action Parsed CPUPATH_ACT_*.
+ * @param pol    Parsed policer (0 unless police).
+ * @return Index after the action, or -1 (message printed).
+ */
+static int cli_parse_action(const MenuCommandContext *ctx, int i, unsigned *action, unsigned *pol)
+{
+    uint32_t p;
+    *pol = 0u;
+    if (i >= ctx->argc) {
+        fmt_printf("%% Incomplete command: action gate, classify or police <p> expected\n");
+        return -1;
+    }
+    if (cli_word_is(ctx->argv[i], "gate")) {
+        *action = CPUPATH_ACT_GATE;
+        return i + 1;
+    }
+    if (cli_word_is(ctx->argv[i], "classify")) {
+        *action = CPUPATH_ACT_CLASSIFY;
+        return i + 1;
+    }
+    if (cli_word_is(ctx->argv[i], "police")) {
+        if (i + 1 >= ctx->argc || cli_parse_u32(ctx->argv[i + 1], &p) != 0 || p >= CPUPATH_CLS_POLICERS) {
+            cli_bad_value("policer (0..3)", (i + 1 < ctx->argc) ? ctx->argv[i + 1] : "");
+            return -1;
+        }
+        *action = CPUPATH_ACT_POLICE;
+        *pol = (unsigned)p;
+        return i + 2;
+    }
+    cli_bad_value("action (gate, classify, police <p>)", ctx->argv[i]);
+    return -1;
+}
+
+/**
+ * @brief Parse a table entry index 0..CPUPATH_CLS_ENTRIES-1.
+ * @param s   Text.
+ * @param out Index.
+ * @return 0, or -1 (message printed).
+ */
+static int cli_parse_entry(const char *s, unsigned *out)
+{
+    uint32_t v;
+    if (cli_parse_u32(s, &v) != 0 || v >= CPUPATH_CLS_ENTRIES) {
+        return cli_bad_value("entry (0..15)", s);
+    }
+    *out = (unsigned)v;
+    return 0;
+}
+
+/**
+ * @brief Parse "a.b.c.d/len" into address and mask.
+ * @param s    Text.
+ * @param addr Address.
+ * @param mask Mask from the prefix length (0..32).
+ * @return 0, or -1 for a malformed prefix.
+ */
+static int cli_parse_prefix(const char *s, uint32_t *addr, uint32_t *mask)
+{
+    char ip[16];
+    unsigned n = 0;
+    uint32_t len;
+    while (s[n] != '\0' && s[n] != '/' && n < sizeof(ip) - 1u) {
+        ip[n] = s[n];
+        n++;
+    }
+    ip[n] = '\0';
+    if (s[n] != '/' || cli_parse_ipv4(ip, addr) != 0 || cli_parse_u32(&s[n + 1u], &len) != 0 || len > 32u) {
+        return -1;
+    }
+    *mask = (len == 0u) ? 0u : (0xFFFFFFFFu << (32u - len));
+    return 0;
+}
+
+/**
+ * @brief Parse "lo" or "lo-hi" (0..65535).
+ * @param s  Text.
+ * @param lo Low end.
+ * @param hi High end (= lo for a single value).
+ * @return 0, or -1 for a malformed or inverted range.
+ */
+static int cli_parse_range(const char *s, uint16_t *lo, uint16_t *hi)
+{
+    char a[8];
+    unsigned n = 0;
+    uint32_t l;
+    uint32_t h;
+    while (s[n] != '\0' && s[n] != '-' && n < sizeof(a) - 1u) {
+        a[n] = s[n];
+        n++;
+    }
+    a[n] = '\0';
+    if (cli_parse_u32(a, &l) != 0 || l > CLI_UDP_PORT_MAX) {
+        return -1;
+    }
+    h = l;
+    if (s[n] == '-' && (cli_parse_u32(&s[n + 1u], &h) != 0 || h > CLI_UDP_PORT_MAX || h < l)) {
+        return -1;
+    }
+    if (s[n] != '\0' && s[n] != '-') {
+        return -1;
+    }
+    *lo = (uint16_t)l;
+    *hi = (uint16_t)h;
+    return 0;
+}
+
+/**
+ * @brief Prefix length of a contiguous mask.
+ * @param m Mask.
+ * @return Leading one bits.
+ */
+static unsigned cli_prefix_len(uint32_t m)
+{
+    unsigned n = 0;
+    while (n < 32u && (m & (0x80000000u >> n)) != 0u) {
+        n++;
+    }
+    return n;
+}
+
+/**
+ * @brief Print the classifier configuration as commands (running-config).
+ * @return None.
+ */
+static void cli_print_classifier_config(void)
+{
+    const cpupath_cls_config_t *c = cpupath_cls_config();
+    char a[16];
+    char b[16];
+    char mt[18];
+    fmt_printf("classifier mode %s\n", cpupath_mode_name(c->mode));
+    for (unsigned p = 1; p < CPUPATH_CLS_POLICERS; p++) {
+        if (c->pol[p].limit_pkts != 0u || c->pol[p].window_ms != 0u || c->pol[p].enabled) {
+            fmt_printf("classifier policer %u %u %u%s\n", p, (unsigned)c->pol[p].limit_pkts,
+                       (unsigned)c->pol[p].window_ms, c->pol[p].enabled ? "" : " disable");
+        }
+    }
+    for (unsigned i = 0; i < CPUPATH_CLS_ENTRIES; i++) {
+        const cpupath_mac_entry_t *m = &c->mac[i];
+        if (!m->valid || i == CPUPATH_STORM_MAC_ENTRY) {
+            continue;
+        }
+        fmt_printf("classifier mac %u %s %s ", i, m->dst ? "dst" : "src", cli_mac_text(m->mac, mt));
+        if (m->has_mask) {
+            fmt_printf("mask %s ", cli_mac_text(m->mask, mt));
+        }
+        cli_print_action(m->action, m->policer);
+        fmt_printf("\n");
+    }
+    for (unsigned i = 0; i < CPUPATH_CLS_ENTRIES; i++) {
+        const cpupath_etype_entry_t *e = &c->etype[i];
+        if (!e->valid) {
+            continue;
+        }
+        fmt_printf("classifier ethertype %u 0x%04X ", i, (unsigned)e->lo);
+        if (e->hi != e->lo) {
+            fmt_printf("to 0x%04X ", (unsigned)e->hi);
+        }
+        cli_print_action(e->action, e->policer);
+        fmt_printf("\n");
+    }
+    for (unsigned i = 0; i < CPUPATH_CLS_ENTRIES; i++) {
+        const cpupath_acl_entry_t *e = &c->acl[i];
+        if (!e->valid) {
+            continue;
+        }
+        fmt_printf("classifier acl %u %s src %s/%u dst %s/%u ", i,
+                   (e->proto == 6u) ? "tcp" : (e->proto == 17u) ? "udp" : "any", cli_ipv4_text(e->src, a),
+                   cli_prefix_len(e->src_mask), cli_ipv4_text(e->dst, b), cli_prefix_len(e->dst_mask));
+        if (e->sport_lo != 0u || e->sport_hi != CLI_UDP_PORT_MAX) {
+            fmt_printf("sport %u-%u ", (unsigned)e->sport_lo, (unsigned)e->sport_hi);
+        }
+        if (e->dport_lo != 0u || e->dport_hi != CLI_UDP_PORT_MAX) {
+            fmt_printf("dport %u-%u ", (unsigned)e->dport_lo, (unsigned)e->dport_hi);
+        }
+        cli_print_action(e->action, e->policer);
+        fmt_printf("\n");
+    }
+}
+
+/**
+ * @brief SHOW TCP: lwIP netif as configured by InitLWIP, the RTL identity it
+ *        follows, the TCP echo server, its connections and lwIP counters.
+ * @param ctx Unused.
+ * @return 0.
+ */
+int cli_show_tcp(const MenuCommandContext *ctx)
+{
+    rtlnet_lwip_status_t s;
+    rtlnet_tcp_echo_status_t e;
+    rtlnet_lwip_counters_t k;
+    char a[16];
+    char m[16];
+    char g[16];
+    char mt[18];
+    unsigned listed = 0;
+    (void)ctx;
+    rtlnet_lwip_status(&s);
+    rtlnet_tcp_echo_status(&e);
+    fmt_printf("lwIP              : %s, link %s; InitLWIP %u calls, %u reconfigurations (MAC %u, address %u), last %s\n",
+               s.running ? "running" : "not started", s.link_up ? "up" : "down", (unsigned)s.init_calls,
+               (unsigned)s.reconfigs, (unsigned)s.mac_changes, (unsigned)s.addr_changes, cli_lwip_result(s.last_result));
+    if (s.running) {
+        uint8_t rmac[6];
+        uint32_t rip = rtlnet_eth_protocol_get_effective_ip(RTLNET_PLAT_PROT_BASE);
+        uint32_t rmask = rtlnet_eth_protocol_get_effective_mask(RTLNET_PLAT_PROT_BASE);
+        uint32_t rgw = rtlnet_eth_protocol_get_effective_gateway(RTLNET_PLAT_PROT_BASE);
+        int same = 1;
+        rtlnet_eth_protocol_get_mac(RTLNET_PLAT_PROT_BASE, rmac);
+        for (unsigned i = 0; i < 6u; i++) {
+            same = same && (rmac[i] == s.mac[i]);
+        }
+        same = same && (rip == s.ip) && (rmask == s.mask) && (rgw == s.gw);
+        fmt_printf("  Interface e0    : MAC %s, IPv4 %s mask %s gateway %s\n", cli_mac_text(s.mac, mt),
+                   cli_ipv4_text(s.ip, a), cli_ipv4_text(s.mask, m), cli_ipv4_text(s.gw, g));
+        fmt_printf("  RTL identity    : %s (protocol wrapper MAC and effective address)\n",
+                   same ? "matches" : "DIFFERS, InitLWIP updates it on the next poll");
+    }
+    fmt_printf("TCP echo          : %s, port %u, %s\n", e.enabled ? "enabled" : "disabled", (unsigned)e.port,
+               e.listening ? "listening" : (e.lwip_running ? "not listening" : "waiting for lwIP"));
+    fmt_printf("  Connections     : active %u, accepted %u, refused %u, closed %u, aborted %u, write errors %u\n",
+               (unsigned)e.active, (unsigned)e.accepted, (unsigned)e.refused, (unsigned)e.closed, (unsigned)e.aborted,
+               (unsigned)e.write_errors);
+    fmt_printf("  Bytes           : received %u, echoed %u\n", (unsigned)e.bytes_rx, (unsigned)e.bytes_tx);
+    for (unsigned i = 0; i < RTLNET_TCP_ECHO_MAX_CONN; i++) {
+        rtlnet_tcp_echo_conn_t cn;
+        if (!rtlnet_tcp_echo_conn(i, &cn)) {
+            continue;
+        }
+        if (listed++ == 0u) {
+            fmt_printf("  Slot  Remote           Port   RX bytes    TX bytes    Queued  Age s  State\n");
+        }
+        fmt_printf("  %-4u  %-15s  %-5u  %-10u  %-10u  %-6u  %-5u  %s\n", i, cli_ipv4_text(cn.remote_ip, a),
+                   (unsigned)cn.remote_port, (unsigned)cn.bytes_rx, (unsigned)cn.bytes_tx, (unsigned)cn.queued,
+                   (unsigned)(cn.age_ms / 1000u), cn.closing ? "closing" : "open");
+    }
+    if (s.running) {
+        rtlnet_lwip_counters(&k);
+        fmt_printf("lwIP counters     : link rx %u tx %u drop %u; ARP rx %u tx %u; IP rx %u tx %u drop %u\n",
+                   (unsigned)k.link_recv, (unsigned)k.link_xmit, (unsigned)k.link_drop, (unsigned)k.etharp_recv,
+                   (unsigned)k.etharp_xmit, (unsigned)k.ip_recv, (unsigned)k.ip_xmit, (unsigned)k.ip_drop);
+        fmt_printf("                    TCP rx %u tx %u drop %u err %u\n", (unsigned)k.tcp_recv,
+                   (unsigned)k.tcp_xmit, (unsigned)k.tcp_drop, (unsigned)k.tcp_err);
+        fmt_printf("lwIP memory       : heap used %u max %u of %u (err %u); pbuf pool used %u max %u of %u (err %u);"
+                   " TCP PCB %u of %u, segments max %u\n",
+                   (unsigned)k.mem_used, (unsigned)k.mem_max, (unsigned)k.mem_avail, (unsigned)k.mem_err,
+                   (unsigned)k.pbuf_pool_used, (unsigned)k.pbuf_pool_max, (unsigned)k.pbuf_pool_avail,
+                   (unsigned)k.pbuf_pool_err, (unsigned)k.tcp_pcb_used, (unsigned)k.tcp_pcb_avail,
+                   (unsigned)k.tcp_seg_max);
+    }
+    return 0;
+}
+
+/**
+ * @brief SHOW CPU-PATH: AXI DMA status and frame counters, the wrapper's
+ *        CPU-path counters, the classifier state.
+ * @param ctx Unused.
+ * @return 0.
+ */
+int cli_show_cpu_path(const MenuCommandContext *ctx)
+{
+    const rtlnet_netif_stats_t *n = rtlnet_netif_stats();
+    cpupath_wrapper_counters_t w;
+    int rc;
+    (void)ctx;
+    fmt_printf("CPU network path (cpu_axis_ethernet_stream)\n");
+    if (!rtlnet_netif_hw_present()) {
+        fmt_printf("  AXI DMA         : not present at 0x%08X\n", (unsigned)RTLNET_PLAT_DMA_BASE);
+    } else {
+        fmt_printf("  AXI DMA         : 0x%08X, S2MM status 0x%08X, MM2S status 0x%08X, resets %u\n",
+                   (unsigned)RTLNET_PLAT_DMA_BASE, (unsigned)rtlnet_netif_dma_sr(1), (unsigned)rtlnet_netif_dma_sr(0),
+                   (unsigned)n->dma_resets);
+    }
+    fmt_printf("  DMA receive     : frames %u, bytes %u; dropped: no pbuf %u, runt %u, lwIP down %u; errors %u\n",
+               (unsigned)n->rx_frames, (unsigned)n->rx_bytes, (unsigned)n->rx_no_pbuf, (unsigned)n->rx_runts,
+               (unsigned)n->rx_unbound, (unsigned)n->rx_errors);
+    fmt_printf("  DMA transmit    : frames %u, bytes %u; timeouts %u, too long %u, errors %u\n", (unsigned)n->tx_frames,
+               (unsigned)n->tx_bytes, (unsigned)n->tx_timeouts, (unsigned)n->tx_too_long, (unsigned)n->tx_errors);
+    rc = cpupath_wrapper_counters(&w);
+    if (rc == CPUPATH_OK) {
+        fmt_printf("  Wrapper         : CPU path %s, to CPU %u, CPU FIFO drops %u, from CPU %u\n",
+                   w.enabled ? "enabled" : "disabled", (unsigned)w.rx_frames, (unsigned)w.rx_fifo_drops,
+                   (unsigned)w.tx_frames);
+    } else if (rc == CPUPATH_ABSENT) {
+        fmt_printf("  Wrapper         : protocol core not present in this build\n");
+    } else {
+        fmt_printf("  Wrapper         : CPU-path registers not in this protocol driver revision\n");
+    }
+    fmt_printf("  Classifier      : %s, driver %s, mode %s\n",
+               cpupath_cls_present() ? "present" : "not present in this build",
+               cpupath_cls_driver() ? "in this firmware" : "not in this firmware build",
+               cpupath_mode_name(cpupath_cls_config()->mode));
+    return 0;
+}
+
+/**
+ * @brief SHOW STORM-CONTROL: broadcast limiter (policer 0) and its counters.
+ * @param ctx Unused.
+ * @return 0.
+ */
+int cli_show_storm(const MenuCommandContext *ctx)
+{
+    const cpupath_cls_config_t *c = cpupath_cls_config();
+    const cpupath_policer_t *p = &c->pol[CPUPATH_STORM_POLICER];
+    cpupath_cls_counters_t k;
+    cpupath_wrapper_counters_t w;
+    int rc;
+    (void)ctx;
+    fmt_printf("Storm control (broadcast to the CPU): %s, %u frames per %u ms (classifier policer %u, MAC entry %u)\n",
+               p->enabled ? "enabled" : "disabled", (unsigned)p->limit_pkts, (unsigned)p->window_ms,
+               (unsigned)CPUPATH_STORM_POLICER, (unsigned)CPUPATH_STORM_MAC_ENTRY);
+    rc = cpupath_cls_counters(&k);
+    if (rc == CPUPATH_OK) {
+        fmt_printf("  Broadcasts      : seen %u, passed %u, dropped %u\n", (unsigned)k.pol_seen[CPUPATH_STORM_POLICER],
+                   (unsigned)k.pol_passed[CPUPATH_STORM_POLICER], (unsigned)k.pol_dropped[CPUPATH_STORM_POLICER]);
+    } else {
+        fmt_printf("  Broadcasts      : %% %s\n", (rc == CPUPATH_ABSENT) ? "classifier not present in this build" :
+                   (rc == CPUPATH_NO_DRIVER) ? "classifier driver not in this firmware build" : "read failed");
+    }
+    if (cpupath_wrapper_counters(&w) == CPUPATH_OK) {
+        fmt_printf("  CPU FIFO drops  : %u\n", (unsigned)w.rx_fifo_drops);
+    } else {
+        fmt_printf("  CPU FIFO drops  : not available (protocol core or driver revision)\n");
+    }
+    return 0;
+}
+
+/**
+ * @brief SHOW CLASSIFIER: mode, policers, MAC / EtherType / ACL entries and
+ *        the counters.
+ * @param ctx Unused.
+ * @return 0.
+ */
+int cli_show_classifier(const MenuCommandContext *ctx)
+{
+    const cpupath_cls_config_t *c = cpupath_cls_config();
+    cpupath_cls_counters_t k;
+    char mt[18];
+    char a[16];
+    char b[16];
+    int rc;
+    (void)ctx;
+    fmt_printf("CPU-path classifier at 0x%08X: %s, driver %s; mode %s\n", (unsigned)RTLNET_PLAT_CLS_BASE,
+               cpupath_cls_present() ? "present" : "not present in this build",
+               cpupath_cls_driver() ? "in this firmware" : "not in this firmware build", cpupath_mode_name(c->mode));
+    rc = cpupath_cls_counters(&k);
+    fmt_printf("  Policer  State     Limit    Window ms  Seen        Passed      Dropped\n");
+    for (unsigned p = 0; p < CPUPATH_CLS_POLICERS; p++) {
+        fmt_printf("  %-7u  %-8s  %-7u  %-9u  ", p, c->pol[p].enabled ? "enabled" : "disabled",
+                   (unsigned)c->pol[p].limit_pkts, (unsigned)c->pol[p].window_ms);
+        if (rc == CPUPATH_OK) {
+            fmt_printf("%-10u  %-10u  %u\n", (unsigned)k.pol_seen[p], (unsigned)k.pol_passed[p], (unsigned)k.pol_dropped[p]);
+        } else {
+            fmt_printf("-           -           -\n");
+        }
+    }
+    for (unsigned i = 0; i < CPUPATH_CLS_ENTRIES; i++) {
+        const cpupath_mac_entry_t *m = &c->mac[i];
+        if (m->valid) {
+            fmt_printf("  MAC %-2u          : %s %s", i, m->dst ? "dst" : "src", cli_mac_text(m->mac, mt));
+            if (m->has_mask) {
+                fmt_printf(" mask %s", cli_mac_text(m->mask, mt));
+            }
+            fmt_printf(" -> ");
+            cli_print_action(m->action, m->policer);
+            fmt_printf("\n");
+        }
+    }
+    for (unsigned i = 0; i < CPUPATH_CLS_ENTRIES; i++) {
+        const cpupath_etype_entry_t *e = &c->etype[i];
+        if (e->valid) {
+            fmt_printf("  EtherType %-2u    : 0x%04X..0x%04X -> ", i, (unsigned)e->lo, (unsigned)e->hi);
+            cli_print_action(e->action, e->policer);
+            fmt_printf("\n");
+        }
+    }
+    for (unsigned i = 0; i < CPUPATH_CLS_ENTRIES; i++) {
+        const cpupath_acl_entry_t *e = &c->acl[i];
+        if (e->valid) {
+            fmt_printf("  ACL %-2u          : %s src %s/%u dst %s/%u sport %u-%u dport %u-%u -> ", i,
+                       (e->proto == 6u) ? "tcp" : (e->proto == 17u) ? "udp" : "any", cli_ipv4_text(e->src, a),
+                       cli_prefix_len(e->src_mask), cli_ipv4_text(e->dst, b), cli_prefix_len(e->dst_mask),
+                       (unsigned)e->sport_lo, (unsigned)e->sport_hi, (unsigned)e->dport_lo, (unsigned)e->dport_hi);
+            cli_print_action(e->action, e->policer);
+            fmt_printf("\n");
+        }
+    }
+    if (rc == CPUPATH_OK) {
+        fmt_printf("  Counters        : frames %u, passed %u, dropped %u (mode %u, policers %u)\n", (unsigned)k.frames,
+                   (unsigned)k.passed, (unsigned)k.dropped, (unsigned)k.mode_dropped, (unsigned)k.police_dropped);
+    } else {
+        fmt_printf("  Counters        : %% %s\n", cpupath_result_text(rc));
+    }
+    return 0;
+}
+
+/**
+ * @brief TCP ECHO ENABLE.
+ * @param ctx Unused.
+ * @return 0.
+ */
+int cli_tcp_echo_enable(const MenuCommandContext *ctx)
+{
+    (void)ctx;
+    netmgr_config()->tcp_echo_enable = 1;
+    netmgr_apply_tcp_echo();
+    return 0;
+}
+
+/**
+ * @brief TCP ECHO DISABLE: the listen PCB closes, open connections stay.
+ * @param ctx Unused.
+ * @return 0.
+ */
+int cli_tcp_echo_disable(const MenuCommandContext *ctx)
+{
+    (void)ctx;
+    netmgr_config()->tcp_echo_enable = 0;
+    netmgr_apply_tcp_echo();
+    return 0;
+}
+
+/**
+ * @brief TCP ECHO PORT [PORT].
+ * @param ctx argv[0] = port 1..65535.
+ * @return 0, or -1 for a bad port.
+ */
+int cli_tcp_echo_port(const MenuCommandContext *ctx)
+{
+    uint32_t p;
+    if (cli_parse_u32(ctx->argv[0], &p) != 0 || p == 0u || p > CLI_UDP_PORT_MAX) {
+        return cli_bad_value("TCP port (1..65535)", ctx->argv[0]);
+    }
+    netmgr_config()->tcp_echo_port = p;
+    netmgr_apply_tcp_echo();
+    return 0;
+}
+
+/**
+ * @brief CLASSIFIER MODE [MODE].
+ * @param ctx argv[0] = drop-all, pass-all, pass-on-match, drop-on-match.
+ * @return 0, or -1 for another word or a driver error.
+ */
+int cli_cls_mode(const MenuCommandContext *ctx)
+{
+    for (unsigned m = 0; m <= CPUPATH_MODE_DROP_ON_MATCH; m++) {
+        if (cli_word_is(ctx->argv[0], cpupath_mode_name(m))) {
+            return cli_cpupath_rc(cpupath_cls_set_mode(m));
+        }
+    }
+    return cli_bad_value("mode (drop-all, pass-all, pass-on-match, drop-on-match)", ctx->argv[0]);
+}
+
+/**
+ * @brief CLASSIFIER POLICER [INDEX] [PKTS] [MS] {DISABLE}.
+ * @param ctx argv = index 0..3, frames per window, window ms, optional "disable".
+ * @return 0, or -1 for a bad value or a driver error.
+ */
+int cli_cls_policer(const MenuCommandContext *ctx)
+{
+    uint32_t idx;
+    uint32_t pk;
+    uint32_t ms;
+    int en = 1;
+    if (cli_parse_u32(ctx->argv[0], &idx) != 0 || idx >= CPUPATH_CLS_POLICERS) {
+        return cli_bad_value("policer (0..3)", ctx->argv[0]);
+    }
+    if (cli_parse_u32(ctx->argv[1], &pk) != 0) {
+        return cli_bad_value("frames per window", ctx->argv[1]);
+    }
+    if (cli_parse_u32(ctx->argv[2], &ms) != 0 || ms == 0u) {
+        return cli_bad_value("window in ms (1..)", ctx->argv[2]);
+    }
+    if (ctx->argc > 3) {
+        if (!cli_word_is(ctx->argv[3], "disable")) {
+            return cli_bad_value("option (disable)", ctx->argv[3]);
+        }
+        en = 0;
+    }
+    return cli_cpupath_rc(cpupath_cls_set_policer((unsigned)idx, en, pk, ms));
+}
+
+/**
+ * @brief CLASSIFIER MAC [ENTRY] [WHICH] [MAC] {W1}..{W4}: dst|src <mac>
+ *        [mask <mac>] gate|classify|police <p>.
+ * @param ctx Arguments as typed.
+ * @return 0, or -1 for a bad value or a driver error.
+ */
+int cli_cls_mac(const MenuCommandContext *ctx)
+{
+    cpupath_mac_entry_t e;
+    unsigned entry;
+    int i = 3;
+    if (cli_parse_entry(ctx->argv[0], &entry) != 0) {
+        return -1;
+    }
+    e.valid = 1;
+    if (cli_word_is(ctx->argv[1], "dst")) {
+        e.dst = 1;
+    } else if (cli_word_is(ctx->argv[1], "src")) {
+        e.dst = 0;
+    } else {
+        return cli_bad_value("field (dst or src)", ctx->argv[1]);
+    }
+    if (cli_parse_mac(ctx->argv[2], e.mac) != 0) {
+        return cli_bad_value("MAC address", ctx->argv[2]);
+    }
+    e.has_mask = 0;
+    for (unsigned j = 0; j < 6u; j++) {
+        e.mask[j] = 0xFFu;
+    }
+    if (i < ctx->argc && cli_word_is(ctx->argv[i], "mask")) {
+        if (i + 1 >= ctx->argc || cli_parse_mac(ctx->argv[i + 1], e.mask) != 0) {
+            return cli_bad_value("mask", (i + 1 < ctx->argc) ? ctx->argv[i + 1] : "");
+        }
+        e.has_mask = 1;
+        i += 2;
+    }
+    i = cli_parse_action(ctx, i, &e.action, &e.policer);
+    if (i < 0) {
+        return -1;
+    }
+    if (i < ctx->argc) {
+        return cli_bad_value("extra word", ctx->argv[i]);
+    }
+    return cli_cpupath_rc(cpupath_cls_set_mac(entry, &e));
+}
+
+/**
+ * @brief CLASSIFIER ETHERTYPE [ENTRY] [TYPE] {W1}..{W4}: <type> [to <type>]
+ *        gate|classify|police <p>.
+ * @param ctx Arguments as typed.
+ * @return 0, or -1 for a bad value or a driver error.
+ */
+int cli_cls_ethertype(const MenuCommandContext *ctx)
+{
+    cpupath_etype_entry_t e;
+    unsigned entry;
+    uint32_t v;
+    int i = 2;
+    if (cli_parse_entry(ctx->argv[0], &entry) != 0) {
+        return -1;
+    }
+    if (cli_parse_u32(ctx->argv[1], &v) != 0 || v > 0xFFFFu) {
+        return cli_bad_value("EtherType (0x0000..0xFFFF)", ctx->argv[1]);
+    }
+    e.valid = 1;
+    e.lo = (uint16_t)v;
+    e.hi = (uint16_t)v;
+    if (i < ctx->argc && cli_word_is(ctx->argv[i], "to")) {
+        if (i + 1 >= ctx->argc || cli_parse_u32(ctx->argv[i + 1], &v) != 0 || v > 0xFFFFu || v < e.lo) {
+            return cli_bad_value("EtherType range end", (i + 1 < ctx->argc) ? ctx->argv[i + 1] : "");
+        }
+        e.hi = (uint16_t)v;
+        i += 2;
+    }
+    i = cli_parse_action(ctx, i, &e.action, &e.policer);
+    if (i < 0) {
+        return -1;
+    }
+    if (i < ctx->argc) {
+        return cli_bad_value("extra word", ctx->argv[i]);
+    }
+    return cli_cpupath_rc(cpupath_cls_set_etype(entry, &e));
+}
+
+/**
+ * @brief CLASSIFIER ACL [ENTRY] [PROTO] {W1}..{W10}: tcp|udp|any src
+ *        <ip>/<len> dst <ip>/<len> [sport <lo>[-<hi>]] [dport <lo>[-<hi>]]
+ *        gate|classify|police <p>.
+ * @param ctx Arguments as typed.
+ * @return 0, or -1 for a bad value or a driver error.
+ */
+int cli_cls_acl(const MenuCommandContext *ctx)
+{
+    cpupath_acl_entry_t e;
+    unsigned entry;
+    int i = 2;
+    if (cli_parse_entry(ctx->argv[0], &entry) != 0) {
+        return -1;
+    }
+    e.valid = 1;
+    if (cli_word_is(ctx->argv[1], "tcp")) {
+        e.proto = 6u;
+    } else if (cli_word_is(ctx->argv[1], "udp")) {
+        e.proto = 17u;
+    } else if (cli_word_is(ctx->argv[1], "any")) {
+        e.proto = 0u;
+    } else {
+        return cli_bad_value("protocol (tcp, udp, any)", ctx->argv[1]);
+    }
+    if (i + 3 >= ctx->argc || !cli_word_is(ctx->argv[i], "src") || cli_parse_prefix(ctx->argv[i + 1], &e.src, &e.src_mask) != 0 ||
+        !cli_word_is(ctx->argv[i + 2], "dst") || cli_parse_prefix(ctx->argv[i + 3], &e.dst, &e.dst_mask) != 0) {
+        fmt_printf("%% Expected: src <ip>/<len> dst <ip>/<len>\n");
+        return -1;
+    }
+    i += 4;
+    e.sport_lo = 0u;
+    e.sport_hi = (uint16_t)CLI_UDP_PORT_MAX;
+    e.dport_lo = 0u;
+    e.dport_hi = (uint16_t)CLI_UDP_PORT_MAX;
+    if (i + 1 < ctx->argc && cli_word_is(ctx->argv[i], "sport")) {
+        if (cli_parse_range(ctx->argv[i + 1], &e.sport_lo, &e.sport_hi) != 0) {
+            return cli_bad_value("source port range", ctx->argv[i + 1]);
+        }
+        i += 2;
+    }
+    if (i + 1 < ctx->argc && cli_word_is(ctx->argv[i], "dport")) {
+        if (cli_parse_range(ctx->argv[i + 1], &e.dport_lo, &e.dport_hi) != 0) {
+            return cli_bad_value("destination port range", ctx->argv[i + 1]);
+        }
+        i += 2;
+    }
+    i = cli_parse_action(ctx, i, &e.action, &e.policer);
+    if (i < 0) {
+        return -1;
+    }
+    if (i < ctx->argc) {
+        return cli_bad_value("extra word", ctx->argv[i]);
+    }
+    return cli_cpupath_rc(cpupath_cls_set_acl(entry, &e));
+}
+
+/**
+ * @brief CLASSIFIER DEFAULTS: the broadcast storm default configuration.
+ * @param ctx Unused.
+ * @return 0, or -1 on a driver error.
+ */
+int cli_cls_defaults(const MenuCommandContext *ctx)
+{
+    (void)ctx;
+    return cli_cpupath_rc(cpupath_cls_defaults());
+}
+
+/**
+ * @brief NO CLASSIFIER MAC [ENTRY].
+ * @param ctx argv[0] = entry.
+ * @return 0, or -1 for a bad entry or a driver error.
+ */
+int cli_no_cls_mac(const MenuCommandContext *ctx)
+{
+    cpupath_mac_entry_t e = { 0 };
+    unsigned entry;
+    if (cli_parse_entry(ctx->argv[0], &entry) != 0) {
+        return -1;
+    }
+    return cli_cpupath_rc(cpupath_cls_set_mac(entry, &e));
+}
+
+/**
+ * @brief NO CLASSIFIER ETHERTYPE [ENTRY].
+ * @param ctx argv[0] = entry.
+ * @return 0, or -1 for a bad entry or a driver error.
+ */
+int cli_no_cls_ethertype(const MenuCommandContext *ctx)
+{
+    cpupath_etype_entry_t e = { 0 };
+    unsigned entry;
+    if (cli_parse_entry(ctx->argv[0], &entry) != 0) {
+        return -1;
+    }
+    return cli_cpupath_rc(cpupath_cls_set_etype(entry, &e));
+}
+
+/**
+ * @brief NO CLASSIFIER ACL [ENTRY].
+ * @param ctx argv[0] = entry.
+ * @return 0, or -1 for a bad entry or a driver error.
+ */
+int cli_no_cls_acl(const MenuCommandContext *ctx)
+{
+    cpupath_acl_entry_t e = { 0 };
+    unsigned entry;
+    if (cli_parse_entry(ctx->argv[0], &entry) != 0) {
+        return -1;
+    }
+    return cli_cpupath_rc(cpupath_cls_set_acl(entry, &e));
+}
+
+/**
+ * @brief NO CLASSIFIER POLICER [INDEX]: disable (a disabled policer passes).
+ * @param ctx argv[0] = policer.
+ * @return 0, or -1 for a bad index or a driver error.
+ */
+int cli_no_cls_policer(const MenuCommandContext *ctx)
+{
+    const cpupath_policer_t *p;
+    uint32_t idx;
+    if (cli_parse_u32(ctx->argv[0], &idx) != 0 || idx >= CPUPATH_CLS_POLICERS) {
+        return cli_bad_value("policer (0..3)", ctx->argv[0]);
+    }
+    p = &cpupath_cls_config()->pol[idx];
+    return cli_cpupath_rc(cpupath_cls_set_policer((unsigned)idx, 0, p->limit_pkts, p->window_ms));
+}
+
+/**
+ * @brief STORM-CONTROL BROADCAST [PKTS] [MS] (config-if).
+ * @param ctx argv = frames per window, window in ms.
+ * @return 0, or -1 for a bad value or a driver error.
+ */
+int cli_if_storm(const MenuCommandContext *ctx)
+{
+    uint32_t pk;
+    uint32_t ms;
+    if (cli_parse_u32(ctx->argv[0], &pk) != 0) {
+        return cli_bad_value("broadcast frames per window", ctx->argv[0]);
+    }
+    if (cli_parse_u32(ctx->argv[1], &ms) != 0 || ms == 0u) {
+        return cli_bad_value("window in ms (1..)", ctx->argv[1]);
+    }
+    return cli_cpupath_rc(cpupath_storm_set(pk, ms));
+}
+
+/**
+ * @brief STORM-CONTROL BROADCAST ENABLE (config-if).
+ * @param ctx Unused.
+ * @return 0, or -1 on a driver error.
+ */
+int cli_if_storm_enable(const MenuCommandContext *ctx)
+{
+    (void)ctx;
+    return cli_cpupath_rc(cpupath_storm_enable(1));
+}
+
+/**
+ * @brief STORM-CONTROL BROADCAST DISABLE (config-if).
+ * @param ctx Unused.
+ * @return 0, or -1 on a driver error.
+ */
+int cli_if_storm_disable(const MenuCommandContext *ctx)
+{
+    (void)ctx;
+    return cli_cpupath_rc(cpupath_storm_enable(0));
+}
+
+/**
+ * @brief NO STORM-CONTROL BROADCAST (config-if): same as disable.
+ * @param ctx Unused.
+ * @return 0, or -1 on a driver error.
+ */
+int cli_if_no_storm(const MenuCommandContext *ctx)
+{
+    (void)ctx;
+    return cli_cpupath_rc(cpupath_storm_enable(0));
 }
