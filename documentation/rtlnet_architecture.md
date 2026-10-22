@@ -5,7 +5,7 @@
 | Product line | IronKernel RTLNet |
 | Document revision | 10-22-2026 |
 | First target | Digilent Nexys Video (Artix-7 XC7A200T-1SBG484C, Realtek RTL8211E RGMII PHY) |
-| Toolchain | Vivado 2025.2 (synthesis, implementation, xsim), MicroBlaze GCC 13.3 |
+| Toolchain | Vivado 2025.2 (synthesis, implementation), Aldec Active-HDL 11.1 (simulation), MicroBlaze GCC 13.3 |
 | Languages | SystemVerilog-2012 for all RTL and benches (`.sv`), C11 for drivers and firmware |
 
 This document is the contract every RTLNet core is built against. A core that follows it can be dropped into
@@ -46,7 +46,7 @@ Every core has exactly four sub-folders:
 ```
 cores/<core>/hdl            synthesizable RTL
 cores/<core>/driver         C driver: the one file that owns this core's registers (<core>.h, <core>.c)
-cores/<core>/testbench      self-checking xsim benches, filelists, run scripts
+cores/<core>/testbench      self-checking Active-HDL benches, filelists
 cores/<core>/documentation  core guide: interface, register map, design, verification record
 ```
 
@@ -67,7 +67,7 @@ RTLNet/
   scripts/                        shared simulation and constraint scripts
 ```
 
-Generated output (Vivado runs, xsim work directories, firmware objects, bitstreams) is never committed;
+Generated output (Vivado runs, Active-HDL work directories, firmware objects, bitstreams) is never committed;
 release bitstreams go in `releases/`.
 
 ---
@@ -81,8 +81,9 @@ recur in every RTLNet file:
   subset every FPGA and ASIC synthesis tool accepts (`logic`, `always_ff`, `always_comb`, packages, `localparam`,
   functions; no classes, no interfaces in synthesizable ports).
 - **Vendor neutral.** Generic cores contain no vendor primitive, no vendor macro and no vendor-only attribute
-  used for function. Vendor-specific circuits live in the target wrappers of section 8, selected by a
-  `TARGET` parameter whose default is `"AMD"`. The MicroBlaze block design is the one AMD-only block, and it is hidden inside the CPU core.
+  used for function. Vendor-specific circuits live in the mapped files of section 8, which take the
+  technology from the single include file `rtlnet_technology.svh` (default AMD); no technology parameter is
+  passed between cores. The MicroBlaze block design is the one AMD-only block, and it is hidden inside the CPU core.
 - **Naming.** Module and file names are `rtlnet_<name>`; ports are lowercase with an interface-role prefix
   (`s_axis_*`, `m_axis_*`, `s_axi_*`, `rgmii_*`, `eth_*`) and direction is carried by `input`/`output`.
   AXI signal names follow the AMBA spelling so vendor tools infer the interfaces. Constants are `ALL_CAPS`,
@@ -217,6 +218,7 @@ Other MicroBlaze peripherals sit in the block design's own map (UART Lite `0x406
 | Module | Role |
 |---|---|
 | `rtlnet_pkg.sv` | stream constants, EtherTypes, IP protocol numbers, `be16/be32/be48`, `keep_bytes`, `keep_mask`, CRC-32 byte and word functions, ones'-complement helpers, default MAC/IP |
+| `rtlnet_technology.svh` | the single technology selection include (section 8) |
 | `rtlnet_ram_core.sv` | the generic RAM (section 8) |
 | `rtlnet_sync.sv` | level synchronizer, N stages, every vendor's attributes |
 | `rtlnet_reset_sync.sv` | asynchronous-assert, synchronous-release reset synchronizer (the named exception) |
@@ -350,18 +352,32 @@ back with the metadata unchanged, so it returns to its sender. Registers: enable
 
 ## 8. Vendor targeting
 
-| Wrapper | `TARGET` values | AMD implementation | Other targets |
-|---|---|---|---|
-| `rtlnet_ram_core` | `"AMD"` (default), `"ALTERA"`, `"LATTICE"`, `"GENERIC"` | direct instance of `xpm_memory_sdpram` (`MEMORY_PRIMITIVE` = `"block"` or `"distributed"`) | Altera: inferred array with `ramstyle` (`M20K`/`MLAB`); Lattice: inferred array with `syn_ramstyle` (`block_ram`/`distributed`); GENERIC/ASIC: behavioural model, replaced by a compiled macro wrapper |
-| `rtlnet_sync`, `rtlnet_reset_sync`, `rtlnet_gray_sync` | all | `ASYNC_REG`, `SHREG_EXTRACT="no"`, `DONT_TOUCH` | Synplify (Lattice): `syn_preserve`, `syn_srlstyle="registers"`; Quartus: `altera_attribute` synchronizer identification; ASIC: library attributes when the back-port starts |
-| `rtlnet_rgmii_io_<family>` | per file | `rtlnet_rgmii_io_amd7.sv`: IDELAYE2, IDDR, ODDR, BUFIO, BUFR, IDELAYCTRL | a new file per family (Intel GPIO DDR, Lattice IDDRX1F/ODDRX1F) with the same ports |
-| MMCM, IOBUF | board top only | `MMCME2_ADV`, `IOBUF` | per board |
+**One include file selects the technology for the whole tree:**
+`cores/rtlnet_common/hdl/rtlnet_technology.svh`. It defines exactly one of `RTLNET_TECH_AMD` (default),
+`RTLNET_TECH_ALTERA`, `RTLNET_TECH_LATTICE`, `RTLNET_TECH_GENERIC`, chosen by a tool command-line define
+(`+define+RTLNET_TECH_ALTERA`) or by changing its default branch, and derives:
 
-`rtlnet_ram_core` interface (simple dual port, independent clocks, synchronous read with one output register):
+| Macro | Use |
+|---|---|
+| `` `RTLNET_TARGET `` | technology string read by `rtlnet_ram_core` |
+| `` `RTLNET_SYNC_ATTR `` | attribute instance on every synchronizer register (no merge, no SRL packing, placed together) |
+| `` `RTLNET_RGMII_IO `` | RGMII pin-layer module for the family, instanced by the MAC |
+
+No core takes a technology parameter and none is passed down the hierarchy. Only per-buffer choices are
+parameters: `RAM_STYLE` and the `*_KB` sizes.
+
+| Mapped file | AMD implementation | Other technologies |
+|---|---|---|
+| `rtlnet_ram_core` | direct instance of `xpm_memory_sdpram` (`MEMORY_PRIMITIVE` = `"block"` or `"distributed"`) | Altera: inferred array, `ramstyle` M20K / MLAB; Lattice: inferred array, `syn_ramstyle` block_ram / distributed; GENERIC/ASIC: behavioural model, replaced by a compiled-macro wrapper |
+| `rtlnet_sync`, `rtlnet_reset_sync`, `rtlnet_gray_sync`, packet FIFO pointers | `ASYNC_REG`, `SHREG_EXTRACT="NO"`, `DONT_TOUCH` | Quartus synchronizer identification + preserve; Synplify `syn_preserve`, `syn_srlstyle="registers"`; ASIC library attributes when the back-port starts |
+| `rtlnet_rgmii_io_<family>` | `rtlnet_rgmii_io_amd7.sv`: IDELAYE2, IDDR, ODDR, BUFIO, BUFR, IDELAYCTRL | one file per family with the same ports (Intel GPIO DDR, Lattice IDDRX1F/ODDRX1F, generic behavioural) |
+| MMCM, IOBUF | board top only | per board |
+
+`rtlnet_ram_core` interface (simple dual port, common or independent clocks, synchronous read, output
+register(s) with synchronous active-low reset):
 
 | Parameter | Meaning |
 |---|---|
-| `TARGET` | vendor, default `"AMD"` |
 | `RAM_STYLE` | `"block"` (default) or `"distributed"` |
 | `DATA_W`, `ADDR_W` | word width and address bits (depth `2**ADDR_W`) |
 | `READ_LATENCY` | 1 (default) or 2 |
@@ -369,8 +385,6 @@ back with the metadata unchanged, so it returns to its sender. Registers: enable
 
 Every buffer in a core states its size as a total-kilobyte parameter (`*_BUF_KB`, `*_FIFO_KB`); the core
 derives the depth from it and stops elaboration with `$fatal` on a size it cannot build.
-
----
 
 ## 9. Clocks and resets (Nexys Video)
 
@@ -436,8 +450,9 @@ CLI command families: `HELP`/`?`, `SYS INFO`, `PHY STATUS|DUMP|READ|WRITE|RESET|
 
 ## 11. Verification
 
-- Simulator: Vivado xsim (`xvlog`/`xvhdl`, `xelab -L xpm -L unisims_ver`, `xsim`). Runner
-  `scripts/rtlnet_run_xsim.ps1 -Bench <tb> -Filelist <core>/testbench/<tb>.f`.
+- Simulator: Aldec Active-HDL 11.1 batch (`vsimsa`, `alog -sv2k12`, `asim`), one seat, serialized by the
+  runner's lock. Runner `scripts/rtlnet_run_sim.ps1 -Bench <tb> -Filelist <core>/testbench/<tb>.f`. The AMD
+  XPM and UNISIM sources are compiled in place from the Vivado install into `.sim/xlib` on first use.
 - Every bench is self-checking and ends with exactly one anchored line `TEST PASS: <bench> checks=<n>` or
   `TEST FAIL: <bench> ...`. The runner fails on a missing pass token (crash, timeout, elaboration error).
 - `+INJECT_FAILURE` forces a failure; each bench is run once with it and must report `TEST FAIL`.
@@ -478,4 +493,4 @@ two streams connect directly.
 
 | Revision | Change |
 |---|---|
-| 10-22-2026 | Initial architecture; all RTL in SystemVerilog; CPU as a replaceable core |
+| 10-22-2026 | Initial architecture; all RTL in SystemVerilog; CPU as a replaceable core; one technology include file; Active-HDL simulation |

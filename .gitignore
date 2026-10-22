@@ -86,3 +86,6 @@ __pycache__/
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# RTLNet simulation work directories (Active-HDL libraries, logs, waves)
+.sim/
