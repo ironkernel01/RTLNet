@@ -26,8 +26,8 @@
 | `scripts/program.ps1`, `scripts/program.tcl` | JTAG programming (hw_server, `program_hw_devices`) |
 | `scripts/cli_test.ps1` | console test over the USB-UART (COM4), either build |
 | `scripts/net_test.ps1` | hardware network test: board side over the CLI, host side from the PC NIC when it is up |
-| `testbench/tb_rtlnet_nexys_video_top.sv` (+ `.f`) | CPU-only board bench with the CPU BFM |
-| `testbench/tb_rtlnet_nexys_video_net.sv` (+ `.f`) | network board bench: BFM + RTL8211E model, ARP / ICMP / UDP echo / DHCP at 10/100/1000 |
+| `testbench/tb_rtlnet_nexys_video_top.sv` (+ `.f`) | CPU-only board bench with the MicroBlaze simulation stub |
+| `testbench/tb_rtlnet_nexys_video_net.sv` (+ `.f`) | network board bench: sim stub + RTL8211E model, ARP / ICMP / UDP echo / DHCP at 10/100/1000 |
 | `testbench/regression.txt` | board regression lines (both benches, negative controls) |
 | `../../scripts/rtlnet_constrain_cdc.tcl` | crossing constraints and report_cdc waivers by cell name |
 

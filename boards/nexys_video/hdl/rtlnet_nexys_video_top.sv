@@ -15,8 +15,8 @@
 //     order); release needs rst_arstn high for STAGES consecutive clocks of
 //     each domain, so a short high glitch cannot release a domain.
 //     app_clk = proto_clk, app_resetn = proto_resetn.
-//   * CPU core u_cpu (rtlnet_cpu_microblaze; with RTLNET_CPU_BFM defined, the
-//     bus-functional model rtlnet_cpu_bfm with the same ports, for the board
+//   * CPU core u_cpu (rtlnet_cpu_microblaze; with RTLNET_MICROBLAZE_SIM_STUB defined, the
+//     simulation stub rtlnet_microblaze_sim_stub with the same ports, for the board
 //     bench) masters u_decoder (rtlnet_axil_decoder) over the RTLNet window
 //     0x44A0_0000 (architecture section 6.1):
 //       slave 0 SYS        0x44A0_0000   4 KiB  u_sysregs
@@ -32,12 +32,20 @@
 //     eth_rst_b is released POR_RESET_MS milliseconds after cpu_clk reset
 //     release (a register output), so the PHY runs and links. With the network
 //     cores rtlnet_mdio drives MDC, MDIO and the PHY reset.
+//   * CPU network path (cpu_axis_ethernet_stream, architecture 7.4): the CPU
+//     core's AXI DMA streams m_axis_eth_* / s_axis_eth_* (cpu_clk) connect to
+//     the protocol wrapper's s_axis_cpu_eth_* / m_axis_cpu_eth_* with
+//     cpu_axis_clk = cpu_clk and cpu_axis_resetn = the cpu_clk reset. Without
+//     the network cores the CPU receive stream is idle and every frame the CPU
+//     sends is accepted and discarded (tready held 1), so a DMA transmit
+//     completes on either bitstream.
 //   * LEDs: led[0] MMCM locked, led[7:1] system-register bits (led[1] is the
 //     firmware heartbeat by convention).
 //   * MMCM, BUFG and IOBUF primitives appear in this file only.
 // Language: SystemVerilog-2012.
 // Revision: 10-22-2026
 //   * 10-22-2026: initial version.
+//   * 10-22-2026: CPU network path between u_cpu and u_protocol.
 // Clocks: sysclk (100 MHz pin) -> MMCM; clk125, clk125_90, clk200, axis_clk,
 //   proto_clk, cpu_clk as above; the MAC's receive clock is internal to it.
 // Pins: names, balls, banks and I/O standards from the Digilent
@@ -189,6 +197,19 @@ module rtlnet_nexys_video_top #(
   logic                  cpu_rvalid;
   logic                  cpu_rready;
   logic [7:0]            cpu_irq;
+
+  // CPU network path (cpu_clk): eth_tx = frames the CPU sends, eth_rx =
+  // frames to the CPU.
+  logic [63:0]           cpu_eth_tx_tdata;
+  logic [7:0]            cpu_eth_tx_tkeep;
+  logic                  cpu_eth_tx_tvalid;
+  logic                  cpu_eth_tx_tlast;
+  logic                  cpu_eth_tx_tready;
+  logic [63:0]           cpu_eth_rx_tdata;
+  logic [7:0]            cpu_eth_rx_tkeep;
+  logic                  cpu_eth_rx_tvalid;
+  logic                  cpu_eth_rx_tlast;
+  logic                  cpu_eth_rx_tready;
 
   logic [NUM_SLV*AW-1:0] dec_awaddr;
   logic [NUM_SLV-1:0]    dec_awvalid;
@@ -349,9 +370,9 @@ module rtlnet_nexys_video_top #(
   // ---------------------------------------------------------------------------
   // CPU core
   // ---------------------------------------------------------------------------
-`ifdef RTLNET_CPU_BFM
-  // Board bench: bus-functional model in place of the processor.
-  rtlnet_cpu_bfm u_cpu (
+`ifdef RTLNET_MICROBLAZE_SIM_STUB
+  // Board bench: simulation stub in place of the processor.
+  rtlnet_microblaze_sim_stub u_cpu (
 `else
   // MicroBlaze subsystem: console on the USB-UART, register master into the
   // decoder, interrupts from the cores.
@@ -378,7 +399,17 @@ module rtlnet_nexys_video_top #(
     .m_axi_rresp   (cpu_rresp),
     .m_axi_rvalid  (cpu_rvalid),
     .m_axi_rready  (cpu_rready),
-    .irq           (cpu_irq)
+    .irq           (cpu_irq),
+    .m_axis_eth_tdata  (cpu_eth_tx_tdata),
+    .m_axis_eth_tkeep  (cpu_eth_tx_tkeep),
+    .m_axis_eth_tvalid (cpu_eth_tx_tvalid),
+    .m_axis_eth_tlast  (cpu_eth_tx_tlast),
+    .m_axis_eth_tready (cpu_eth_tx_tready),
+    .s_axis_eth_tdata  (cpu_eth_rx_tdata),
+    .s_axis_eth_tkeep  (cpu_eth_rx_tkeep),
+    .s_axis_eth_tvalid (cpu_eth_rx_tvalid),
+    .s_axis_eth_tlast  (cpu_eth_rx_tlast),
+    .s_axis_eth_tready (cpu_eth_rx_tready)
   );
 
   // RTLNet window decoder: one transaction at a time to the window that owns
@@ -662,6 +693,9 @@ module rtlnet_nexys_video_top #(
     .NUM_SOCKETS     (4),
     .UDP_RX_BUF_KB   (16),
     .UDP_TX_BUF_KB   (8),
+    .CPU_PATH_ENABLE (1),
+    .CPU_RX_FIFO_KB  (16),
+    .CPU_TX_FIFO_KB  (8),
     .RAM_STYLE       ("block")
   ) u_protocol (
     .axis_clk          (axis_clk),
@@ -709,6 +743,18 @@ module rtlnet_nexys_video_top #(
     .s_axi_rresp       (dec_rresp[SLV_PROT*2 +: 2]),
     .s_axi_rvalid      (dec_rvalid[SLV_PROT]),
     .s_axi_rready      (dec_rready[SLV_PROT]),
+    .cpu_axis_clk           (cpu_clk),
+    .cpu_axis_resetn        (cpu_resetn_sync),
+    .m_axis_cpu_eth_tdata   (cpu_eth_rx_tdata),
+    .m_axis_cpu_eth_tkeep   (cpu_eth_rx_tkeep),
+    .m_axis_cpu_eth_tvalid  (cpu_eth_rx_tvalid),
+    .m_axis_cpu_eth_tlast   (cpu_eth_rx_tlast),
+    .m_axis_cpu_eth_tready  (cpu_eth_rx_tready),
+    .s_axis_cpu_eth_tdata   (cpu_eth_tx_tdata),
+    .s_axis_cpu_eth_tkeep   (cpu_eth_tx_tkeep),
+    .s_axis_cpu_eth_tvalid  (cpu_eth_tx_tvalid),
+    .s_axis_cpu_eth_tlast   (cpu_eth_tx_tlast),
+    .s_axis_cpu_eth_tready  (cpu_eth_tx_tready),
     .stat_ip_valid     (prot_stat_ip_valid),
     .stat_dhcp_bound   (prot_stat_dhcp_bound),
     .ev_rx_frame       (),
@@ -779,8 +825,15 @@ module rtlnet_nexys_video_top #(
     end
   end
 
-  assign cpu_irq         = 8'd0;
-  assign net_status      = 6'd0;
+  assign cpu_irq           = 8'd0;
+  assign net_status        = 6'd0;
+  // CPU network path without the protocol wrapper: no frames to the CPU;
+  // frames from the CPU are accepted and discarded.
+  assign cpu_eth_rx_tdata  = 64'd0;
+  assign cpu_eth_rx_tkeep  = 8'd0;
+  assign cpu_eth_rx_tvalid = 1'b0;
+  assign cpu_eth_rx_tlast  = 1'b0;
+  assign cpu_eth_tx_tready = 1'b1;
   assign rgmii_rx_levels = {eth_rxck, eth_rxd, eth_rxctl};
   assign eth_rst_b       = phy_rst_n;
   assign eth_mdc         = 1'b0;

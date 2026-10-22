@@ -2,8 +2,8 @@
 // File: tb_rtlnet_nexys_video_top.sv
 // Purpose: board bench of the CPU-only Nexys Video top: the real board top
 //   (MMCM model, reset tree, decoder, system registers, stubs, PHY power-on
-//   reset, MDIO pad) with the CPU core replaced by rtlnet_cpu_bfm
-//   (RTLNET_CPU_BFM defined in the filelist).
+//   reset, MDIO pad) with the CPU core replaced by rtlnet_microblaze_sim_stub
+//   (RTLNET_MICROBLAZE_SIM_STUB defined in the filelist).
 // Overview (checks):
 //   * MMCM lock, led[0], reset release.
 //   * System registers: ID, VERSION, CAPS, BUILD_ID/BUILD_DIRTY parameters,
@@ -14,8 +14,8 @@
 //   * PHY reset pin low after reset release, high POR_RESET_MS later.
 //   * Stub windows (MAC, MDIO, ECHO, PROTOCOL and a protocol leaf,
 //     CLASSIFIER): OKAY and ID 0; an unmapped address: DECERR.
-//   * UART: BFM transmit reaches uart_rx_out, bench transmit on uart_tx_in
-//     reaches the BFM receiver.
+//   * UART: sim stub transmit reaches uart_rx_out, bench transmit on uart_tx_in
+//     reaches the sim stub receiver.
 //   * CPU RESET button: asserts every domain, SCRATCH and uptime restart.
 //   * Idle PHY outputs (TX, MDC), MDIO released.
 // The bench shortens a "millisecond" to MS_CYCLES = 1000 cpu_clk clocks
@@ -70,7 +70,7 @@ module tb_rtlnet_nexys_video_top;
   always #(SYSCLK_HALF) sysclk = ~sysclk;
   always #(RXCK_HALF)   eth_rxck = ~eth_rxck;
 
-  // Device under test: the board top with the CPU bus-functional model.
+  // Device under test: the board top with the MicroBlaze simulation stub.
   rtlnet_nexys_video_top #(
     .BUILD_ID     (BUILD_ID),
     .BUILD_DIRTY  (1'b1),
@@ -101,7 +101,7 @@ module tb_rtlnet_nexys_video_top;
     .eth_pme_b   (eth_pme_b)
   );
 
-  // Register helpers through the BFM.
+  // Register helpers through the sim stub.
   task automatic rd(input logic [31:0] addr, output logic [31:0] data, output logic [1:0] resp);
     dut.u_cpu.axil_read(addr, data, resp);
   endtask
@@ -286,7 +286,7 @@ module tb_rtlnet_nexys_video_top;
     join
     pin_uart_send(8'hA3);
     dut.u_cpu.uart_get(b, 200_000, ok);
-    tb_check(ok && b == 8'hA3, $sformatf("BFM received 0x%02x ok %0d, expected 0xA3", b, ok));
+    tb_check(ok && b == 8'hA3, $sformatf("sim stub received 0x%02x ok %0d, expected 0xA3", b, ok));
     tb_check(dut.u_cpu.uart_rx_errors == 0, "no UART framing errors");
 
     // CPU RESET button: every domain resets, registers return to defaults.

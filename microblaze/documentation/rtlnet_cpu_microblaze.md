@@ -7,7 +7,7 @@
 | Language | SystemVerilog-2012 wrapper; Vivado Tcl block design |
 | Technology | AMD 7-series (the one AMD-only block of RTLNet, architecture section 3) |
 | Port contract | architecture section 15.6 |
-| Verification | board bench `tb_rtlnet_nexys_video_top` (BFM in place of the core); hardware bring-up on the Nexys Video |
+| Verification | board bench `tb_rtlnet_nexys_video_top` (sim stub in place of the core); hardware bring-up on the Nexys Video |
 
 The CPU is a core like any other: a vendor-neutral port list around the processor subsystem. The
 MicroBlaze block design is created by script on every build; nothing generated is committed.
@@ -20,7 +20,7 @@ MicroBlaze block design is created by script on every build; nothing generated i
 | `hdl/rtlnet_cpu_microblaze.sv` | the core: section 15.6 ports, instance `u_bd` of the generated `rtlnet_cpu_wrapper` |
 | `hdl/rtlnet_cpu_microblaze.f` | filelist (the wrapper `.sv`; the build adds the generated wrapper) |
 | `driver/rtlnet_cpu_microblaze.h` | software contract: address map, vectors, interrupt numbering (single definition) |
-| `testbench/rtlnet_cpu_bfm.sv` | bus-functional model with the same ports |
+| `rtlnet_microblaze_sim_stub.sv (top of microblaze/)` | simulation stub with the same ports |
 
 ## 2. Interface
 
@@ -92,7 +92,7 @@ vendor system:
    JTAG UART), a timer, an interrupt controller and an AXI4-Lite (or Avalon-MM bridged to AXI4-Lite)
    master covering 0x44A0_0000 + 1 MiB at the same processor address.
 2. Clock and reset from the ports (no PLL inside); the receive pin synchronized inside.
-3. The board top selects the module by name (the `ifdef` that today selects the BFM shows the pattern);
+3. The board top selects the module by name (the `ifdef` that today selects the sim stub shows the pattern);
    the decoder, the system registers and every core below the decoder are unchanged.
 4. Software: a `driver/rtlnet_cpu_<name>.h` with the same macro names (`RTLNET_CPU_UART_BASE` ...),
    a UART and timer driver for that vendor's peripherals behind the same platform API
@@ -102,8 +102,8 @@ vendor system:
 
 ## 7. Bus-functional model
 
-`testbench/rtlnet_cpu_bfm.sv` (module `rtlnet_cpu_bfm`, same ports) replaces the core when a bench
-defines `RTLNET_CPU_BFM`; the board top then instances it as `u_cpu`. Tasks (called hierarchically,
+`rtlnet_microblaze_sim_stub.sv (top of microblaze/)` (module `rtlnet_microblaze_sim_stub`, same ports) replaces the core when a bench
+defines `RTLNET_MICROBLAZE_SIM_STUB`; the board top then instances it as `u_cpu`. Tasks (called hierarchically,
 `dut.u_cpu.<task>`): `wait_reset_release`, `axil_write(addr, data, strb, resp)`,
 `axil_read(addr, data, resp)` (timeouts return resp 2'b10 and count `axil_timeouts`),
 `uart_send(byte)` on `uart_txd`, a receiver on `uart_rxd` into `uart_rx_q` (`uart_get`,
@@ -114,7 +114,7 @@ defines `RTLNET_CPU_BFM`; the board top then instances it as `u_cpu`. Tasks (cal
 | Check | Result (10-22-2026) |
 |---|---|
 | Block design creation, validation, output products, wrapper (Vivado 2025.2) | no errors, 0 critical warnings |
-| Board bench `tb_rtlnet_nexys_video_top` (BFM AXI4-Lite and UART tasks against the real top) | TEST PASS, 74 checks; `+INJECT_FAILURE` gives TEST FAIL; a perturbed clock expectation gives TEST FAIL |
+| Board bench `tb_rtlnet_nexys_video_top` (sim stub AXI4-Lite and UART tasks against the real top) | TEST PASS, 74 checks; `+INJECT_FAILURE` gives TEST FAIL; a perturbed clock expectation gives TEST FAIL |
 | CPU-only board build, post-route | WNS +1.698 ns, WHS +0.081 ns, no failing endpoints (commit f34a8bac) |
 | Hardware: firmware merged with updatemem, JTAG programmed, CLI over the USB-UART | `cli_test.ps1` 15/15 (board report: `boards/nexys_video/documentation/rtlnet_nexys_video.md`) |
 
@@ -136,4 +136,4 @@ Utilization (post-route, `u_cpu`, xc7a200t): 2450 LUTs (64 LUTRAM, 92 SRL), 2097
 
 | Revision | Change |
 |---|---|
-| 10-22-2026 | Initial version: block design script, wrapper, driver header, BFM |
+| 10-22-2026 | Initial version: block design script, wrapper, driver header, sim stub |

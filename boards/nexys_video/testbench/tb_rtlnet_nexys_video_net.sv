@@ -2,7 +2,7 @@
 // File: tb_rtlnet_nexys_video_net.sv
 // Purpose: network board bench of the Nexys Video top: the real board top
 //   built with RTLNET_WITH_NETWORK (MAC, MDIO, protocol wrapper with every
-//   leaf, UDP echo), the CPU core replaced by rtlnet_cpu_bfm (RTLNET_CPU_BFM),
+//   leaf, UDP echo), the CPU core replaced by rtlnet_microblaze_sim_stub (RTLNET_MICROBLAZE_SIM_STUB),
 //   and the RTL8211E model (cores/rtlnet_eth_mac/testbench) on the RGMII and
 //   MDIO pins with a pull-up on MDIO, at 100 Mb/s (+SPEED=1000 for gigabit).
 // Overview (checks):
@@ -86,7 +86,7 @@ module tb_rtlnet_nexys_video_net;
 
   always #5.0 sysclk = ~sysclk;
 
-  // Device under test: board top with the network cores and the CPU BFM.
+  // Device under test: board top with the network cores and the MicroBlaze simulation stub.
   rtlnet_nexys_video_top #(
     .BUILD_ID     (32'hBEEF_0001),
     .BUILD_DIRTY  (1'b0),
@@ -144,7 +144,7 @@ module tb_rtlnet_nexys_video_net;
   );
 
   // ---------------------------------------------------------------------------
-  // Register access through the BFM
+  // Register access through the sim stub
   // ---------------------------------------------------------------------------
   task automatic rd(input logic [31:0] addr, output logic [31:0] data);
     logic [1:0] r;

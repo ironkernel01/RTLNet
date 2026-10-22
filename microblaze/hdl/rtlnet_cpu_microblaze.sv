@@ -4,10 +4,17 @@
 //   section 15.6) around the MicroBlaze block design `rtlnet_cpu`
 //   (microblaze/hdl/rtlnet_cpu_bd.tcl).
 // Overview:
-//   * The block design holds MicroBlaze, 128 KiB LMB BRAM, MDM, UART Lite
-//     (115200 8N1), AXI Timer, AXI INTC and the interconnect; its exported
-//     AXI4-Lite master M_AXI_RTLNET (0x44A0_0000, 1 MiB) is this core's
-//     m_axi_* register master, full 32-bit addresses.
+//   * The block design holds MicroBlaze, 256 KiB LMB BRAM, MDM, UART Lite
+//     (115200 8N1), AXI Timer, AXI INTC, the AXI DMA with its 128 KiB AXI
+//     BRAM and the interconnects; its exported AXI4-Lite master M_AXI_RTLNET
+//     (0x44A0_0000, 1 MiB) is this core's m_axi_* register master, full
+//     32-bit addresses.
+//   * Ethernet frames (cpu_axis_ethernet_stream, architecture 7.4): the DMA
+//     MM2S stream M_AXIS_ETH is m_axis_eth_* (frames the CPU sends, to the
+//     protocol wrapper's s_axis_cpu_eth_*), the S2MM stream S_AXIS_ETH is
+//     s_axis_eth_* (unclaimed frames from the wrapper's m_axis_cpu_eth_*).
+//     RTLNet stream format: 64-bit tdata, byte 0 in [7:0], tkeep contiguous
+//     from bit 0 on the last beat, tlast; complete Ethernet frames without FCS.
 //   * The console receive pin is asynchronous to clk. The UART Lite of the
 //     block design synchronizes it with its own two-stage ASYNC_REG chain
 //     (UARTLITE_RX_I/INPUT_DOUBLE_REGS3), so it connects straight through; a
@@ -16,10 +23,11 @@
 //     inside this wrapper.
 //   * A replacement processor (Nios V, another RISC-V) is a different file with
 //     this exact port list; the board top does not change. The bus-functional
-//     model testbench/rtlnet_cpu_bfm.sv has the same ports.
+//     model rtlnet_microblaze_sim_stub.sv (top of microblaze/) has the same ports.
 // Language: SystemVerilog-2012.
 // Revision: 10-22-2026
 //   * 10-22-2026: initial version.
+//   * 10-22-2026: m_axis_eth_* / s_axis_eth_* frame streams (AXI DMA).
 // Clocks: clk (cpu_clk 100 MHz) only; resetn synchronous to clk, active low.
 // -----------------------------------------------------------------------------
 module rtlnet_cpu_microblaze (
@@ -54,7 +62,23 @@ module rtlnet_cpu_microblaze (
 
   // Interrupt requests, level, active high, synchronous to clk (INTC inputs
   // 0..7).
-  input  logic [7:0]  irq
+  input  logic [7:0]  irq,
+
+  // Ethernet frames to the network, clk domain, RTLNet stream (AXI DMA MM2S;
+  // to the protocol wrapper's s_axis_cpu_eth_*).
+  output logic [63:0] m_axis_eth_tdata,
+  output logic [7:0]  m_axis_eth_tkeep,
+  output logic        m_axis_eth_tvalid,
+  output logic        m_axis_eth_tlast,
+  input  logic        m_axis_eth_tready,
+
+  // Ethernet frames from the network, clk domain, RTLNet stream (AXI DMA
+  // S2MM; from the protocol wrapper's m_axis_cpu_eth_*).
+  input  logic [63:0] s_axis_eth_tdata,
+  input  logic [7:0]  s_axis_eth_tkeep,
+  input  logic        s_axis_eth_tvalid,
+  input  logic        s_axis_eth_tlast,
+  output logic        s_axis_eth_tready
 );
 
   // MicroBlaze subsystem, Tcl-generated block design wrapper.
@@ -82,7 +106,17 @@ module rtlnet_cpu_microblaze (
     .M_AXI_RTLNET_rdata   (m_axi_rdata),
     .M_AXI_RTLNET_rresp   (m_axi_rresp),
     .M_AXI_RTLNET_rvalid  (m_axi_rvalid),
-    .M_AXI_RTLNET_rready  (m_axi_rready)
+    .M_AXI_RTLNET_rready  (m_axi_rready),
+    .M_AXIS_ETH_tdata     (m_axis_eth_tdata),
+    .M_AXIS_ETH_tkeep     (m_axis_eth_tkeep),
+    .M_AXIS_ETH_tvalid    (m_axis_eth_tvalid),
+    .M_AXIS_ETH_tlast     (m_axis_eth_tlast),
+    .M_AXIS_ETH_tready    (m_axis_eth_tready),
+    .S_AXIS_ETH_tdata     (s_axis_eth_tdata),
+    .S_AXIS_ETH_tkeep     (s_axis_eth_tkeep),
+    .S_AXIS_ETH_tvalid    (s_axis_eth_tvalid),
+    .S_AXIS_ETH_tlast     (s_axis_eth_tlast),
+    .S_AXIS_ETH_tready    (s_axis_eth_tready)
   );
 
 endmodule

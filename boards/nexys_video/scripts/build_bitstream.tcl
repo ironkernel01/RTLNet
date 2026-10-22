@@ -14,7 +14,9 @@
 #     synth_design (top rtlnet_nexys_video_top, xc7a200tsbg484-1, generics
 #     BUILD_ID and BUILD_DIRTY, define RTLNET_WITH_NETWORK only for the
 #     network build), scripts/rtlnet_constrain_cdc.tcl, opt/place/phys_opt/
-#     route, reports, gates, write_bitstream, write_mem_info, build_info.txt.
+#     route, reports, gates, write_bitstream, write_mem_info, the fixed
+#     hardware platform (XSA, write_hw_platform -fixed, the input of the
+#     firmware BSP flow microblaze/firmware/build.ps1), build_info.txt.
 #   * Gates (each its own exit code; nothing is written past a failed gate):
 #       99 bad arguments            11 missing source, filelist or XDC
 #       12 block design failure     10 synthesis error or critical warning
@@ -29,6 +31,7 @@
 #       27 report_cdc Critical/Warning finding, or a methodology finding
 #          (Warning or worse) without a waiver in this script
 #       40 write_bitstream          41 write_mem_info
+#       42 write_hw_platform
 #   * Reports saved in build/reports: utilization post-synth and post-route,
 #     timing summary, CDC (report_cdc -details), methodology, DRC,
 #     check_timing, clock networks, clock interaction, failing paths.
@@ -37,6 +40,7 @@
 #   Normally run through boards/nexys_video/scripts/build.ps1.
 # Revision: 10-22-2026
 #   * 10-22-2026: initial version.
+#   * 10-22-2026: XSA export (write_hw_platform -fixed).
 # -----------------------------------------------------------------------------
 
 # Script-relative roots (survive tree moves; no dependence on the caller's cwd).
@@ -384,6 +388,10 @@ set mmi    [file join $BUILD_DIR rtlnet_nexys_video.mmi]
 if {[catch {write_bitstream -force $bit_hw} err]} { nv_exit 40 "write_bitstream: $err" }
 if {[catch {write_mem_info -force $mmi} err]} { nv_exit 41 "write_mem_info: $err" }
 
+# Fixed hardware platform for the firmware BSP (Vitis platform component).
+set xsa [file join $BUILD_DIR rtlnet_nexys_video.xsa]
+if {[catch {write_hw_platform -fixed -force -include_bit -file $xsa} err]} { nv_exit 42 "write_hw_platform: $err" }
+
 # ---------------------------------------------------------------------------
 # Build record.
 # ---------------------------------------------------------------------------
@@ -402,6 +410,7 @@ puts $fh "utilization   [join $util_summary {, }]"
 puts $fh "cdc_classes   $::rtlnet_cdc_result"
 puts $fh "bitstream_hw  [file tail $bit_hw]"
 puts $fh "mmi           [file tail $mmi]"
+puts $fh "xsa           [file tail $xsa]"
 close $fh
 puts "rtlnet_build: PASS $bit_hw"
 exit 0
