@@ -18,12 +18,14 @@
  * FF:FF:FF:FF:FF:FF policed by policer 0, policer 0 = 10 frames per 100 ms.
  * "storm-control broadcast" is policer 0 plus that MAC entry.
  *
- * Driver binding: the classifier driver (cores/rtlnet_classifier/driver) and
- * the wrapper's CPU-path register functions are written in parallel with
- * this firmware. Until they are in the tree the configuration is kept here
- * and every hardware access reports CPUPATH_NO_DRIVER; a classifier that
- * answers its ID ("CLSF") is reported present. RTLNET_HAVE_CLS_DRIVER is 1
- * when rtlnet_classifier.h is on the include path.
+ * Driver binding: the wrapper's CPU-path registers through the
+ * rtlnet_eth_protocol driver (rtlnet_eth_protocol_cpu_path_present,
+ * _set/_get_cpu_path_enable, _read_cpu_counters). The classifier driver
+ * (cores/rtlnet_classifier/driver) is written in parallel with this
+ * firmware: until it is in the tree the configuration is kept here and every
+ * classifier access reports CPUPATH_NO_DRIVER; a classifier that answers its
+ * ID ("CLSF") is reported present. RTLNET_HAVE_CLS_DRIVER is 1 when
+ * rtlnet_classifier.h is on the include path.
  *
  * This header holds types, constants and signatures; rtlnet_cpupath.c holds
  * the per-function commentary.
@@ -119,10 +121,16 @@ typedef struct {
 
 typedef struct {
     int      valid;                /* wrapper CPU-path registers read */
-    int      enabled;
-    uint32_t rx_frames;            /* committed to the CPU receive FIFO */
-    uint32_t rx_fifo_drops;        /* CPU receive FIFO full */
-    uint32_t tx_frames;            /* frames from the CPU */
+    int      enabled;              /* CTRL.CPU_PATH_ENABLE */
+    uint32_t rx_fifo_kb;           /* CPU_CAPS */
+    uint32_t tx_fifo_kb;
+    uint32_t delivered;            /* frames dequeued to the leaves (and the CPU copy) */
+    uint32_t rx_frames;            /* unclaimed, committed to the CPU receive FIFO */
+    uint32_t rx_claimed;           /* copies dropped: a leaf claimed the frame */
+    uint32_t rx_fifo_drops;        /* unclaimed, lost: CPU receive FIFO full */
+    uint32_t tx_frames;            /* CPU frames sent to the MAC */
+    uint32_t tx_discarded;         /* CPU frames discarded while the path is off */
+    uint32_t tx_rejected;          /* CPU frames with an illegal length or tkeep */
 } cpupath_wrapper_counters_t;
 
 void                        cpupath_config_defaults(void);

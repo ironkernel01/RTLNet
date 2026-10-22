@@ -173,16 +173,18 @@ write_checkpoint -force [file join $BUILD_DIR post_synth.dcp]
 # (it names pin-layer cells), then the expected crossing instances: packet
 # FIFOs u_mac/u_rx_fifo, u_mac/u_tx_fifo, u_protocol/u_ingress_fifo,
 # u_protocol/u_egress_fifo and the socket layer's u_rx_fifo, u_tx_fifo and
-# u_tx_desc_fifo (fifo 7); register crossings of the MAC, the protocol wrapper
+# u_tx_desc_fifo, and the CPU network path queues u_protocol/u_cpu_rx_fifo and
+# u_protocol/u_cpu_tx_fifo (fifo 9); register crossings of the MAC, the protocol wrapper
 # and the UDP echo (axil_cdc 3); Gray counters u_mac/u_tx_count_sync and the
-# wrapper's four ingress/egress counter crossings (gray 5). A change of these
+# wrapper's four ingress/egress counter crossings and its CPU transmit reject
+# counter u_cnt_cpu_reject_sync (gray 6). A change of these
 # counts fails the build until the expectation is reviewed and updated here.
 if {$NETWORK} {
   set rgmii_xdc [file join $BOARD_DIR constraints rtlnet_nexys_video_rgmii.xdc]
   if {![file exists $rgmii_xdc]} { nv_exit 11 "XDC not found: $rgmii_xdc" }
   if {[catch {read_xdc $rgmii_xdc} err]} { nv_exit 13 "RGMII constraints: $err" }
   set ::rtlnet_cdc_required {sync reset gray fifo axil_cdc}
-  set ::rtlnet_cdc_expect   {fifo 7 axil_cdc 3 gray 5}
+  set ::rtlnet_cdc_expect   {fifo 9 axil_cdc 3 gray 6}
 } else {
   set ::rtlnet_cdc_required {sync reset}
   set ::rtlnet_cdc_expect   {fifo 0 axil_cdc 0 gray 0}

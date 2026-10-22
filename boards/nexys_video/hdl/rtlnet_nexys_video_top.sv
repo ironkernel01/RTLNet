@@ -696,6 +696,10 @@ module rtlnet_nexys_video_top #(
     .CPU_PATH_ENABLE (1),
     .CPU_RX_FIFO_KB  (16),
     .CPU_TX_FIFO_KB  (8),
+    // The CPU-path classifier joins the build when its core lands
+    // (cores/rtlnet_classifier); until then the CPU receive stream is unfiltered.
+    .CPU_CLASSIFIER_ENABLE (0),
+    .CPU_AXIS_CLK_HZ (CPU_CLK_HZ),
     .RAM_STYLE       ("block")
   ) u_protocol (
     .axis_clk          (axis_clk),

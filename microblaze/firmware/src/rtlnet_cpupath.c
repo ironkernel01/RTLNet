@@ -130,7 +130,7 @@ static int hw_sync(void)
  *   2. With the driver: initialize it and write the configuration (the
  *      broadcast storm default unless the CLI changed it) - the classifier
  *      leaves DROP-ALL here.
- *   3. Enable the wrapper's CPU path when its driver offers the control.
+ *   3. Enable the wrapper's CPU path when it is built (CAPS).
  * Returns: CPUPATH_OK, CPUPATH_ABSENT, CPUPATH_NO_DRIVER or CPUPATH_HW_ERROR.
  */
 int cpupath_init(void)
@@ -142,11 +142,10 @@ int cpupath_init(void)
         g_present = 0;
     }
 #endif
-#ifdef RTLNET_PROTO_CTRL_CPU_PATH_ENABLE
-    if (rtlnet_eth_protocol_probe(RTLNET_PLAT_PROT_BASE) == RTLNET_PROTO_OK) {
-        rtlnet_eth_protocol_set_cpu_path(RTLNET_PLAT_PROT_BASE, 1);
+    if (rtlnet_eth_protocol_probe(RTLNET_PLAT_PROT_BASE) == RTLNET_PROTO_OK &&
+        rtlnet_eth_protocol_cpu_path_present(RTLNET_PLAT_PROT_BASE)) {
+        (void)rtlnet_eth_protocol_set_cpu_path_enable(RTLNET_PLAT_PROT_BASE, 1);
     }
-#endif
     return hw_sync();
 }
 
@@ -349,28 +348,31 @@ int cpupath_storm_enable(int on)
 /*
  * cpupath_wrapper_counters -- the protocol wrapper's CPU-path counters.
  * Returns: CPUPATH_OK (*out valid), CPUPATH_ABSENT (no protocol core) or
- *          CPUPATH_NO_DRIVER (the wrapper driver has no CPU-path registers).
+ *          CPUPATH_NO_DRIVER (a wrapper built without the CPU path).
  */
 int cpupath_wrapper_counters(cpupath_wrapper_counters_t *out)
 {
+    rtlnet_eth_protocol_cpu_counters_t k;
     *out = (cpupath_wrapper_counters_t){ 0 };
     if (rtlnet_eth_protocol_probe(RTLNET_PLAT_PROT_BASE) != RTLNET_PROTO_OK) {
         return CPUPATH_ABSENT;
     }
-#ifdef RTLNET_PROTO_CTRL_CPU_PATH_ENABLE
-    {
-        rtlnet_eth_protocol_cpu_counters_t k;
-        rtlnet_eth_protocol_read_cpu_counters(RTLNET_PLAT_PROT_BASE, &k);
-        out->valid = 1;
-        out->enabled = rtlnet_eth_protocol_get_cpu_path(RTLNET_PLAT_PROT_BASE);
-        out->rx_frames = k.rx_frames;
-        out->rx_fifo_drops = k.rx_dropped;
-        out->tx_frames = k.tx_frames;
-        return CPUPATH_OK;
+    if (!rtlnet_eth_protocol_cpu_path_present(RTLNET_PLAT_PROT_BASE)) {
+        return CPUPATH_NO_DRIVER;
     }
-#else
-    return CPUPATH_NO_DRIVER;
-#endif
+    rtlnet_eth_protocol_read_cpu_counters(RTLNET_PLAT_PROT_BASE, &k);
+    out->valid = 1;
+    out->enabled = rtlnet_eth_protocol_get_cpu_path_enable(RTLNET_PLAT_PROT_BASE);
+    out->rx_fifo_kb = rtlnet_eth_protocol_get_cpu_rx_fifo_kb(RTLNET_PLAT_PROT_BASE);
+    out->tx_fifo_kb = rtlnet_eth_protocol_get_cpu_tx_fifo_kb(RTLNET_PLAT_PROT_BASE);
+    out->delivered = k.delivered_frames;
+    out->rx_frames = k.cpu_rx_frames;
+    out->rx_claimed = k.cpu_rx_claimed;
+    out->rx_fifo_drops = k.cpu_rx_dropped;
+    out->tx_frames = k.cpu_tx_frames;
+    out->tx_discarded = k.cpu_tx_discarded;
+    out->tx_rejected = k.cpu_tx_rejected;
+    return CPUPATH_OK;
 }
 
 /*

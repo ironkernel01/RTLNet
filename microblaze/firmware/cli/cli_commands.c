@@ -2124,13 +2124,16 @@ int cli_show_cpu_path(const MenuCommandContext *ctx)
                (unsigned)n->tx_bytes, (unsigned)n->tx_timeouts, (unsigned)n->tx_too_long, (unsigned)n->tx_errors);
     rc = cpupath_wrapper_counters(&w);
     if (rc == CPUPATH_OK) {
-        fmt_printf("  Wrapper         : CPU path %s, to CPU %u, CPU FIFO drops %u, from CPU %u\n",
-                   w.enabled ? "enabled" : "disabled", (unsigned)w.rx_frames, (unsigned)w.rx_fifo_drops,
-                   (unsigned)w.tx_frames);
+        fmt_printf("  Wrapper         : CPU path %s, CPU FIFOs rx %u KiB tx %u KiB\n", w.enabled ? "enabled" : "disabled",
+                   (unsigned)w.rx_fifo_kb, (unsigned)w.tx_fifo_kb);
+        fmt_printf("  Wrapper RX      : delivered %u, to CPU %u, claimed by a leaf %u, CPU FIFO drops %u\n",
+                   (unsigned)w.delivered, (unsigned)w.rx_frames, (unsigned)w.rx_claimed, (unsigned)w.rx_fifo_drops);
+        fmt_printf("  Wrapper TX      : from CPU %u, discarded (path off) %u, rejected %u\n", (unsigned)w.tx_frames,
+                   (unsigned)w.tx_discarded, (unsigned)w.tx_rejected);
     } else if (rc == CPUPATH_ABSENT) {
         fmt_printf("  Wrapper         : protocol core not present in this build\n");
     } else {
-        fmt_printf("  Wrapper         : CPU-path registers not in this protocol driver revision\n");
+        fmt_printf("  Wrapper         : protocol core built without the CPU network path\n");
     }
     fmt_printf("  Classifier      : %s, driver %s, mode %s\n",
                cpupath_cls_present() ? "present" : "not present in this build",
