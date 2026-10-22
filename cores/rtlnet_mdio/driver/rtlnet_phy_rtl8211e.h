@@ -127,7 +127,7 @@
 #define RTLNET_PHY_LACR_BOARD       RTLNET_PHY_LACR_LED0_ACT       /* 0x0010 */
 
 /* Energy-Efficient Ethernet advertisement: MMD 7 (auto-negotiation), register
- * 60 EEEAR (Tables 51, 52), reached through Clause 22 registers 13/14 by
+ * 60 EEEAR (IEEE 802.3 clause 45 register 7.60; datasheet Table 21), reached through Clause 22 registers 13/14 by
  * rtlnet_mdio_mmd_read/write. Bit 1 is 100BASE-TX EEE, bit 2 is 1000BASE-T EEE. */
 #define RTLNET_PHY_MMD_AN           7u
 #define RTLNET_PHY_MMD_EEE_ADV      60u
