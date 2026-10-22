@@ -300,6 +300,18 @@ The CPU network stack (lwIP) uses the same MAC and the wrapper's effective IP; t
 requests and pings for that address, so lwIP only ever sees what no leaf claims (TCP, ARP replies to its own
 requests, other UDP, other ICMP).
 
+**Broadcast storm limiter (`rtlnet_bcast_limiter`, on the CPU path).** Every frame headed to the CPU (unclaimed by
+the leaves) whose destination MAC is `FF:FF:FF:FF:FF:FF` passes the limiter: in each fixed window of
+`BCAST_WINDOW_MS` milliseconds (`proto_clk` millisecond tick) the first `BCAST_LIMIT_PKTS` broadcast frames are
+committed to the CPU and the rest are dropped (the copy is written with `s_bad`). Defaults 10 frames per 100 ms,
+limiter enabled; both numbers and the enable are registers (reset values from the parameters
+`BCAST_LIMIT_DEFAULT` 10, `BCAST_WINDOW_MS_DEFAULT` 100). The hardware leaves are never limited (a DHCP offer or an
+ARP request still reaches them). Counters, 32-bit, cleared by `CNT_CLEAR`: `BCAST_SEEN` (broadcast frames offered to
+the CPU path), `BCAST_PASSED`, `BCAST_DROPPED`; `BCAST_SEEN = BCAST_PASSED + BCAST_DROPPED`. A broadcast that passes the
+limiter but finds the CPU FIFO full is counted as passed here and as a CPU FIFO drop there. CLI: `show storm-control`;
+config-if `storm-control broadcast <packets> <milliseconds>`, `storm-control broadcast enable|disable` (`no
+storm-control broadcast` = disable).
+
 ### 7.5 The leaf contract
 
 Every protocol leaf (ARP, ICMP, DHCP, iperf, UDP socket) is a `proto_clk` module with:
@@ -575,6 +587,7 @@ Parameters: `CLK_HZ` 100_000_000, `POR_RESET_MS` 20.
 Parameters: `PROTO_CLK_HZ` 50_000_000, `INGRESS_FIFO_KB` 16, `EGRESS_FIFO_KB` 8, `ARP_ENABLE`/`ICMP_ENABLE`/
 `DHCP_ENABLE`/`IPERF_ENABLE`/`UDP_ENABLE` 1, `ICMP_BUF_KB` 2, `DHCP_BUF_KB` 1, `IPERF_PORT` 5001,
 `NUM_SOCKETS` 4, `UDP_RX_BUF_KB` 16, `UDP_TX_BUF_KB` 8, `CPU_PATH_ENABLE` 1, `CPU_RX_FIFO_KB` 16, `CPU_TX_FIFO_KB` 8,
+`BCAST_LIMIT_DEFAULT` 10, `BCAST_WINDOW_MS_DEFAULT` 100,
 `RAM_STYLE` "block". Queue instance names `u_ingress_fifo`, `u_egress_fifo`, `u_cpu_rx_fifo`, `u_cpu_tx_fifo`. Arbiter
 priority: UDP socket, ICMP, ARP, DHCP, iperf, CPU.
 
@@ -636,3 +649,4 @@ DHCP control (start, stop, renew now, auto-start) lives in the DHCP leaf's own r
 |---|---|
 | 10-22-2026 | Initial architecture; all RTL in SystemVerilog; CPU as a replaceable core; one technology include file; Active-HDL simulation; CPU port list, BD address map and CLI hierarchy aligned with the built cores |
 | 10-22-2026 | CPU network path (`cpu_axis_ethernet_stream`, leaf `claim`), AXI DMA, lwIP TCP echo server, `microblaze/` folder, BSP generated from the AMD install |
+| 10-22-2026 | Broadcast storm limiter on the CPU path (default 10 frames / 100 ms) |
