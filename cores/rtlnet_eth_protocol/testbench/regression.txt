@@ -5,3 +5,5 @@ tb_rtlnet_eth_protocol  cores/rtlnet_eth_protocol/testbench/tb_rtlnet_eth_protoc
 tb_rtlnet_eth_protocol  cores/rtlnet_eth_protocol/testbench/tb_rtlnet_eth_protocol.f  p50_62   plusargs=CLKPAIR=3
 tb_rtlnet_eth_protocol  cores/rtlnet_eth_protocol/testbench/tb_rtlnet_eth_protocol.f  generic  defines=RTLNET_TECH_GENERIC
 tb_rtlnet_eth_protocol  cores/rtlnet_eth_protocol/testbench/tb_rtlnet_eth_protocol.f  neg      plusargs=INJECT_FAILURE  expectfail
+tb_rtlnet_eth_protocol_regs  cores/rtlnet_eth_protocol/testbench/tb_rtlnet_eth_protocol_regs.f
+tb_rtlnet_eth_protocol_regs  cores/rtlnet_eth_protocol/testbench/tb_rtlnet_eth_protocol_regs.f  neg  plusargs=INJECT_FAILURE  expectfail
