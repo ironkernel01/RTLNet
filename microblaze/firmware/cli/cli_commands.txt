@@ -109,8 +109,8 @@ cli_tcp_echo_disable:config:TCP ECHO DISABLE:Disable the TCP echo server (open c
 cli_tcp_echo_port:config:TCP ECHO PORT [PORT]:TCP echo server port (default 7)
 cli_cls_mode:config:CLASSIFIER MODE [MODE]:Mode: drop-all, pass-all, pass-on-match or drop-on-match
 cli_cls_policer:config:CLASSIFIER POLICER [INDEX] [PKTS] [MS] {DISABLE}:Policer 0..3: frames per window in ms (or disable)
-cli_cls_mac:config:CLASSIFIER MAC [ENTRY] [WHICH] [MAC] {W1} {W2} {W3} {W4}:MAC entry: dst|src <mac> [mask <mac>] gate|classify|police <p>
-cli_cls_ethertype:config:CLASSIFIER ETHERTYPE [ENTRY] [TYPE] {W1} {W2} {W3} {W4}:EtherType entry: <type> [to <type>] gate|classify|police <p>
+cli_cls_mac:config:CLASSIFIER MAC [ENTRY] [WHICH] [MAC] {W1} {W2} {W3} {W4}:MAC entry (0..15): dst|src <mac> gate|classify|police <p>
+cli_cls_ethertype:config:CLASSIFIER ETHERTYPE [ENTRY] [TYPE] {W1} {W2} {W3} {W4}:EtherType entry (0..7): <type> [to <type>] gate|classify|police <p>
 cli_cls_acl:config:CLASSIFIER ACL [ENTRY] [PROTO] {W1} {W2} {W3} {W4} {W5} {W6} {W7} {W8} {W9} {W10}:ACL entry: tcp|udp|any src <ip>/<len> dst <ip>/<len> [sport <lo>[-<hi>]] [dport <lo>[-<hi>]] gate|classify|police <p>
 cli_cls_defaults:config:CLASSIFIER DEFAULTS:Broadcast storm default (pass-all, broadcast 10 per 100 ms)
 cli_no_cls_mac:config:NO CLASSIFIER MAC [ENTRY]:Clear a MAC entry

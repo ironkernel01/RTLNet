@@ -25,7 +25,8 @@
  * Project:   RTLNet Nexys Video firmware, CLI desktop harness
  * Purpose:   Harness-side controls of the host platform (host_platform.c):
  *            console capture for the --demo checks, the register model's set
- *            of present cores, and the reload counter. The platform services
+ *            of present cores, the classifier register model and the reload
+ *            counter. The platform services
  *            themselves are declared in src/rtlnet_platform.h.
  */
 #ifndef HOST_PLATFORM_H
@@ -38,6 +39,8 @@ const char *host_capture_text(void);
 void        host_console_echo(int on);
 void        host_model_set_core(uintptr_t base, uint32_t id);
 uint32_t    host_model_leds(void);
+uint32_t    host_model_cls_peek(uint32_t offset);
+void        host_model_cls_poke(uint32_t offset, uint32_t value);
 int         host_reload_count(void);
 
 #endif /* HOST_PLATFORM_H */

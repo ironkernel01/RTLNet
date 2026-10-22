@@ -5,7 +5,7 @@
 | Board | Digilent Nexys Video, XC7A200T-1SBG484C, Realtek RTL8211E-VL |
 | Document revision | 10-22-2026 |
 | Top | `boards/nexys_video/hdl/rtlnet_nexys_video_top.sv` (`rtlnet_nexys_video_top`) |
-| Builds | network (`build.ps1 -Network`, `RTLNET_WITH_NETWORK`: MAC, MDIO, protocol wrapper with ARP/ICMP/DHCP/iperf/UDP socket leaves, UDP echo) and CPU-only (default); both built, timing met, on hardware |
+| Builds | network (`build.ps1 -Network`, `RTLNET_WITH_NETWORK`: MAC, MDIO, protocol wrapper with ARP/ICMP/DHCP/iperf/UDP socket leaves, CPU network path with its classifier, UDP echo) and CPU-only (default); both built, timing met, on hardware |
 | Tools | Vivado 2025.2, MicroBlaze GCC 13.3, Active-HDL 11.1 |
 | Firmware | one image for both builds (`microblaze/firmware`, standalone BSP generated from the build's XSA, lwIP TCP echo on the CPU network path); absent cores are probed and reported "not present in this build" |
 
@@ -57,7 +57,8 @@ glitch argument). The PHY reset `eth_rst_b` is a register: low after reset relea
 
 Decoder `u_decoder` (`rtlnet_axil_decoder`, N = 6), windows of architecture 6.1: SYS 0x44A0_0000,
 MAC 0x44A0_1000, MDIO 0x44A0_2000, ECHO 0x44A0_3000, PROTOCOL 0x44A1_0000 (64 KiB),
-CLASSIFIER 0x44A2_0000 (reserved). Windows without a core are `rtlnet_axil_slave` stubs: OKAY,
+CLASSIFIER 0x44A2_0000 (reserved for a main-ingress classifier; the CPU-path classifier is inside the protocol
+wrapper at PROTOCOL + 0x8000 = 0x44A1_8000). Windows without a core are `rtlnet_axil_slave` stubs: OKAY,
 read data 0. Other addresses in the 1 MiB window: DECERR.
 
 System registers (single definition `microblaze/firmware/src/rtlnet_nexys_video_sysregs.h`):
@@ -125,8 +126,9 @@ CDC constraints (`scripts/rtlnet_constrain_cdc.tcl`, sourced after synthesis): c
 gray, fifo, axil_cdc by cell name; per-class counts and a per-instance list
 (`build/reports/cdc_instances.txt`) are written; `::rtlnet_cdc_required` is `{sync reset}` for the
 CPU-only build and all five for the network build (zero matches of a required class is an error);
-`::rtlnet_cdc_expect` pins the instance counts (network: fifo 7, axil_cdc 3, gray 5; CPU-only: 0, 0,
-0), so a crossing added or lost by a core change fails the build until reviewed. For the findings
+`::rtlnet_cdc_expect` pins the instance counts (network: fifo 9, axil_cdc 4, gray 6; CPU-only: 0, 0,
+0; the fourth `rtlnet_axil_cdc` is the CPU-path classifier's register crossing, its two synchronizers are counted in
+the sync class), so a crossing added or lost by a core change fails the build until reviewed. For the findings
 report_cdc cannot recognize the script creates native waivers (`create_waiver -type CDC`), scoped to
 one instance's source and destination registers with the protocol as the reason: CDC-6 on every Gray
 bus (`gray_src` -> `gray_dst_ff[0]`, FIFO `s_gray`/`m_gray` -> `*_m1`/`*_s1`) and on the FIFO event
@@ -149,7 +151,9 @@ paths (`rtlnet_nexys_video.xdc`). No clock groups.
 `microblaze/firmware/src/rtlnet_netmgr.c` (called from `main.c`): probes every core; MDIO core
 init, MDC calibration against the AXI timer, wait for the core's PHY power-on reset plus 30 ms,
 RTL8211E ID check, RX delay on (page 0xA4 register 28, read back), advertisement (full duplex
-10/100/1000 by default) and AN restart; MAC init; protocol addresses (MAC kept from the wrapper's
+10/100/1000 by default) and AN restart; MAC init; CPU-path classifier (`cpupath_init`: `rtlnet_classifier_init` at
+0x44A1_8000, then `rtlnet_classifier_config_bcast_storm(10, 100)`, before the MAC receive path is enabled and before
+`InitLWIP`; the classifier is drop-all until then); protocol addresses (MAC kept from the wrapper's
 reset value, static 192.169.1.220/24, gateway 192.169.1.1); DHCP AUTO flag; iperf port 5001; socket 0
 open on port 7 with connect-on-receive; UDP echo on socket 0. Link monitor every 250 ms (PHYSR):
 link up programs the MAC speed, RX/TX enable (unless `shutdown`), LINK_UP, waits for the receive
@@ -310,22 +314,79 @@ The TCP numbers are CPU bound: every received frame is copied from the AXI BRAM 
 (uncached 32-bit reads over AXI), lwIP checksums it in software, and every ACK or echo segment is copied back
 into a DMA buffer; the 100 MHz MicroBlaze has no caches. CPU load was not instrumented.
 
+### 6.5 Network build with the CPU-path classifier
+
+Network build of commit 7fe67e42 (tree clean), 10-22-2026, Vivado 2025.2, `build.ps1 -Network`:
+`CPU_CLASSIFIER_ENABLE` 1 (`u_protocol/g_cpu.g_classifier.u_cpu_classifier`, `AXIS_CLK_HZ` 100 MHz, defaults of the
+core), firmware on the classifier driver.
+
+| Item | Result |
+|---|---|
+| Synthesis / implementation | 0 critical warnings; `rtlnet_build: PASS`; bitstream build 1470 s (the regression ran on the same machine), firmware 83 s, merge 26 s |
+| Timing (post-route) | WNS +0.119 ns, WHS +0.011 ns, WPWS +0.264 ns; 0 failing setup, hold and pulse-width endpoints (before the classifier: +0.221 / +0.018 / +0.264) |
+| Intra-clock WNS | cpu_clk +0.119 (worst), clk125 +1.145, axis_clk +2.131, clk200 +2.614, proto_clk +5.110, clk125_90 +5.466, rgmii_rxc +2.779 ns |
+| Utilization (post-route) | 19515 LUTs (14.59 %), 27339 FFs (10.22 %), 226.5 BRAM tiles (62.05 %), 5 DSP48; the classifier adds 3346 LUTs, 6156 FFs, 30 BRAM tiles (the out-of-context figures of its documentation: 3351 / 6217 / 30) |
+| CDC constraints | before (commit a9e043e6) / after: sync 26 instances, 118 first stages / 28, 120; reset 8 / 32 / unchanged; gray 6 / 192 / unchanged; fifo 9 / 88 / unchanged; axil_cdc 3 instances, 200 constrained cells / 4, 279. New: `u_cpu_classifier/u_regs/u_axil_cdc` (79 cells) and its `u_req_sync`, `u_ack_sync`. `::rtlnet_cdc_expect` now `fifo 9 axil_cdc 4 gray 6`; 41 report_cdc waivers (was 32) |
+| report_cdc | waived CDC-1 x159, CDC-6 x236, CDC-15 x237, all inside the crossing primitives; Info only otherwise; no unwaived Critical/Warning |
+| Firmware | `firmware.elf` text 159348 B, data 2104 B, bss 151344 B; harness `menu.exe --demo` TEST PASS 292 checks |
+| Merge / JTAG | updatemem 0 warnings; `program.ps1` programmed in 3.8 s, DONE high |
+
+Board simulation (Active-HDL 11.1) with the classifier enabled: `tb_rtlnet_nexys_video_net` TEST PASS, 107 checks at
+10, 100 and 1000 Mb/s: the classifier reads "CLSF" at 0x44A1_8000 and MODE drop-all; an unclaimed datagram is
+committed to the CPU FIFO and dropped (classifier FRAMES 1, DROPPED 1, MODE_DROPPED 1, nothing at the CPU); after the
+stand-in's `cls_config_bcast_storm` (the driver's register sequence, ID check included) a unicast datagram reaches the
+CPU byte-exact; a burst of 8 broadcasts with a limit of 3 per 2 ms passes exactly 3 (byte-exact) and drops 5 (policer 0
+SEEN 8 / PASSED 3 / DROPPED 5, classifier PASSED / DROPPED / POLICE_DROPPED, MAC table hits 8, wrapper CPU_RX_FRAMES);
+perturbing the expected PASSED count gives TEST FAIL. Full regression `scripts/rtlnet_regression.ps1`: 69 passed,
+0 failed.
+
+Hardware (board at 192.169.1.199 by DHCP, PC wired NIC "Ethernet" 192.169.1.178):
+
+| Check | Result |
+|---|---|
+| Start-up | `show classifier`: hardware MODE pass-all, STATUS 0x00000100, 16 + 16 entries, 2 rules, 4 policers, 64 bytes compared, delay line 31 beats, verdict latency 23 clocks (the build parameters of the classifier documentation) |
+| `cli_test.ps1` | `CLI_TEST: PASS 27/27` |
+| `net_test.ps1 -Nic Ethernet -Speed 100` | `NET_TEST: PASS 25/25` (ping 0/64/1472 x20 no loss, UDP echo client 200 datagrams, iperf UDP 90 Mb/s PC -> board 94.1 Mbit/s 0/40093 lost, board -> PC 94.4 Mbit/s 0/40126 lost, 10 Mb/s forced and restored) |
+| `tcp_test.ps1` | `TCP_TEST: PASS 5/5` (echo 4 connections 9.6 Mbit/s, TCP iperf 68.6 Mbit/s PC -> board, together: echo PASS, iperf 51.5 Mbit/s, UDP 20.9 Mbit/s 0/17837 lost) |
+| `show phy` | LCR 0x0070, LACR 0x0010 (read back, ext page 0x2C), EEE: MMD 7.60 = 0x0000 (off); RX delay 0x8575 -> 0xAD75; 100 Mb/s full duplex, partner 10h/10f/100h/100f |
+| Broadcast flood | see below |
+
+Broadcast flood (`microblaze/firmware/test/bcast_flood.py --rate 400 --seconds 10 --bind 192.169.1.178`, 2000
+datagrams to 192.169.1.255 and 2000 to 255.255.255.255, UDP port 9, 64 B), with `ping` of the board once a second
+and `tcp_echo_client.py --conns 2` in a loop (20 runs of 76 messages, 589408 bytes each way) running at the same
+time; counters cleared (`clear counters`) before, read after:
+
+| Counter | Value |
+|---|---|
+| `show storm-control` | 10 frames per 100 ms: seen 4000, passed 1004, dropped 2996 (seen = passed + dropped; 10 per window x 100 windows = 1000, plus 4 from window boundaries); CPU FIFO drops 0 |
+| `show classifier` | frames 15518, passed 12522, dropped 2996 (mode 0, policers 2996, overrun 0); MAC table hits 4000; policer 0 seen 4000 / passed 1004 / dropped 2996 |
+| Wrapper RX | delivered 15532, to CPU 15518, claimed by a leaf 14, CPU FIFO drops 0; DMA receive 12522 frames = classifier PASSED, no pbuf 0, errors 0 |
+| Ping during the flood | 14 sent, 14 received, 0 lost, < 1 ms |
+| TCP echo during the flood | 20 consecutive runs PASS byte-exact, 16.8 Mbit/s typical (three runs at 8.8 .. 9.0 Mbit/s) |
+| Classifier STATUS after the flood | 0x00010100: the sticky STALL_SEEN bit is set (the delay line met output back-pressure while the CPU path was loaded); no frame was lost to it (OVERRUN_DROPPED 0, CPU FIFO drops 0) |
+
+Per policer window the board passes 10 broadcasts; unicast TCP and ICMP frames pass unchanged.
+
+After the rebase onto the lwiperf merge (firmware rebuilt `-Werror` clean, merged into the same bitstream, text 159.6 KB) the console test passed 27/27, `tcp_test.ps1` 5/5 (iperf `-R` now returns 29.3 Mbit/s board -> PC) and a second flood gave seen 4002, passed 1013, dropped 2989, ping 14/14, TCP echo PASS.
+
 ## 7. Network integration (done 10-22-2026) and what remains
 
-Integrated: `u_mac`, `u_mdio`, `u_protocol` (every leaf), `u_echo` under `RTLNET_WITH_NETWORK`, the
-RGMII constraints, the CDC classes and counts, every core driver in the firmware (CLI and network
-manager), the network board bench, and the hardware bring-up of section 6.1.
+Integrated: `u_mac`, `u_mdio`, `u_protocol` (every leaf, the CPU network path and its classifier), `u_echo` under
+`RTLNET_WITH_NETWORK`, the RGMII constraints, the CDC classes and counts, every core driver in the firmware (CLI and
+network manager), the network board bench, and the hardware bring-up and host tests of sections 6.1, 6.4 and 6.5.
 
 Open:
 
-1. Host-side hardware tests (PC ARP entry, ping sweep 0/64/1472 x20, UDP echo client, iperf -u):
-   `net_test.ps1` runs them as soon as the PC NIC "Ethernet" is connected; no iperf 2 binary is on
-   this PC (none was downloaded).
-2. 1000 Mb/s on hardware needs a gigabit partner (simulated and constrained; the router is 10/100).
-3. RX IDELAY tap sweep on hardware (the MAC documentation's procedure); the build meets the 1000 Mb/s
-   RGMII budget with tap 12 (balanced +0.22 / +0.24 ns).
-4. The `ev_*` pulse outputs of the MAC and the protocol wrapper are unconnected (LED or interrupt use).
-5. Interrupts (PHY INTB through `rtlnet_mdio` irq[0]) are wired but the firmware polls.
+1. 1000 Mb/s on hardware needs a gigabit partner (simulated and constrained; the router is 10/100).
+2. RX IDELAY tap sweep on hardware (the MAC documentation's procedure); the build meets the 1000 Mb/s RGMII budget with
+   tap 12 (balanced +0.22 / +0.24 ns).
+3. The `ev_*` pulse outputs of the MAC, the protocol wrapper and the classifier (`ev_pass`, `ev_drop`) are unconnected
+   (LED or interrupt use).
+4. Interrupts (PHY INTB through `rtlnet_mdio` irq[0], DMA) are wired but the firmware polls.
+5. The CPU-path classifier is configured as a whole by the firmware (`hw_sync`): a CLI change drops CPU-bound frames
+   for about 100 us. The 0x44A2_0000 main-ingress classifier window stays a stub.
+6. The LED behaviour of the RTL8211E (LINK steady, ACT blink) is configured and read back but was not observed.
+7. The classifier STALL_SEEN flag under load (section 6.5) is not analysed beyond the absence of any drop.
 
 ## 8. Revision history
 
@@ -334,3 +395,4 @@ Open:
 | 10-22-2026 | Initial version: CPU-only board top, build flow, bring-up |
 | 10-22-2026 | Network integration: RGMII XDC, CDC counts and waivers, network board bench, firmware network manager and driver-backed CLI, hardware results at 100 and 10 Mb/s |
 | 10-22-2026 | `microblaze/` folder; CPU core with AXI DMA, AXI BRAM, 512 KiB LMB; XSA export; BSP-based firmware with lwIP; CPU-only hardware checkpoint (section 6.3) |
+| 10-22-2026 | CPU-path classifier enabled in the network build (`CPU_CLASSIFIER_ENABLE` 1), CDC expectation `axil_cdc 4`, firmware on the classifier driver, bench checks for drop-all and broadcast limiting, hardware results of section 6.5; open items refreshed |

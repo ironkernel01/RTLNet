@@ -40,6 +40,7 @@
  * ---------------------------------------------------------------------------
  *  10-22-2026  MenuBuilder AI / Steve Spano    Initial hierarchical command set
  *  10-22-2026  MenuBuilder AI / Steve Spano    Network commands on the core drivers; demo expectations updated
+ *  10-22-2026  MenuBuilder AI / Steve Spano    Classifier register model: CLI and boot configuration through the driver
  * ===========================================================================
  */
 #include <stdio.h>    /* printf, getchar */
@@ -48,6 +49,8 @@
 #include "cli_commands.h"
 #include "host_platform.h"
 #include "menu.h"
+#include "rtlnet_classifier.h"
+#include "rtlnet_cpupath.h"
 #include "rtlnet_platform.h"
 
 /* One scripted step: characters to type, text that must (and must not)
@@ -125,6 +128,154 @@ static int demo_aligned(const char *text)
         p = eol + 1;
     }
     return (lines >= 2) ? 1 : 0;
+}
+
+/**
+ * @brief Check one word of the classifier register model.
+ * @param off  Offset in the classifier window.
+ * @param want Expected value.
+ * @param msg  Description.
+ * @return None.
+ */
+static void demo_cls(uint32_t off, uint32_t want, const char *msg)
+{
+    char buf[160];
+    uint32_t got = host_model_cls_peek(off);
+    (void)snprintf(buf, sizeof(buf), "classifier register 0x%03X (%s): 0x%08X, expected 0x%08X", (unsigned)off, msg,
+                   (unsigned)got, (unsigned)want);
+    demo_check(got == want, buf);
+}
+
+/**
+ * @brief Run the CLI against the classifier register model: boot
+ *        configuration, every classifier command written through the driver,
+ *        counters read back.
+ * @return None.
+ */
+static void demo_classifier(void)
+{
+    uint32_t mem_boot[RTLNET_CLS_WINDOW_BYTES / 4u];
+    host_model_set_core(RTLNET_PLAT_CLS_BASE, RTLNET_ID_CLS);
+    host_capture_clear();
+    demo_type("enable\r");
+    demo_type("configure terminal\r");
+
+    /* The running configuration of the scripted session (storm 20/200 disabled, pass-on-match, MAC 3, EtherType
+     * pair 4, ACL 1, policer 1) is written by the boot call when it differs from the default. */
+    demo_check(cpupath_init() == CPUPATH_OK, "cpupath_init with the classifier present");
+    demo_check(cpupath_cls_present() == 1, "classifier reported present");
+    demo_cls(RTLNET_CLS_REG_CTRL, RTLNET_CLS_MODE_PASS_ON_MATCH, "MODE pass-on-match");
+    demo_cls(RTLNET_CLS_REG_POLICER(0) + RTLNET_CLS_POL_LIMIT, 20u, "policer 0 limit");
+    demo_cls(RTLNET_CLS_REG_POLICER(0) + RTLNET_CLS_POL_WINDOW, 200u, "policer 0 window");
+    demo_cls(RTLNET_CLS_REG_POLICER(0) + RTLNET_CLS_POL_CTRL, 0u, "policer 0 disabled by no storm-control");
+    demo_cls(RTLNET_CLS_REG_POLICER(1) + RTLNET_CLS_POL_LIMIT, 5u, "policer 1 limit");
+    demo_cls(RTLNET_CLS_REG_POLICER(1) + RTLNET_CLS_POL_WINDOW, 50u, "policer 1 window");
+    demo_cls(RTLNET_CLS_REG_POLICER(1) + RTLNET_CLS_POL_CTRL, RTLNET_CLS_POL_CTRL_ENABLE, "policer 1 enabled");
+    /* MAC 3: src 02:00:00:00:00:01, gate -> the MAC table gates (CLASSIFY clear). */
+    demo_cls(RTLNET_CLS_REG_ENTRY(RTLNET_CLS_TABLE_MAC, 3u) + RTLNET_CLS_ENT_SRC_LO, 0x00000001u, "MAC 3 value low");
+    demo_cls(RTLNET_CLS_REG_ENTRY(RTLNET_CLS_TABLE_MAC, 3u) + RTLNET_CLS_ENT_CTRL,
+             RTLNET_CLS_ENT_VALID | RTLNET_CLS_ENT_SRC_EN | 0x0200u, "MAC 3 control word");
+    demo_cls(RTLNET_CLS_REG_ENTRY(RTLNET_CLS_TABLE_MAC, 0u) + RTLNET_CLS_ENT_CTRL,
+             RTLNET_CLS_ENT_VALID | RTLNET_CLS_ENT_DST_EN | RTLNET_CLS_ENT_POLICE_EN | 0xFFFFu, "MAC 0 control word");
+    demo_cls(RTLNET_CLS_REG_TABLE_MODE(RTLNET_CLS_TABLE_MAC), RTLNET_CLS_TM_ENABLE, "MAC table enabled, gating");
+    /* EtherType pair 4 = entries 8 and 9: 0x88B5..0x88B6 policed by policer 2, classify-only range table. */
+    demo_cls(RTLNET_CLS_REG_ENTRY(RTLNET_CLS_TABLE_ETHERTYPE, 8u) + RTLNET_CLS_ENT_SRC_LO, 0x88B5u, "EtherType low");
+    demo_cls(RTLNET_CLS_REG_ENTRY(RTLNET_CLS_TABLE_ETHERTYPE, 9u) + RTLNET_CLS_ENT_SRC_LO, 0x88B6u, "EtherType high");
+    demo_cls(RTLNET_CLS_REG_ENTRY(RTLNET_CLS_TABLE_ETHERTYPE, 8u) + RTLNET_CLS_ENT_CTRL,
+             RTLNET_CLS_ENT_VALID | RTLNET_CLS_ENT_SRC_EN | RTLNET_CLS_ENT_POLICE_EN | (2u << RTLNET_CLS_ENT_POLICER_SHIFT),
+             "EtherType control word");
+    demo_cls(RTLNET_CLS_REG_TABLE_MODE(RTLNET_CLS_TABLE_ETHERTYPE),
+             RTLNET_CLS_TM_ENABLE | ((uint32_t)RTLNET_CLS_CMP_RANGE << RTLNET_CLS_TM_COMPARE_SHIFT) | RTLNET_CLS_TM_CLASSIFY,
+             "EtherType table range, classify-only");
+    /* ACL 1: tcp src 192.169.1.0/24 dst any dport 22, police 1 -> tuple table classify-only. */
+    demo_cls(RTLNET_CLS_REG_TUPLE(1u) + RTLNET_CLS_TUP_CTRL,
+             RTLNET_CLS_TUP_VALID | RTLNET_CLS_TUP_PROTO_EN | RTLNET_CLS_TUP_POLICE_EN | (1u << RTLNET_CLS_TUP_POLICER_SHIFT) | 6u,
+             "ACL 1 control word");
+    demo_cls(RTLNET_CLS_REG_TUPLE(1u) + RTLNET_CLS_TUP_SRC_IP, 0xC0A90100u, "ACL 1 source");
+    demo_cls(RTLNET_CLS_REG_TUPLE(1u) + RTLNET_CLS_TUP_SRC_MASK, 0xFFFFFF00u, "ACL 1 source mask");
+    demo_cls(RTLNET_CLS_REG_TUPLE(1u) + RTLNET_CLS_TUP_DST_MASK, 0u, "ACL 1 destination mask (any)");
+    demo_cls(RTLNET_CLS_REG_TUPLE(1u) + RTLNET_CLS_TUP_DPORT, (22u << 16) | 22u, "ACL 1 destination port 22");
+    demo_cls(RTLNET_CLS_REG_TUPLE(1u) + RTLNET_CLS_TUP_SPORT, 0xFFFF0000u, "ACL 1 source port any");
+    demo_cls(RTLNET_CLS_REG_TABLE_MODE(RTLNET_CLS_TABLE_TUPLE), RTLNET_CLS_TM_ENABLE | RTLNET_CLS_TM_CLASSIFY,
+             "tuple table enabled, classify-only");
+
+    /* classifier defaults: the broadcast storm configuration through the CLI (whole configuration rewritten). */
+    demo_type("classifier defaults\r");
+    demo_cls(RTLNET_CLS_REG_CTRL, RTLNET_CLS_MODE_PASS_ALL, "MODE pass-all after defaults");
+    demo_cls(RTLNET_CLS_REG_POLICER(0) + RTLNET_CLS_POL_LIMIT, 10u, "storm limit 10");
+    demo_cls(RTLNET_CLS_REG_POLICER(0) + RTLNET_CLS_POL_WINDOW, 100u, "storm window 100");
+    demo_cls(RTLNET_CLS_REG_POLICER(0) + RTLNET_CLS_POL_CTRL, RTLNET_CLS_POL_CTRL_ENABLE, "storm policer enabled");
+    demo_cls(RTLNET_CLS_REG_TABLE_MODE(RTLNET_CLS_TABLE_MAC), RTLNET_CLS_TM_ENABLE | RTLNET_CLS_TM_CLASSIFY,
+             "MAC table classify-only");
+    demo_cls(RTLNET_CLS_REG_TABLE_MODE(RTLNET_CLS_TABLE_ETHERTYPE), 0u, "EtherType table cleared");
+    demo_cls(RTLNET_CLS_REG_TABLE_MODE(RTLNET_CLS_TABLE_TUPLE), 0u, "tuple table cleared");
+    demo_cls(RTLNET_CLS_REG_POLICER(1) + RTLNET_CLS_POL_CTRL, 0u, "policer 1 cleared");
+    for (uint32_t i = 0; i < RTLNET_CLS_WINDOW_BYTES / 4u; i++) {
+        mem_boot[i] = host_model_cls_peek(4u * i);
+    }
+
+    /* The boot call on the default configuration (rtlnet_classifier_config_bcast_storm) leaves the same
+     * register state as the generic whole-configuration write above. */
+    host_model_set_core(RTLNET_PLAT_CLS_BASE, RTLNET_ID_CLS);
+    demo_check(cpupath_init() == CPUPATH_OK, "cpupath_init on the default configuration");
+    {
+        int same = 1;
+        for (uint32_t i = 0; i < RTLNET_CLS_WINDOW_BYTES / 4u; i++) {
+            if (host_model_cls_peek(4u * i) != mem_boot[i]) {
+                same = 0;
+            }
+        }
+        demo_check(same, "config_bcast_storm and the generic configuration write leave identical registers");
+    }
+
+    /* Storm-control commands in the interface context. */
+    demo_type("interface eth0\r");
+    demo_type("storm-control broadcast 7 30\r");
+    demo_cls(RTLNET_CLS_REG_POLICER(0) + RTLNET_CLS_POL_LIMIT, 7u, "storm-control limit");
+    demo_cls(RTLNET_CLS_REG_POLICER(0) + RTLNET_CLS_POL_WINDOW, 30u, "storm-control window");
+    demo_type("storm-control broadcast disable\r");
+    demo_cls(RTLNET_CLS_REG_POLICER(0) + RTLNET_CLS_POL_CTRL, 0u, "storm-control disable");
+    demo_cls(RTLNET_CLS_REG_POLICER(0) + RTLNET_CLS_POL_LIMIT, 7u, "limit kept by disable");
+    demo_type("storm-control broadcast enable\r");
+    demo_cls(RTLNET_CLS_REG_POLICER(0) + RTLNET_CLS_POL_CTRL, RTLNET_CLS_POL_CTRL_ENABLE, "storm-control enable");
+    demo_type("end\r");
+
+    /* Counters read back through the driver. */
+    host_model_cls_poke(RTLNET_CLS_REG_COUNTER(RTLNET_CLS_CNT_FRAMES), 100u);
+    host_model_cls_poke(RTLNET_CLS_REG_COUNTER(RTLNET_CLS_CNT_PASSED), 62u);
+    host_model_cls_poke(RTLNET_CLS_REG_COUNTER(RTLNET_CLS_CNT_DROPPED), 38u);
+    host_model_cls_poke(RTLNET_CLS_REG_COUNTER(RTLNET_CLS_CNT_POLICE_DROPPED), 38u);
+    host_model_cls_poke(RTLNET_CLS_REG_POLICER(0) + RTLNET_CLS_POL_SEEN, 50u);
+    host_model_cls_poke(RTLNET_CLS_REG_POLICER(0) + RTLNET_CLS_POL_PASSED, 12u);
+    host_model_cls_poke(RTLNET_CLS_REG_POLICER(0) + RTLNET_CLS_POL_DROPPED, 38u);
+    host_capture_clear();
+    demo_type("show storm-control\r");
+    demo_check(strstr(host_capture_text(), "enabled, 7 frames per 30 ms") != NULL &&
+               strstr(host_capture_text(), "seen 50, passed 12, dropped 38") != NULL,
+               "show storm-control reads the policer through the driver");
+    host_capture_clear();
+    demo_type("show classifier\r");
+    demo_check(strstr(host_capture_text(), "Hardware        : mode pass-all") != NULL &&
+               strstr(host_capture_text(), "delay line 31 beats, verdict latency 23 clocks") != NULL &&
+               strstr(host_capture_text(), "frames 100, passed 62, dropped 38 (mode 0, policers 38") != NULL,
+               "show classifier reads state and counters through the driver");
+    host_capture_clear();
+    demo_type("show cpu-path\r");
+    demo_check(strstr(host_capture_text(), "Classifier      : present, mode pass-all") != NULL, "show cpu-path: classifier present");
+    demo_type("clear counters\r");
+
+    /* Out of range indices stay errors with the classifier present. */
+    host_capture_clear();
+    demo_type("configure terminal\r");
+    demo_type("classifier ethertype 8 0x88b5 gate\r");
+    demo_check(strstr(host_capture_text(), "% Invalid entry (0..7)") != NULL ||
+               strstr(host_capture_text(), "entry (0..7)") != NULL, "EtherType entry 8 rejected (pairs 0..7)");
+    host_capture_clear();
+    demo_type("classifier mac 3 src 02:00:00:00:00:01 mask ff:ff:ff:00:00:00 gate\r");
+    demo_check(strstr(host_capture_text(), "% ") != NULL, "MAC mask is not accepted");
+    demo_type("end\r");
+    demo_type("disable\r");
+    host_model_set_core(RTLNET_PLAT_CLS_BASE, 0u);
 }
 
 /**
@@ -239,7 +390,7 @@ static const demo_step_t g_steps[] = {
       { "% classifier not present in this build; setting kept", NULL, NULL, NULL }, NULL, MENU_MODE_CONFIG },
     { "classifier acl 2 tcp src 192.169.1.0/33 dst 0.0.0.0/0 gate\r", { "% Expected: src <ip>/<len> dst <ip>/<len>",
       NULL, NULL, NULL }, NULL, MENU_MODE_CONFIG },
-    { "classifier mac 3 src 02:00:00:00:00:01 mask ff:ff:ff:00:00:00 gate\r", { "% classifier not present", NULL, NULL, NULL },
+    { "classifier mac 3 src 02:00:00:00:00:01 gate\r", { "% classifier not present", NULL, NULL, NULL },
       NULL, MENU_MODE_CONFIG },
     { "classifier ethertype 4 0x88b5 to 0x88b6 police 2\r", { "% classifier not present", NULL, NULL, NULL },
       NULL, MENU_MODE_CONFIG },
@@ -255,7 +406,7 @@ static const demo_step_t g_steps[] = {
     { "show run\r", { " storm-control broadcast 20 200", " no storm-control broadcast", "tcp echo port 2007",
       "classifier mode pass-on-match" }, NULL, MENU_MODE_PRIV },
     { "show run\r", { "classifier acl 1 tcp src 192.169.1.0/24 dst 0.0.0.0/0 dport 22-22 police 1",
-      "classifier mac 3 src 02:00:00:00:00:01 mask ff:ff:ff:00:00:00 gate",
+      "classifier mac 3 src 02:00:00:00:00:01 gate",
       "classifier ethertype 4 0x88B5 to 0x88B6 police 2", "classifier policer 1 5 50" }, NULL, MENU_MODE_PRIV },
     { "\x1b[A\r", { "! RTLNet running configuration", NULL, NULL, NULL }, NULL, MENU_MODE_PRIV },
     { "show versiox\bn\r", { "Board ID        : NXVD", NULL, NULL, NULL }, NULL, MENU_MODE_PRIV },
@@ -316,6 +467,9 @@ static int demo_run(int inject_failure)
                strstr(host_capture_text(), "MAC speed       :") != NULL, "present MAC core reported through its driver");
     demo_check(strstr(host_capture_text(), "not present") == NULL, "present core not reported absent");
     host_model_set_core(RTLNET_PLAT_MAC_BASE, 0u);
+
+    /* The classifier present: boot configuration, CLI and counters through the driver. */
+    demo_classifier();
 
     /* Reload restarts the console in user exec mode with default settings. */
     demo_type("enable\r");

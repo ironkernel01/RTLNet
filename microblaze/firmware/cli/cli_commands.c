@@ -1144,7 +1144,7 @@ int cli_show_counters(const MenuCommandContext *ctx)
                        (unsigned)ck.pol_seen[CPUPATH_STORM_POLICER], (unsigned)ck.pol_passed[CPUPATH_STORM_POLICER],
                        (unsigned)ck.pol_dropped[CPUPATH_STORM_POLICER]);
         } else {
-            fmt_printf("Classifier        : %s\n", cpupath_cls_present() ? "counters need the classifier driver" :
+            fmt_printf("Classifier        : %s\n", cpupath_cls_present() ? "counters not readable" :
                        "not present in this build");
         }
         rtlnet_tcp_echo_status(&e);
@@ -2129,16 +2129,17 @@ static int cli_parse_action(const MenuCommandContext *ctx, int i, unsigned *acti
 }
 
 /**
- * @brief Parse a table entry index 0..CPUPATH_CLS_ENTRIES-1.
- * @param s   Text.
- * @param out Index.
+ * @brief Parse a table entry index 0..limit-1.
+ * @param s     Text.
+ * @param limit Number of entries (CPUPATH_CLS_ENTRIES, or CPUPATH_CLS_PAIRS for EtherType).
+ * @param out   Index.
  * @return 0, or -1 (message printed).
  */
-static int cli_parse_entry(const char *s, unsigned *out)
+static int cli_parse_entry(const char *s, unsigned limit, unsigned *out)
 {
     uint32_t v;
-    if (cli_parse_u32(s, &v) != 0 || v >= CPUPATH_CLS_ENTRIES) {
-        return cli_bad_value("entry (0..15)", s);
+    if (cli_parse_u32(s, &v) != 0 || v >= limit) {
+        return cli_bad_value((limit == CPUPATH_CLS_PAIRS) ? "entry (0..7)" : "entry (0..15)", s);
     }
     *out = (unsigned)v;
     return 0;
@@ -2238,13 +2239,10 @@ static void cli_print_classifier_config(void)
             continue;
         }
         fmt_printf("classifier mac %u %s %s ", i, m->dst ? "dst" : "src", cli_mac_text(m->mac, mt));
-        if (m->has_mask) {
-            fmt_printf("mask %s ", cli_mac_text(m->mask, mt));
-        }
         cli_print_action(m->action, m->policer);
         fmt_printf("\n");
     }
-    for (unsigned i = 0; i < CPUPATH_CLS_ENTRIES; i++) {
+    for (unsigned i = 0; i < CPUPATH_CLS_PAIRS; i++) {
         const cpupath_etype_entry_t *e = &c->etype[i];
         if (!e->valid) {
             continue;
@@ -2386,9 +2384,7 @@ int cli_show_cpu_path(const MenuCommandContext *ctx)
     } else {
         fmt_printf("  Wrapper         : protocol core built without the CPU network path\n");
     }
-    fmt_printf("  Classifier      : %s, driver %s, mode %s\n",
-               cpupath_cls_present() ? "present" : "not present in this build",
-               cpupath_cls_driver() ? "in this firmware" : "not in this firmware build",
+    fmt_printf("  Classifier      : %s, mode %s\n", cpupath_cls_present() ? "present" : "not present in this build",
                cpupath_mode_name(cpupath_cls_config()->mode));
     return 0;
 }
@@ -2415,7 +2411,7 @@ int cli_show_storm(const MenuCommandContext *ctx)
                    (unsigned)k.pol_passed[CPUPATH_STORM_POLICER], (unsigned)k.pol_dropped[CPUPATH_STORM_POLICER]);
     } else {
         fmt_printf("  Broadcasts      : %% %s\n", (rc == CPUPATH_ABSENT) ? "classifier not present in this build" :
-                   (rc == CPUPATH_NO_DRIVER) ? "classifier driver not in this firmware build" : "read failed");
+                   "read failed");
     }
     if (cpupath_wrapper_counters(&w) == CPUPATH_OK) {
         fmt_printf("  CPU FIFO drops  : %u\n", (unsigned)w.rx_fifo_drops);
@@ -2435,14 +2431,21 @@ int cli_show_classifier(const MenuCommandContext *ctx)
 {
     const cpupath_cls_config_t *c = cpupath_cls_config();
     cpupath_cls_counters_t k;
+    cpupath_cls_info_t inf;
     char mt[18];
     char a[16];
     char b[16];
     int rc;
     (void)ctx;
-    fmt_printf("CPU-path classifier at 0x%08X: %s, driver %s; mode %s\n", (unsigned)RTLNET_PLAT_CLS_BASE,
-               cpupath_cls_present() ? "present" : "not present in this build",
-               cpupath_cls_driver() ? "in this firmware" : "not in this firmware build", cpupath_mode_name(c->mode));
+    fmt_printf("CPU-path classifier at 0x%08X: %s; mode %s\n", (unsigned)RTLNET_PLAT_CLS_BASE,
+               cpupath_cls_present() ? "present" : "not present in this build", cpupath_mode_name(c->mode));
+    if (cpupath_cls_info(&inf) == CPUPATH_OK) {
+        fmt_printf("  Hardware        : mode %s, status 0x%08X, tables %u entries, tuple %u, rules %u, policers %u\n",
+                   cpupath_mode_name(inf.mode), (unsigned)inf.status, (unsigned)inf.table_entries,
+                   (unsigned)inf.tuple_entries, (unsigned)inf.num_rules, (unsigned)inf.num_policers);
+        fmt_printf("  Frame path      : %u bytes compared, delay line %u beats, verdict latency %u clocks\n",
+                   (unsigned)inf.match_depth_bytes, (unsigned)inf.delay_beats, (unsigned)inf.verdict_latency);
+    }
     rc = cpupath_cls_counters(&k);
     fmt_printf("  Policer  State     Limit    Window ms  Seen        Passed      Dropped\n");
     for (unsigned p = 0; p < CPUPATH_CLS_POLICERS; p++) {
@@ -2457,16 +2460,12 @@ int cli_show_classifier(const MenuCommandContext *ctx)
     for (unsigned i = 0; i < CPUPATH_CLS_ENTRIES; i++) {
         const cpupath_mac_entry_t *m = &c->mac[i];
         if (m->valid) {
-            fmt_printf("  MAC %-2u          : %s %s", i, m->dst ? "dst" : "src", cli_mac_text(m->mac, mt));
-            if (m->has_mask) {
-                fmt_printf(" mask %s", cli_mac_text(m->mask, mt));
-            }
-            fmt_printf(" -> ");
+            fmt_printf("  MAC %-2u          : %s %s -> ", i, m->dst ? "dst" : "src", cli_mac_text(m->mac, mt));
             cli_print_action(m->action, m->policer);
             fmt_printf("\n");
         }
     }
-    for (unsigned i = 0; i < CPUPATH_CLS_ENTRIES; i++) {
+    for (unsigned i = 0; i < CPUPATH_CLS_PAIRS; i++) {
         const cpupath_etype_entry_t *e = &c->etype[i];
         if (e->valid) {
             fmt_printf("  EtherType %-2u    : 0x%04X..0x%04X -> ", i, (unsigned)e->lo, (unsigned)e->hi);
@@ -2486,8 +2485,11 @@ int cli_show_classifier(const MenuCommandContext *ctx)
         }
     }
     if (rc == CPUPATH_OK) {
-        fmt_printf("  Counters        : frames %u, passed %u, dropped %u (mode %u, policers %u)\n", (unsigned)k.frames,
-                   (unsigned)k.passed, (unsigned)k.dropped, (unsigned)k.mode_dropped, (unsigned)k.police_dropped);
+        fmt_printf("  Counters        : frames %u, passed %u, dropped %u (mode %u, policers %u, overrun %u)\n",
+                   (unsigned)k.frames, (unsigned)k.passed, (unsigned)k.dropped, (unsigned)k.mode_dropped,
+                   (unsigned)k.police_dropped, (unsigned)k.overrun_dropped);
+        fmt_printf("  Table hits      : MAC %u, EtherType %u, ACL %u\n", (unsigned)k.mac_hits, (unsigned)k.etype_hits,
+                   (unsigned)k.acl_hits);
     } else {
         fmt_printf("  Counters        : %% %s\n", cpupath_result_text(rc));
     }
@@ -2582,7 +2584,7 @@ int cli_cls_policer(const MenuCommandContext *ctx)
 
 /**
  * @brief CLASSIFIER MAC [ENTRY] [WHICH] [MAC] {W1}..{W4}: dst|src <mac>
- *        [mask <mac>] gate|classify|police <p>.
+ *        gate|classify|police <p> (the MAC table compares single values).
  * @param ctx Arguments as typed.
  * @return 0, or -1 for a bad value or a driver error.
  */
@@ -2591,7 +2593,7 @@ int cli_cls_mac(const MenuCommandContext *ctx)
     cpupath_mac_entry_t e;
     unsigned entry;
     int i = 3;
-    if (cli_parse_entry(ctx->argv[0], &entry) != 0) {
+    if (cli_parse_entry(ctx->argv[0], CPUPATH_CLS_ENTRIES, &entry) != 0) {
         return -1;
     }
     e.valid = 1;
@@ -2605,17 +2607,6 @@ int cli_cls_mac(const MenuCommandContext *ctx)
     if (cli_parse_mac(ctx->argv[2], e.mac) != 0) {
         return cli_bad_value("MAC address", ctx->argv[2]);
     }
-    e.has_mask = 0;
-    for (unsigned j = 0; j < 6u; j++) {
-        e.mask[j] = 0xFFu;
-    }
-    if (i < ctx->argc && cli_word_is(ctx->argv[i], "mask")) {
-        if (i + 1 >= ctx->argc || cli_parse_mac(ctx->argv[i + 1], e.mask) != 0) {
-            return cli_bad_value("mask", (i + 1 < ctx->argc) ? ctx->argv[i + 1] : "");
-        }
-        e.has_mask = 1;
-        i += 2;
-    }
     i = cli_parse_action(ctx, i, &e.action, &e.policer);
     if (i < 0) {
         return -1;
@@ -2628,7 +2619,7 @@ int cli_cls_mac(const MenuCommandContext *ctx)
 
 /**
  * @brief CLASSIFIER ETHERTYPE [ENTRY] [TYPE] {W1}..{W4}: <type> [to <type>]
- *        gate|classify|police <p>.
+ *        gate|classify|police <p> (entry 0..7: a range pair of the table).
  * @param ctx Arguments as typed.
  * @return 0, or -1 for a bad value or a driver error.
  */
@@ -2638,7 +2629,7 @@ int cli_cls_ethertype(const MenuCommandContext *ctx)
     unsigned entry;
     uint32_t v;
     int i = 2;
-    if (cli_parse_entry(ctx->argv[0], &entry) != 0) {
+    if (cli_parse_entry(ctx->argv[0], CPUPATH_CLS_PAIRS, &entry) != 0) {
         return -1;
     }
     if (cli_parse_u32(ctx->argv[1], &v) != 0 || v > 0xFFFFu) {
@@ -2676,7 +2667,7 @@ int cli_cls_acl(const MenuCommandContext *ctx)
     cpupath_acl_entry_t e;
     unsigned entry;
     int i = 2;
-    if (cli_parse_entry(ctx->argv[0], &entry) != 0) {
+    if (cli_parse_entry(ctx->argv[0], CPUPATH_CLS_ENTRIES, &entry) != 0) {
         return -1;
     }
     e.valid = 1;
@@ -2741,7 +2732,7 @@ int cli_no_cls_mac(const MenuCommandContext *ctx)
 {
     cpupath_mac_entry_t e = { 0 };
     unsigned entry;
-    if (cli_parse_entry(ctx->argv[0], &entry) != 0) {
+    if (cli_parse_entry(ctx->argv[0], CPUPATH_CLS_ENTRIES, &entry) != 0) {
         return -1;
     }
     return cli_cpupath_rc(cpupath_cls_set_mac(entry, &e));
@@ -2756,7 +2747,7 @@ int cli_no_cls_ethertype(const MenuCommandContext *ctx)
 {
     cpupath_etype_entry_t e = { 0 };
     unsigned entry;
-    if (cli_parse_entry(ctx->argv[0], &entry) != 0) {
+    if (cli_parse_entry(ctx->argv[0], CPUPATH_CLS_PAIRS, &entry) != 0) {
         return -1;
     }
     return cli_cpupath_rc(cpupath_cls_set_etype(entry, &e));
@@ -2771,7 +2762,7 @@ int cli_no_cls_acl(const MenuCommandContext *ctx)
 {
     cpupath_acl_entry_t e = { 0 };
     unsigned entry;
-    if (cli_parse_entry(ctx->argv[0], &entry) != 0) {
+    if (cli_parse_entry(ctx->argv[0], CPUPATH_CLS_ENTRIES, &entry) != 0) {
         return -1;
     }
     return cli_cpupath_rc(cpupath_cls_set_acl(entry, &e));
