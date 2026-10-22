@@ -40,11 +40,21 @@ function Invoke-Step([string]$exe, [string[]]$argv) {
     if ($LASTEXITCODE -ne 0) { throw "failed ($LASTEXITCODE): $exe $($argv -join ' ')" }
 }
 
+# Core drivers (cores/<core>/driver): the only code that touches each core.
+$drvCores = @('rtlnet_eth_mac', 'rtlnet_mdio', 'rtlnet_eth_protocol', 'rtlnet_arp', 'rtlnet_icmp',
+              'rtlnet_dhcp', 'rtlnet_iperf', 'rtlnet_udp_socket', 'rtlnet_udp_echo')
+$drvSrcs = @(
+    'cores/rtlnet_eth_mac/driver/rtlnet_eth_mac.c', 'cores/rtlnet_mdio/driver/rtlnet_mdio.c',
+    'cores/rtlnet_mdio/driver/rtlnet_phy_rtl8211e.c', 'cores/rtlnet_eth_protocol/driver/rtlnet_eth_protocol.c',
+    'cores/rtlnet_arp/driver/rtlnet_arp.c', 'cores/rtlnet_icmp/driver/rtlnet_icmp.c',
+    'cores/rtlnet_dhcp/driver/rtlnet_dhcp.c', 'cores/rtlnet_iperf/driver/rtlnet_iperf.c',
+    'cores/rtlnet_udp_socket/driver/rtlnet_udp_socket.c', 'cores/rtlnet_udp_echo/driver/rtlnet_udp_echo.c'
+)
 $inc = @(
     "-I$Fw/src", "-I$Fw/cli",
     "-I$Repo/cores/rtlnet_common/driver",
     "-I$Repo/cores/rtlnet_cpu_microblaze/driver"
-)
+) + ($drvCores | ForEach-Object { "-I$Repo/cores/$_/driver" })
 $common = @('-std=c11', '-Wall', '-Wextra', '-Werror', '-pedantic')
 
 # 1. The generated CLI tables must match the command file.
@@ -57,9 +67,9 @@ if (-not $NoFirmware) {
     $cflags  = $common + @('-Os', '-g', '-ffreestanding', '-ffunction-sections', '-fdata-sections')
     $srcs = @(
         'src/crt0.S', 'src/main.c', 'src/rtlnet_platform.c', 'src/uart_lite.c', 'src/timer.c',
-        'src/rtlnet_board.c', 'src/rtlnet_fmt.c', 'src/rtlnet_string.c',
+        'src/rtlnet_board.c', 'src/rtlnet_fmt.c', 'src/rtlnet_string.c', 'src/rtlnet_netmgr.c',
         'cli/menu.c', 'cli/menu_table.c', 'cli/cli_commands.c'
-    )
+    ) + ($drvSrcs | ForEach-Object { "../../$_" })
     $objs = @()
     $objDir = Join-Path $Out 'obj'
     New-Item -ItemType Directory -Force -Path $objDir | Out-Null
@@ -79,7 +89,8 @@ if (-not $NoFirmware) {
 #    against a register model.
 if ($HostHarness -or $Demo) {
     $hsrcs = @('host/main.c', 'host/host_platform.c', 'src/rtlnet_board.c', 'src/rtlnet_fmt.c',
-               'cli/menu.c', 'cli/menu_table.c', 'cli/cli_commands.c')
+               'src/rtlnet_netmgr.c', 'cli/menu.c', 'cli/menu_table.c', 'cli/cli_commands.c') +
+             ($drvSrcs | ForEach-Object { "../../$_" })
     $exe = Join-Path $Out 'menu.exe'
     Invoke-Step 'gcc' ($common + @('-O2', '-DRTLNET_HOST_TEST', "-I$Fw/host") + $inc +
         ($hsrcs | ForEach-Object { "$Fw/$_" }) + @('-o', $exe))

@@ -460,6 +460,18 @@ void Menu_PrintPrompt(void)
 }
 
 /**
+ * @brief Print the prompt and the line typed so far (after an asynchronous
+ *        message such as a link event).
+ * @return None.
+ */
+void Menu_Redisplay(void)
+{
+    Menu_PrintPrompt();
+    g_line[g_len] = '\0';
+    Menu_Write(g_line);
+}
+
+/**
  * @brief Built-in EXIT: leave the current mode for its parent.
  * @param ctx Callback context (unused).
  * @return 0; at the root mode prints a note and stays.

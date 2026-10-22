@@ -165,11 +165,23 @@ write_checkpoint -force [file join $BUILD_DIR post_synth.dcp]
 # Crossing constraints by cell name. The CPU-only build has reset and level
 # synchronizers only; the network build adds Gray counters, packet FIFOs and
 # AXI4-Lite crossings.
+# Network build: the RGMII interface timing applies to the synthesized netlist
+# (it names pin-layer cells), then the expected crossing instances: packet
+# FIFOs u_mac/u_rx_fifo, u_mac/u_tx_fifo, the protocol ingress/egress queues
+# and the socket layer's RX/TX payload FIFOs plus the ICMP payload queue
+# (fifo 7); register crossings of the MAC, the protocol wrapper and the UDP
+# echo (axil_cdc 3); Gray counters (gray 5).
 if {$NETWORK} {
+  set rgmii_xdc [file join $BOARD_DIR constraints rtlnet_nexys_video_rgmii.xdc]
+  if {![file exists $rgmii_xdc]} { nv_exit 11 "XDC not found: $rgmii_xdc" }
+  if {[catch {read_xdc $rgmii_xdc} err]} { nv_exit 13 "RGMII constraints: $err" }
   set ::rtlnet_cdc_required {sync reset gray fifo axil_cdc}
+  set ::rtlnet_cdc_expect   {fifo 7 axil_cdc 3 gray 5}
 } else {
   set ::rtlnet_cdc_required {sync reset}
+  set ::rtlnet_cdc_expect   {fifo 0 axil_cdc 0 gray 0}
 }
+set ::rtlnet_cdc_report [file join $RPT_DIR cdc_instances.txt]
 if {[catch {source [file join $REPO scripts rtlnet_constrain_cdc.tcl]} err]} { nv_exit 13 "CDC constraints: $err" }
 
 # ---------------------------------------------------------------------------
@@ -272,7 +284,10 @@ foreach c [get_cells -quiet -hierarchical -filter {REF_NAME == FDCE || REF_NAME 
   if {$p eq ""} { set p [get_pins -quiet $c/PRE] }
   set net [get_nets -quiet -of_objects $p]
   if {$net ne "" && [get_property TYPE $net] in {GROUND POWER}} continue
-  if {[regexp {^u_rst_[a-z0-9_]+/pipe_reg\[[0-9]+\]$} $c]} { incr n_async_rs; continue }
+  set parent [get_cells -quiet [get_property PARENT $c]]
+  set pref ""
+  if {$parent ne ""} { set pref "[get_property REF_NAME $parent] [get_property ORIG_REF_NAME $parent]" }
+  if {[regexp {/pipe_reg\[[0-9]+\]$} $c] && [regexp {(^| )rtlnet_reset_sync} $pref]} { incr n_async_rs; continue }
   if {[string match "u_cpu/u_bd/*" $c]} { incr n_async_bd; continue }
   lappend bad_async $c
 }
@@ -285,16 +300,29 @@ if {[llength $bad_async] > 0} { nv_exit 23 "user asynchronous reset endpoints: [
 # Warning finding at all. Methodology: every Warning or worse must match a
 # waiver below (rule, object pattern, rationale); matched waivers are printed.
 # ---------------------------------------------------------------------------
+# The ID summary of report_cdc -details lists the unwaived findings with their
+# severity, then the waived ones (created by rtlnet_constrain_cdc.tcl) in a
+# separate "Waived Endpoints" table. The gate also requires the ID table to be
+# found at all, so a format change cannot pass silently.
 set cdc_bad {}
-foreach line [split [report_cdc -return_string] "\n"] {
-  if {[regexp {^(CDC-[0-9]+)\s+(Critical|Warning)\s+([0-9]+)} $line -> id sev cnt]} { lappend cdc_bad "$id $sev x$cnt" }
+set cdc_ids 0
+set cdc_waived {}
+foreach line [split [report_cdc -details -return_string] "\n"] {
+  if {[regexp {^(CDC-[0-9]+)\s+(Critical|Warning|Info)\s+([0-9]+)\s} $line -> id sev cnt]} {
+    incr cdc_ids
+    if {$sev ne "Info"} { lappend cdc_bad "$id $sev x$cnt" }
+  } elseif {[regexp {^(CDC-[0-9]+)\s+([0-9]+)\s*$} $line -> id cnt]} {
+    lappend cdc_waived "$id x$cnt"
+  }
 }
+puts "rtlnet_build: report_cdc: $cdc_ids finding classes, waived by rtlnet_constrain_cdc.tcl: [expr {[llength $cdc_waived] ? [join $cdc_waived {, }] : {none}}]"
+if {$cdc_ids == 0} { nv_exit 27 "report_cdc ID summary not found (format changed?)" }
 if {[llength $cdc_bad] > 0} { nv_exit 27 "report_cdc findings: [join $cdc_bad {, }]" }
 
 # Waiver test for LUTAR-1 on the reset AND: the LUT is the rst_arstn gate and
 # every asynchronous pin it drives is a CLR pin of an rtlnet_reset_sync chain.
 proc nv_waive_reset_and {desc} {
-  if {![regexp {^LUT cell u_rst_[a-z0-9_]+/pipe\[[0-9]+\]_i_1,} $desc]} { return 0 }
+  if {![regexp {^LUT cell u_rst_[a-z0-9_]+/pipe\[[0-9]+\]_i_1(__[0-9]+)?,} $desc]} { return 0 }
   set pins [regexp -all -inline {\S+/(?:CLR|PRE)\M} $desc]
   if {[llength $pins] == 0} { return 0 }
   foreach p $pins {
@@ -311,6 +339,8 @@ set meth_waivers {
            {rst_arstn = cpu_resetn AND mmcm_locked into the rtlnet_reset_sync chains only; glitch argument in the board top header}}
   {TIMING-9 {.}
            {report_cdc (gated above: no Critical/Warning) shows every crossing synchronized; the asynchronous groups are the MDM BSCAN clocks of the vendor IP}}
+  {TIMING-47 {^A False Path timing constraint is set between synchronous clocks rgmii_rxc_v and rgmii_rxc }
+           {RGMII same-edge capture: the opposite-edge setup and same-edge hold pairs of the DDR input describe no capture (rtlnet_nexys_video_rgmii.xdc, MAC documentation section 6)}}
 }
 set meth_bad {}
 foreach v [get_methodology_violations -quiet] {

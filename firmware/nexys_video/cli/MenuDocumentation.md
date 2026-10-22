@@ -26,7 +26,7 @@ SPDX-License-Identifier: LGPL-2.1-or-later
 |---|---|
 | Revision | 10-22-2026 (newest row of the revision history in cli/cli_commands.txt) |
 | Generated | 2026-10-22 00:00:00 -04:00 by cli/gen_menu.py from cli/cli_commands.txt |
-| Commands | 42 table entries (5 mode-entry), 12 keyword groups, 3 built-ins (exit, end, help) |
+| Commands | 54 table entries (5 mode-entry), 13 keyword groups, 3 built-ins (exit, end, help) |
 
 ## 1. Title and overview
 
@@ -228,41 +228,53 @@ token counts; exec commands are also accepted in priv.
 | 5 | cli_enter_socket | config | `SOCKET [INDEX]` | INDEX | — | 2 | 2 | config-sock | Configure a UDP socket (index 0..3) |
 | 6 | cli_show_version | exec | `SHOW VERSION` | — | — | 2 | 2 | — | Board, register map, build and firmware identity |
 | 7 | cli_show_system | exec | `SHOW SYSTEM` | — | — | 2 | 2 | — | Clocks, uptime, switches, buttons and PHY pins |
-| 8 | cli_show_interfaces | exec | `SHOW INTERFACES` | — | — | 2 | 2 | — | Ethernet interface status (MAC core) |
-| 9 | cli_show_phy | exec | `SHOW PHY` | — | — | 2 | 2 | — | PHY link and registers (MDIO core) |
-| 10 | cli_show_ip | exec | `SHOW IP` | — | — | 2 | 2 | — | IPv4 address, mask and gateway (protocol core) |
-| 11 | cli_show_arp | exec | `SHOW ARP` | — | — | 2 | 2 | — | ARP responder status (ARP leaf) |
-| 12 | cli_show_dhcp | exec | `SHOW DHCP` | — | — | 2 | 2 | — | DHCP client state and lease (DHCP leaf) |
-| 13 | cli_show_iperf | exec | `SHOW IPERF` | — | — | 2 | 2 | — | iperf server statistics (iperf leaf) |
-| 14 | cli_show_sockets | exec | `SHOW SOCKETS` | — | — | 2 | 2 | — | UDP socket table (UDP socket leaf) |
-| 15 | cli_show_counters | exec | `SHOW COUNTERS` | — | — | 2 | 2 | — | MAC and protocol frame counters |
+| 8 | cli_show_interfaces | exec | `SHOW INTERFACES` | — | — | 2 | 2 | — | Ethernet link, MAC status and frame counters |
+| 9 | cli_show_phy | exec | `SHOW PHY` | — | — | 2 | 2 | — | PHY identity, RX delay, link, advertisement and partner |
+| 10 | cli_show_ip | exec | `SHOW IP` | — | — | 2 | 2 | — | Node MAC, static and effective IPv4 address, mask and gateway |
+| 11 | cli_show_arp | exec | `SHOW ARP` | — | — | 2 | 2 | — | ARP responder counters |
+| 12 | cli_show_dhcp | exec | `SHOW DHCP` | — | — | 2 | 2 | — | DHCP client state, lease and counters |
+| 13 | cli_show_iperf | exec | `SHOW IPERF` | — | — | 2 | 2 | — | iperf server port and statistics |
+| 14 | cli_show_sockets | exec | `SHOW SOCKETS` | — | — | 2 | 2 | — | UDP socket table, UDP echo and counters |
+| 15 | cli_show_counters | exec | `SHOW COUNTERS` | — | — | 2 | 2 | — | Frame counters of every core |
 | 16 | cli_show_running | priv | `SHOW RUNNING-CONFIG` | — | — | 2 | 2 | — | Current configuration |
 | 17 | cli_disable | priv | `DISABLE` | — | — | 1 | 1 | — | Leave privileged exec mode |
 | 18 | cli_debug_read | priv | `DEBUG READ [ADDR]` | ADDR | — | 3 | 3 | — | Read a 32-bit word (hex 0x... or decimal address) |
 | 19 | cli_debug_write | priv | `DEBUG WRITE [ADDR] [VALUE]` | ADDR, VALUE | — | 4 | 4 | — | Write a 32-bit word |
-| 20 | cli_led_on | priv | `LED [N] ON` | N | — | 3 | 3 | — | Turn user LED n (2..7) on |
-| 21 | cli_led_off | priv | `LED [N] OFF` | N | — | 3 | 3 | — | Turn user LED n (2..7) off |
-| 22 | cli_reload | priv | `RELOAD` | — | — | 1 | 1 | — | Restart the firmware (soft restart) |
-| 23 | cli_ip_gateway | config | `IP DEFAULT-GATEWAY [ADDR]` | ADDR | — | 3 | 3 | — | Set the IPv4 default gateway |
-| 24 | cli_no_ip_gateway | config | `NO IP DEFAULT-GATEWAY` | — | — | 3 | 3 | — | Remove the IPv4 default gateway |
-| 25 | cli_echo_enable | config | `ECHO ENABLE {SOCKET}` | — | SOCKET | 2 | 3 | — | Enable the UDP echo server (all sockets, or one) |
-| 26 | cli_no_echo_enable | config | `NO ECHO ENABLE` | — | — | 3 | 3 | — | Disable the UDP echo server |
-| 27 | cli_if_speed | config-if | `SPEED [MBPS]` | MBPS | — | 2 | 2 | — | Link speed: 10, 100, 1000 or auto |
-| 28 | cli_if_autoneg | config-if | `AUTONEG` | — | — | 1 | 1 | — | Enable auto-negotiation |
-| 29 | cli_if_no_autoneg | config-if | `NO AUTONEG` | — | — | 2 | 2 | — | Disable auto-negotiation (forced speed) |
-| 30 | cli_if_shutdown | config-if | `SHUTDOWN` | — | — | 1 | 1 | — | Disable the interface |
-| 31 | cli_if_no_shutdown | config-if | `NO SHUTDOWN` | — | — | 2 | 2 | — | Enable the interface |
-| 32 | cli_if_ip_address | config-if | `IP ADDRESS [ADDR] [MASK]` | ADDR, MASK | — | 4 | 4 | — | Set the static IPv4 address and mask |
-| 33 | cli_if_no_ip_address | config-if | `NO IP ADDRESS` | — | — | 3 | 3 | — | Remove the static IPv4 address |
-| 34 | cli_dhcp_start | config-dhcp | `START` | — | — | 1 | 1 | — | Start DHCP discovery now |
-| 35 | cli_dhcp_stop | config-dhcp | `STOP` | — | — | 1 | 1 | — | Stop the DHCP client and release the lease |
-| 36 | cli_dhcp_auto | config-dhcp | `AUTO` | — | — | 1 | 1 | — | Start DHCP automatically on link up |
-| 37 | cli_dhcp_no_auto | config-dhcp | `NO AUTO` | — | — | 2 | 2 | — | Do not start DHCP on link up |
-| 38 | cli_sock_open | config-sock | `OPEN [PORT]` | PORT | — | 2 | 2 | — | Open the socket on a local UDP port |
-| 39 | cli_sock_close | config-sock | `CLOSE` | — | — | 1 | 1 | — | Close the socket |
-| 40 | cli_sock_remote | config-sock | `REMOTE [ADDR] [PORT]` | ADDR, PORT | — | 3 | 3 | — | Set the remote IPv4 address and UDP port |
-| 41 | cli_sock_connect | config-sock | `CONNECT-ON-RECEIVE` | — | — | 1 | 1 | — | Follow the sender of the last datagram |
-| 42 | cli_sock_no_connect | config-sock | `NO CONNECT-ON-RECEIVE` | — | — | 2 | 2 | — | Keep the configured remote address |
+| 20 | cli_phy_read | priv | `PHY READ [REG]` | REG | — | 3 | 3 | — | Read a PHY register (0..31) over MDIO |
+| 21 | cli_phy_write | priv | `PHY WRITE [REG] [VALUE]` | REG, VALUE | — | 4 | 4 | — | Write a PHY register (0..31) over MDIO |
+| 22 | cli_phy_dump | priv | `PHY DUMP` | — | — | 2 | 2 | — | Read PHY registers 0..31 |
+| 23 | cli_clear_counters | priv | `CLEAR COUNTERS` | — | — | 2 | 2 | — | Clear the counters of every core |
+| 24 | cli_led_on | priv | `LED [N] ON` | N | — | 3 | 3 | — | Turn user LED n (2..7) on |
+| 25 | cli_led_off | priv | `LED [N] OFF` | N | — | 3 | 3 | — | Turn user LED n (2..7) off |
+| 26 | cli_reload | priv | `RELOAD` | — | — | 1 | 1 | — | Restart the firmware (soft restart) |
+| 27 | cli_ip_gateway | config | `IP DEFAULT-GATEWAY [ADDR]` | ADDR | — | 3 | 3 | — | Set the static IPv4 default gateway |
+| 28 | cli_no_ip_gateway | config | `NO IP DEFAULT-GATEWAY` | — | — | 3 | 3 | — | Remove the static default gateway (0.0.0.0) |
+| 29 | cli_echo_enable | config | `ECHO ENABLE {SOCKET}` | — | SOCKET | 2 | 3 | — | Enable the UDP echo server (configured socket, or the one given) |
+| 30 | cli_no_echo_enable | config | `NO ECHO ENABLE` | — | — | 3 | 3 | — | Disable the UDP echo server |
+| 31 | cli_echo_socket | config | `ECHO SOCKET [INDEX]` | INDEX | — | 3 | 3 | — | Echo on socket 0..3, or "any" |
+| 32 | cli_iperf_port | config | `IPERF PORT [PORT]` | PORT | — | 3 | 3 | — | iperf server UDP port (default 5001) |
+| 33 | cli_if_speed | config-if | `SPEED [MBPS]` | MBPS | — | 2 | 2 | — | Link speed: 10, 100, 1000 or auto |
+| 34 | cli_if_duplex | config-if | `DUPLEX [MODE]` | MODE | — | 2 | 2 | — | Duplex: full, half or auto (the MAC is full duplex only) |
+| 35 | cli_if_autoneg | config-if | `AUTONEG` | — | — | 1 | 1 | — | Enable auto-negotiation (speed/duplex limit the advertisement) |
+| 36 | cli_if_no_autoneg | config-if | `NO AUTONEG` | — | — | 2 | 2 | — | Disable auto-negotiation (forced 10 or 100 Mb/s) |
+| 37 | cli_if_advertise | config-if | `ADVERTISE [MODES]` | MODES | — | 2 | 2 | — | Advertise modes, e.g. 10f,100f,1000f or all |
+| 38 | cli_if_no_advertise | config-if | `NO ADVERTISE` | — | — | 2 | 2 | — | Advertisement from speed and duplex again |
+| 39 | cli_if_shutdown | config-if | `SHUTDOWN` | — | — | 1 | 1 | — | Disable the interface (MAC receive and transmit) |
+| 40 | cli_if_no_shutdown | config-if | `NO SHUTDOWN` | — | — | 2 | 2 | — | Enable the interface |
+| 41 | cli_if_ip_address | config-if | `IP ADDRESS [ADDR] [MASK]` | ADDR, MASK | — | 4 | 4 | — | Set the static IPv4 address and mask |
+| 42 | cli_if_no_ip_address | config-if | `NO IP ADDRESS` | — | — | 3 | 3 | — | Remove the static IPv4 address (0.0.0.0) |
+| 43 | cli_if_ip_netmask | config-if | `IP NETMASK [MASK]` | MASK | — | 3 | 3 | — | Set the static netmask |
+| 44 | cli_if_mac | config-if | `MAC-ADDRESS [MAC]` | MAC | — | 2 | 2 | — | Set the node MAC address (aa:bb:cc:dd:ee:ff) |
+| 45 | cli_dhcp_start | config-dhcp | `START` | — | — | 1 | 1 | — | Start DHCP discovery now |
+| 46 | cli_dhcp_stop | config-dhcp | `STOP` | — | — | 1 | 1 | — | Stop the DHCP client and release the lease |
+| 47 | cli_dhcp_renew | config-dhcp | `RENEW` | — | — | 1 | 1 | — | Renew the lease now |
+| 48 | cli_dhcp_auto | config-dhcp | `AUTO` | — | — | 1 | 1 | — | Start DHCP automatically on link up |
+| 49 | cli_dhcp_no_auto | config-dhcp | `NO AUTO` | — | — | 2 | 2 | — | Do not start DHCP on link up |
+| 50 | cli_sock_open | config-sock | `OPEN [PORT]` | PORT | — | 2 | 2 | — | Open the socket on a local UDP port |
+| 51 | cli_sock_close | config-sock | `CLOSE` | — | — | 1 | 1 | — | Close the socket |
+| 52 | cli_sock_remote | config-sock | `REMOTE [ADDR] [PORT] {MAC}` | ADDR, PORT | MAC | 3 | 4 | — | Remote IPv4 address, UDP port and next-hop MAC |
+| 53 | cli_sock_connect | config-sock | `CONNECT-ON-RECEIVE` | — | — | 1 | 1 | — | Follow the sender of the last datagram |
+| 54 | cli_sock_no_connect | config-sock | `NO CONNECT-ON-RECEIVE` | — | — | 2 | 2 | — | Keep the configured remote address |
 
 Built-ins (menu.c): `EXIT` (every mode), `END` (privileged and configuration modes), `HELP` and `?`
 (every mode, identical listing), `!!` (repeat the previous line), Ctrl-C (cancel the line),
@@ -275,6 +287,7 @@ Keyword groups (help text when `?` lists a keyword shared by several commands):
 | exec | `SHOW` | Show running system information |
 | priv | `DEBUG` | Raw register access |
 | priv | `LED` | Set a user LED (2..7) |
+| priv | `PHY` | PHY registers over MDIO |
 | config | `IP` | Global IP configuration |
 | config | `NO` | Negate a command or set its default |
 | config | `NO ECHO` | UDP echo server |

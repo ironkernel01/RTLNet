@@ -24,16 +24,16 @@
  * Generated: 2026-10-22 14:00:00 -04:00
  * Project:   RTLNet Nexys Video firmware, hierarchical CLI
  * Purpose:   Callbacks of every command in cli/cli_commands.txt (the
- *            MenuBuilder "callback" file), the console start-up banner and
- *            the running configuration.
+ *            MenuBuilder "callback" file) and the console start-up banner.
  *
- * Layering: no register access here. Board registers and core probing go
- * through src/rtlnet_board.c, console/time/LEDs through rtlnet_platform.h.
- * Network commands probe their core's ID register first; a core absent from
- * the build answers ID 0 and the command prints "<core> not present in this
- * build", so the same firmware runs before and after network integration.
- * Configuration commands always update the running configuration (shown by
- * "show running-config"), whether or not the core is present.
+ * Layering: no register access here. Status comes from the core drivers
+ * (cores/<core>/driver), configuration goes through the network manager
+ * (src/rtlnet_netmgr.c, which owns the running configuration and applies it),
+ * board registers through src/rtlnet_board.c. Every network command first
+ * probes its core's ID register; a core absent from the build answers ID 0
+ * and the command prints "<core> not present in this build", so the same
+ * firmware runs on the CPU-only and the network bitstream. Configuration
+ * commands always update the running configuration.
  */
 /*
  * ===========================================================================
@@ -42,6 +42,7 @@
  *  Revision    Author                          Description
  * ---------------------------------------------------------------------------
  *  10-22-2026  MenuBuilder AI / Steve Spano    Initial hierarchical command set
+ *  10-22-2026  MenuBuilder AI / Steve Spano    Network commands on the core drivers; phy, clear, iperf, advertise, duplex, mac-address
  * ===========================================================================
  */
 #include "cli_commands.h"
@@ -50,45 +51,26 @@
 
 #include "menu.h"
 #include "menu_commands.h"
+#include "rtlnet_arp.h"
 #include "rtlnet_board.h"
+#include "rtlnet_dhcp.h"
+#include "rtlnet_eth_mac.h"
+#include "rtlnet_eth_protocol.h"
 #include "rtlnet_fmt.h"
+#include "rtlnet_icmp.h"
+#include "rtlnet_iperf.h"
+#include "rtlnet_netmgr.h"
+#include "rtlnet_phy_rtl8211e.h"
 #include "rtlnet_platform.h"
+#include "rtlnet_udp_echo.h"
+#include "rtlnet_udp_socket.h"
 
-#define CLI_NUM_SOCKETS     4u
-#define CLI_SPEED_AUTO      0u
 #define CLI_LED_FIRST_USER  2u
 #define CLI_LED_LAST        7u
 #define CLI_UDP_PORT_MAX    65535u
+#define CLI_PHY_REG_MAX     31u
 
-/* Default static address mirrors rtlnet_pkg::DEFAULT_LOCAL_IP
- * (cores/rtlnet_common/hdl/rtlnet_pkg.sv); keep the two in step. */
-#define CLI_DEFAULT_IP      0xC0A901DCu   /* 192.169.1.220 */
-#define CLI_DEFAULT_MASK    0xFFFFFF00u   /* 255.255.255.0 */
-
-typedef struct {
-    int      open;
-    uint32_t local_port;
-    uint32_t remote_ip;
-    uint32_t remote_port;
-    int      connect_on_receive;
-} cli_socket_cfg_t;
-
-typedef struct {
-    uint32_t speed_mbps;      /* CLI_SPEED_AUTO or 10/100/1000 */
-    int      autoneg;
-    int      shutdown;
-    int      has_ip;
-    uint32_t ip;
-    uint32_t mask;
-    uint32_t gateway;         /* 0 = none */
-    int      dhcp_auto;
-    int      echo_enable;
-    int      echo_socket;     /* -1 = all sockets */
-    cli_socket_cfg_t sock[CLI_NUM_SOCKETS];
-} cli_config_t;
-
-static cli_config_t g_cfg;
-static unsigned     g_cur_sock;
+static unsigned g_cur_sock;
 
 /* One core of the RTLNet window, for presence probing. */
 typedef struct {
@@ -101,6 +83,7 @@ static const cli_core_t g_core_mac   = { "MAC",        RTLNET_PLAT_MAC_BASE,   R
 static const cli_core_t g_core_mdio  = { "MDIO",       RTLNET_PLAT_MDIO_BASE,  RTLNET_ID_MDIO };
 static const cli_core_t g_core_prot  = { "PROTOCOL",   RTLNET_PLAT_PROT_BASE,  RTLNET_ID_PROT };
 static const cli_core_t g_core_arp   = { "ARP",        RTLNET_PLAT_ARP_BASE,   RTLNET_ID_ARP };
+static const cli_core_t g_core_icmp  = { "ICMP",       RTLNET_PLAT_ICMP_BASE,  RTLNET_ID_ICMP };
 static const cli_core_t g_core_dhcp  = { "DHCP",       RTLNET_PLAT_DHCP_BASE,  RTLNET_ID_DHCP };
 static const cli_core_t g_core_iperf = { "IPERF",      RTLNET_PLAT_IPERF_BASE, RTLNET_ID_IPERF };
 static const cli_core_t g_core_udp   = { "UDP socket", RTLNET_PLAT_UDP_BASE,   RTLNET_ID_UDP };
@@ -119,6 +102,28 @@ static const cli_core_t g_core_echo  = { "UDP echo",   RTLNET_PLAT_ECHO_BASE,  R
 static void cli_io_write(const char *s, size_t n)
 {
     plat_console_write(s, n);
+}
+
+/**
+ * @brief Case-insensitive comparison with a lower-case literal.
+ * @param s   Typed text (may be NULL).
+ * @param lit Lower-case literal.
+ * @return 1 when equal, else 0.
+ */
+static int cli_word_is(const char *s, const char *lit)
+{
+    if (s == NULL) {
+        return 0;
+    }
+    while (*s != '\0' && *lit != '\0') {
+        char c = (*s >= 'A' && *s <= 'Z') ? (char)(*s - 'A' + 'a') : *s;
+        if (c != *lit) {
+            return 0;
+        }
+        s++;
+        lit++;
+    }
+    return (*s == '\0' && *lit == '\0') ? 1 : 0;
 }
 
 /**
@@ -175,6 +180,9 @@ static int cli_parse_u32(const char *s, uint32_t *out)
 static int cli_parse_ipv4(const char *s, uint32_t *out)
 {
     uint32_t addr = 0;
+    if (s == NULL) {
+        return -1;
+    }
     for (int part = 0; part < 4; part++) {
         uint32_t v = 0;
         int digits = 0;
@@ -205,6 +213,54 @@ static int cli_parse_ipv4(const char *s, uint32_t *out)
 }
 
 /**
+ * @brief Value of one hexadecimal digit.
+ * @param c Character.
+ * @return 0..15, or -1 for a non-hex character.
+ */
+static int cli_hex_digit(char c)
+{
+    if (c >= '0' && c <= '9') {
+        return c - '0';
+    }
+    if (c >= 'a' && c <= 'f') {
+        return c - 'a' + 10;
+    }
+    if (c >= 'A' && c <= 'F') {
+        return c - 'A' + 10;
+    }
+    return -1;
+}
+
+/**
+ * @brief Parse a MAC address "aa:bb:cc:dd:ee:ff" (':' or '-' separators).
+ * @param s   Text.
+ * @param mac Output, mac[0] first on the wire.
+ * @return 0 on success, -1 on a malformed address.
+ */
+static int cli_parse_mac(const char *s, uint8_t mac[6])
+{
+    if (s == NULL) {
+        return -1;
+    }
+    for (int i = 0; i < 6; i++) {
+        int hi = cli_hex_digit(s[0]);
+        int lo = (hi >= 0) ? cli_hex_digit(s[1]) : -1;
+        if (lo < 0) {
+            return -1;
+        }
+        mac[i] = (uint8_t)((hi << 4) | lo);
+        s += 2;
+        if (i < 5) {
+            if (*s != ':' && *s != '-') {
+                return -1;
+            }
+            s++;
+        }
+    }
+    return (*s == '\0') ? 0 : -1;
+}
+
+/**
  * @brief Format an IPv4 address as dotted quad.
  * @param a   Address, first octet in bits [31:24].
  * @param buf Output buffer of at least 16 characters.
@@ -214,6 +270,18 @@ static const char *cli_ipv4_text(uint32_t a, char buf[16])
 {
     (void)fmt_snprintf(buf, 16u, "%u.%u.%u.%u", (unsigned)(a >> 24), (unsigned)((a >> 16) & 0xFFu),
                        (unsigned)((a >> 8) & 0xFFu), (unsigned)(a & 0xFFu));
+    return buf;
+}
+
+/**
+ * @brief Format a MAC address as aa:bb:cc:dd:ee:ff.
+ * @param mac Address.
+ * @param buf Output buffer of at least 18 characters.
+ * @return buf.
+ */
+static const char *cli_mac_text(const uint8_t mac[6], char buf[18])
+{
+    (void)fmt_snprintf(buf, 18u, "%02x:%02x:%02x:%02x:%02x:%02x", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     return buf;
 }
 
@@ -238,43 +306,58 @@ static void cli_print_mhz(uint32_t khz)
 }
 
 /**
+ * @brief Print an advertisement / ability mask (RTLNET_PHY_ADV_*).
+ * @param m Mask.
+ * @return None.
+ */
+static void cli_print_adv(uint32_t m)
+{
+    static const char *const names[6] = { "10h", "10f", "100h", "100f", "1000h", "1000f" };
+    int first = 1;
+    for (unsigned i = 0; i < 6u; i++) {
+        if ((m >> i) & 1u) {
+            fmt_printf("%s%s", first ? "" : ",", names[i]);
+            first = 0;
+        }
+    }
+    if (first) {
+        fmt_printf("none");
+    }
+}
+
+/**
  * @brief Probe a core and report when it is absent from the build.
  * @param core Core descriptor (name, window base, expected ID).
- * @return 1 when present (prints its header and the driver note), 0 when
- *         absent (prints "<core> not present in this build").
+ * @return 1 when present, 0 when absent (prints "<core> not present in this
+ *         build").
  */
 static int cli_core_check(const cli_core_t *core)
 {
     board_probe_t p;
     char want[5];
-    char got[5];
     board_id_text(core->id, want);
     if (!board_probe(core->base, core->id, &p)) {
         fmt_printf("%% %s not present in this build (ID 0x%08X at 0x%08X, expected 0x%08X \"%s\")\n",
                    core->name, (unsigned)p.id, (unsigned)core->base, (unsigned)core->id, want);
         return 0;
     }
-    board_id_text(p.id, got);
-    fmt_printf("%s core present at 0x%08X: ID \"%s\", register map ", core->name, (unsigned)core->base, got);
-    cli_print_datecode(p.version);
-    fmt_printf(", CAPS 0x%08X\n", (unsigned)p.caps);
-    fmt_printf("  (detailed status needs the %s driver, not integrated in this firmware)\n", core->name);
     return 1;
 }
 
 /**
- * @brief Note for a configuration change: stored, and whether it reached hardware.
+ * @brief Note for a configuration change whose core is absent.
  * @param core Core the setting belongs to.
- * @return None.
+ * @return 1 when the core is present (the caller applies the setting), 0 when
+ *         absent (setting kept in the running configuration only).
  */
-static void cli_config_note(const cli_core_t *core)
+static int cli_config_core(const cli_core_t *core)
 {
     board_probe_t p;
     if (!board_probe(core->base, core->id, &p)) {
         fmt_printf("%% %s not present in this build; setting kept in the running configuration\n", core->name);
-    } else {
-        fmt_printf("%% %s driver not integrated; setting kept in the running configuration\n", core->name);
+        return 0;
     }
+    return 1;
 }
 
 /**
@@ -289,38 +372,55 @@ static int cli_bad_value(const char *what, const char *val)
     return -1;
 }
 
+/**
+ * @brief Report a driver error.
+ * @param what Operation.
+ * @param rc   Driver return code.
+ * @return -1 when rc is nonzero, else 0.
+ */
+static int cli_rc(const char *what, int rc)
+{
+    if (rc != 0) {
+        fmt_printf("%% %s failed (%d)\n", what, rc);
+        return -1;
+    }
+    return 0;
+}
+
+/**
+ * @brief The PHY bus, with the absent/not-answering messages.
+ * @return MDIO context, or NULL (message printed).
+ */
+static const rtlnet_mdio_t *cli_phy_bus(void)
+{
+    const rtlnet_mdio_t *m;
+    if (!cli_core_check(&g_core_mdio)) {
+        return NULL;
+    }
+    m = netmgr_mdio();
+    if (m == NULL) {
+        fmt_printf("%% MDIO core did not initialize\n");
+    }
+    return m;
+}
+
 /* ------------------------------------------------------------------------- */
-/* Start-up and configuration                                                */
+/* Start-up                                                                  */
 /* ------------------------------------------------------------------------- */
 
 /**
- * @brief Reset the running configuration to the power-on defaults.
+ * @brief Reset the CLI-side state (selected socket); the running
+ *        configuration itself belongs to the network manager.
  * @return None.
  */
 void cli_config_defaults(void)
 {
-    g_cfg.speed_mbps  = CLI_SPEED_AUTO;
-    g_cfg.autoneg     = 1;
-    g_cfg.shutdown    = 0;
-    g_cfg.has_ip      = 1;
-    g_cfg.ip          = CLI_DEFAULT_IP;
-    g_cfg.mask        = CLI_DEFAULT_MASK;
-    g_cfg.gateway     = 0u;
-    g_cfg.dhcp_auto   = 1;
-    g_cfg.echo_enable = 0;
-    g_cfg.echo_socket = -1;
-    for (unsigned i = 0; i < CLI_NUM_SOCKETS; i++) {
-        g_cfg.sock[i].open               = 0;
-        g_cfg.sock[i].local_port         = 0u;
-        g_cfg.sock[i].remote_ip          = 0u;
-        g_cfg.sock[i].remote_port        = 0u;
-        g_cfg.sock[i].connect_on_receive = 0;
-    }
     g_cur_sock = 0u;
 }
 
 /**
- * @brief Console start-up: banner, engine initialization, first prompt.
+ * @brief Console start-up: banner, engine initialization, network bring-up
+ *        (netmgr_init: core probing, PHY, default configuration), first prompt.
  * @return None.
  * The banner names the board and build so a transcript identifies the image.
  */
@@ -336,6 +436,7 @@ void cli_start(void)
     fmt_printf("Board %s, build %08x%s. Type ? for help.\n\n", idt, (unsigned)board_sys_read(NXV_SYS_BUILD_ID),
                (board_sys_read(NXV_SYS_BUILD_DIRTY) & 1u) ? " (dirty)" : "");
     (void)Menu_Init(&io);
+    netmgr_init();
     Menu_PrintPrompt();
 }
 
@@ -350,12 +451,10 @@ void cli_start(void)
  */
 int cli_enter_interface(const MenuCommandContext *ctx)
 {
-    const char *n = ctx->argv[0];
-    if (n != NULL && (n[0] == 'e' || n[0] == 'E') && (n[1] == 't' || n[1] == 'T') &&
-        (n[2] == 'h' || n[2] == 'H') && n[3] == '0' && n[4] == '\0') {
+    if (cli_word_is(ctx->argv[0], "eth0")) {
         return 0;
     }
-    return cli_bad_value("interface (only eth0 exists)", n);
+    return cli_bad_value("interface (only eth0 exists)", ctx->argv[0]);
 }
 
 /**
@@ -366,7 +465,7 @@ int cli_enter_interface(const MenuCommandContext *ctx)
 int cli_enter_socket(const MenuCommandContext *ctx)
 {
     uint32_t v;
-    if (cli_parse_u32(ctx->argv[0], &v) != 0 || v >= CLI_NUM_SOCKETS) {
+    if (cli_parse_u32(ctx->argv[0], &v) != 0 || v >= NETMGR_NUM_SOCKETS) {
         return cli_bad_value("socket index (0..3)", ctx->argv[0]);
     }
     g_cur_sock = (unsigned)v;
@@ -407,7 +506,7 @@ int cli_show_version(const MenuCommandContext *ctx)
 
 /**
  * @brief SHOW SYSTEM: MMCM lock, uptime, CPU clock, measured clocks,
- *        switches, buttons, LEDs and PHY pin levels.
+ *        switches, buttons, LEDs, PHY pins and network status levels.
  * @param ctx Unused.
  * @return 0.
  */
@@ -425,6 +524,7 @@ int cli_show_system(const MenuCommandContext *ctx)
     uint32_t btn  = board_sys_read(NXV_SYS_BUTTONS) & 0x1Fu;
     uint32_t leds = board_sys_read(NXV_SYS_LEDS) & 0xFFu;
     uint32_t phy  = board_sys_read(NXV_SYS_PHY_STATUS);
+    uint32_t net  = board_sys_read(NXV_SYS_NET_STATUS);
     uint32_t s    = up / 1000u;
     (void)ctx;
 
@@ -450,131 +550,328 @@ int cli_show_system(const MenuCommandContext *ctx)
     for (unsigned b = 0; b < 5u; b++) {
         fmt_printf("%c=%u%s", btn_names[b], (unsigned)((btn >> b) & 1u), (b < 4u) ? " " : ")\n");
     }
-    fmt_printf("  LEDs            : 0x%02X  (led0 MMCM lock, led1 heartbeat)\n", (unsigned)(leds | ((cs & 1u) ? 1u : 0u)));
+    fmt_printf("  LEDs            : 0x%02X  (led0 MMCM lock, led1 heartbeat, led2 link, led3 DHCP lease)\n",
+               (unsigned)(leds | ((cs & 1u) ? 1u : 0u)));
     fmt_printf("  PHY pins        : rst_n=%u int_n=%u pme_n=%u mdio=%u rxck=%u rxctl=%u rxd=0x%X\n",
                (unsigned)((phy & NXV_PHY_RST_N) != 0u), (unsigned)((phy & NXV_PHY_INT_N) != 0u),
                (unsigned)((phy & NXV_PHY_PME_N) != 0u), (unsigned)((phy & NXV_PHY_MDIO_IN) != 0u),
                (unsigned)((phy & NXV_PHY_RXCK) != 0u), (unsigned)((phy & NXV_PHY_RXCTL) != 0u),
                (unsigned)((phy & NXV_PHY_RXD_MASK) >> NXV_PHY_RXD_SHIFT));
+    fmt_printf("  Network status  : link_up=%u speed=%u rx_clk_ok=%u ip_valid=%u dhcp_bound=%u\n",
+               (unsigned)((net & NXV_NET_LINK_UP) != 0u), (unsigned)((net & NXV_NET_SPEED_MASK) >> NXV_NET_SPEED_SHIFT),
+               (unsigned)((net & NXV_NET_RX_CLK_OK) != 0u), (unsigned)((net & NXV_NET_IP_VALID) != 0u),
+               (unsigned)((net & NXV_NET_DHCP_BOUND) != 0u));
     return 0;
 }
 
 /**
- * @brief SHOW INTERFACES: MAC core status and the eth0 configuration.
+ * @brief SHOW INTERFACES: link monitor state, MAC status and counters, and
+ *        the eth0 configuration.
  * @param ctx Unused.
  * @return 0.
  */
 int cli_show_interfaces(const MenuCommandContext *ctx)
 {
+    const netmgr_link_t *l = netmgr_link();
+    const netmgr_config_t *c = netmgr_config();
+    rtlnet_eth_mac_status_t st;
+    rtlnet_eth_mac_counters_t k;
     (void)ctx;
-    (void)cli_core_check(&g_core_mac);
-    fmt_printf("eth0 configuration: speed %s%s, autoneg %s, %s\n",
-               (g_cfg.speed_mbps == CLI_SPEED_AUTO) ? "auto" : "",
-               (g_cfg.speed_mbps == 10u) ? "10" : (g_cfg.speed_mbps == 100u) ? "100" :
-               (g_cfg.speed_mbps == 1000u) ? "1000" : "",
-               g_cfg.autoneg ? "on" : "off", g_cfg.shutdown ? "shutdown" : "no shutdown");
+    if (!cli_core_check(&g_core_mac)) {
+        return 0;
+    }
+    rtlnet_eth_mac_read_status(RTLNET_PLAT_MAC_BASE, &st);
+    rtlnet_eth_mac_read_counters(RTLNET_PLAT_MAC_BASE, &k);
+    fmt_printf("eth0 is %s%s", l->up ? "up" : "down", c->shutdown ? " (administratively shut down)" : "");
+    if (l->up) {
+        fmt_printf(", %u Mb/s %s duplex", (unsigned)l->speed_mbps, l->full_duplex ? "full" : "half");
+    }
+    fmt_printf(", link changes up %u / down %u\n", (unsigned)l->ups, (unsigned)l->downs);
+    fmt_printf("  MAC speed       : %u Mb/s in effect, RXC %s (rate %u), IDELAY %s, receive path %s\n",
+               (unsigned)st.speed_mbps, st.rx_clk_ok ? "ok" : "not qualified", (unsigned)st.rx_clk_rate,
+               st.idelay_rdy ? "ready" : "not ready", st.rx_in_reset ? "in reset" : "running");
+    fmt_printf("  In-band status  : link %u, %u Mb/s, %s duplex (debug)\n", (unsigned)st.inband_link,
+               (unsigned)st.inband_speed_mbps, st.inband_full_duplex ? "full" : "half");
+    fmt_printf("  Frames          : rx good %u, rx bad %u, rx overflow %u, tx %u\n", (unsigned)k.rx_good,
+               (unsigned)k.rx_bad, (unsigned)k.rx_overflow, (unsigned)k.tx_frames);
+    fmt_printf("  Configuration   : speed ");
+    if (c->speed_mbps == 0u) {
+        fmt_printf("auto");
+    } else {
+        fmt_printf("%u", (unsigned)c->speed_mbps);
+    }
+    fmt_printf(", duplex %s, autoneg %s, advertise ",
+               (c->duplex == NETMGR_DUPLEX_FULL) ? "full" : (c->duplex == NETMGR_DUPLEX_HALF) ? "half" : "auto",
+               c->autoneg ? "on" : "off");
+    cli_print_adv(netmgr_adv_effective());
+    fmt_printf("\n");
     return 0;
 }
 
 /**
- * @brief SHOW PHY: MDIO core status.
+ * @brief SHOW PHY: PHY identity, RX delay, BMCR/BMSR/PHYSR, link, own and
+ *        partner advertisement.
  * @param ctx Unused.
- * @return 0.
+ * @return 0, or -1 on an MDIO error.
  */
 int cli_show_phy(const MenuCommandContext *ctx)
 {
+    const rtlnet_mdio_t *m = cli_phy_bus();
+    const netmgr_present_t *p = netmgr_present();
+    rtlnet_phy_status_t st;
+    uint32_t adv = 0u;
+    int rc;
     (void)ctx;
-    (void)cli_core_check(&g_core_mdio);
+    if (m == NULL) {
+        return 0;
+    }
+    fmt_printf("PHY at MDIO address %u: ID 0x%08X %s, MDC half period %u ns\n", (unsigned)m->phy_addr,
+               (unsigned)p->phy_id, p->phy ? "(RTL8211E)" : "(no RTL8211E answer)", (unsigned)p->mdc_half_ns);
+    fmt_printf("  RX clock delay  : page 0xA4 reg 28 0x%04X -> 0x%04X (%s), bring-up result %d\n",
+               (unsigned)p->rgmii_before, (unsigned)p->rgmii_after,
+               ((p->rgmii_after & (RTLNET_PHY_RGMII_CTRL_DELAY | RTLNET_PHY_RGMII_RX_DELAY)) ==
+                (RTLNET_PHY_RGMII_CTRL_DELAY | RTLNET_PHY_RGMII_RX_DELAY)) ? "RX delay on" : "RX delay OFF",
+               p->phy_rc);
+    rc = rtlnet_phy_rtl8211e_status(m, &st);
+    if (rc != RTLNET_PHY_OK) {
+        return cli_rc("PHY status read", rc);
+    }
+    (void)rtlnet_phy_rtl8211e_advertise_get(m, &adv);
+    fmt_printf("  Registers       : BMCR 0x%04X  BMSR 0x%04X  PHYSR 0x%04X  ANLPAR 0x%04X  GBSR 0x%04X\n",
+               (unsigned)st.bmcr, (unsigned)st.bmsr, (unsigned)st.physr, (unsigned)st.anlpar, (unsigned)st.gbsr);
+    fmt_printf("  Link            : %s", st.link_up ? "up" : "down");
+    if (st.speed_valid) {
+        fmt_printf(", %u Mb/s %s duplex%s", (unsigned)rtlnet_phy_speed_mbps(st.speed),
+                   st.full_duplex ? "full" : "half", st.mdi_crossover ? ", MDI-X" : ", MDI");
+    }
+    fmt_printf("\n  Auto-negotiation: %s, %s\n", st.an_enabled ? "enabled" : "disabled (forced)",
+               st.an_complete ? "complete" : "not complete");
+    fmt_printf("  Advertised      : ");
+    cli_print_adv(adv);
+    fmt_printf("\n  Partner         : ");
+    cli_print_adv(st.partner_adv);
+    fmt_printf("\n");
     return 0;
 }
 
 /**
- * @brief SHOW IP: protocol core status and the configured addresses.
+ * @brief SHOW IP: node MAC, static and effective addresses, DHCP use.
  * @param ctx Unused.
  * @return 0.
  */
 int cli_show_ip(const MenuCommandContext *ctx)
 {
+    uint8_t mac[6];
     char a[16];
-    char m[16];
+    char b[16];
     char g[16];
+    char mt[18];
+    uintptr_t base = RTLNET_PLAT_PROT_BASE;
     (void)ctx;
-    (void)cli_core_check(&g_core_prot);
-    if (g_cfg.has_ip) {
-        fmt_printf("Configured: address %s mask %s", cli_ipv4_text(g_cfg.ip, a), cli_ipv4_text(g_cfg.mask, m));
-    } else {
-        fmt_printf("Configured: no static address");
+    if (!cli_core_check(&g_core_prot)) {
+        return 0;
     }
-    fmt_printf(", gateway %s, DHCP %s\n", g_cfg.gateway ? cli_ipv4_text(g_cfg.gateway, g) : "none",
-               g_cfg.dhcp_auto ? "auto" : "manual");
+    rtlnet_eth_protocol_get_mac(base, mac);
+    fmt_printf("Node MAC          : %s, destination filter %s\n", cli_mac_text(mac, mt),
+               rtlnet_eth_protocol_get_filter_enable(base) ? "on" : "off (promiscuous)");
+    fmt_printf("Effective IPv4    : %s mask %s gateway %s (%s)\n",
+               cli_ipv4_text(rtlnet_eth_protocol_get_effective_ip(base), a),
+               cli_ipv4_text(rtlnet_eth_protocol_get_effective_mask(base), b),
+               cli_ipv4_text(rtlnet_eth_protocol_get_effective_gateway(base), g),
+               rtlnet_eth_protocol_ip_from_dhcp(base) ? "DHCP lease" : "static");
+    fmt_printf("Static IPv4       : %s mask %s gateway %s\n", cli_ipv4_text(rtlnet_eth_protocol_get_static_ip(base), a),
+               cli_ipv4_text(rtlnet_eth_protocol_get_netmask(base), b),
+               cli_ipv4_text(rtlnet_eth_protocol_get_gateway(base), g));
+    fmt_printf("Leaves present    : 0x%02X, enabled 0x%02X (bit 0 UDP, 1 ICMP, 2 ARP, 3 DHCP, 4 iperf)\n",
+               (unsigned)rtlnet_eth_protocol_get_leaves_present(base),
+               (unsigned)rtlnet_eth_protocol_get_leaf_enables(base));
     return 0;
 }
 
 /**
- * @brief SHOW ARP: ARP leaf status.
+ * @brief SHOW ARP: ARP responder counters.
  * @param ctx Unused.
  * @return 0.
  */
 int cli_show_arp(const MenuCommandContext *ctx)
 {
+    rtlnet_arp_counters_t k;
     (void)ctx;
-    (void)cli_core_check(&g_core_arp);
+    if (!cli_core_check(&g_core_arp)) {
+        return 0;
+    }
+    rtlnet_arp_read_counters(RTLNET_PLAT_ARP_BASE, &k);
+    fmt_printf("ARP responder %s: requests for us %u, replies sent %u, ignored %u, reply delay %u proto_clk cycles\n",
+               (rtlnet_arp_get_status(RTLNET_PLAT_ARP_BASE) & RTLNET_ARP_STATUS_ENABLED) ? "enabled" : "disabled",
+               (unsigned)k.requests_for_us, (unsigned)k.replies_sent, (unsigned)k.ignored,
+               (unsigned)rtlnet_arp_get_reply_delay_cycles(RTLNET_PLAT_ARP_BASE));
     return 0;
 }
 
 /**
- * @brief SHOW DHCP: DHCP leaf status.
+ * @brief SHOW DHCP: client state, lease and counters.
  * @param ctx Unused.
  * @return 0.
  */
 int cli_show_dhcp(const MenuCommandContext *ctx)
 {
+    rtlnet_dhcp_lease_t l;
+    rtlnet_dhcp_counters_t k;
+    char a[16];
+    char m[16];
+    char r[16];
+    char s[16];
     (void)ctx;
-    (void)cli_core_check(&g_core_dhcp);
+    if (!cli_core_check(&g_core_dhcp)) {
+        return 0;
+    }
+    (void)rtlnet_dhcp_read_lease(RTLNET_PLAT_DHCP_BASE, &l);
+    (void)rtlnet_dhcp_read_counters(RTLNET_PLAT_DHCP_BASE, &k);
+    fmt_printf("DHCP client: state %s%s%s, auto-start %s, xid 0x%08X\n", rtlnet_dhcp_state_name(l.state),
+               l.bound ? ", bound" : "", l.fail ? ", last attempt failed" : "", l.auto_start ? "on" : "off",
+               (unsigned)l.xid);
+    if (l.bound) {
+        fmt_printf("  Lease           : %s mask %s router %s server %s\n", cli_ipv4_text(l.lease_ip, a),
+                   cli_ipv4_text(l.lease_mask, m), cli_ipv4_text(l.lease_router, r), cli_ipv4_text(l.lease_server, s));
+        fmt_printf("  Lease time      : %u s, elapsed %u s\n", (unsigned)l.lease_time_s, (unsigned)l.lease_elapsed_s);
+    }
+    fmt_printf("  Counters        : discover %u, offer %u, request %u, ack %u, nak %u, lost %u, release %u\n",
+               (unsigned)k.discovers_sent, (unsigned)k.offers_rx, (unsigned)k.requests_sent, (unsigned)k.acks_rx,
+               (unsigned)k.naks_rx, (unsigned)k.leases_lost, (unsigned)k.releases_sent);
     return 0;
 }
 
 /**
- * @brief SHOW IPERF: iperf leaf status.
+ * @brief SHOW IPERF: server port and statistics of the last flow.
  * @param ctx Unused.
  * @return 0.
  */
 int cli_show_iperf(const MenuCommandContext *ctx)
 {
+    rtlnet_iperf_stats_t st;
     (void)ctx;
-    (void)cli_core_check(&g_core_iperf);
+    if (!cli_core_check(&g_core_iperf)) {
+        return 0;
+    }
+    (void)rtlnet_iperf_read_stats(RTLNET_PLAT_IPERF_BASE, &st);
+    fmt_printf("iperf server on UDP port %u%s%s, reverse (-R) %s\n", (unsigned)st.udp_port,
+               st.rx_active ? ", receiving" : "", st.tx_active ? ", sending" : "", st.reverse_allowed ? "allowed" : "off");
+    fmt_printf("  Last flow       : %u datagrams, %u bytes (low word), lost %u, out of order %u, jitter %u.%04u us\n",
+               (unsigned)st.rx_datagrams, (unsigned)(uint32_t)st.rx_bytes, (unsigned)st.rx_lost,
+               (unsigned)st.rx_outoforder, (unsigned)(st.jitter_us16 / 16u), (unsigned)((st.jitter_us16 % 16u) * 625u));
+    fmt_printf("  Duration        : %u us, requested rate %u b/s, reverse datagrams %u, reports %u\n",
+               (unsigned)st.last_duration_us, (unsigned)st.req_rate_bps, (unsigned)st.tx_datagrams,
+               (unsigned)st.reports_sent);
     return 0;
 }
 
 /**
- * @brief SHOW SOCKETS: UDP socket leaf status and the socket table.
+ * @brief SHOW SOCKETS: socket table from the hardware, UDP echo and the
+ *        socket-layer counters.
  * @param ctx Unused.
  * @return 0.
  */
 int cli_show_sockets(const MenuCommandContext *ctx)
 {
+    rtlnet_udp_socket_counters_t k;
+    rtlnet_udp_echo_config_t ec;
+    rtlnet_udp_echo_counters_t ek;
     char r[16];
+    char mt[18];
     (void)ctx;
-    (void)cli_core_check(&g_core_udp);
-    fmt_printf("Sock  State   Local  Remote           Port   Connect-on-receive\n");
-    for (unsigned i = 0; i < CLI_NUM_SOCKETS; i++) {
-        const cli_socket_cfg_t *k = &g_cfg.sock[i];
-        fmt_printf("%-4u  %-6s  %-5u  %-15s  %-5u  %s\n", i, k->open ? "open" : "closed", (unsigned)k->local_port,
-                   cli_ipv4_text(k->remote_ip, r), (unsigned)k->remote_port, k->connect_on_receive ? "yes" : "no");
+    if (!cli_core_check(&g_core_udp)) {
+        return 0;
+    }
+    fmt_printf("Sock  State   Local  Remote           Port   Next-hop MAC       Conn  RX      TX      Drops\n");
+    for (unsigned i = 0; i < NETMGR_NUM_SOCKETS; i++) {
+        rtlnet_udp_socket_config_t sc;
+        rtlnet_udp_socket_remote_t rm;
+        rtlnet_udp_socket_sock_counters_t sk;
+        if (rtlnet_udp_socket_get_config(RTLNET_PLAT_UDP_BASE, i, &sc) != 0 ||
+            rtlnet_udp_socket_get_remote(RTLNET_PLAT_UDP_BASE, i, &rm) != 0 ||
+            rtlnet_udp_socket_read_sock_counters(RTLNET_PLAT_UDP_BASE, i, &sk) != 0) {
+            continue;
+        }
+        fmt_printf("%-4u  %-6s  %-5u  %-15s  %-5u  %s  %-4s  %-6u  %-6u  %u\n", i, sc.enabled ? "open" : "closed",
+                   (unsigned)sc.local_port, cli_ipv4_text(rm.ip, r), (unsigned)rm.port, cli_mac_text(rm.mac, mt),
+                   sc.connect_on_rx ? "yes" : "no", (unsigned)sk.rx_datagrams, (unsigned)sk.tx_datagrams,
+                   (unsigned)(sk.rx_drops + sk.tx_drops));
+    }
+    (void)rtlnet_udp_socket_read_counters(RTLNET_PLAT_UDP_BASE, &k);
+    fmt_printf("Socket layer      : rx %u, no socket %u, bad %u, fifo drops %u, tx frames %u, tx drops %u\n",
+               (unsigned)k.rx_datagrams, (unsigned)k.rx_no_socket, (unsigned)k.rx_bad, (unsigned)k.rx_fifo_drops,
+               (unsigned)k.tx_frames, (unsigned)k.tx_drops);
+    if (cli_core_check(&g_core_echo) && rtlnet_udp_echo_get_config(RTLNET_PLAT_ECHO_BASE, &ec) == 0 &&
+        rtlnet_udp_echo_read_counters(RTLNET_PLAT_ECHO_BASE, &ek) == 0) {
+        fmt_printf("UDP echo          : %s on ", ec.enabled ? "enabled" : "disabled");
+        if (ec.socket_any) {
+            fmt_printf("any socket");
+        } else {
+            fmt_printf("socket %u", (unsigned)ec.socket);
+        }
+        fmt_printf(", echoed %u datagrams / %u bytes, discarded %u\n", (unsigned)ek.echoed_datagrams,
+                   (unsigned)ek.echoed_bytes, (unsigned)ek.discarded);
     }
     return 0;
 }
 
 /**
- * @brief SHOW COUNTERS: MAC and protocol core status.
+ * @brief SHOW COUNTERS: frame counters of every core.
  * @param ctx Unused.
  * @return 0.
  */
 int cli_show_counters(const MenuCommandContext *ctx)
 {
     (void)ctx;
-    (void)cli_core_check(&g_core_mac);
-    (void)cli_core_check(&g_core_prot);
+    if (cli_core_check(&g_core_mac)) {
+        rtlnet_eth_mac_counters_t k;
+        rtlnet_eth_mac_read_counters(RTLNET_PLAT_MAC_BASE, &k);
+        fmt_printf("MAC               : rx good %u, rx bad %u, rx overflow %u, tx %u\n", (unsigned)k.rx_good,
+                   (unsigned)k.rx_bad, (unsigned)k.rx_overflow, (unsigned)k.tx_frames);
+    }
+    if (cli_core_check(&g_core_prot)) {
+        rtlnet_eth_protocol_counters_t k;
+        rtlnet_eth_protocol_read_counters(RTLNET_PLAT_PROT_BASE, &k);
+        fmt_printf("Protocol          : ingress %u, filtered %u, dropped %u, egress %u\n", (unsigned)k.ingress_frames,
+                   (unsigned)k.ingress_filtered, (unsigned)k.ingress_dropped, (unsigned)k.egress_frames);
+    }
+    if (cli_core_check(&g_core_arp)) {
+        rtlnet_arp_counters_t k;
+        rtlnet_arp_read_counters(RTLNET_PLAT_ARP_BASE, &k);
+        fmt_printf("ARP               : requests %u, replies %u, ignored %u\n", (unsigned)k.requests_for_us,
+                   (unsigned)k.replies_sent, (unsigned)k.ignored);
+    }
+    if (cli_core_check(&g_core_icmp)) {
+        rtlnet_icmp_counters_t k;
+        rtlnet_icmp_read_counters(RTLNET_PLAT_ICMP_BASE, &k);
+        fmt_printf("ICMP              : echo requests %u, replies %u, bad checksum %u, bad size %u (max payload %u)\n",
+                   (unsigned)k.echo_requests, (unsigned)k.echo_replies, (unsigned)k.dropped_checksum,
+                   (unsigned)k.dropped_size, (unsigned)rtlnet_icmp_get_max_payload(RTLNET_PLAT_ICMP_BASE));
+    }
+    if (cli_core_check(&g_core_dhcp)) {
+        rtlnet_dhcp_counters_t k;
+        (void)rtlnet_dhcp_read_counters(RTLNET_PLAT_DHCP_BASE, &k);
+        fmt_printf("DHCP              : discover %u, offer %u, request %u, ack %u, nak %u\n", (unsigned)k.discovers_sent,
+                   (unsigned)k.offers_rx, (unsigned)k.requests_sent, (unsigned)k.acks_rx, (unsigned)k.naks_rx);
+    }
+    if (cli_core_check(&g_core_iperf)) {
+        rtlnet_iperf_stats_t st;
+        (void)rtlnet_iperf_read_stats(RTLNET_PLAT_IPERF_BASE, &st);
+        fmt_printf("iperf             : datagrams %u, lost %u, reports %u\n", (unsigned)st.rx_datagrams,
+                   (unsigned)st.rx_lost, (unsigned)st.reports_sent);
+    }
+    if (cli_core_check(&g_core_udp)) {
+        rtlnet_udp_socket_counters_t k;
+        (void)rtlnet_udp_socket_read_counters(RTLNET_PLAT_UDP_BASE, &k);
+        fmt_printf("UDP sockets       : rx %u, no socket %u, bad %u, tx %u, tx drops %u\n", (unsigned)k.rx_datagrams,
+                   (unsigned)k.rx_no_socket, (unsigned)k.rx_bad, (unsigned)k.tx_frames, (unsigned)k.tx_drops);
+    }
+    if (cli_core_check(&g_core_echo)) {
+        rtlnet_udp_echo_counters_t k;
+        (void)rtlnet_udp_echo_read_counters(RTLNET_PLAT_ECHO_BASE, &k);
+        fmt_printf("UDP echo          : echoed %u datagrams / %u bytes, discarded %u\n", (unsigned)k.echoed_datagrams,
+                   (unsigned)k.echoed_bytes, (unsigned)k.discarded);
+    }
     return 0;
 }
 
@@ -585,30 +882,37 @@ int cli_show_counters(const MenuCommandContext *ctx)
  */
 int cli_show_running(const MenuCommandContext *ctx)
 {
+    const netmgr_config_t *c = netmgr_config();
     char a[16];
     char m[16];
+    char mt[18];
     (void)ctx;
     fmt_printf("!\n! RTLNet running configuration\n!\ninterface eth0\n");
-    if (g_cfg.speed_mbps == CLI_SPEED_AUTO) {
+    if (c->speed_mbps == 0u) {
         fmt_printf(" speed auto\n");
     } else {
-        fmt_printf(" speed %u\n", (unsigned)g_cfg.speed_mbps);
+        fmt_printf(" speed %u\n", (unsigned)c->speed_mbps);
     }
-    fmt_printf(" %sautoneg\n", g_cfg.autoneg ? "" : "no ");
-    fmt_printf(" %sshutdown\n", g_cfg.shutdown ? "" : "no ");
-    if (g_cfg.has_ip) {
-        fmt_printf(" ip address %s %s\n", cli_ipv4_text(g_cfg.ip, a), cli_ipv4_text(g_cfg.mask, m));
+    fmt_printf(" duplex %s\n", (c->duplex == NETMGR_DUPLEX_FULL) ? "full" :
+               (c->duplex == NETMGR_DUPLEX_HALF) ? "half" : "auto");
+    fmt_printf(" %sautoneg\n", c->autoneg ? "" : "no ");
+    if (c->adv_mask != 0u) {
+        fmt_printf(" advertise ");
+        cli_print_adv(c->adv_mask);
+        fmt_printf("\n");
+    }
+    fmt_printf(" %sshutdown\n", c->shutdown ? "" : "no ");
+    fmt_printf(" mac-address %s\n", cli_mac_text(c->mac, mt));
+    if (c->static_ip != 0u) {
+        fmt_printf(" ip address %s %s\n", cli_ipv4_text(c->static_ip, a), cli_ipv4_text(c->netmask, m));
     } else {
         fmt_printf(" no ip address\n");
     }
-    fmt_printf("!\n");
-    if (g_cfg.gateway != 0u) {
-        fmt_printf("ip default-gateway %s\n!\n", cli_ipv4_text(g_cfg.gateway, a));
-    }
-    fmt_printf("ip dhcp\n %sauto\n!\n", g_cfg.dhcp_auto ? "" : "no ");
-    for (unsigned i = 0; i < CLI_NUM_SOCKETS; i++) {
-        const cli_socket_cfg_t *k = &g_cfg.sock[i];
-        if (!k->open && k->remote_ip == 0u && !k->connect_on_receive) {
+    fmt_printf("!\nip default-gateway %s\n!\n", cli_ipv4_text(c->gateway, a));
+    fmt_printf("ip dhcp\n %sauto\n!\n", c->dhcp_auto ? "" : "no ");
+    for (unsigned i = 0; i < NETMGR_NUM_SOCKETS; i++) {
+        const netmgr_socket_cfg_t *k = &c->sock[i];
+        if (!k->open && k->remote_ip == 0u && !k->connect_on_rx) {
             continue;
         }
         fmt_printf("socket %u\n", i);
@@ -616,23 +920,21 @@ int cli_show_running(const MenuCommandContext *ctx)
             fmt_printf(" open %u\n", (unsigned)k->local_port);
         }
         if (k->remote_ip != 0u) {
-            fmt_printf(" remote %s %u\n", cli_ipv4_text(k->remote_ip, a), (unsigned)k->remote_port);
+            fmt_printf(" remote %s %u %s\n", cli_ipv4_text(k->remote_ip, a), (unsigned)k->remote_port,
+                       cli_mac_text(k->remote_mac, mt));
         }
-        if (k->connect_on_receive) {
+        if (k->connect_on_rx) {
             fmt_printf(" connect-on-receive\n");
         }
         fmt_printf("!\n");
     }
-    if (g_cfg.echo_enable) {
-        if (g_cfg.echo_socket < 0) {
-            fmt_printf("echo enable\n");
-        } else {
-            fmt_printf("echo enable %d\n", g_cfg.echo_socket);
-        }
+    if (c->echo_socket < 0) {
+        fmt_printf("echo socket any\n");
     } else {
-        fmt_printf("no echo enable\n");
+        fmt_printf("echo socket %d\n", c->echo_socket);
     }
-    fmt_printf("end\n");
+    fmt_printf("%secho enable\n", c->echo_enable ? "" : "no ");
+    fmt_printf("iperf port %u\nend\n", (unsigned)c->iperf_port);
     return 0;
 }
 
@@ -707,6 +1009,132 @@ int cli_debug_write(const MenuCommandContext *ctx)
 }
 
 /**
+ * @brief Parse a PHY register number 0..31.
+ * @param s   Text.
+ * @param reg Parsed register.
+ * @return 0, or -1 (message printed).
+ */
+static int cli_parse_phy_reg(const char *s, uint8_t *reg)
+{
+    uint32_t v;
+    if (cli_parse_u32(s, &v) != 0 || v > CLI_PHY_REG_MAX) {
+        return cli_bad_value("PHY register (0..31)", s);
+    }
+    *reg = (uint8_t)v;
+    return 0;
+}
+
+/**
+ * @brief PHY READ [REG]: one Clause 22 read.
+ * @param ctx argv[0] = register.
+ * @return 0, or -1 on a bad register or an MDIO error.
+ */
+int cli_phy_read(const MenuCommandContext *ctx)
+{
+    const rtlnet_mdio_t *m = cli_phy_bus();
+    uint8_t reg;
+    uint16_t v = 0u;
+    int rc;
+    if (m == NULL || cli_parse_phy_reg(ctx->argv[0], &reg) != 0) {
+        return -1;
+    }
+    rc = rtlnet_mdio_read(m, reg, &v);
+    if (rc != RTLNET_MDIO_OK) {
+        return cli_rc("MDIO read", rc);
+    }
+    fmt_printf("PHY %u reg %u = 0x%04X\n", (unsigned)m->phy_addr, (unsigned)reg, (unsigned)v);
+    return 0;
+}
+
+/**
+ * @brief PHY WRITE [REG] [VALUE]: one Clause 22 write, then read back.
+ * @param ctx argv[0] = register, argv[1] = 16-bit value.
+ * @return 0, or -1 on a bad argument or an MDIO error.
+ */
+int cli_phy_write(const MenuCommandContext *ctx)
+{
+    const rtlnet_mdio_t *m = cli_phy_bus();
+    uint8_t reg;
+    uint32_t v;
+    uint16_t rb = 0u;
+    if (m == NULL || cli_parse_phy_reg(ctx->argv[0], &reg) != 0) {
+        return -1;
+    }
+    if (cli_parse_u32(ctx->argv[1], &v) != 0 || v > 0xFFFFu) {
+        return cli_bad_value("16-bit value", ctx->argv[1]);
+    }
+    if (cli_rc("MDIO write", rtlnet_mdio_write(m, reg, (uint16_t)v)) != 0) {
+        return -1;
+    }
+    (void)rtlnet_mdio_read(m, reg, &rb);
+    fmt_printf("PHY %u reg %u <- 0x%04X (reads back 0x%04X)\n", (unsigned)m->phy_addr, (unsigned)reg, (unsigned)v,
+               (unsigned)rb);
+    return 0;
+}
+
+/**
+ * @brief PHY DUMP: registers 0..31 of the current page.
+ * @param ctx Unused.
+ * @return 0, or -1 on an MDIO error.
+ */
+int cli_phy_dump(const MenuCommandContext *ctx)
+{
+    const rtlnet_mdio_t *m = cli_phy_bus();
+    uint16_t regs[RTLNET_PHY_NUM_REGS];
+    (void)ctx;
+    if (m == NULL) {
+        return -1;
+    }
+    if (cli_rc("PHY dump", rtlnet_phy_rtl8211e_dump(m, regs)) != 0) {
+        return -1;
+    }
+    for (unsigned r = 0; r < RTLNET_PHY_NUM_REGS; r++) {
+        fmt_printf("%s%2u: %04X", (r % 8u) == 0u ? "  " : "   ", r, (unsigned)regs[r]);
+        if ((r % 8u) == 7u) {
+            fmt_printf("\n");
+        }
+    }
+    return 0;
+}
+
+/**
+ * @brief CLEAR COUNTERS: clear the counters of every present core.
+ * @param ctx Unused.
+ * @return 0.
+ */
+int cli_clear_counters(const MenuCommandContext *ctx)
+{
+    const netmgr_present_t *p = netmgr_present();
+    (void)ctx;
+    if (p->mac) {
+        rtlnet_eth_mac_clear_counters(RTLNET_PLAT_MAC_BASE);
+    }
+    if (p->prot) {
+        rtlnet_eth_protocol_clear_counters(RTLNET_PLAT_PROT_BASE);
+    }
+    if (p->arp) {
+        rtlnet_arp_clear_counters(RTLNET_PLAT_ARP_BASE);
+    }
+    if (p->icmp) {
+        rtlnet_icmp_clear_counters(RTLNET_PLAT_ICMP_BASE);
+    }
+    if (p->dhcp) {
+        rtlnet_dhcp_clear_counters(RTLNET_PLAT_DHCP_BASE);
+    }
+    if (p->iperf) {
+        rtlnet_iperf_clear_counters(RTLNET_PLAT_IPERF_BASE);
+    }
+    if (p->udp) {
+        rtlnet_udp_socket_clear_counters(RTLNET_PLAT_UDP_BASE);
+    }
+    if (p->echo) {
+        rtlnet_udp_echo_clear_counters(RTLNET_PLAT_ECHO_BASE);
+    }
+    fmt_printf("Counters cleared\n");
+    return 0;
+}
+
+/**
  * @brief Common part of LED [N] ON / OFF.
  * @param s  LED index text.
  * @param on 1 on, 0 off.
@@ -775,8 +1203,10 @@ int cli_ip_gateway(const MenuCommandContext *ctx)
     if (cli_parse_ipv4(ctx->argv[0], &a) != 0) {
         return cli_bad_value("IPv4 address", ctx->argv[0]);
     }
-    g_cfg.gateway = a;
-    cli_config_note(&g_core_prot);
+    netmgr_config()->gateway = a;
+    if (cli_config_core(&g_core_prot)) {
+        netmgr_apply_addresses();
+    }
     return 0;
 }
 
@@ -788,29 +1218,48 @@ int cli_ip_gateway(const MenuCommandContext *ctx)
 int cli_no_ip_gateway(const MenuCommandContext *ctx)
 {
     (void)ctx;
-    g_cfg.gateway = 0u;
-    cli_config_note(&g_core_prot);
+    netmgr_config()->gateway = 0u;
+    if (cli_config_core(&g_core_prot)) {
+        netmgr_apply_addresses();
+    }
     return 0;
 }
 
 /**
- * @brief ECHO ENABLE {SOCKET}: UDP echo on every socket or on one.
- * @param ctx argv[0] = optional socket index.
+ * @brief Parse a socket index 0..3 or "any" (-1).
+ * @param s   Text.
+ * @param out Index, -1 for any.
+ * @return 0, or -1 (message printed).
+ */
+static int cli_parse_echo_socket(const char *s, int *out)
+{
+    uint32_t v;
+    if (cli_word_is(s, "any")) {
+        *out = -1;
+        return 0;
+    }
+    if (cli_parse_u32(s, &v) != 0 || v >= NETMGR_NUM_SOCKETS) {
+        return cli_bad_value("socket index (0..3 or any)", s);
+    }
+    *out = (int)v;
+    return 0;
+}
+
+/**
+ * @brief ECHO ENABLE {SOCKET}: UDP echo on the configured socket or the one given.
+ * @param ctx argv[0] = optional socket index or "any".
  * @return 0, or -1 for a bad socket index.
  */
 int cli_echo_enable(const MenuCommandContext *ctx)
 {
-    int sock = -1;
-    if (ctx->argc > 0) {
-        uint32_t v;
-        if (cli_parse_u32(ctx->argv[0], &v) != 0 || v >= CLI_NUM_SOCKETS) {
-            return cli_bad_value("socket index (0..3)", ctx->argv[0]);
-        }
-        sock = (int)v;
+    netmgr_config_t *c = netmgr_config();
+    if (ctx->argc > 0 && cli_parse_echo_socket(ctx->argv[0], &c->echo_socket) != 0) {
+        return -1;
     }
-    g_cfg.echo_enable = 1;
-    g_cfg.echo_socket = sock;
-    cli_config_note(&g_core_echo);
+    c->echo_enable = 1;
+    if (cli_config_core(&g_core_echo)) {
+        return cli_rc("UDP echo", netmgr_apply_echo());
+    }
     return 0;
 }
 
@@ -822,8 +1271,44 @@ int cli_echo_enable(const MenuCommandContext *ctx)
 int cli_no_echo_enable(const MenuCommandContext *ctx)
 {
     (void)ctx;
-    g_cfg.echo_enable = 0;
-    cli_config_note(&g_core_echo);
+    netmgr_config()->echo_enable = 0;
+    if (cli_config_core(&g_core_echo)) {
+        return cli_rc("UDP echo", netmgr_apply_echo());
+    }
+    return 0;
+}
+
+/**
+ * @brief ECHO SOCKET [INDEX]: socket the echo server answers on.
+ * @param ctx argv[0] = 0..3 or "any".
+ * @return 0, or -1 for a bad index.
+ */
+int cli_echo_socket(const MenuCommandContext *ctx)
+{
+    if (cli_parse_echo_socket(ctx->argv[0], &netmgr_config()->echo_socket) != 0) {
+        return -1;
+    }
+    if (cli_config_core(&g_core_echo)) {
+        return cli_rc("UDP echo", netmgr_apply_echo());
+    }
+    return 0;
+}
+
+/**
+ * @brief IPERF PORT [PORT]: iperf server UDP port.
+ * @param ctx argv[0] = port 1..65535.
+ * @return 0, or -1 for a bad port.
+ */
+int cli_iperf_port(const MenuCommandContext *ctx)
+{
+    uint32_t p;
+    if (cli_parse_u32(ctx->argv[0], &p) != 0 || p == 0u || p > CLI_UDP_PORT_MAX) {
+        return cli_bad_value("UDP port (1..65535)", ctx->argv[0]);
+    }
+    netmgr_config()->iperf_port = p;
+    if (cli_config_core(&g_core_iperf)) {
+        return cli_rc("iperf port", netmgr_apply_iperf());
+    }
     return 0;
 }
 
@@ -832,61 +1317,160 @@ int cli_no_echo_enable(const MenuCommandContext *ctx)
 /* ------------------------------------------------------------------------- */
 
 /**
+ * @brief Apply the PHY settings when the PHY is there.
+ * @return 0, or -1 on a driver error.
+ */
+static int cli_apply_phy(void)
+{
+    if (!cli_config_core(&g_core_mdio)) {
+        return 0;
+    }
+    if (!netmgr_present()->phy) {
+        fmt_printf("%% PHY did not answer; setting kept in the running configuration\n");
+        return 0;
+    }
+    return cli_rc("PHY configuration", netmgr_apply_phy());
+}
+
+/**
  * @brief SPEED [MBPS]: 10, 100, 1000 or auto.
  * @param ctx argv[0] = speed.
- * @return 0, or -1 for another value.
+ * @return 0, or -1 for another value (1000 needs auto-negotiation).
  */
 int cli_if_speed(const MenuCommandContext *ctx)
 {
-    const char *s = ctx->argv[0];
+    netmgr_config_t *c = netmgr_config();
     uint32_t v;
-    if (s != NULL && (s[0] == 'a' || s[0] == 'A') && (s[1] == 'u' || s[1] == 'U') && (s[2] == 't' || s[2] == 'T') &&
-        (s[3] == 'o' || s[3] == 'O') && s[4] == '\0') {
-        v = CLI_SPEED_AUTO;
-    } else if (cli_parse_u32(s, &v) != 0 || (v != 10u && v != 100u && v != 1000u)) {
-        return cli_bad_value("speed (10, 100, 1000, auto)", s);
+    if (cli_word_is(ctx->argv[0], "auto")) {
+        v = 0u;
+    } else if (cli_parse_u32(ctx->argv[0], &v) != 0 || (v != 10u && v != 100u && v != 1000u)) {
+        return cli_bad_value("speed (10, 100, 1000, auto)", ctx->argv[0]);
     }
-    g_cfg.speed_mbps = v;
-    cli_config_note(&g_core_mdio);
-    return 0;
+    if (!c->autoneg && (v == 0u || v == 1000u)) {
+        fmt_printf("%% With autoneg off the speed must be 10 or 100\n");
+        return -1;
+    }
+    c->speed_mbps = v;
+    return cli_apply_phy();
+}
+
+/**
+ * @brief DUPLEX [MODE]: full, half or auto.
+ * @param ctx argv[0] = mode.
+ * @return 0, or -1 for another value.
+ */
+int cli_if_duplex(const MenuCommandContext *ctx)
+{
+    netmgr_config_t *c = netmgr_config();
+    if (cli_word_is(ctx->argv[0], "full")) {
+        c->duplex = NETMGR_DUPLEX_FULL;
+    } else if (cli_word_is(ctx->argv[0], "half")) {
+        c->duplex = NETMGR_DUPLEX_HALF;
+        fmt_printf("%% Note: the MAC runs full duplex only\n");
+    } else if (cli_word_is(ctx->argv[0], "auto")) {
+        c->duplex = NETMGR_DUPLEX_AUTO;
+    } else {
+        return cli_bad_value("duplex (full, half, auto)", ctx->argv[0]);
+    }
+    return cli_apply_phy();
 }
 
 /**
  * @brief AUTONEG.
  * @param ctx Unused.
- * @return 0.
+ * @return 0, or -1 on a driver error.
  */
 int cli_if_autoneg(const MenuCommandContext *ctx)
 {
     (void)ctx;
-    g_cfg.autoneg = 1;
-    cli_config_note(&g_core_mdio);
-    return 0;
+    netmgr_config()->autoneg = 1;
+    return cli_apply_phy();
 }
 
 /**
- * @brief NO AUTONEG.
+ * @brief NO AUTONEG: forced 10 or 100 Mb/s (default 100 when speed is auto/1000).
  * @param ctx Unused.
- * @return 0.
+ * @return 0, or -1 on a driver error.
  */
 int cli_if_no_autoneg(const MenuCommandContext *ctx)
 {
+    netmgr_config_t *c = netmgr_config();
     (void)ctx;
-    g_cfg.autoneg = 0;
-    cli_config_note(&g_core_mdio);
-    return 0;
+    c->autoneg = 0;
+    if (c->speed_mbps != 10u && c->speed_mbps != 100u) {
+        c->speed_mbps = 100u;
+        fmt_printf("%% Forced speed 100 Mb/s\n");
+    }
+    return cli_apply_phy();
 }
 
 /**
- * @brief SHUTDOWN.
+ * @brief ADVERTISE [MODES]: explicit advertisement, a comma list of
+ *        10h,10f,100h,100f,1000h,1000f, or "all".
+ * @param ctx argv[0] = list.
+ * @return 0, or -1 for a bad list.
+ */
+int cli_if_advertise(const MenuCommandContext *ctx)
+{
+    static const char *const names[6] = { "10h", "10f", "100h", "100f", "1000h", "1000f" };
+    const char *s = ctx->argv[0];
+    uint32_t mask = 0u;
+    if (cli_word_is(s, "all")) {
+        mask = RTLNET_PHY_ADV_ALL;
+    } else {
+        while (s != NULL && *s != '\0') {
+            char word[8];
+            unsigned n = 0;
+            int hit = 0;
+            while (*s != '\0' && *s != ',' && n < sizeof(word) - 1u) {
+                word[n++] = *s++;
+            }
+            word[n] = '\0';
+            if (*s == ',') {
+                s++;
+            }
+            for (unsigned i = 0; i < 6u; i++) {
+                if (cli_word_is(word, names[i])) {
+                    mask |= 1u << i;
+                    hit = 1;
+                }
+            }
+            if (!hit) {
+                return cli_bad_value("advertise mode (10h,10f,100h,100f,1000h,1000f,all)", word);
+            }
+        }
+    }
+    if (mask == 0u) {
+        return cli_bad_value("advertise list", ctx->argv[0]);
+    }
+    netmgr_config()->adv_mask = mask;
+    return cli_apply_phy();
+}
+
+/**
+ * @brief NO ADVERTISE: advertisement derived from speed and duplex.
+ * @param ctx Unused.
+ * @return 0, or -1 on a driver error.
+ */
+int cli_if_no_advertise(const MenuCommandContext *ctx)
+{
+    (void)ctx;
+    netmgr_config()->adv_mask = 0u;
+    return cli_apply_phy();
+}
+
+/**
+ * @brief SHUTDOWN: MAC receive and transmit off.
  * @param ctx Unused.
  * @return 0.
  */
 int cli_if_shutdown(const MenuCommandContext *ctx)
 {
     (void)ctx;
-    g_cfg.shutdown = 1;
-    cli_config_note(&g_core_mac);
+    netmgr_config()->shutdown = 1;
+    if (cli_config_core(&g_core_mac)) {
+        netmgr_apply_shutdown();
+    }
     return 0;
 }
 
@@ -898,13 +1482,15 @@ int cli_if_shutdown(const MenuCommandContext *ctx)
 int cli_if_no_shutdown(const MenuCommandContext *ctx)
 {
     (void)ctx;
-    g_cfg.shutdown = 0;
-    cli_config_note(&g_core_mac);
+    netmgr_config()->shutdown = 0;
+    if (cli_config_core(&g_core_mac)) {
+        netmgr_apply_shutdown();
+    }
     return 0;
 }
 
 /**
- * @brief IP ADDRESS [ADDR] [MASK].
+ * @brief IP ADDRESS [ADDR] [MASK]: static address (used when no lease is held).
  * @param ctx argv[0] = address, argv[1] = mask.
  * @return 0, or -1 for a malformed address or mask.
  */
@@ -918,23 +1504,64 @@ int cli_if_ip_address(const MenuCommandContext *ctx)
     if (cli_parse_ipv4(ctx->argv[1], &m) != 0) {
         return cli_bad_value("IPv4 mask", ctx->argv[1]);
     }
-    g_cfg.has_ip = 1;
-    g_cfg.ip     = a;
-    g_cfg.mask   = m;
-    cli_config_note(&g_core_prot);
+    netmgr_config()->static_ip = a;
+    netmgr_config()->netmask = m;
+    if (cli_config_core(&g_core_prot)) {
+        netmgr_apply_addresses();
+    }
     return 0;
 }
 
 /**
- * @brief NO IP ADDRESS.
+ * @brief NO IP ADDRESS: static address 0.0.0.0 (only a lease gives an address).
  * @param ctx Unused.
  * @return 0.
  */
 int cli_if_no_ip_address(const MenuCommandContext *ctx)
 {
     (void)ctx;
-    g_cfg.has_ip = 0;
-    cli_config_note(&g_core_prot);
+    netmgr_config()->static_ip = 0u;
+    if (cli_config_core(&g_core_prot)) {
+        netmgr_apply_addresses();
+    }
+    return 0;
+}
+
+/**
+ * @brief IP NETMASK [MASK].
+ * @param ctx argv[0] = mask.
+ * @return 0, or -1 for a malformed mask.
+ */
+int cli_if_ip_netmask(const MenuCommandContext *ctx)
+{
+    uint32_t m;
+    if (cli_parse_ipv4(ctx->argv[0], &m) != 0) {
+        return cli_bad_value("IPv4 mask", ctx->argv[0]);
+    }
+    netmgr_config()->netmask = m;
+    if (cli_config_core(&g_core_prot)) {
+        netmgr_apply_addresses();
+    }
+    return 0;
+}
+
+/**
+ * @brief MAC-ADDRESS [MAC]: node MAC address (protocol wrapper filter and replies).
+ * @param ctx argv[0] = aa:bb:cc:dd:ee:ff.
+ * @return 0, or -1 for a malformed or multicast address.
+ */
+int cli_if_mac(const MenuCommandContext *ctx)
+{
+    uint8_t mac[6];
+    if (cli_parse_mac(ctx->argv[0], mac) != 0 || (mac[0] & 1u) != 0u) {
+        return cli_bad_value("unicast MAC address", ctx->argv[0]);
+    }
+    for (unsigned i = 0; i < 6u; i++) {
+        netmgr_config()->mac[i] = mac[i];
+    }
+    if (cli_config_core(&g_core_prot)) {
+        netmgr_apply_addresses();
+    }
     return 0;
 }
 
@@ -943,25 +1570,51 @@ int cli_if_no_ip_address(const MenuCommandContext *ctx)
 /* ------------------------------------------------------------------------- */
 
 /**
- * @brief START: begin DHCP discovery.
+ * @brief START: begin DHCP discovery (new transaction).
  * @param ctx Unused.
  * @return 0 when the DHCP leaf is present, -1 otherwise.
  */
 int cli_dhcp_start(const MenuCommandContext *ctx)
 {
     (void)ctx;
-    return cli_core_check(&g_core_dhcp) ? 0 : -1;
+    if (!cli_core_check(&g_core_dhcp)) {
+        return -1;
+    }
+    rtlnet_dhcp_start(RTLNET_PLAT_DHCP_BASE);
+    fmt_printf("DHCP discovery started\n");
+    return 0;
 }
 
 /**
- * @brief STOP: stop the DHCP client.
+ * @brief STOP: stop the client (DHCPRELEASE when a lease is held).
  * @param ctx Unused.
  * @return 0 when the DHCP leaf is present, -1 otherwise.
  */
 int cli_dhcp_stop(const MenuCommandContext *ctx)
 {
     (void)ctx;
-    return cli_core_check(&g_core_dhcp) ? 0 : -1;
+    if (!cli_core_check(&g_core_dhcp)) {
+        return -1;
+    }
+    rtlnet_dhcp_stop(RTLNET_PLAT_DHCP_BASE);
+    fmt_printf("DHCP stopped\n");
+    return 0;
+}
+
+/**
+ * @brief RENEW: renew the lease now (when bound).
+ * @param ctx Unused.
+ * @return 0 when the DHCP leaf is present, -1 otherwise.
+ */
+int cli_dhcp_renew(const MenuCommandContext *ctx)
+{
+    (void)ctx;
+    if (!cli_core_check(&g_core_dhcp)) {
+        return -1;
+    }
+    rtlnet_dhcp_renew_now(RTLNET_PLAT_DHCP_BASE);
+    fmt_printf("DHCP renew requested\n");
+    return 0;
 }
 
 /**
@@ -972,8 +1625,10 @@ int cli_dhcp_stop(const MenuCommandContext *ctx)
 int cli_dhcp_auto(const MenuCommandContext *ctx)
 {
     (void)ctx;
-    g_cfg.dhcp_auto = 1;
-    cli_config_note(&g_core_dhcp);
+    netmgr_config()->dhcp_auto = 1;
+    if (cli_config_core(&g_core_dhcp)) {
+        netmgr_apply_dhcp_auto();
+    }
     return 0;
 }
 
@@ -985,14 +1640,28 @@ int cli_dhcp_auto(const MenuCommandContext *ctx)
 int cli_dhcp_no_auto(const MenuCommandContext *ctx)
 {
     (void)ctx;
-    g_cfg.dhcp_auto = 0;
-    cli_config_note(&g_core_dhcp);
+    netmgr_config()->dhcp_auto = 0;
+    if (cli_config_core(&g_core_dhcp)) {
+        netmgr_apply_dhcp_auto();
+    }
     return 0;
 }
 
 /* ------------------------------------------------------------------------- */
 /* UDP socket configuration                                                  */
 /* ------------------------------------------------------------------------- */
+
+/**
+ * @brief Apply the selected socket when the socket layer is there.
+ * @return 0, or -1 when the driver rejects it.
+ */
+static int cli_apply_socket(void)
+{
+    if (cli_config_core(&g_core_udp)) {
+        return cli_rc("socket configuration", netmgr_apply_socket(g_cur_sock));
+    }
+    return 0;
+}
 
 /**
  * @brief OPEN [PORT]: open the selected socket on a local port.
@@ -1005,10 +1674,9 @@ int cli_sock_open(const MenuCommandContext *ctx)
     if (cli_parse_u32(ctx->argv[0], &p) != 0 || p == 0u || p > CLI_UDP_PORT_MAX) {
         return cli_bad_value("UDP port (1..65535)", ctx->argv[0]);
     }
-    g_cfg.sock[g_cur_sock].open       = 1;
-    g_cfg.sock[g_cur_sock].local_port = p;
-    cli_config_note(&g_core_udp);
-    return 0;
+    netmgr_config()->sock[g_cur_sock].open       = 1;
+    netmgr_config()->sock[g_cur_sock].local_port = p;
+    return cli_apply_socket();
 }
 
 /**
@@ -1019,30 +1687,37 @@ int cli_sock_open(const MenuCommandContext *ctx)
 int cli_sock_close(const MenuCommandContext *ctx)
 {
     (void)ctx;
-    g_cfg.sock[g_cur_sock].open = 0;
-    cli_config_note(&g_core_udp);
-    return 0;
+    netmgr_config()->sock[g_cur_sock].open = 0;
+    return cli_apply_socket();
 }
 
 /**
- * @brief REMOTE [ADDR] [PORT]: remote endpoint of the selected socket.
- * @param ctx argv[0] = IPv4 address, argv[1] = UDP port.
- * @return 0, or -1 for a bad address or port.
+ * @brief REMOTE [ADDR] [PORT] {MAC}: remote endpoint of the selected socket
+ *        (the next-hop MAC is needed: the socket layer resolves no addresses).
+ * @param ctx argv[0] = IPv4 address, argv[1] = UDP port, argv[2] = optional MAC.
+ * @return 0, or -1 for a bad argument.
  */
 int cli_sock_remote(const MenuCommandContext *ctx)
 {
+    netmgr_socket_cfg_t *k = &netmgr_config()->sock[g_cur_sock];
     uint32_t a;
     uint32_t p;
+    uint8_t mac[6] = { 0u, 0u, 0u, 0u, 0u, 0u };
     if (cli_parse_ipv4(ctx->argv[0], &a) != 0) {
         return cli_bad_value("IPv4 address", ctx->argv[0]);
     }
     if (cli_parse_u32(ctx->argv[1], &p) != 0 || p == 0u || p > CLI_UDP_PORT_MAX) {
         return cli_bad_value("UDP port (1..65535)", ctx->argv[1]);
     }
-    g_cfg.sock[g_cur_sock].remote_ip   = a;
-    g_cfg.sock[g_cur_sock].remote_port = p;
-    cli_config_note(&g_core_udp);
-    return 0;
+    if (ctx->argc > 2 && cli_parse_mac(ctx->argv[2], mac) != 0) {
+        return cli_bad_value("MAC address", ctx->argv[2]);
+    }
+    k->remote_ip = a;
+    k->remote_port = p;
+    for (unsigned i = 0; i < 6u; i++) {
+        k->remote_mac[i] = mac[i];
+    }
+    return cli_apply_socket();
 }
 
 /**
@@ -1053,9 +1728,8 @@ int cli_sock_remote(const MenuCommandContext *ctx)
 int cli_sock_connect(const MenuCommandContext *ctx)
 {
     (void)ctx;
-    g_cfg.sock[g_cur_sock].connect_on_receive = 1;
-    cli_config_note(&g_core_udp);
-    return 0;
+    netmgr_config()->sock[g_cur_sock].connect_on_rx = 1;
+    return cli_apply_socket();
 }
 
 /**
@@ -1066,7 +1740,6 @@ int cli_sock_connect(const MenuCommandContext *ctx)
 int cli_sock_no_connect(const MenuCommandContext *ctx)
 {
     (void)ctx;
-    g_cfg.sock[g_cur_sock].connect_on_receive = 0;
-    cli_config_note(&g_core_udp);
-    return 0;
+    netmgr_config()->sock[g_cur_sock].connect_on_rx = 0;
+    return cli_apply_socket();
 }

@@ -134,6 +134,7 @@ int      Menu_ProcessLine(const char *line);
 void     Menu_InputChar(int c);
 void     Menu_PrintHelp(void);
 void     Menu_PrintPrompt(void);
+void     Menu_Redisplay(void);
 void     Menu_SetMode(MenuMode mode);
 MenuMode Menu_GetMode(void);
 const char *Menu_ModeName(MenuMode mode);
