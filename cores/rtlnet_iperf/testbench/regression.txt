@@ -1,0 +1,4 @@
+# rtlnet_iperf regression: <bench> <filelist> [tag] [defines=A,B] [plusargs=X,Y] [expectfail]
+tb_rtlnet_iperf   cores/rtlnet_iperf/testbench/tb_rtlnet_iperf.f
+tb_rtlnet_iperf   cores/rtlnet_iperf/testbench/tb_rtlnet_iperf.f  generic  defines=RTLNET_TECH_GENERIC
+tb_rtlnet_iperf   cores/rtlnet_iperf/testbench/tb_rtlnet_iperf.f  neg      plusargs=INJECT_FAILURE  expectfail

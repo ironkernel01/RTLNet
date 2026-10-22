@@ -1,0 +1,4 @@
+# rtlnet_dhcp regression: <bench> <filelist> [tag] [defines=A,B] [plusargs=X,Y] [expectfail]
+tb_rtlnet_dhcp   cores/rtlnet_dhcp/testbench/tb_rtlnet_dhcp.f
+tb_rtlnet_dhcp   cores/rtlnet_dhcp/testbench/tb_rtlnet_dhcp.f  generic  defines=RTLNET_TECH_GENERIC
+tb_rtlnet_dhcp   cores/rtlnet_dhcp/testbench/tb_rtlnet_dhcp.f  neg      plusargs=INJECT_FAILURE  expectfail
