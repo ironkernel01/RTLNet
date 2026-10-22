@@ -81,6 +81,9 @@ section 15 port lists). This page lists the rules a core must follow to be accep
 - Run: `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rtlnet_run_sim.ps1 -Bench <tb> -Filelist <f>`.
   The runner serializes the single Active-HDL seat machine-wide; just call it. Do not start the Active-HDL GUI.
 - Prove each new check can fail (perturb the bench once, see TEST FAIL, restore).
+- **Board-level benches never simulate the processor.** The CPU core is replaced by `microblaze/rtlnet_microblaze_sim_stub.sv`
+  (same ports): scripted AXI4-Lite register sequences do what firmware does, and frame source/sink tasks stand in for
+  the DMA streams. Firmware (lwIP, CLI) is verified on hardware and by the host-side harnesses.
 
 ## 6. Synthesis check
 

@@ -5,3 +5,6 @@ tb_rtlnet_packet_fifo   cores/rtlnet_common/testbench/tb_rtlnet_packet_fifo.f  n
 tb_rtlnet_axil          cores/rtlnet_common/testbench/tb_rtlnet_axil.f
 tb_rtlnet_primitives    cores/rtlnet_common/testbench/tb_rtlnet_primitives.f
 tb_rtlnet_primitives    cores/rtlnet_common/testbench/tb_rtlnet_primitives.f  generic  defines=RTLNET_TECH_GENERIC
+tb_rtlnet_shift_reg     cores/rtlnet_common/testbench/tb_rtlnet_shift_reg.f
+tb_rtlnet_shift_reg     cores/rtlnet_common/testbench/tb_rtlnet_shift_reg.f  generic  defines=RTLNET_TECH_GENERIC
+tb_rtlnet_shift_reg     cores/rtlnet_common/testbench/tb_rtlnet_shift_reg.f  neg      plusargs=INJECT_FAILURE  expectfail
