@@ -1,0 +1,6 @@
+# rtlnet_classifier regression: <bench> <filelist> [tag] [defines=A,B] [plusargs=X,Y] [expectfail]
+tb_rtlnet_classifier   cores/rtlnet_classifier/testbench/tb_rtlnet_classifier.f
+tb_rtlnet_classifier   cores/rtlnet_classifier/testbench/tb_rtlnet_classifier.f  generic  defines=RTLNET_TECH_GENERIC
+tb_rtlnet_classifier   cores/rtlnet_classifier/testbench/tb_rtlnet_classifier.f  m128     defines=TB_CLS_M128,RTLNET_TECH_GENERIC
+tb_rtlnet_classifier   cores/rtlnet_classifier/testbench/tb_rtlnet_classifier.f  m40      defines=TB_CLS_M40,RTLNET_TECH_GENERIC
+tb_rtlnet_classifier   cores/rtlnet_classifier/testbench/tb_rtlnet_classifier.f  neg      defines=RTLNET_TECH_GENERIC  plusargs=INJECT_FAILURE  expectfail
