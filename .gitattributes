@@ -1,0 +1,32 @@
+# Normalize text files; keep platform-specific line endings where tools care
+* text=auto
+
+*.v       text
+*.sv      text
+*.svh     text
+*.vh      text
+*.vhd     text
+*.xdc     text
+*.tcl     text
+*.xpr     text
+*.xci     text
+*.bd      text
+*.py      text
+*.md      text
+
+*.sh      text eol=lf
+*.bat     text eol=crlf
+*.cmd     text eol=crlf
+
+# Binary artifacts
+*.bit     binary
+*.bin     binary
+*.mcs     binary
+*.dcp     binary
+*.xsa     binary
+*.pdf     binary
+*.png     binary
+*.jpg     binary
+*.xlsx    binary
+*.docx    binary
+*.zip     binary

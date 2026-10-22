@@ -1,0 +1,88 @@
+# ---------------------------------------------------------------------------
+# Vivado generated project directories (recreated on open / rebuild)
+# Keep: *.xpr, sources, constraints, *.xci, *.bd, *.tcl
+# ---------------------------------------------------------------------------
+*.cache/
+*.runs/
+*.sim/
+*.hw/
+*.ip_user_files/
+*.gen/
+*.srcs/sources_1/bd/*/ip/
+*.srcs/sources_1/bd/*/ipshared/
+*.srcs/sources_1/bd/*/hdl/
+*.srcs/sources_1/bd/*/sim/
+*.srcs/sources_1/bd/*/synth/
+*.srcs/sources_1/ip/*/*
+!*.srcs/sources_1/ip/*/*.xci
+.Xil/
+NA/
+
+# Vivado logs, journals, backups
+*.jou
+*.log
+*.str
+*.backup.*
+vivado_pid*.zip
+vivado*.str
+webtalk*
+usage_statistics_webtalk.*
+hs_err_pid*.log
+
+# Vivado / Vitis HLS / Vitis
+.ipcache/
+*.wdb
+*.pb
+xsim.dir/
+xvlog.*
+xelab.*
+xsim.*
+!xsim.tcl
+.lock
+*.lpr
+
+# Build outputs (store release bitstreams under releases/ instead)
+build/
+output/
+*.bit
+*.bin
+*.mcs
+*.prm
+*.ltx
+*.dcp
+*.rpt
+*.hwdef
+*.xsa
+!releases/**
+
+# ---------------------------------------------------------------------------
+# Other simulators
+# ---------------------------------------------------------------------------
+# Questa / ModelSim
+work/
+transcript
+*.wlf
+modelsim.ini
+# Icarus / Verilator / waveforms
+*.vvp
+obj_dir/
+*.vcd
+*.fst
+*.ghw
+# cocotb
+sim_build/
+results.xml
+__pycache__/
+*.pyc
+
+# ---------------------------------------------------------------------------
+# Editors / OS
+# ---------------------------------------------------------------------------
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+*.swp
+*~
+Thumbs.db
+desktop.ini
+.DS_Store
