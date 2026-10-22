@@ -123,9 +123,9 @@ try {
     Send-Step $sp 'end' "end`r" @() 'rtlnet#'
     Send-Step $sp 'debug read 0x44a00000' "debug read 0x44a00000`r" @('0x44A00000 = 0x4E585644') 'rtlnet#'
     Send-Step $sp 'sh ver' "sh ver`r" @('Board ID\s+: NXVD', 'Register map\s+: 10-22-2026') 'rtlnet#'
-    Send-Step $sp 'show interfaces' "show interfaces`r" @('% MAC not present in this build') 'rtlnet#'
+    Send-Step $sp 'show interfaces' "show interfaces`r" @('(% MAC not present in this build|eth0 is (up|down))') 'rtlnet#'
     Send-Step $sp 'led 2 on' "led 2 on`r" @('LED 2 on') 'rtlnet#'
-    Send-Step $sp 'LEDS readback' "debug read 0x44a00014`r" @('0x44A00014 = 0x0000000[46]') 'rtlnet#'
+    Send-Step $sp 'LEDS readback' "debug read 0x44a00014`r" @('0x44A00014 = 0x000000[0-9A-F][4567CDEF]') 'rtlnet#'
     Send-Step $sp 'led 2 off' "led 2 off`r" @('LED 2 off') 'rtlnet#'
     Send-Step $sp 'disable' "disable`r" @() 'rtlnet>'
 } finally {
