@@ -432,7 +432,7 @@ How to put a new UDP application on the socket streams.
 | IP options, fragments, VLAN tags | rejected (`RX_BAD`) / not parsed (a tagged frame's EtherType is 0x8100 and is ignored) |
 | Ethernet destination | not checked (the wrapper filters local MAC and broadcast) |
 | RX FIFO granularity | one datagram per 2 KiB slot regardless of size: 8 datagrams at 16 KiB |
-| Descriptor FIFO | fixed 1 KiB (64 descriptors), not covered by a parameter; with `RAM_STYLE = "block"` it costs one RAMB36 and one RAMB18 |
+| Descriptor FIFO | fixed 1 KiB (64 descriptors), not covered by a parameter; with `RAM_STYLE = "block"` it costs about 1.5 block RAM tiles (one RAMB36 and one RAMB18, inferred from the synthesis totals, not reported per instance) |
 | Leaf disabled | received frames ignored (not counted); application datagrams consumed and counted as `TX_DROPS` |
 | Frames shorter than 42 bytes | ignored when they end before beat 4, `RX_BAD` otherwise |
 | Remote register read | the four `REMOTE_*` registers are read one by one; a CONNECT_ON_RX update between two reads gives a mixed view |
