@@ -197,6 +197,24 @@ Hardware (board cabled to a 10/100 router at 192.169.1.1), network image d2aa397
 | Traffic | renew: MAC rx good / tx +1 each, RX_BAD 0; the router ARPed the board and got replies (ARP requests = replies) |
 | 10 Mb/s | `speed 10` (advertise 10f): link down/up, 10 Mb/s full duplex, RXC rate 10, renew + stop/start DHCP + ARP replies; `speed auto` back to 100 Mb/s |
 | Scripts | `net_test.ps1`: PASS 18/18 board-side, 4 host checks BLOCKED (PC NIC disconnected); `cli_test.ps1`: PASS 15/15 |
+
+#### Host-side network tests, 10-22-2026
+
+PC on the bench network over Wi-Fi (`IronKernel`, PC 192.169.1.130, router 192.169.1.1); board DHCP lease
+192.169.1.199. `net_test.ps1 -Nic "Wi-Fi 2" -Speed <n>`, with the link forced from the CLI for 10 Mb/s
+(`interface eth0` / `speed 10`) and `speed auto` restored afterwards.
+
+| Check | 100 Mb/s (auto) | 10 Mb/s (forced) |
+|---|---|---|
+| link, MAC RXC qualified, PHY ID / RX delay, PHYSR speed | pass | pass (RXC rate 11) |
+| DHCP lease, effective IP from the lease, renew moves counters, RX_BAD 0 | pass | pass |
+| `ping -l 0 / 64 / 1472 -n 20` | 0 lost each | 0 lost each |
+| board ARP entry on the PC | pass | pass |
+| `udp_echo_client.py`, 200 datagrams to port 7, byte-exact | PASS | PASS |
+| iperf 2 UDP | BLOCKED: no iperf 2 binary on the PC | BLOCKED |
+| summary | `NET_TEST: PASS 23/23` (incl. the board-side 10 Mb/s round) | `NET_TEST: PASS 14/14` |
+
+1000 Mb/s on hardware still needs a gigabit link partner (the router is 10/100).
 | Cold start | after JTAG configuration: link up 100 Mb/s and a DHCP lease acquired from scratch (discover/offer/request/ack 1 each), MAC rx 2 / tx 2 |
 | Host tests (arp, ping 0/64/1472 x20, UDP echo client, iperf -u) | not run: the PC's wired NIC "Ethernet" (ASIX USB, 192.169.1.178) is disconnected; no iperf 2 binary on PATH |
 
