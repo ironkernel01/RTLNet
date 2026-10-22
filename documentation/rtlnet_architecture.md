@@ -223,6 +223,7 @@ these addresses for firmware is `microblaze/driver/rtlnet_cpu_microblaze.h`.
 | `rtlnet_pkg.sv` | stream constants, EtherTypes, IP protocol numbers, `be16/be32/be48`, `keep_bytes`, `keep_mask`, CRC-32 byte and word functions, ones'-complement helpers, default MAC/IP |
 | `rtlnet_technology.svh` | the single technology selection include (section 8) |
 | `rtlnet_ram_core.sv` | the generic RAM (section 8) |
+| `rtlnet_shift_reg_core.sv` | the generic fixed-delay shift register (AMD: LUT shift-register RAM, `SRLC32E`) |
 | `rtlnet_sync.sv` | level synchronizer, N stages, every vendor's attributes |
 | `rtlnet_reset_sync.sv` | asynchronous-assert, synchronous-release reset synchronizer (the named exception) |
 | `rtlnet_pulse_sync.sv` | toggle-based single-event crossing |
@@ -395,6 +396,7 @@ parameters: `RAM_STYLE` and the `*_KB` sizes.
 | Mapped file | AMD implementation | Other technologies |
 |---|---|---|
 | `rtlnet_ram_core` | direct instance of `xpm_memory_sdpram` (`MEMORY_PRIMITIVE` = `"block"` or `"distributed"`) | Altera: inferred array, `ramstyle` M20K / MLAB; Lattice: inferred array, `syn_ramstyle` block_ram / distributed; GENERIC/ASIC: behavioural model, replaced by a compiled-macro wrapper |
+| `rtlnet_shift_reg_core` | direct `SRLC32E` instances (LUT shift-register RAM), cascaded through `Q31`, registered output | Altera: inferred array, `ramstyle` MLAB; Lattice: `syn_srlstyle` distributed; GENERIC: register array |
 | `rtlnet_sync`, `rtlnet_reset_sync`, `rtlnet_gray_sync`, packet FIFO pointers | `ASYNC_REG`, `SHREG_EXTRACT="NO"`, `DONT_TOUCH` | Quartus synchronizer identification + preserve; Synplify `syn_preserve`, `syn_srlstyle="registers"`; ASIC library attributes when the back-port starts |
 | `rtlnet_rgmii_io_<family>` | `rtlnet_rgmii_io_amd7.sv`: IDELAYE2, IDDR, ODDR, BUFIO, BUFR, IDELAYCTRL | one file per family with the same ports (Intel GPIO DDR, Lattice IDDRX1F/ODDRX1F, generic behavioural) |
 | MMCM, IOBUF | board top only | per board |

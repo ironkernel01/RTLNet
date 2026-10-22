@@ -120,7 +120,7 @@ try {
         New-Item -ItemType Directory -Force -Path $XlibDir | Out-Null
         $uni = Join-Path $Vivado 'data/verilog/src/unisims'
         $prims = @('IBUF', 'OBUF', 'IOBUF', 'IBUFDS', 'BUFG', 'BUFGCE', 'BUFIO', 'BUFR', 'IDDR', 'ODDR',
-                   'IDELAYE2', 'IDELAYCTRL', 'MMCME2_ADV', 'MMCME2_BASE', 'PLLE2_ADV', 'PLLE2_BASE')
+                   'IDELAYE2', 'IDELAYCTRL', 'SRLC32E', 'MMCME2_ADV', 'MMCME2_BASE', 'PLLE2_ADV', 'PLLE2_BASE')
         $uniFiles = @()
         foreach ($p in $prims) {
             $f = Join-Path $uni "$p.v"

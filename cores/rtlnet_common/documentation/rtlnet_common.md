@@ -18,6 +18,7 @@ AXI4-Lite plumbing, so a retarget to another FPGA vendor or an ASIC touches this
 | `rtlnet_technology.svh` | the technology selection: `RTLNET_TECH_AMD` (default), `_ALTERA`, `_LATTICE`, `_GENERIC`; derives `` `RTLNET_TARGET ``, `` `RTLNET_SYNC_ATTR ``, `` `RTLNET_RGMII_IO `` |
 | `rtlnet_pkg.sv` | stream geometry, protocol numbers, `be16/be32/be48`, `keep_bytes`, `keep_mask`, `keep_through_lane`, `crc32_byte`, `crc32_bytes`, `csum_fold16`, `beat_word_sum`, `ipv4_header_checksum`, `id4`, `clog2i`, default MAC/IP |
 | `rtlnet_ram_core.sv` | the one RAM: simple dual port, `RAM_STYLE` block/distributed, `READ_LATENCY` 1/2, `CLOCKING` common/independent |
+| `rtlnet_shift_reg_core.sv` | the one fixed-delay shift register: AMD = LUT shift-register RAM (direct `SRLC32E` instances, cascaded, registered output); Altera MLAB / Lattice distributed / generic register array; no reset on the storage |
 | `rtlnet_sync.sv` | level synchronizer, `WIDTH` chains of `STAGES` flops |
 | `rtlnet_reset_sync.sv` | asynchronous-assert, synchronous-release reset (the one named asynchronous exception) |
 | `rtlnet_pulse_sync.sv` | toggle event crossing |
@@ -103,6 +104,7 @@ unmapped address with DECERR.
 
 | Bench | Proves | Result (10-22-2026) |
 |---|---|---|
+| `tb_rtlnet_shift_reg` | `rtlnet_shift_reg_core` depths 2, 5, 16, 32, 33, 64, 70 with a random shift enable: output = input delayed by exactly DEPTH enabled clocks; a tap shortened by one is caught (27701 fails) | PASS, 27712 checks (AMD SRLC32E and GENERIC); synthesis of 73 x 16 maps to 73 SRLC32E + 73 FF, 0 logic LUTs |
 | `tb_rtlnet_packet_fifo` | 150 random frames across unrelated clocks (62.5/50 MHz) with source gaps and sink stalls, byte-exact and in order; runts, flagged-bad and oversize frames dropped with one `bad_frame` each; drop-when-full keeps 4 of 10 with 6 `overflow`; `s_ready` never low inside a frame | PASS, 239 checks (AMD and GENERIC); `+INJECT_FAILURE` reports TEST FAIL |
 | `tb_rtlnet_axil` | decoder + CDC (100 to 50.3 and 62.7 MHz) + slave: 300 random accesses against a model, partial write ignored, DECERR on unmapped addresses, window boundaries | PASS, 487 checks |
 | `tb_rtlnet_primitives` | CRC-32 functions against an independent serial oracle (200 frames, check value 0xCBF43926, residue 0xDEBB20E3), keep/byte-order helpers, IPv4 checksum; 500 pulses each way; Gray counter monotonic and exact; reset assertion with the clock stopped; RAM core in four configurations including reset | PASS, 1324 checks (AMD and GENERIC) |

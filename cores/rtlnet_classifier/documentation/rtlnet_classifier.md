@@ -189,8 +189,11 @@ policed frame; a disabled policer passes. Per-policer counters `SEEN`, `PASSED`,
 
 ### 6.4 Delay line and valid gating
 
-The delay line is `DELAY_BEATS` slots, each `{tdata, tkeep, tlast, slot_valid}`, plain registers (a vendor tool may
-map them to shift-register primitives; no primitive is instanced). It **shifts every clock**: an accepted input beat
+The delay line is `DELAY_BEATS` slots. `{tdata, tkeep, tlast}` (73 bits) live in one `rtlnet_shift_reg_core`
+(`u_delay_line`: on AMD a LUT shift-register RAM of `SRLC32E` instances with a registered output; the technology comes
+from `rtlnet_technology.svh`). The per-slot valid bits cannot live in a LUT shift register (it has no reset), so they
+are a `DELAY_BEATS`-bit flip-flop shift chain that clears on reset — a warm reset can never release stale beats. The
+line **shifts every clock**: an accepted input beat
 enters slot 0, otherwise an empty slot (bubble) enters, so every beat leaves exactly `DELAY_BEATS` clocks after it
 entered and a frame's tail never waits for the next frame. The only stall is output back-pressure: while the last
 slot holds a beat that the output slice cannot take, the whole line holds and `s_axis_tready` is low (registered).
@@ -221,7 +224,7 @@ The classifier is written for 390.625 MHz on UltraScale+ (25G, one 64-bit beat p
 | policers | budget decrement and window compare registered separately (the window counter compare is a registered terminal-count flag) |
 | RAM reads | `rtlnet_ram_core` with `READ_LATENCY` 2 for tables and compare buffers |
 | fanout | control registers that fan out to many lanes (MODE, table modes, compare buffer outputs) are registered locally per engine, with `(* max_fanout *)`-free replication by explicit duplicate registers so no vendor attribute is required |
-| delay line | plain registers, shift enable = one registered signal (`line_hold`), output gate = registered verdict bit AND slot valid |
+| delay line | `rtlnet_shift_reg_core` (SRL data path, registered output) + flip-flop valid chain; shift enable = one registered signal (`line_hold`), output gate = registered verdict bit AND slot valid |
 | `s_axis_tready` | a flop; the output side uses an `rtlnet_axis_reg_slice` so the downstream ready reaches only `line_hold` |
 
 `VERDICT_LATENCY` is a localparam computed from these stage counts (no hand-entered number), and
