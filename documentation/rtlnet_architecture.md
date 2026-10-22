@@ -27,7 +27,8 @@ network stack: every protocol runs in logic, and the CPU only configures and mon
 | ARP responder | `rtlnet_arp` | RFC 826 replies for the local IPv4 address |
 | ICMP echo (ping) | `rtlnet_icmp` | RFC 792 echo reply, payload up to 1472 bytes |
 | DHCP client | `rtlnet_dhcp` | RFC 2131 DISCOVER/OFFER/REQUEST/ACK, renew, lease loss |
-| iperf 2 UDP server | `rtlnet_iperf` | `iperf -c <board> -u` with server report; `-R` reverse stream |
+| iperf 2 UDP server | `rtlnet_iperf` | `iperf -c <board> -u` with server report; `-R` reverse stream (RTL) |
+| iperf 2 TCP server | firmware (`lwiperf` on lwIP) | `iperf -c <board>` on TCP port 5001 through the CPU network path |
 | UDP socket layer | `rtlnet_udp_socket` | N bound ports, payload streams to and from applications |
 | UDP echo server | `rtlnet_udp_echo` | application on the socket payload streams: returns every datagram to its sender |
 | Frame filter/classifier | `rtlnet_classifier` | **designed, not built yet** (section 13) |
@@ -472,7 +473,7 @@ repository; the generated BSP lives in the ignored build folder. Layers:
 | BSP (generated) | start-up, vectors, Xilinx drivers, `xil_printf`, lwIP core |
 | platform (`microblaze/firmware/src`) | UART console on XUartLite, millisecond tick on XTmrCtr, interrupt setup on XIntc |
 | RTLNet drivers | `cores/<core>/driver/*.c`, compiled in place, the only code that touches each core's registers |
-| network | `rtlnet_netmgr.c` (PHY/MAC/DHCP management), `rtlnet_lwip_netif.c` (lwIP netif on the AXI DMA and the `cpu_axis_ethernet_stream`), `rtlnet_tcp_echo.c` (lwIP raw-API TCP echo server, port 7) |
+| network | `rtlnet_netmgr.c` (PHY/MAC/DHCP management), `rtlnet_lwip_netif.c` (lwIP netif on the AXI DMA and the `cpu_axis_ethernet_stream`), `rtlnet_tcp_echo.c` (lwIP raw-API TCP echo server, port 7), TCP iperf server on port 5001 (lwIP's `lwiperf`, compiled in place from the install; the UDP iperf server on port 5001 is the RTL iperf leaf) |
 | CLI | `menu.c`, `cli_commands.c` (MenuBuilder hierarchical rules) |
 
 CLI: a light network-switch style hierarchy built on the MenuBuilder rules
