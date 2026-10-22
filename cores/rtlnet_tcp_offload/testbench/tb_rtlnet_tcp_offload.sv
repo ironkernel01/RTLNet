@@ -15,13 +15,14 @@
 //   4. RX checksum: random good and corrupted frames: data bytes bit-exact, the
 //      final beat padded with zero bytes to 8, the trailer at roundup8(length)
 //      with every field equal to the reference; counters equal the reference.
-//   5. RX enable toggled during continuous traffic: each frame leaves entirely
-//      as pass-through or entirely with a trailer, in step with the CTRL writes.
+//   5. CTRL toggled during continuous traffic (RX trailer; TX insert modes): each frame
+//      follows the CTRL value at its first input beat, whatever happens later.
 //   6. TX and RX traffic together with different stall patterns.
 //   7. Throughput: back-to-back frames, no source gaps, no sink stalls; the
 //      period between frames is measured and checked (TX: payload beats + the
 //      packet FIFO idle clock; RX: payload beats + 1 trailer beat, 0 disabled).
 //   8. STATUS idle falls while a frame is in flight and rises after it left.
+//   9. CTRL cleared while frames sit in the buffer: they leave with the insert they started with.
 // Reference model: parse_frame / ref_tx / ref_rx below are written from the
 //   protocol rules (byte offsets, RFC 1071 inet_sum from rtlnet_tb_pkg) and share
 //   no code with the RTL.
@@ -464,6 +465,19 @@ module tb_rtlnet_tcp_offload;
     end
   endtask
 
+  // TX counters when some frames started within the CTRL change window: frames exact, the others
+  // between the count of the unambiguous frames and that plus the ambiguous ones.
+  task automatic check_counters_tol(input string tag, input int tol);
+    logic [31:0] v;
+    u_axi.rd(R_TX, v);
+    tb_check(int'(v) == exp_tx[0], $sformatf("%s: TX counter 0 = %0d, expected %0d", tag, v, exp_tx[0]));
+    for (int i = 1; i < NTX; i++) begin
+      u_axi.rd(R_TX + 12'(4 * i), v);
+      tb_check(int'(v) >= exp_tx[i] && int'(v) <= exp_tx[i] + tol,
+               $sformatf("%s: TX counter %0d = %0d, expected %0d..%0d", tag, i, v, exp_tx[i], exp_tx[i] + tol));
+    end
+  endtask
+
   task automatic clear_counters();
     u_axi.wr(R_CLR, 32'h1);
     clear_expected();
@@ -602,11 +616,25 @@ module tb_rtlnet_tcp_offload;
   // ---------------------------------------------------------------------------
   int tx_first_t [$];
   int rx_first_t [$];
+  int tx_in_last_t [$];
+  int tx_in_first_t [$];
+  bit tx_in_first = 1'b1;
+  int rx_in_first_t [$];
+  bit rx_in_first = 1'b1;
   bit tx_mon_first = 1'b1;
   bit rx_mon_first = 1'b1;
 
   always @(posedge clk) begin
     if (resetn) begin
+      if (tx_i_v && tx_i_r) begin
+        if (tx_in_first) tx_in_first_t.push_back(cyc);
+        tx_in_first <= tx_i_l;
+      end
+      if (tx_i_v && tx_i_r && tx_i_l) tx_in_last_t.push_back(cyc);
+      if (rx_i_v && rx_i_r) begin
+        if (rx_in_first) rx_in_first_t.push_back(cyc);
+        rx_in_first <= rx_i_l;
+      end
       if (tx_o_v && tx_o_r) begin
         if (tx_mon_first) tx_first_t.push_back(cyc);
         tx_mon_first <= tx_o_l;
@@ -794,24 +822,28 @@ module tb_rtlnet_tcp_offload;
     check_counters("rx");
     set_ctrl(32'h0);
 
-    // ---- 5. RX enable toggled during traffic ----------------------------------
+    // ---- 5. CTRL toggled during traffic: each frame follows the CTRL value at its first beat ----
     begin
       bytes_t inq[$];
       bytes_t got;
-      bytes_t pt;
-      bytes_t tr;
+      bytes_t e;
+      bytes_t e_off;
+      string  why;
       bit ok;
-      bit d_v, d_i, d_l, d_u;
-      bit is_pt;
-      bit is_tr;
-      int last_form;
-      int changes;
-      int n_pt;
-      int n_tr;
-      string why;
+      bit d_a, d_b, d_c, d_d;
+      int n_form [0:1];
+      int t_chg [0:3];
+      int v_chg [0:3];
+      int tf;
+      int val;
+      bit amb;
+      int n_amb;
+      // ---- RX
       clear_counters();
       u_rx_src.gap_pct = 20;
       u_rx_sink.ready_pct = 80;
+      rx_in_first_t = {};
+      rx_in_first = 1'b1;
       for (int i = 0; i < 120; i++) inq.push_back(gen_frame());
       set_ctrl(32'h0);
       fork
@@ -820,48 +852,115 @@ module tb_rtlnet_tcp_offload;
         end
         begin
           repeat (400)  @(posedge clk);
-          set_ctrl(32'h4);
+          set_ctrl(32'h4); t_chg[0] = cyc; v_chg[0] = 1;
           repeat (700)  @(posedge clk);
-          set_ctrl(32'h0);
+          set_ctrl(32'h0); t_chg[1] = cyc; v_chg[1] = 0;
           repeat (500)  @(posedge clk);
-          set_ctrl(32'h4);
+          set_ctrl(32'h4); t_chg[2] = cyc; v_chg[2] = 1;
           repeat (300)  @(posedge clk);
-          set_ctrl(32'h0);
+          set_ctrl(32'h0); t_chg[3] = cyc; v_chg[3] = 0;
         end
       join
-      last_form = -1;
-      changes = 0;
-      n_pt = 0;
-      n_tr = 0;
+      n_form[0] = 0; n_form[1] = 0;
+      tb_check(rx_in_first_t.size() == 120, $sformatf("toggle RX first-beat times %0d", rx_in_first_t.size()));
       for (int i = 0; i < 120; i++) begin
         u_rx_sink.get(got, 200000, ok);
         tb_check(ok, $sformatf("toggle frame %0d missing", i));
-        if (ok) begin
-          pt = inq[i];
-          tr = ref_rx(inq[i], d_v, d_i, d_l, d_u);
-          is_pt = bytes_equal(got, pt, why);
-          is_tr = bytes_equal(got, tr, why);
-          tb_check(is_pt || is_tr, $sformatf("toggle frame %0d is neither pass-through nor trailer form (%0d bytes)", i, got.size()));
-          if (is_tr && !is_pt) begin
-            n_tr++;
-            if (last_form != 1) changes++;
-            last_form = 1;
-            exp_rx[0]++;
-            if (d_v) exp_rx[1]++;
-            if (d_i) exp_rx[2]++;
-            if (d_l) exp_rx[3]++;
-            if (d_u) exp_rx[4]++;
+        if (ok && i < rx_in_first_t.size()) begin
+          tf = rx_in_first_t[i];
+          val = 0;
+          amb = 1'b0;
+          for (int c = 0; c < 4; c++) begin
+            if (tf >= t_chg[c] - 16) val = v_chg[c];
+            if (tf >= t_chg[c] - 16 && tf <= t_chg[c] + 16) amb = 1'b1;
+          end
+          e = ref_rx(inq[i], d_a, d_b, d_c, d_d);
+          e_off = inq[i];
+          if (!amb) begin
+            tb_check(bytes_equal(got, (val == 1) ? e : e_off, why),
+                     $sformatf("toggle RX frame %0d (first beat t=%0d, ctrl %0d): %s", i, tf, val, why));
           end else begin
-            n_pt++;
-            if (last_form != 0) changes++;
-            last_form = 0;
+            tb_check(bytes_equal(got, e, why) || bytes_equal(got, e_off, why), $sformatf("toggle RX frame %0d ambiguous", i));
+          end
+          if (bytes_equal(got, e, why)) begin
+            n_form[1]++;
+            exp_rx[0]++;
+            if (d_a) exp_rx[1]++;
+            if (d_b) exp_rx[2]++;
+            if (d_c) exp_rx[3]++;
+            if (d_d) exp_rx[4]++;
+          end else begin
+            n_form[0]++;
           end
         end
       end
-      tb_check(n_pt > 0 && n_tr > 0, $sformatf("toggle test saw pass-through %0d and trailer %0d frames", n_pt, n_tr));
-      tb_check(changes <= 5, $sformatf("form changes %0d exceed the 4 CTRL writes (plus the start)", changes));
+      tb_check(n_form[0] > 20 && n_form[1] > 20, $sformatf("RX toggle saw pass-through %0d and trailer %0d frames", n_form[0], n_form[1]));
       repeat (40) @(posedge clk);
       check_counters("rx toggle");
+      // ---- TX
+      clear_counters();
+      inq = {};
+      tx_in_first_t = {};
+      tx_in_first = 1'b1;
+      u_tx_src.gap_pct = 20;
+      u_tx_sink.ready_pct = 80;
+      for (int i = 0; i < 120; i++) inq.push_back(gen_frame());
+      set_ctrl(32'h0);
+      fork
+        begin
+          for (int i = 0; i < 120; i++) u_tx_src.send(inq[i]);
+        end
+        begin
+          repeat (400)  @(posedge clk);
+          set_ctrl(32'h3); t_chg[0] = cyc; v_chg[0] = 3;
+          repeat (700)  @(posedge clk);
+          set_ctrl(32'h1); t_chg[1] = cyc; v_chg[1] = 1;
+          repeat (500)  @(posedge clk);
+          set_ctrl(32'h2); t_chg[2] = cyc; v_chg[2] = 2;
+          repeat (300)  @(posedge clk);
+          set_ctrl(32'h0); t_chg[3] = cyc; v_chg[3] = 0;
+        end
+      join
+      n_form[0] = 0; n_form[1] = 0;
+      n_amb = 0;
+      tb_check(tx_in_first_t.size() == 120, $sformatf("toggle TX first-beat times %0d", tx_in_first_t.size()));
+      for (int i = 0; i < 120; i++) begin
+        u_tx_sink.get(got, 200000, ok);
+        tb_check(ok, $sformatf("toggle TX frame %0d missing", i));
+        if (ok && i < tx_in_first_t.size()) begin
+          tf = tx_in_first_t[i];
+          val = 0;
+          amb = 1'b0;
+          for (int c = 0; c < 4; c++) begin
+            if (tf >= t_chg[c] - 16) val = v_chg[c];
+            if (tf >= t_chg[c] - 16 && tf <= t_chg[c] + 16) amb = 1'b1;
+          end
+          e = ref_tx(inq[i], val[0], val[1], d_a, d_b, d_c, d_d);
+          if (!amb) begin
+            tb_check(bytes_equal(got, e, why), $sformatf("toggle TX frame %0d (first beat t=%0d, ctrl %0d): %s", i, tf, val, why));
+            exp_tx[0]++;
+            if (d_a) exp_tx[1]++;
+            if (d_b) exp_tx[2]++;
+            if (d_c) exp_tx[3]++;
+            if (d_d) exp_tx[4]++;
+          end else begin
+            // Either neighbouring CTRL value may apply; count the frame by the value that matches.
+            bit hit;
+            hit = 1'b0;
+            n_amb++;
+            exp_tx[0]++;
+            for (int cv = 0; cv < 4; cv++) begin
+              e = ref_tx(inq[i], cv[0], cv[1], d_a, d_b, d_c, d_d);
+              if (bytes_equal(got, e, why)) hit = 1'b1;
+            end
+            tb_check(hit, $sformatf("toggle TX frame %0d ambiguous: no CTRL value explains the output", i));
+          end
+          n_form[(val == 0) ? 0 : 1]++;
+        end
+      end
+      tb_check(n_form[0] > 10 && n_form[1] > 10, $sformatf("TX toggle saw off %0d and on %0d frames", n_form[0], n_form[1]));
+      repeat (40) @(posedge clk);
+      check_counters_tol("tx toggle", n_amb);
     end
 
     // ---- 6. TX and RX together --------------------------------------------------
@@ -907,6 +1006,40 @@ module tb_rtlnet_tcp_offload;
     burst_rx(14, 1514, 1'b0, per);
     tb_check(per > 189.9 && per < 190.1, $sformatf("RX 1514-byte disabled period %f, expected 190", per));
 
+    // ---- 7b. Latency of one frame through an idle core ---------------------------
+    begin
+      bytes_t f;
+      bytes_t got;
+      bit ok;
+      for (int sz = 0; sz < 3; sz++) begin
+        int bytes_n;
+        bytes_n = (sz == 0) ? 64 : ((sz == 1) ? 512 : 1514);
+        f = build_ip(1'b0, 8'd6, 5, bytes_n - 34, 16'h4000, 0, 1'b0, 1'b0);
+        set_ctrl(32'h7);
+        tx_first_t = {};
+        tx_in_last_t = {};
+        u_tx_sink.ready_pct = 100;
+        u_tx_src.gap_pct = 0;
+        u_tx_src.send(f);
+        u_tx_sink.get(got, 200000, ok);
+        tb_check(ok && tx_first_t.size() == 1 && tx_in_last_t.size() == 1, "TX latency frame");
+        if (ok) $display("TXO LATENCY tx %0d bytes: final input beat accepted -> first output beat %0d clocks",
+                         bytes_n, tx_first_t[0] - tx_in_last_t[0]);
+        rx_first_t = {};
+        rx_in_first_t = {};
+        u_rx_sink.ready_pct = 100;
+        u_rx_src.gap_pct = 0;
+        u_rx_src.send(f);
+        u_rx_sink.get(got, 200000, ok);
+        tb_check(ok && rx_first_t.size() == 1 && rx_in_first_t.size() == 1, "RX latency frame");
+        if (ok) $display("TXO LATENCY rx %0d bytes: first input beat accepted -> first output beat %0d clocks",
+                         bytes_n, rx_first_t[0] - rx_in_first_t[0]);
+        repeat (60) @(posedge clk);
+      end
+      clear_counters();
+      set_ctrl(32'h0);
+    end
+
     // ---- 8. STATUS idle ---------------------------------------------------------
     begin
       bytes_t f;
@@ -934,6 +1067,50 @@ module tb_rtlnet_tcp_offload;
       u_axi.rd(R_STATUS, st_idle);
       tb_check(st_idle[1:0] == 2'b11, $sformatf("STATUS idle bits after drain: %08x", st_idle));
       set_ctrl(32'h0);
+    end
+
+    // ---- 9. CTRL cleared while frames are buffered: they keep the value they started with --------
+    begin
+      bytes_t f1;
+      bytes_t f2;
+      bytes_t f3;
+      bytes_t got;
+      bytes_t e;
+      string  why;
+      bit ok;
+      bit d_a, d_b, d_c, d_d;
+      logic [31:0] st;
+      clear_counters();
+      f1 = build_ip(1'b0, 8'd6, 5, 300, 16'h4000, 0, 1'b0, 1'b0);
+      f2 = build_ip(1'b1, 8'd17, 5, 200, 16'h4000, 0, 1'b0, 1'b0);
+      f3 = build_ip(1'b0, 8'd6, 5, 100, 16'h4000, 0, 1'b0, 1'b0);
+      u_tx_src.gap_pct = 0;
+      u_tx_sink.ready_pct = 0;
+      set_ctrl(32'h3);
+      u_tx_src.send(f1);
+      u_tx_src.send(f2);
+      repeat (100) @(posedge clk);
+      u_axi.rd(R_STATUS, st);
+      tb_check(st[0] == 1'b0, $sformatf("STATUS tx_idle low with buffered frames: %08x", st));
+      set_ctrl(32'h0);
+      fork
+        u_tx_src.send(f3);
+        begin
+          repeat (20) @(posedge clk);
+          u_tx_sink.ready_pct = 100;
+        end
+      join
+      u_tx_sink.get(got, 200000, ok);
+      e = ref_tx(f1, 1'b1, 1'b1, d_a, d_b, d_c, d_d);
+      tb_check(ok && bytes_equal(got, e, why), $sformatf("buffered frame 1 keeps tx insert after CTRL clear: %s", why));
+      u_tx_sink.get(got, 200000, ok);
+      e = ref_tx(f2, 1'b1, 1'b1, d_a, d_b, d_c, d_d);
+      tb_check(ok && bytes_equal(got, e, why), $sformatf("buffered frame 2 keeps tx insert after CTRL clear: %s", why));
+      u_tx_sink.get(got, 200000, ok);
+      tb_check(ok && bytes_equal(got, f3, why), $sformatf("frame after CTRL clear untouched: %s", why));
+      repeat (60) @(posedge clk);
+      u_axi.rd(R_STATUS, st);
+      tb_check(st[0] == 1'b1, $sformatf("STATUS tx_idle high after drain: %08x", st));
     end
 
     repeat (50) @(posedge clk);
