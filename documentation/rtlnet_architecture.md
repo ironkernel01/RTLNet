@@ -32,6 +32,7 @@ network stack: every protocol runs in logic, and the CPU only configures and mon
 | UDP socket layer | `rtlnet_udp_socket` | N bound ports, payload streams to and from applications |
 | UDP echo server | `rtlnet_udp_echo` | application on the socket payload streams: returns every datagram to its sender |
 | Frame filter/classifier | `rtlnet_classifier` | **designed, not built yet** (section 13) |
+| Checksum offload | `rtlnet_tcp_offload` | on the CPU DMA stream: inserts IPv4 / TCP / UDP checksums into frames the CPU sends (store-and-forward patch); checks them on frames the CPU receives and appends an 8-byte trailer beat with the result (cut-through) |
 | CPU network path | `rtlnet_eth_protocol` CPU port + `microblaze/` | every frame no enabled leaf claims goes to the CPU (`cpu_axis_ethernet_stream`, AXI DMA); the CPU sends frames back the same way; lwIP runs a TCP echo server on it |
 | CPU core | `rtlnet_cpu_microblaze` | MicroBlaze block design behind a vendor-neutral core port list; replaceable by a Nios V / RISC-V core with the same ports |
 | Board top | `boards/nexys_video/hdl/rtlnet_nexys_video_top.sv` | the Nexys Video "Top.sv": clocks, resets, pins, CPU core, address decode, LEDs |
@@ -62,7 +63,8 @@ RTLNet/
     rtlnet_eth_protocol/          protocol wrapper
     rtlnet_arp/  rtlnet_icmp/  rtlnet_dhcp/  rtlnet_iperf/
     rtlnet_udp_socket/  rtlnet_udp_echo/
-    rtlnet_classifier/            documentation only until it is built
+    rtlnet_classifier/            configurable frame filter
+    rtlnet_tcp_offload/           IPv4 / TCP / UDP checksum insert (TX) and check with trailer (RX) on the CPU path
   microblaze/                     everything MicroBlaze: CPU core (hdl, driver, testbench, documentation) and
                                   firmware/ (CLI + lwIP TCP echo application; BSP, drivers and lwIP are generated or
                                   compiled in place from the AMD install, never copied)
@@ -208,6 +210,8 @@ Protocol sub-map (offset inside 0x1_0000):
 | 0x3000 | DHCP |
 | 0x4000 | iperf |
 | 0x5000 | UDP socket layer |
+| 0x8000 | `rtlnet_classifier` (CPU path, section 7.4) |
+| 0x9000 | `rtlnet_tcp_offload` (CPU path, section 14; **planned slot**, `0x44A1_9000`, not wired yet) |
 
 Other MicroBlaze peripherals sit in the block design's own map (LMB BRAM `0x0000_0000` 128 KiB, UART Lite
 `0x4060_0000`, interrupt controller `0x4120_0000`, MDM `0x4140_0000`, Timer `0x41C0_0000`). The single source of
@@ -536,6 +540,26 @@ Y ms). Everything is configured through the AXI4-Lite slave by the C driver. Fir
 7.4, whose first firmware configuration is the broadcast storm limiter. Full specification:
 `cores/rtlnet_classifier/documentation/rtlnet_classifier.md`.
 
+## 14. `rtlnet_tcp_offload`
+
+Checksum offload on the CPU DMA stream, one stream clock (the CPU stream clock). Egress (DMA MM2S -> offload -> CPU TX
+FIFO) is store-and-forward: the frame is written whole into an `rtlnet_packet_fifo` (`TX_BUF_KB`, default 4 = two
+maximum frames) while a streaming engine sums the IPv4 header and the TCP / UDP pseudo-header plus segment; a sideband
+queue carries the two checksums and their byte positions, and a registered byte-lane replace writes them into the frame
+as it leaves (IPv4 field at frame byte 24/25, +4 with one 802.1Q tag; L4 field at TCP +16 / UDP +6 from the L4 start;
+existing field contents ignored, UDP `0x0000` sent as `0xFFFF`, Ethernet padding past the IP total length excluded,
+fragments and other protocols skipped and counted, malformed lengths counted). Ingress (classifier output ->
+offload -> DMA S2MM) is cut-through: the frame passes a delay line of 17 beats while the engine finishes, then the final
+data beat is padded to 8 bytes (`tkeep` all ones, pad bytes 0) and one trailer beat with `tlast` follows, always at
+byte offset `roundup8(frame_len)`: frame length, folded L4 sum, flags (is_ipv4, is_tcp, is_udp, vlan, fragment,
+ip_ok, l4_ok, verified), L4 offset, marker `0xA5`. The hardware drops nothing; the CPU stack reads the trailer. Registers
+(ID `"TCPO"`): `CTRL` bits `tx_ip_csum`, `tx_l4_csum`, `rx_csum` (power-up 0 = both paths bit-exact pass-through), `STATUS`
+idle bits, `CAPS` (`TX_PRESENT`, `RX_PRESENT`, insert types, buffer size), counters. Full specification, latency
+and throughput table, trailer layout, lwIP mapping and verification record:
+`cores/rtlnet_tcp_offload/documentation/rtlnet_tcp_offload.md`. Integration into the protocol wrapper (RX after the
+classifier, TX before the CPU TX FIFO, sub-map slot `0x9000`, wrapper `CPU_CAPS` discovery bits 17 / 18) is the next
+step; the `TX_ENABLE` / `RX_ENABLE` single-path builds are future work.
+
 ## 15. Core port lists (integration contract)
 
 These port lists are binding: cores are built in parallel and connected by the board top by name. All resets
@@ -648,6 +672,22 @@ DHCP control (start, stop, renew now, auto-start) lives in the DHCP leaf's own r
 | Ethernet frames to the network (clk) | out `m_axis_eth_tdata[63:0]`, `m_axis_eth_tkeep[7:0]`, `m_axis_eth_tvalid`, `m_axis_eth_tlast`; in `m_axis_eth_tready` (AXI DMA MM2S; to the wrapper's `s_axis_cpu_eth_*`) |
 | Ethernet frames from the network (clk) | in `s_axis_eth_tdata[63:0]`, `s_axis_eth_tkeep[7:0]`, `s_axis_eth_tvalid`, `s_axis_eth_tlast`; out `s_axis_eth_tready` (AXI DMA S2MM; from the wrapper's `m_axis_cpu_eth_*`) |
 
+### 15.7 `rtlnet_tcp_offload`
+
+| Group | Ports |
+|---|---|
+| clocks, resets | `clk` (cpu_axis_clk), `resetn`, `s_axi_aclk` (cpu_clk), `s_axi_aresetn` |
+| TX in, frames from the CPU DMA MM2S (clk) | in `s_axis_tx_tdata[63:0]`, `s_axis_tx_tkeep[7:0]`, `s_axis_tx_tvalid`, `s_axis_tx_tlast`; out `s_axis_tx_tready` (a flop) |
+| TX out, frames to the CPU TX FIFO (clk) | out `m_axis_tx_tdata[63:0]`, `m_axis_tx_tkeep[7:0]`, `m_axis_tx_tvalid`, `m_axis_tx_tlast`; in `m_axis_tx_tready` |
+| RX in, frames from the classifier (clk) | in `s_axis_rx_tdata[63:0]`, `s_axis_rx_tkeep[7:0]`, `s_axis_rx_tvalid`, `s_axis_rx_tlast`; out `s_axis_rx_tready` (a flop) |
+| RX out, frames and trailers to the CPU DMA S2MM (clk) | out `m_axis_rx_tdata[63:0]`, `m_axis_rx_tkeep[7:0]`, `m_axis_rx_tvalid`, `m_axis_rx_tlast`; in `m_axis_rx_tready` |
+| registers | `s_axi_*` slave, `ADDR_W` 12 (internal `rtlnet_axil_cdc` to `clk`) |
+
+Parameters: `TX_BUF_KB` 4, `RAM_STYLE` "block", `SB_RAM_STYLE` "distributed", `MAX_FRAME_BYTES` 1518. Instance names the
+constraints depend on: `u_regs/u_axil_cdc`, `u_tx/u_tx_fifo`. Expected CDC census: `sync 2`, `axil_cdc 1`, `fifo 1`.
+All outputs are registered. In the CPU path the instance sits between `u_cpu_classifier` and the DMA S2MM stream (RX)
+and between the DMA MM2S stream and `u_cpu_tx_fifo` (TX).
+
 ## 16. Revision history
 
 | Revision | Change |
@@ -655,3 +695,4 @@ DHCP control (start, stop, renew now, auto-start) lives in the DHCP leaf's own r
 | 10-22-2026 | Initial architecture; all RTL in SystemVerilog; CPU as a replaceable core; one technology include file; Active-HDL simulation; CPU port list, BD address map and CLI hierarchy aligned with the built cores |
 | 10-22-2026 | CPU network path (`cpu_axis_ethernet_stream`, leaf `claim`), AXI DMA, lwIP TCP echo server, `microblaze/` folder, BSP generated from the AMD install |
 | 10-22-2026 | Broadcast storm limiter on the CPU path (default 10 frames / 100 ms) |
+| 10-22-2026 | `rtlnet_tcp_offload`: checksum insert on the CPU TX stream, check with trailer on the CPU RX stream (core built; sub-map slot 0x9000 planned) |

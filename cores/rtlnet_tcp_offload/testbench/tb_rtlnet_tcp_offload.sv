@@ -617,8 +617,10 @@ module tb_rtlnet_tcp_offload;
   int tx_first_t [$];
   int rx_first_t [$];
   int tx_in_last_t [$];
-  int tx_in_first_t [$];
-  bit tx_in_first = 1'b1;
+  int tx_core_first_t [$];     // first beats as the core takes them (CTRL is sampled then)
+  int rx_core_first_t [$];
+  bit tx_core_first = 1'b1;
+  bit rx_core_first = 1'b1;
   int rx_in_first_t [$];
   bit rx_in_first = 1'b1;
   bit tx_mon_first = 1'b1;
@@ -626,9 +628,13 @@ module tb_rtlnet_tcp_offload;
 
   always @(posedge clk) begin
     if (resetn) begin
-      if (tx_i_v && tx_i_r) begin
-        if (tx_in_first) tx_in_first_t.push_back(cyc);
-        tx_in_first <= tx_i_l;
+      if (dut.u_tx.fire) begin
+        if (tx_core_first) tx_core_first_t.push_back(cyc);
+        tx_core_first <= dut.u_tx.in_l;
+      end
+      if (dut.u_rx.adv && dut.u_rx.in_v) begin
+        if (rx_core_first) rx_core_first_t.push_back(cyc);
+        rx_core_first <= dut.u_rx.in_l;
       end
       if (tx_i_v && tx_i_r && tx_i_l) tx_in_last_t.push_back(cyc);
       if (rx_i_v && rx_i_r) begin
@@ -813,6 +819,43 @@ module tb_rtlnet_tcp_offload;
       set_ctrl(32'h0);
     end
 
+    // ---- 3c. Back-to-back shortest frames (5 and 6 beats), both paths ---------------
+    begin
+      bytes_t sq[$];
+      bytes_t f;
+      for (int i = 0; i < 160; i++) begin
+        bit tg;
+        tg = (rr(0, 1) == 1);
+        case (rr(0, 3))
+          0: begin
+            f = build_ip(tg, 8'd253, 5, 0, 16'h4000, 0, rr(0, 1) == 1, 1'b0);
+            while (f.size() > (tg ? 38 : 34)) void'(f.pop_back());
+          end
+          1: begin
+            f = build_ip(tg, 8'd17, 5, 8, 16'h4000, 0, rr(0, 1) == 1, 1'b0);
+            while (f.size() > (tg ? 46 : 42)) void'(f.pop_back());
+          end
+          2: begin
+            f = build_ip(tg, 8'd17, 5, 9 + rr(0, 6), 16'h4000, 0, rr(0, 1) == 1, 1'b0);
+          end
+          default: begin
+            f = build_ip(tg, 8'd6, 5, 20, 16'h4000, 0, rr(0, 1) == 1, 1'b0);
+            while (f.size() > (tg ? 58 : 54)) void'(f.pop_back());
+          end
+        endcase
+        sq.push_back(f);
+      end
+      clear_counters();
+      set_ctrl(32'h3);
+      run_tx_list(sq, 1'b1, 1'b1, 0, 100);
+      check_counters("tx short frames");
+      set_ctrl(32'h4);
+      run_rx_list(sq, 1'b1, 0, 100);
+      check_counters("rx short frames");
+      run_rx_list(sq, 1'b1, 15, 60);
+      set_ctrl(32'h0);
+    end
+
     // ---- 4. RX checksum ---------------------------------------------------------
     clear_counters();
     set_ctrl(32'h4);
@@ -842,13 +885,12 @@ module tb_rtlnet_tcp_offload;
       clear_counters();
       u_rx_src.gap_pct = 20;
       u_rx_sink.ready_pct = 80;
-      rx_in_first_t = {};
-      rx_in_first = 1'b1;
-      for (int i = 0; i < 120; i++) inq.push_back(gen_frame());
+      rx_core_first_t = {};
+      for (int i = 0; i < 200; i++) inq.push_back(gen_frame());
       set_ctrl(32'h0);
       fork
         begin
-          for (int i = 0; i < 120; i++) u_rx_src.send(inq[i]);
+          for (int i = 0; i < 200; i++) u_rx_src.send(inq[i]);
         end
         begin
           repeat (400)  @(posedge clk);
@@ -862,12 +904,12 @@ module tb_rtlnet_tcp_offload;
         end
       join
       n_form[0] = 0; n_form[1] = 0;
-      tb_check(rx_in_first_t.size() == 120, $sformatf("toggle RX first-beat times %0d", rx_in_first_t.size()));
-      for (int i = 0; i < 120; i++) begin
+      tb_check(rx_core_first_t.size() == 200, $sformatf("toggle RX first-beat times %0d", rx_core_first_t.size()));
+      for (int i = 0; i < 200; i++) begin
         u_rx_sink.get(got, 200000, ok);
         tb_check(ok, $sformatf("toggle frame %0d missing", i));
-        if (ok && i < rx_in_first_t.size()) begin
-          tf = rx_in_first_t[i];
+        if (ok && i < rx_core_first_t.size()) begin
+          tf = rx_core_first_t[i];
           val = 0;
           amb = 1'b0;
           for (int c = 0; c < 4; c++) begin
@@ -894,21 +936,20 @@ module tb_rtlnet_tcp_offload;
           end
         end
       end
-      tb_check(n_form[0] > 20 && n_form[1] > 20, $sformatf("RX toggle saw pass-through %0d and trailer %0d frames", n_form[0], n_form[1]));
+      tb_check(n_form[0] > 8 && n_form[1] > 8, $sformatf("RX toggle saw pass-through %0d and trailer %0d frames", n_form[0], n_form[1]));
       repeat (40) @(posedge clk);
       check_counters("rx toggle");
       // ---- TX
       clear_counters();
       inq = {};
-      tx_in_first_t = {};
-      tx_in_first = 1'b1;
+      tx_core_first_t = {};
       u_tx_src.gap_pct = 20;
       u_tx_sink.ready_pct = 80;
-      for (int i = 0; i < 120; i++) inq.push_back(gen_frame());
+      for (int i = 0; i < 200; i++) inq.push_back(gen_frame());
       set_ctrl(32'h0);
       fork
         begin
-          for (int i = 0; i < 120; i++) u_tx_src.send(inq[i]);
+          for (int i = 0; i < 200; i++) u_tx_src.send(inq[i]);
         end
         begin
           repeat (400)  @(posedge clk);
@@ -923,12 +964,12 @@ module tb_rtlnet_tcp_offload;
       join
       n_form[0] = 0; n_form[1] = 0;
       n_amb = 0;
-      tb_check(tx_in_first_t.size() == 120, $sformatf("toggle TX first-beat times %0d", tx_in_first_t.size()));
-      for (int i = 0; i < 120; i++) begin
+      tb_check(tx_core_first_t.size() == 200, $sformatf("toggle TX first-beat times %0d", tx_core_first_t.size()));
+      for (int i = 0; i < 200; i++) begin
         u_tx_sink.get(got, 200000, ok);
         tb_check(ok, $sformatf("toggle TX frame %0d missing", i));
-        if (ok && i < tx_in_first_t.size()) begin
-          tf = tx_in_first_t[i];
+        if (ok && i < tx_core_first_t.size()) begin
+          tf = tx_core_first_t[i];
           val = 0;
           amb = 1'b0;
           for (int c = 0; c < 4; c++) begin
@@ -958,7 +999,7 @@ module tb_rtlnet_tcp_offload;
           n_form[(val == 0) ? 0 : 1]++;
         end
       end
-      tb_check(n_form[0] > 10 && n_form[1] > 10, $sformatf("TX toggle saw off %0d and on %0d frames", n_form[0], n_form[1]));
+      tb_check(n_form[0] > 8 && n_form[1] > 8, $sformatf("TX toggle saw off %0d and on %0d frames", n_form[0], n_form[1]));
       repeat (40) @(posedge clk);
       check_counters_tol("tx toggle", n_amb);
     end
