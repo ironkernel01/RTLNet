@@ -460,8 +460,10 @@ not change. `microblaze/rtlnet_microblaze_sim_stub.sv` (module `rtlnet_microblaz
 AXI4-Lite transactions for the board bench.
 
 The block design also carries an AXI DMA (simple mode, 64-bit streams, `S2MM` from `s_axis_eth_*`, `MM2S` to
-`m_axis_eth_*`, both interrupts on the INTC) and an AXI BRAM for DMA buffers and the lwIP heap; the LMB BRAM is
-256 KiB.
+`m_axis_eth_*`, both interrupts on the INTC) and an AXI BRAM for the DMA buffers; the LMB BRAM (256 KiB, up to
+512 KiB) holds code, stack, heap and the lwIP pools. **All firmware runs from internal block RAM only; no external
+memory (DDR) is used.** MicroBlaze caches are optional and, when enabled, cover only the AXI BRAM range, with explicit
+flush/invalidate around each DMA transfer.
 
 Firmware (`microblaze/firmware`) is C11 built with `mb-gcc` against a standalone BSP that is **generated at build time
 from the hardware export (XSA) by the Vitis tools in the AMD install** (standalone OS, `axidma`, `uartlite`,
