@@ -52,6 +52,16 @@
 #define NETMGR_LED_LEASE        3u       /* led[3]: DHCP lease held */
 #define NETMGR_RX_READY_POLLS   20000u   /* MAC receive qualification, about 10 ms of reads */
 
+/* InitPHY() results (first failing step). */
+#define NETMGR_PHY_OK           0
+#define NETMGR_PHY_NO_MDIO      (-1)    /* MDIO core absent (CPU-only bitstream) */
+#define NETMGR_PHY_POR_TIMEOUT  (-2)    /* the MDIO core's power-on PHY reset did not finish */
+#define NETMGR_PHY_NOT_FOUND    (-3)    /* no RTL8211E ID on the bus */
+#define NETMGR_PHY_RXDLY_FAIL   (-4)    /* RX delay not read back */
+#define NETMGR_PHY_LED_FAIL     (-5)    /* LED registers not read back */
+#define NETMGR_PHY_EEE_FAIL     (-6)    /* EEE advertisement not cleared */
+#define NETMGR_PHY_AN_FAIL      (-7)    /* advertisement / AN restart failed */
+
 /* Duplex setting. */
 #define NETMGR_DUPLEX_AUTO      0u
 #define NETMGR_DUPLEX_HALF      1u
@@ -101,7 +111,7 @@ typedef struct {
     int      cpupath_rc;        /* cpupath_init() result (CPUPATH_*) */
     int      lwip_rc;           /* first InitLWIP() result (RTLNET_LWIP_*) */
     uint32_t phy_id;            /* PHYID1 << 16 | PHYID2 as read */
-    int      phy_rc;            /* result of the PHY bring-up (RTLNET_PHY_*) */
+    int      phy_rc;            /* result of InitPHY (NETMGR_PHY_*) */
     uint16_t rgmii_before;      /* page 0xA4 register 28 before / after the RX delay write */
     uint16_t rgmii_after;
     uint32_t mdc_half_ns;       /* calibrated MDC half period */
@@ -119,6 +129,8 @@ typedef struct {
     uint32_t lease_ip;
 } netmgr_link_t;
 
+int                     InitPHY(void);
+int                     netmgr_phy_reset(void);
 void                    netmgr_init(void);
 void                    netmgr_poll(void);
 netmgr_config_t        *netmgr_config(void);

@@ -275,37 +275,105 @@ void netmgr_apply_dhcp_auto(void)
 }
 
 /*
- * phy_bringup -- MDIO bus, PHY identity, RX clock delay, advertisement.
+ * InitPHY -- the whole RTL8211E bring-up in one place, in order.
  * Steps:
- *   1. MDIO driver init (core ID), MDC calibration against the AXI timer.
- *   2. Wait for the core's power-on PHY reset, then the PHY settle time.
- *   3. Probe PHYID; enable the RGMII RX delay (read-back verified).
- *   4. Apply the speed/duplex/advertisement configuration (restarts AN).
- * Returns: nothing; results in g_present.
+ *   1. MDIO driver on the MDIO core (core ID); absent core: NETMGR_PHY_NO_MDIO.
+ *   2. Wait for the core's power-on PHY reset to finish, then the 30 ms PHY
+ *      settle time (RTL8211E: MDIO access 30 ms after reset release).
+ *   3. MDC calibration against the AXI timer (half period in ns).
+ *   4. Probe PHYID1/2 = 0x001C/0xC915.
+ *   5. RGMII RX clock delay on (page 0xA4 register 28), read back.
+ *   6. LEDs: LINK steady, ACT blinking on TX/RX, USER off
+ *      (rtlnet_phy_rtl8211e_leds_default); EEE advertisement off
+ *      (rtlnet_phy_rtl8211e_set_eee_advert(false)), because EEE makes the
+ *      RJ45 LEDs blink. Compiled when the PHY driver provides both
+ *      (RTLNET_PHY_RTL8211E_HAS_LEDS); until then the summary line reports
+ *      "not in this driver".
+ *   7. The configured advertisement (or forced speed), then the
+ *      auto-negotiation restart (netmgr_apply_phy).
+ *   8. One summary line on the console.
+ * Called at boot (netmgr_init, before InitLWIP) and after every PHY reset
+ * (CLI "phy reset"), so the RX delay, LEDs and EEE setting are always
+ * re-applied.
+ * Returns: NETMGR_PHY_OK or the first failing step (NETMGR_PHY_*); the
+ *          details stay in netmgr_present().
  */
-static void phy_bringup(void)
+int InitPHY(void)
 {
     uint32_t id = 0u;
-    int rc = rtlnet_mdio_init(&g_mdio, RTLNET_PLAT_MDIO_BASE, RTLNET_PHY_RTL8211E_ADDR_DEFAULT, mdio_delay_us, NULL);
+    int rc;
+    const char *leds = "not in this driver";
+
+    g_present.phy = 0;
+    g_present.phy_id = 0u;
+    rc = rtlnet_mdio_init(&g_mdio, RTLNET_PLAT_MDIO_BASE, RTLNET_PHY_RTL8211E_ADDR_DEFAULT, mdio_delay_us, NULL);
     g_present.mdio = (rc == RTLNET_MDIO_OK) ? 1 : 0;
     if (!g_present.mdio) {
-        return;
+        g_present.phy_rc = NETMGR_PHY_NO_MDIO;
+        return NETMGR_PHY_NO_MDIO;
     }
+    if (rtlnet_mdio_wait_por(&g_mdio) != RTLNET_MDIO_OK) {
+        g_present.phy_rc = NETMGR_PHY_POR_TIMEOUT;
+        fmt_printf("PHY: MDIO core power-on reset did not finish\n");
+        return NETMGR_PHY_POR_TIMEOUT;
+    }
+    plat_delay_ms(NETMGR_PHY_SETTLE_MS);
     (void)rtlnet_mdio_calibrate(&g_mdio, mdio_now_ticks, RTLNET_PLAT_TICKS_PER_US, &g_present.mdc_half_ns);
-    rc = rtlnet_mdio_wait_por(&g_mdio);
-    if (rc == RTLNET_MDIO_OK) {
-        plat_delay_ms(NETMGR_PHY_SETTLE_MS);
-        rc = rtlnet_phy_rtl8211e_probe(&g_mdio, &id);
-    }
+    rc = rtlnet_phy_rtl8211e_probe(&g_mdio, &id);
     g_present.phy_id = id;
-    if (rc == RTLNET_PHY_OK) {
-        rc = rtlnet_phy_rtl8211e_enable_rx_delay(&g_mdio, &g_present.rgmii_before, &g_present.rgmii_after);
-        g_present.phy = 1;
-        if (rc == RTLNET_PHY_OK) {
-            rc = netmgr_apply_phy();
-        }
+    if (rc != RTLNET_PHY_OK) {
+        g_present.phy_rc = NETMGR_PHY_NOT_FOUND;
+        fmt_printf("PHY: no RTL8211E answer (ID 0x%08X)\n", (unsigned)id);
+        return NETMGR_PHY_NOT_FOUND;
     }
-    g_present.phy_rc = rc;
+    g_present.phy = 1;
+    rc = rtlnet_phy_rtl8211e_enable_rx_delay(&g_mdio, &g_present.rgmii_before, &g_present.rgmii_after);
+    if (rc != RTLNET_PHY_OK) {
+        g_present.phy_rc = NETMGR_PHY_RXDLY_FAIL;
+        fmt_printf("PHY: RX delay write not read back (0x%04X -> 0x%04X)\n", (unsigned)g_present.rgmii_before,
+                   (unsigned)g_present.rgmii_after);
+        return NETMGR_PHY_RXDLY_FAIL;
+    }
+#if defined(RTLNET_PHY_RTL8211E_HAS_LEDS)
+    if (rtlnet_phy_rtl8211e_leds_default(&g_mdio) != RTLNET_PHY_OK) {
+        g_present.phy_rc = NETMGR_PHY_LED_FAIL;
+        fmt_printf("PHY: LED configuration not read back\n");
+        return NETMGR_PHY_LED_FAIL;
+    }
+    if (rtlnet_phy_rtl8211e_set_eee_advert(&g_mdio, 0) != RTLNET_PHY_OK) {
+        g_present.phy_rc = NETMGR_PHY_EEE_FAIL;
+        fmt_printf("PHY: EEE advertisement not cleared\n");
+        return NETMGR_PHY_EEE_FAIL;
+    }
+    leds = "LINK steady, ACT blink, USER off; EEE off";
+#endif
+    if (netmgr_apply_phy() != RTLNET_PHY_OK) {
+        g_present.phy_rc = NETMGR_PHY_AN_FAIL;
+        fmt_printf("PHY: advertisement / auto-negotiation restart failed\n");
+        return NETMGR_PHY_AN_FAIL;
+    }
+    g_present.phy_rc = NETMGR_PHY_OK;
+    fmt_printf("PHY: RTL8211E ID 0x%08X, RX delay 0x%04X -> 0x%04X, MDC half period %u ns, LEDs %s, %s\n",
+               (unsigned)id, (unsigned)g_present.rgmii_before, (unsigned)g_present.rgmii_after,
+               (unsigned)g_present.mdc_half_ns, leds, g_cfg.autoneg ? "auto-negotiation restarted" : "forced speed");
+    return NETMGR_PHY_OK;
+}
+
+/*
+ * netmgr_phy_reset -- hardware PHY reset through the MDIO core, then InitPHY.
+ * Steps:
+ *   1. rtlnet_mdio_phy_reset pulses the PHY reset pin (the link monitor sees
+ *      the link go down by itself through PHYSR).
+ *   2. InitPHY re-applies RX delay, LEDs, EEE and the advertisement.
+ * Returns: the InitPHY result, NETMGR_PHY_NO_MDIO without the MDIO core.
+ */
+int netmgr_phy_reset(void)
+{
+    if (!g_present.mdio) {
+        return NETMGR_PHY_NO_MDIO;
+    }
+    (void)rtlnet_mdio_phy_reset(&g_mdio);
+    return InitPHY();
 }
 
 /*
@@ -335,7 +403,7 @@ void netmgr_init(void)
     g_present.echo  = (rtlnet_udp_echo_probe(RTLNET_PLAT_ECHO_BASE) == 0);
     g_present.phy   = 0;
     g_present.phy_rc = 0;
-    phy_bringup();
+    (void)InitPHY();
 
     /* CPU network path: the classifier leaves DROP-ALL (broadcast storm
      * default) before lwIP sees any frame; then the DMA netif. */
@@ -366,7 +434,7 @@ void netmgr_init(void)
     if (g_present.mac || g_present.mdio || g_present.prot) {
         fmt_printf("Network: MAC %s, MDIO %s, PHY %s (ID 0x%08X, RX delay reg 0x%04X -> 0x%04X), protocol %s\n",
                    g_present.mac ? "ok" : "absent", g_present.mdio ? "ok" : "absent",
-                   g_present.phy ? ((g_present.phy_rc == 0) ? "ok" : "error") : "absent",
+                   g_present.phy ? ((g_present.phy_rc == NETMGR_PHY_OK) ? "ok" : "error") : "absent",
                    (unsigned)g_present.phy_id, (unsigned)g_present.rgmii_before, (unsigned)g_present.rgmii_after,
                    g_present.prot ? "ok" : "absent");
         fmt_printf("CPU path: DMA %s, classifier %s, lwIP %s\n", g_present.dma ? "ok" : "absent",

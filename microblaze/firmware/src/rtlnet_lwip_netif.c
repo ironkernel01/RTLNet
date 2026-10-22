@@ -57,6 +57,19 @@ static int dma_reset(void)
 }
 
 /*
+ * chan_busy -- a transfer is in progress on a channel.
+ * XAxiDma_Busy reports a halted channel (never started, or after a reset) as
+ * busy, because IDLE is 0 while HALTED is 1; a halted channel takes a new
+ * simple transfer at once, so it counts as free here.
+ * Returns: 1 running and not idle, 0 idle or halted.
+ */
+static int chan_busy(int rx)
+{
+    uint32_t sr = XAxiDma_ReadReg(g_dma.RegBase, (rx ? XAXIDMA_RX_OFFSET : XAXIDMA_TX_OFFSET) + XAXIDMA_SR_OFFSET);
+    return ((sr & (XAXIDMA_HALTED_MASK | XAXIDMA_IDLE_MASK)) == 0u) ? 1 : 0;
+}
+
+/*
  * rx_arm -- start an S2MM simple transfer into the current ring entry.
  * Returns: nothing; g_rx_armed tells whether the transfer started.
  */
@@ -139,7 +152,7 @@ static err_t netif_linkoutput(struct netif *nif, struct pbuf *p)
     buf = g_tx_buf[g_tx_idx];
     (void)pbuf_copy_partial(p, buf, len, 0u);
     t0 = plat_ticks();
-    while (XAxiDma_Busy(&g_dma, XAXIDMA_DMA_TO_DEVICE)) {
+    while (chan_busy(0)) {
         if ((plat_ticks() - t0) >= RTLNET_NETIF_TX_WAIT_US * RTLNET_PLAT_TICKS_PER_US) {
             g_st.tx_timeouts++;
             LINK_STATS_INC(link.drop);
@@ -248,7 +261,7 @@ void rtlnet_netif_poll(struct netif *nif)
             rx_arm();
             return;
         }
-        if (XAxiDma_Busy(&g_dma, XAXIDMA_DEVICE_TO_DMA)) {
+        if (chan_busy(1)) {
             return;
         }
         len = XAxiDma_ReadReg(g_dma.RegBase, XAXIDMA_RX_OFFSET + XAXIDMA_BUFFLEN_OFFSET);
