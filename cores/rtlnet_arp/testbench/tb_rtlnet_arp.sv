@@ -19,10 +19,16 @@
 //     good request chained behind it, truncated requests, the leaf disabled,
 //     a changed local address, 150 random mutated frames, register readback
 //     and the counter values against the model, CNT_CLEAR.
+//   * claim (leaf contract 7.5): rtlnet_tb_leaf_claim_monitor checks the
+//     pulse timing (after the last beat, before busy falls), one pulse per
+//     frame, none while disabled; the bench model expects exactly one claim
+//     per answered request (per frame in send_and_judge, cumulative in
+//     check_counters) and none for any other frame.
 //   * +INJECT_FAILURE forces TEST FAIL (negative control).
 // Language: SystemVerilog-2012 (simulation only).
 // Revision: 10-22-2026
 //   * 10-22-2026: initial version.
+//   * 10-22-2026: claim checks.
 // Clocks: each harness has its own 50 MHz leaf clock.
 // -----------------------------------------------------------------------------
 `timescale 1ns / 1ps
@@ -73,6 +79,7 @@ module tb_rtlnet_arp_unit #(
   logic        m_tlast;
   logic        m_tready;
   logic        busy;
+  logic        claim;
 
   logic        reg_wr_en = 1'b0;
   logic [11:0] reg_wr_addr = '0;
@@ -99,6 +106,7 @@ module tb_rtlnet_arp_unit #(
     .local_mac     (local_mac),
     .local_ip      (local_ip),
     .busy          (busy),
+    .claim         (claim),
     .reg_wr_en     (reg_wr_en),
     .reg_wr_addr   (reg_wr_addr),
     .reg_wr_data   (reg_wr_data),
@@ -119,6 +127,11 @@ module tb_rtlnet_arp_unit #(
   rtlnet_tb_leaf_busy_monitor #(.NAME(NAME), .RISE_LIMIT(RISE_LIMIT), .STUCK_LIMIT(DELAY + 20000)) u_busy_mon (
     .clk(clk), .resetn(resetn), .s_tvalid(s_tvalid), .s_tready(s_tready), .s_tlast(s_tlast),
     .m_tvalid(m_tvalid), .m_tready(m_tready), .m_tlast(m_tlast), .busy(busy));
+
+  // Claim rule checker (timing, one per frame, never while disabled).
+  rtlnet_tb_leaf_claim_monitor #(.NAME(NAME), .RISE_LIMIT(RISE_LIMIT)) u_claim_mon (
+    .clk(clk), .resetn(resetn), .enable(enable), .s_tvalid(s_tvalid), .s_tready(s_tready), .s_tlast(s_tlast),
+    .busy(busy), .claim(claim));
 
   // ---------------------------------------------------------------------------
   // Local monitors: cycle counter, last input beat, first reply beat, busy
@@ -231,11 +244,13 @@ module tb_rtlnet_arp_unit #(
   int exp_requests = 0;
   int exp_replies  = 0;
   int exp_ignored  = 0;
+  int exp_claims   = 0;                // never cleared: one per answered request
 
   function automatic void account(input int cls);
     if (cls == ANSWER) begin
       exp_requests++;
       exp_replies++;
+      exp_claims++;
     end else if (cls == IGNORED_ARP) begin
       exp_ignored++;
     end
@@ -278,6 +293,8 @@ module tb_rtlnet_arp_unit #(
   // Send one frame to an idle leaf and check the model's outcome.
   task automatic send_and_judge(input string tag, input bytes_t f);
     int cls;
+    int c0;
+    c0  = u_claim_mon.claims;
     cls = arp_classify(f, local_ip, enable);
     account(cls);
     u_src.send(f);
@@ -287,12 +304,17 @@ module tb_rtlnet_arp_unit #(
       expect_none(tag, 80 + DELAY + 8);
     end
     wait_idle(50000 + DELAY);
+    tb_check(u_claim_mon.claims - c0 == ((cls == ANSWER) ? 1 : 0),
+             $sformatf("%s: %s: %0d claim pulses, expected %0d", NAME, tag, u_claim_mon.claims - c0,
+                       (cls == ANSWER) ? 1 : 0));
   endtask
 
   task automatic check_counters(input string tag);
     reg_expect(12'h020, 32'(exp_requests), {tag, " REQUESTS_FOR_US"});
     reg_expect(12'h024, 32'(exp_replies), {tag, " REPLIES_SENT"});
     reg_expect(12'h028, 32'(exp_ignored), {tag, " IGNORED"});
+    tb_check(u_claim_mon.claims == exp_claims, $sformatf("%s: %s: claims %0d, expected %0d (answered requests)", NAME,
+             tag, u_claim_mon.claims, exp_claims));
   endtask
 
   // ---------------------------------------------------------------------------

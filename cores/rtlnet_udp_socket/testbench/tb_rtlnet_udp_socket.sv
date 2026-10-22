@@ -33,6 +33,12 @@
 //  10. Receive and transmit at the same time (30 datagrams each, random
 //      lengths and stalls), a frame starting while the leaf is busy ignored
 //      whole, leaf enable low, CNT_CLEAR.
+//   Claim (leaf contract 7.5): rtlnet_tb_leaf_claim_monitor (timing, one per
+//   frame, never while disabled); at every counter check the claims since the
+//   last CNT_CLEAR equal the datagrams for an enabled socket: delivered +
+//   RX FIFO drops + late-verdict drops (truncated datagram, bad UDP checksum);
+//   header rejections, unknown ports, ignored frames, a frame starting while
+//   busy and the disabled leaf claim nothing.
 //   Always on: rtlnet_tb_leaf_busy_monitor; busy high within 12 clocks of
 //   every input frame's last beat; no gap inside an output frame or an
 //   application datagram.
@@ -41,6 +47,7 @@
 // Language: SystemVerilog-2012 (simulation only).
 // Revision: 10-22-2026
 //   * 10-22-2026: initial version.
+//   * 10-22-2026: claim checks.
 // Run: powershell -File scripts/rtlnet_run_sim.ps1 -Bench tb_rtlnet_udp_socket
 //        -Filelist cores/rtlnet_udp_socket/testbench/tb_rtlnet_udp_socket.f
 // -----------------------------------------------------------------------------
@@ -114,6 +121,7 @@ module tb_rtlnet_udp_socket;
   logic [63:0] sa_tdata;  logic [7:0] sa_tkeep;  logic sa_tvalid, sa_tlast, sa_tready;
   logic        enable = 1'b1;
   logic        busy;
+  logic        claim;
   logic        reg_wr_en = 1'b0;
   logic [11:0] reg_wr_addr = '0;
   logic [31:0] reg_wr_data = '0;
@@ -129,7 +137,7 @@ module tb_rtlnet_udp_socket;
     .s_axis_tready(s_tready),
     .m_axis_tdata(m_tdata), .m_axis_tkeep(m_tkeep), .m_axis_tvalid(m_tvalid), .m_axis_tlast(m_tlast),
     .m_axis_tready(m_tready),
-    .local_mac(LOCAL_MAC), .local_ip(LOCAL_IP), .busy(busy),
+    .local_mac(LOCAL_MAC), .local_ip(LOCAL_IP), .busy(busy), .claim(claim),
     .reg_wr_en(reg_wr_en), .reg_wr_addr(reg_wr_addr), .reg_wr_data(reg_wr_data),
     .reg_rd_en(reg_rd_en), .reg_rd_addr(reg_rd_addr), .reg_rd_data(reg_rd_data),
     .app_clk(app_clk), .app_resetn(app_resetn),
@@ -158,6 +166,9 @@ module tb_rtlnet_udp_socket;
   rtlnet_tb_leaf_busy_monitor #(.NAME("udp_socket")) u_busy_mon (
     .clk(proto_clk), .resetn(proto_resetn), .s_tvalid(s_tvalid), .s_tready(s_tready), .s_tlast(s_tlast),
     .m_tvalid(m_tvalid), .m_tready(m_tready), .m_tlast(m_tlast), .busy(busy));
+  rtlnet_tb_leaf_claim_monitor #(.NAME("udp_socket")) u_claim_mon (
+    .clk(proto_clk), .resetn(proto_resetn), .enable(enable), .s_tvalid(s_tvalid), .s_tready(s_tready),
+    .s_tlast(s_tlast), .busy(busy), .claim(claim));
 
   // ---------------------------------------------------------------------------
   // Always-on monitors
@@ -213,6 +224,8 @@ module tb_rtlnet_udp_socket;
   // Expected counter values
   // ---------------------------------------------------------------------------
   int exp_no_socket = 0, exp_bad = 0, exp_fifo_drops = 0, exp_tx_frames = 0, exp_tx_drops = 0, exp_rx_dg = 0;
+  int exp_late_bad  = 0;                 // claimed datagrams dropped by a late verdict (in RX_BAD)
+  int claims_base   = 0;                 // claim count at the last CNT_CLEAR
   int exp_s_rx[NUM_SOCKETS];
   int exp_s_rxd[NUM_SOCKETS];
   int exp_s_tx[NUM_SOCKETS];
@@ -324,6 +337,9 @@ module tb_rtlnet_udp_socket;
     reg_expect(R_TX_FRAMES,     exp_tx_frames,  {what, " TX_FRAMES"});
     reg_expect(R_TX_DROPS,      exp_tx_drops,   {what, " TX_DROPS"});
     reg_expect(R_RX_DATAGRAMS,  exp_rx_dg,      {what, " RX_DATAGRAMS"});
+    tb_check(u_claim_mon.claims - claims_base == exp_rx_dg + exp_fifo_drops + exp_late_bad,
+             $sformatf("%s: claims %0d = delivered %0d + FIFO drops %0d + late drops %0d", what,
+                       u_claim_mon.claims - claims_base, exp_rx_dg, exp_fifo_drops, exp_late_bad));
     for (int n = 0; n < NUM_SOCKETS; n++) begin
       reg_expect(sreg(n, S_RX_DG),     exp_s_rx[n],  $sformatf("%s sock%0d RX_DATAGRAMS", what, n));
       reg_expect(sreg(n, S_RX_DROPS),  exp_s_rxd[n], $sformatf("%s sock%0d RX_DROPS", what, n));
@@ -534,13 +550,13 @@ module tb_rtlnet_udp_socket;
     f = rx_frame(PEER_MAC, PEER_IP, LOCAL_IP, 16'd2, 16'd5000, payload_bytes(MAX_PAY + 1, 1));
     wrapper_send(f); exp_bad++;                                                    // total length 1501
     f = rx_frame(PEER_MAC, PEER_IP, LOCAL_IP, 16'd2, 16'd5000, payload_bytes(100, 1)); void'(f.pop_back());
-    wrapper_send(f); exp_bad++;                                                    // truncated by 1 byte
+    wrapper_send(f); exp_bad++; exp_late_bad++;                                    // truncated by 1 byte
     f = rx_frame(PEER_MAC, PEER_IP, LOCAL_IP, 16'd2, 16'd5000, payload_bytes(23, 1));
     for (int k = 0; k < 9; k++) void'(f.pop_back());
-    wrapper_send(f); exp_bad++;                                                    // truncated in the final word
+    wrapper_send(f); exp_bad++; exp_late_bad++;                                    // truncated in the final word
     f = rx_frame(PEER_MAC, PEER_IP, LOCAL_IP, 16'd2, 16'd5000, payload_bytes(0, 1));
     while (f.size() > 41) void'(f.pop_back());
-    wrapper_send(f); exp_bad++;                                                    // zero length, 41 bytes
+    wrapper_send(f); exp_bad++; exp_late_bad++;                                    // zero length, 41 bytes
     f = rx_frame(PEER_MAC, PEER_IP, LOCAL_IP, 16'd2, 16'd5000, pl); f[24] = f[24] ^ 8'h01;
     wrapper_send(f); exp_bad++;                                                    // header checksum
     expect_no_rx("rejected frames");
@@ -597,13 +613,13 @@ module tb_rtlnet_udp_socket;
     wrapper_send(rx_frame(PEER_MAC, PEER_IP, LOCAL_IP, 16'd45004, 16'd5000, pl, 1'b0));
     expect_rx(8'd0, PEER_IP, 16'd45004, PEER_MAC, 8'h00, pl, "zero UDP checksum accepted");
     exp_rx_dg++; exp_s_rx[0]++;
-    wrapper_send(f); exp_bad++;                                                    // payload bit flipped
+    wrapper_send(f); exp_bad++; exp_late_bad++;                                    // payload bit flipped
     f = rx_frame(PEER_MAC, PEER_IP, LOCAL_IP, 16'd45005, 16'd5000, payload_bytes(0, 1), 1'b1);
     f[41] = f[41] ^ 8'h01;
-    wrapper_send(f); exp_bad++;                                                    // zero length, bad sum
+    wrapper_send(f); exp_bad++; exp_late_bad++;                                    // zero length, bad sum
     f = rx_frame(PEER_MAC, PEER_IP, LOCAL_IP, 16'd45006, 16'd5000, payload_bytes(7, 1), 1'b1);
     f[48] = f[48] ^ 8'h01;
-    wrapper_send(f); exp_bad++;                                                    // 7 bytes, last byte bad
+    wrapper_send(f); exp_bad++; exp_late_bad++;                                    // 7 bytes, last byte bad
     expect_no_rx("bad UDP checksum with CTRL bit 0 set");
     reg_wr(R_CTRL, 32'h0);
     check_counters("after checksum");
@@ -768,12 +784,14 @@ module tb_rtlnet_udp_socket;
     reg_wr(R_CTRL, 32'h0001_0000);
     reg_expect(R_CTRL, 32'h0, "CNT_CLEAR reads 0");
     exp_no_socket = 0; exp_bad = 0; exp_fifo_drops = 0; exp_tx_frames = 0; exp_tx_drops = 0; exp_rx_dg = 0;
+    exp_late_bad = 0; claims_base = u_claim_mon.claims;
     for (int n = 0; n < NUM_SOCKETS; n++) begin
       exp_s_rx[n] = 0; exp_s_rxd[n] = 0; exp_s_tx[n] = 0; exp_s_txd[n] = 0;
     end
     check_counters("after CNT_CLEAR");
 
     tb_check(u_src.sent > 0 && u_app_src.sent > 0, "stimulus ran");
+    tb_check(claims_base > 100, $sformatf("claims seen over the run (%0d)", claims_base));
     tb_verdict(BENCH);
   end
 

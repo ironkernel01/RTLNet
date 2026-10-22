@@ -29,6 +29,11 @@
 //   * enable is sampled at a frame's first beat: a frame that starts while the
 //     leaf is disabled is ignored. A request accepted before a disable is
 //     still answered.
+//   * claim (registered one-clock pulse, architecture 7.5): the clock after
+//     the last beat of every request this leaf answers (the clock rx_frame_end
+//     is high, one clock before busy rises), gated by enable at that edge, so
+//     a disabled leaf never claims. The wrapper keeps a claimed frame from the
+//     CPU network path.
 //   * Registers (12-bit leaf register port, read data registered one clock
 //     after reg_rd_en): offsets and bits are defined in
 //     cores/rtlnet_arp/driver/rtlnet_arp.h; the localparams below mirror it.
@@ -41,6 +46,7 @@
 // Language: SystemVerilog-2012 (synthesizable subset).
 // Revision: 10-22-2026
 //   * 10-22-2026: initial version.
+//   * 10-22-2026: claim output (leaf contract 7.5, CPU network path).
 // Clocks: clk (proto_clk) only; resetn synchronous to it, active low.
 // -----------------------------------------------------------------------------
 module rtlnet_arp #(
@@ -75,6 +81,10 @@ module rtlnet_arp #(
 
   // Leaf status (registered): high while a request is being answered.
   output logic        busy,
+
+  // Claim (registered one-clock pulse): this leaf answers the frame that just
+  // ended; issued the clock after its last beat.
+  output logic        claim,
 
   // Leaf register port (proto_clk): write strobe, read strobe, read data one
   // clock after reg_rd_en.
@@ -230,6 +240,7 @@ module rtlnet_arp #(
       frame_is_arp <= 1'b0;
       request_ok   <= 1'b0;
       rx_frame_end <= 1'b0;
+      claim        <= 1'b0;
       rx_ethertype <= '0;
       rx_htype     <= '0;
       rx_ptype     <= '0;
@@ -241,8 +252,10 @@ module rtlnet_arp #(
       rx_tpa_high  <= '0;
     end else begin
       rx_frame_end <= 1'b0;
+      claim        <= 1'b0;
       if (beat) begin
         if (s_axis_tlast) rx_frame_end <= answer_now;
+        if (s_axis_tlast) claim        <= answer_now && enable;
         case (rx_state)
           S_RX_B0: begin                       // bytes 0-7: Ethernet destination, source MAC high
             frame_taken  <= enable && tx_is_idle && !start_reply;
