@@ -153,10 +153,11 @@ module rtlnet_udp_socket #(
   localparam int STATUS_TX_ACTIVE_BIT    = 2;
   localparam int STATUS_RX_FIFO_FULL_BIT = 3;
   localparam int STATUS_TX_PENDING_BIT   = 4;
-  localparam int CAPS_CSUM_CHECK_BIT     = 24;
 
   localparam logic [31:0] CORE_ID      = id4("U", "D", "P", "S");
   localparam logic [31:0] CORE_VERSION = 32'h1022_2026;
+  // CAPS: [7:0] NUM_SOCKETS, [15:8] UDP_RX_BUF_KB, [23:16] UDP_TX_BUF_KB,
+  // [24] receive UDP checksum check available.
   localparam logic [31:0] CORE_CAPS    = {7'd0, 1'b1, 8'(UDP_TX_BUF_KB), 8'(UDP_RX_BUF_KB), 8'(NUM_SOCKETS)};
 
   // Descriptor FIFO: 1 KiB = 64 two-word slots, more than the payload FIFO's

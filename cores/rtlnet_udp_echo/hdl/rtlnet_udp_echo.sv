@@ -148,6 +148,7 @@ module rtlnet_udp_echo (
   logic        ctrl_any;
   logic [7:0]  ctrl_socket;
   logic        cnt_clear;
+  logic [31:0] status_word;
   logic [31:0] cnt_echoed;
   logic [31:0] cnt_bytes;
   logic [31:0] cnt_discarded;
@@ -241,6 +242,12 @@ module rtlnet_udp_echo (
   );
 
   assign cnt_clear = reg_wr_en && (reg_wr_addr == REG_CTRL) && reg_wr_data[CTRL_CNT_CLEAR_BIT];
+
+  always_comb begin
+    status_word                    = '0;
+    status_word[STATUS_ENABLE_BIT] = ctrl_enable;
+    status_word[STATUS_BUSY_BIT]   = (state != E_META0);
+  end
 
   // ---------------------------------------------------------------------------
   // Echo engine
@@ -400,7 +407,7 @@ module rtlnet_udp_echo (
         REG_VERSION:          reg_rd_data <= CORE_VERSION;
         REG_CAPS:             reg_rd_data <= CORE_CAPS;
         REG_CTRL:             reg_rd_data <= {16'd0, ctrl_socket, 6'd0, ctrl_any, ctrl_enable};
-        REG_STATUS:           reg_rd_data <= {30'd0, (state != E_META0), ctrl_enable};
+        REG_STATUS:           reg_rd_data <= status_word;
         REG_ECHOED_DATAGRAMS: reg_rd_data <= cnt_echoed;
         REG_ECHOED_BYTES:     reg_rd_data <= cnt_bytes;
         REG_DISCARDED:        reg_rd_data <= cnt_discarded;

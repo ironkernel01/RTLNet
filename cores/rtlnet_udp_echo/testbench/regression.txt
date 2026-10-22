@@ -1,0 +1,6 @@
+# rtlnet_udp_echo regression: <bench> <filelist> [tag] [defines=A,B] [plusargs=X,Y] [expectfail]
+# Socket layer + echo; app_clk 62.5 MHz against proto_clk 50 MHz (default) or app_clk = proto_clk (Nexys Video).
+tb_rtlnet_udp_echo   cores/rtlnet_udp_echo/testbench/tb_rtlnet_udp_echo.f
+tb_rtlnet_udp_echo   cores/rtlnet_udp_echo/testbench/tb_rtlnet_udp_echo.f  appproto  defines=TB_APP_PROTO
+tb_rtlnet_udp_echo   cores/rtlnet_udp_echo/testbench/tb_rtlnet_udp_echo.f  generic   defines=RTLNET_TECH_GENERIC
+tb_rtlnet_udp_echo   cores/rtlnet_udp_echo/testbench/tb_rtlnet_udp_echo.f  neg       plusargs=INJECT_FAILURE  expectfail
