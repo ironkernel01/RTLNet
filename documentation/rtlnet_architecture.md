@@ -300,17 +300,15 @@ The CPU network stack (lwIP) uses the same MAC and the wrapper's effective IP; t
 requests and pings for that address, so lwIP only ever sees what no leaf claims (TCP, ARP replies to its own
 requests, other UDP, other ICMP).
 
-**Broadcast storm limiter (`rtlnet_bcast_limiter`, on the CPU path).** Every frame headed to the CPU (unclaimed by
-the leaves) whose destination MAC is `FF:FF:FF:FF:FF:FF` passes the limiter: in each fixed window of
-`BCAST_WINDOW_MS` milliseconds (`proto_clk` millisecond tick) the first `BCAST_LIMIT_PKTS` broadcast frames are
-committed to the CPU and the rest are dropped (the copy is written with `s_bad`). Defaults 10 frames per 100 ms,
-limiter enabled; both numbers and the enable are registers (reset values from the parameters
-`BCAST_LIMIT_DEFAULT` 10, `BCAST_WINDOW_MS_DEFAULT` 100). The hardware leaves are never limited (a DHCP offer or an
-ARP request still reaches them). Counters, 32-bit, cleared by `CNT_CLEAR`: `BCAST_SEEN` (broadcast frames offered to
-the CPU path), `BCAST_PASSED`, `BCAST_DROPPED`; `BCAST_SEEN = BCAST_PASSED + BCAST_DROPPED`. A broadcast that passes the
-limiter but finds the CPU FIFO full is counted as passed here and as a CPU FIFO drop there. CLI: `show storm-control`;
-config-if `storm-control broadcast <packets> <milliseconds>`, `storm-control broadcast enable|disable` (`no
-storm-control broadcast` = disable).
+**CPU-path classifier and the broadcast storm limiter.** `m_axis_cpu_eth_*` is the output of an `rtlnet_classifier`
+instance (`u_cpu_classifier`, `cpu_axis_clk`) placed after `u_cpu_rx_fifo`, so every frame headed to the CPU passes the
+configurable MAC / EtherType / L2 / L3 / L4 filter of section 13. At power-up the filter is **drop-all** until the C
+driver configures it; the firmware's first configuration is the broadcast storm limiter (destination
+`FF:FF:FF:FF:FF:FF` policed to 10 frames per 100 ms, every other frame passes). The hardware leaves are never
+filtered. Registers: protocol sub-map window 0x8000, decoded in `s_axi_aclk` ahead of the wrapper's own register
+crossing; driver `cores/rtlnet_classifier/driver`. CLI: `show storm-control`, `show classifier`; config-if
+`storm-control broadcast <packets> <milliseconds>`, `storm-control broadcast enable|disable`; privileged
+`classifier ...` commands for modes, tables, the tuple ACL, rules and policers.
 
 ### 7.5 The leaf contract
 
@@ -521,17 +519,17 @@ re-architecture.
 
 ---
 
-## 13. `rtlnet_classifier` (designed, built later)
+## 13. `rtlnet_classifier`
 
-A pass/drop filter of whole frames on the MAC receive stream, between `rtlnet_eth_mac.m_axis_rx` and
-`rtlnet_eth_protocol.s_axis` (`axis_clk`), optionally also on the transmit stream. Three engines judge each frame in
-parallel: a **table engine** (MAC, VLAN, IPv4 and L4-port tables of single values or ranges, compared against the
-source, destination, either or both fields, include/exclude per table, VLAN-aware offsets), **positional rule
-engines** (64 bytes, per byte a mask, an operator `== != < > <= >=` or don't-care and a compare byte,
-include/exclude per rule) and a **combiner** (`table_pass AND rule_pass`, block-all, bypass). A verdict FIFO and a
-store-and-forward data FIFO release or discard each frame whole. Tables and compare buffers live in
-`rtlnet_ram_core`; counters cross by `rtlnet_gray_sync`. Address window 0x2_0000. Full specification:
-`cores/rtlnet_classifier/documentation/rtlnet_classifier.md`. Until it is built the two streams connect directly.
+A configurable MAC / EtherType / layer-2 / layer-3 / layer-4 filter on an RTLNet stream, built on a shift-register
+delay line: each frame is delayed by `MATCH_DEPTH_BYTES` (default 64) plus the verdict latency while field tables (MAC,
+EtherType, VLAN, IP, port: single, range or data/mask, source/destination/either/both), a tuple ACL table (protocol,
+IP/mask, port ranges) and positional byte-by-byte mask+operator rule engines judge its first bytes; at the end of the
+delay line the original frame is presented with its valid set or cleared by the combined decision. A global mode
+selects drop-all (power-up), pass-all, pass-on-match or drop-on-match; classify-only entries feed policers (X frames per
+Y ms). Everything is configured through the AXI4-Lite slave by the C driver. First instance: the CPU path of section
+7.4, whose first firmware configuration is the broadcast storm limiter. Full specification:
+`cores/rtlnet_classifier/documentation/rtlnet_classifier.md`.
 
 ## 14. Revision history
 
