@@ -1,0 +1,651 @@
+/*
+ * test_rtlnet_classifier_host.c -- host unit test of the rtlnet_classifier driver
+ *
+ * Copyright (C) 2026 IronKernel. All rights reserved.
+ *
+ * Role: runs rtlnet_classifier.c unmodified (built with RTLNET_HOST_TEST)
+ * against a register model of the core, mirroring the RTL register file
+ * (cores/rtlnet_classifier/hdl/rtlnet_classifier_regs.sv):
+ *   - ID, VERSION, CAPS, LATENCY constants for a chosen build;
+ *   - CTRL: MODE, CLEAR_TABLES (zeroes every mode, policer, entry and rule
+ *     byte; STATUS.CLEARING for a few reads), CNT_CLEAR (zeroes counters);
+ *   - TABLE_MODE / RULE_MODE with their implemented-bit masks;
+ *   - policer CTRL / LIMIT / WINDOW (a write reloads BUDGET), counters RO;
+ *   - entry, tuple and rule words stored only at defined offsets (undefined
+ *     offsets read 0 and ignore writes).
+ * The model also checks the update protocol on every access: no field-table
+ * or tuple word is written while its table is enabled, and no rule byte is
+ * written while its rule is enabled.
+ *
+ * Output: exactly one line, "TEST PASS: rtlnet_classifier_host checks=N" or
+ * "TEST FAIL: rtlnet_classifier_host fails=F checks=N first=<msg>".
+ * Argument --inject-failure forces a failure (negative control). Exit code 0
+ * on PASS.
+ */
+#include "rtlnet_classifier.h"
+
+#include <stdio.h>    /* printf, snprintf */
+#include <string.h>   /* memset, strcmp */
+
+/* -------------------------------------------------------------------------
+ * Check bookkeeping
+ * ------------------------------------------------------------------------- */
+static int g_checks;
+static int g_fails;
+static char g_first[200];
+
+static void check(int cond, const char *msg)
+{
+    g_checks++;
+    if (!cond) {
+        g_fails++;
+        if (g_first[0] == '\0') {
+            snprintf(g_first, sizeof g_first, "%s", msg);
+        }
+        printf("CHECK FAILED: %s\n", msg);
+    }
+}
+
+static void checkf(int cond, const char *fmt, unsigned a, unsigned b)
+{
+    char buf[200];
+
+    snprintf(buf, sizeof buf, fmt, a, b);
+    check(cond, buf);
+}
+
+/* -------------------------------------------------------------------------
+ * Register model
+ * ------------------------------------------------------------------------- */
+#define TB_BASE          ((uintptr_t)0x44A08000u)
+#define TB_WORDS         1024u
+#define TB_CLEAR_READS   3u
+
+static uint32_t g_reg[TB_WORDS];         /* stored words (entry memory, modes, policers) */
+static uint32_t g_cnt[RTLNET_CLS_NUM_COUNTERS];
+static uint32_t g_pol_cnt[RTLNET_CLS_MAX_POLICERS][3];
+static uint32_t g_budget[RTLNET_CLS_MAX_POLICERS];
+static uint32_t g_mode;
+static uint32_t g_clear_reads;           /* STATUS reads left with CLEARING set */
+static int      g_clear_stuck;           /* model a CLEARING that never ends */
+static uint32_t g_clear_count;           /* CLEAR_TABLES pulses seen */
+static uint32_t g_cnt_clear_count;
+static uint32_t g_id = RTLNET_CLS_ID_VALUE;
+static uint32_t g_status_reads;
+static int      g_protocol_violations;
+
+/* Build parameters of the modelled core. */
+static uint32_t g_te = 16u;
+static uint32_t g_tu = 16u;
+static uint32_t g_nr = 2u;
+static uint32_t g_np = 4u;
+static uint32_t g_lanes = 2u;
+static uint32_t g_mdb = 64u;
+
+static uint32_t model_stride(void)
+{
+    uint32_t s = 0x100u;
+
+    while (s < 4u * g_mdb) {
+        s <<= 1;
+    }
+    return s;
+}
+
+static uint32_t model_caps(void)
+{
+    return g_te | (g_tu << 5) | (g_nr << 10) | (g_np << 13) | (g_lanes << 16) | ((g_mdb / 8u) << 21);
+}
+
+static void model_clear(void)
+{
+    uint32_t i;
+
+    for (i = 0x020u / 4u; i < TB_WORDS; i++) {
+        g_reg[i] = 0u;
+    }
+    for (i = 0u; i < RTLNET_CLS_MAX_POLICERS; i++) {
+        g_budget[i] = 0u;
+    }
+    g_mode = 0u;
+}
+
+static void model_reset(void)
+{
+    memset(g_reg, 0, sizeof g_reg);
+    memset(g_cnt, 0, sizeof g_cnt);
+    memset(g_pol_cnt, 0, sizeof g_pol_cnt);
+    memset(g_budget, 0, sizeof g_budget);
+    g_mode = 0u;
+    g_clear_reads = TB_CLEAR_READS;
+    g_clear_stuck = 0;
+    g_clear_count = 0u;
+    g_cnt_clear_count = 0u;
+    g_id = RTLNET_CLS_ID_VALUE;
+    g_status_reads = 0u;
+    g_protocol_violations = 0;
+}
+
+/* Offset class of the entry memory: 1 field table t, 2 tuple, 3 rule; 0 none. */
+static int entry_class(uint32_t off, uint32_t *t_or_r)
+{
+    uint32_t hi = off >> 8;
+
+    if (hi >= 4u && hi <= 8u) {
+        *t_or_r = hi - 4u;
+        return (((off >> 4) & 0xFu) < g_te) ? 1 : 0;
+    }
+    if (hi == 9u || hi == 0xAu) {
+        uint32_t e = (off - 0x900u) / 0x20u;
+        uint32_t w = ((off - 0x900u) % 0x20u) / 4u;
+        *t_or_r = 5u;
+        return (e < g_tu && w < RTLNET_CLS_TUP_WORDS) ? 2 : 0;
+    }
+    if (hi >= 0xCu) {
+        uint32_t r = (off - 0xC00u) / model_stride();
+        uint32_t b = ((off - 0xC00u) % model_stride()) / 4u;
+        *t_or_r = r;
+        return (r < g_nr && b < g_mdb) ? 3 : 0;
+    }
+    return 0;
+}
+
+uint32_t rtlnet_host_reg_read32(uintptr_t addr)
+{
+    uint32_t off = (uint32_t)(addr - TB_BASE);
+    uint32_t i;
+
+    if (off == RTLNET_CLS_REG_ID) {
+        return g_id;
+    }
+    if (off == RTLNET_CLS_REG_VERSION) {
+        return RTLNET_CLS_VERSION_VALUE;
+    }
+    if (off == RTLNET_CLS_REG_CAPS) {
+        return model_caps();
+    }
+    if (off == RTLNET_CLS_REG_LATENCY) {
+        uint32_t v = (g_te > g_tu ? g_te : g_tu) / g_lanes + 14u;
+        return (g_mdb / 8u + v) | (v << 8);
+    }
+    if (off == RTLNET_CLS_REG_CTRL) {
+        return g_mode;
+    }
+    if (off == RTLNET_CLS_REG_STATUS) {
+        uint32_t clearing = 0u;
+        g_status_reads++;
+        if (g_clear_stuck) {
+            clearing = 1u;
+        } else if (g_clear_reads > 0u) {
+            g_clear_reads--;
+            clearing = 1u;
+        }
+        return clearing | (g_mode << RTLNET_CLS_STATUS_MODE_SHIFT);
+    }
+    if (off >= 0x080u && off < 0x0C0u) {
+        return g_cnt[(off - 0x080u) / 4u];
+    }
+    for (i = 0u; i < g_np; i++) {
+        uint32_t b = RTLNET_CLS_REG_POLICER(i);
+        if (off == b + RTLNET_CLS_POL_SEEN) {
+            return g_pol_cnt[i][0];
+        }
+        if (off == b + RTLNET_CLS_POL_PASSED) {
+            return g_pol_cnt[i][1];
+        }
+        if (off == b + RTLNET_CLS_POL_DROPPED) {
+            return g_pol_cnt[i][2];
+        }
+        if (off == b + RTLNET_CLS_POL_BUDGET) {
+            return g_budget[i];
+        }
+    }
+    if (off < RTLNET_CLS_WINDOW_BYTES) {
+        return g_reg[off / 4u];
+    }
+    return 0u;
+}
+
+void rtlnet_host_reg_write32(uintptr_t addr, uint32_t value)
+{
+    uint32_t off = (uint32_t)(addr - TB_BASE);
+    uint32_t idx;
+    uint32_t i;
+    int cls;
+
+    if (off == RTLNET_CLS_REG_CTRL) {
+        if ((value & RTLNET_CLS_CTRL_CLEAR_TABLES) != 0u) {
+            model_clear();
+            g_clear_reads = TB_CLEAR_READS;
+            g_clear_count++;
+        } else {
+            g_mode = value & RTLNET_CLS_CTRL_MODE_MASK;
+        }
+        if ((value & RTLNET_CLS_CTRL_CNT_CLEAR) != 0u) {
+            memset(g_cnt, 0, sizeof g_cnt);
+            memset(g_pol_cnt, 0, sizeof g_pol_cnt);
+            g_cnt_clear_count++;
+        }
+        return;
+    }
+    for (i = 0u; i < (uint32_t)RTLNET_CLS_NUM_TABLES; i++) {
+        if (off == RTLNET_CLS_REG_TABLE_MODE(i)) {
+            g_reg[off / 4u] = value & 0x9Fu;
+            return;
+        }
+    }
+    for (i = 0u; i < g_nr; i++) {
+        if (off == RTLNET_CLS_REG_RULE_MODE(i)) {
+            g_reg[off / 4u] = value & 0x3Fu;
+            return;
+        }
+    }
+    for (i = 0u; i < g_np; i++) {
+        uint32_t b = RTLNET_CLS_REG_POLICER(i);
+        if (off == b + RTLNET_CLS_POL_CTRL) {
+            g_reg[off / 4u] = value & 1u;
+            g_budget[i] = g_reg[(b + RTLNET_CLS_POL_LIMIT) / 4u];
+            return;
+        }
+        if (off == b + RTLNET_CLS_POL_LIMIT || off == b + RTLNET_CLS_POL_WINDOW) {
+            g_reg[off / 4u] = value;
+            g_budget[i] = g_reg[(b + RTLNET_CLS_POL_LIMIT) / 4u];
+            return;
+        }
+    }
+    cls = entry_class(off, &idx);
+    if (cls == 1 || cls == 2) {
+        if ((g_reg[RTLNET_CLS_REG_TABLE_MODE(idx) / 4u] & RTLNET_CLS_TM_ENABLE) != 0u) {
+            g_protocol_violations++;
+        }
+        g_reg[off / 4u] = value;
+    } else if (cls == 3) {
+        if ((g_reg[RTLNET_CLS_REG_RULE_MODE(idx) / 4u] & RTLNET_CLS_RM_ENABLE) != 0u) {
+            g_protocol_violations++;
+        }
+        g_reg[off / 4u] = value;
+    }
+}
+
+static uint32_t mreg(uint32_t off)
+{
+    return g_reg[off / 4u];
+}
+
+/* -------------------------------------------------------------------------
+ * Tests
+ * ------------------------------------------------------------------------- */
+static rtlnet_classifier_t g_ctx;
+
+static void init_ok(void)
+{
+    model_reset();
+    check(rtlnet_classifier_init(&g_ctx, TB_BASE) == RTLNET_CLS_OK, "init");
+}
+
+static void test_init(void)
+{
+    rtlnet_classifier_t c;
+
+    model_reset();
+    check(rtlnet_classifier_init(NULL, TB_BASE) == RTLNET_CLS_ERR_ARG, "init NULL");
+    g_id = 0x12345678u;
+    check(rtlnet_classifier_init(&c, TB_BASE) == RTLNET_CLS_ERR_ID, "init wrong ID");
+    check(rtlnet_classifier_set_mode(&c, RTLNET_CLS_MODE_PASS_ALL) == RTLNET_CLS_ERR_NOT_INIT,
+          "failed init leaves the context unusable");
+    model_reset();
+    g_clear_stuck = 1;
+    check(rtlnet_classifier_init(&c, TB_BASE) == RTLNET_CLS_ERR_TIMEOUT, "init CLEARING stuck");
+    check(g_status_reads == RTLNET_CLS_CLEAR_POLL_MAX, "CLEARING poll bounded by RTLNET_CLS_CLEAR_POLL_MAX");
+    init_ok();
+    check(g_ctx.table_entries == g_te && g_ctx.tuple_entries == g_tu && g_ctx.num_rules == g_nr &&
+          g_ctx.num_policers == g_np && g_ctx.table_lanes == g_lanes && g_ctx.match_depth_bytes == g_mdb,
+          "CAPS decoded");
+    check(g_ctx.rule_stride == 0x100u, "rule stride 0x100 at 64 bytes");
+    check(g_ctx.delay_beats == 8u + 22u && g_ctx.verdict_latency == 22u, "LATENCY decoded");
+    g_mdb = 128u;
+    g_nr = 2u;
+    init_ok();
+    check(g_ctx.rule_stride == 0x200u, "rule stride 0x200 at 128 bytes");
+    g_mdb = 128u;
+    g_nr = 4u;
+    model_reset();
+    check(rtlnet_classifier_init(&c, TB_BASE) == RTLNET_CLS_ERR_ID, "impossible CAPS rejected");
+    g_mdb = 64u;
+    g_nr = 2u;
+    init_ok();
+}
+
+static void test_mode(void)
+{
+    rtlnet_cls_mode_t m;
+    uint32_t st;
+    int i;
+
+    init_ok();
+    for (i = 0; i < 4; i++) {
+        check(rtlnet_classifier_set_mode(&g_ctx, (rtlnet_cls_mode_t)i) == RTLNET_CLS_OK, "set_mode");
+        check(g_mode == (uint32_t)i, "MODE written");
+        check(rtlnet_classifier_get_mode(&g_ctx, &m) == RTLNET_CLS_OK && (int)m == i, "get_mode");
+    }
+    check(rtlnet_classifier_set_mode(&g_ctx, (rtlnet_cls_mode_t)4) == RTLNET_CLS_ERR_ARG, "set_mode bad");
+    check(rtlnet_classifier_get_mode(&g_ctx, NULL) == RTLNET_CLS_ERR_ARG, "get_mode NULL");
+    check(rtlnet_classifier_get_status(&g_ctx, &st) == RTLNET_CLS_OK &&
+          ((st & RTLNET_CLS_STATUS_MODE_MASK) >> RTLNET_CLS_STATUS_MODE_SHIFT) == 3u, "get_status MODE");
+    check(rtlnet_classifier_set_mode(NULL, RTLNET_CLS_MODE_PASS_ALL) == RTLNET_CLS_ERR_ARG, "set_mode NULL ctx");
+}
+
+static void test_table_mode(void)
+{
+    rtlnet_cls_table_mode_t tm;
+    int t;
+
+    init_ok();
+    for (t = 0; t < RTLNET_CLS_NUM_TABLES; t++) {
+        check(rtlnet_classifier_table_mode(&g_ctx, (rtlnet_cls_table_t)t, 1, 1, RTLNET_CLS_CMP_MASK, 1, 1) ==
+              RTLNET_CLS_OK, "table_mode");
+        checkf(mreg(RTLNET_CLS_REG_TABLE_MODE(t)) == 0x9Bu, "TABLE_MODE[%u] = 0x9B (got 0x%x)", (unsigned)t,
+               mreg(RTLNET_CLS_REG_TABLE_MODE(t)));
+        check(rtlnet_classifier_get_table_mode(&g_ctx, (rtlnet_cls_table_t)t, &tm) == RTLNET_CLS_OK &&
+              tm.enable && tm.exclude && tm.compare == RTLNET_CLS_CMP_MASK && tm.classify && tm.vlan_aware,
+              "get_table_mode all bits");
+        check(rtlnet_classifier_table_mode(&g_ctx, (rtlnet_cls_table_t)t, 1, 0, RTLNET_CLS_CMP_RANGE, 0, 0) ==
+              RTLNET_CLS_OK && mreg(RTLNET_CLS_REG_TABLE_MODE(t)) == 0x05u, "table_mode range enable");
+    }
+    check(rtlnet_classifier_table_mode(&g_ctx, (rtlnet_cls_table_t)6, 1, 0, RTLNET_CLS_CMP_SINGLE, 0, 0) ==
+          RTLNET_CLS_ERR_ARG, "table_mode bad table");
+    check(rtlnet_classifier_table_mode(&g_ctx, RTLNET_CLS_TABLE_MAC, 1, 0, (rtlnet_cls_compare_t)3, 0, 0) ==
+          RTLNET_CLS_ERR_ARG, "table_mode bad compare");
+}
+
+static void test_entries(void)
+{
+    rtlnet_cls_entry_t e;
+    rtlnet_cls_entry_t g;
+    uint32_t t;
+    uint32_t i;
+
+    init_ok();
+    for (t = 0u; t < 5u; t++) {
+        /* Enabled table: the update must disable it while writing. */
+        (void)rtlnet_classifier_table_mode(&g_ctx, (rtlnet_cls_table_t)t, 1, 0, RTLNET_CLS_CMP_SINGLE, 0, 0);
+        for (i = 0u; i < g_te; i++) {
+            memset(&e, 0, sizeof e);
+            e.valid = 1u;
+            e.src_en = (uint8_t)(i & 1u);
+            e.dst_en = (uint8_t)((i >> 1) & 1u);
+            e.both = (uint8_t)((i >> 2) & 1u);
+            e.proto_en = (uint8_t)((i >> 3) & 1u);
+            e.proto = (uint8_t)(17u + i);
+            e.police_en = 1u;
+            e.policer = (uint8_t)(i & 3u);
+            e.src_value = 0x0000A1B2C3D4E5F0ull + i + 0x1000000ull * t;
+            e.dst_value = 0x0000102030405060ull + i;
+            check(rtlnet_classifier_table_entry_set(&g_ctx, (rtlnet_cls_table_t)t, i, &e) == RTLNET_CLS_OK,
+                  "entry_set");
+            memset(&g, 0, sizeof g);
+            check(rtlnet_classifier_table_entry_get(&g_ctx, (rtlnet_cls_table_t)t, i, &g) == RTLNET_CLS_OK,
+                  "entry_get");
+            check(memcmp(&e, &g, sizeof e) == 0, "entry round trip");
+        }
+        check(mreg(RTLNET_CLS_REG_TABLE_MODE(t)) == 0x01u, "table mode restored after update");
+        check(mreg(RTLNET_CLS_REG_ENTRY(t, 3u) + RTLNET_CLS_ENT_CTRL) ==
+              (RTLNET_CLS_ENT_VALID | RTLNET_CLS_ENT_SRC_EN | RTLNET_CLS_ENT_DST_EN | RTLNET_CLS_ENT_POLICE_EN |
+               (3u << RTLNET_CLS_ENT_POLICER_SHIFT) | (20u << RTLNET_CLS_ENT_PROTO_SHIFT) | 0xA1B2u),
+              "entry control word packing");
+    }
+    check(rtlnet_classifier_table_entry_set(&g_ctx, RTLNET_CLS_TABLE_MAC, g_te, &e) == RTLNET_CLS_ERR_RANGE,
+          "entry index range");
+    check(rtlnet_classifier_table_entry_set(&g_ctx, RTLNET_CLS_TABLE_TUPLE, 0u, &e) == RTLNET_CLS_ERR_ARG,
+          "entry_set on the tuple table");
+    check(rtlnet_classifier_table_entry_get(&g_ctx, RTLNET_CLS_TABLE_MAC, 0u, NULL) == RTLNET_CLS_ERR_ARG,
+          "entry_get NULL");
+}
+
+static void test_tuples(void)
+{
+    rtlnet_cls_tuple_t x;
+    rtlnet_cls_tuple_t y;
+    uint32_t i;
+
+    init_ok();
+    (void)rtlnet_classifier_table_mode(&g_ctx, RTLNET_CLS_TABLE_TUPLE, 1, 0, RTLNET_CLS_CMP_SINGLE, 0, 0);
+    for (i = 0u; i < g_tu; i++) {
+        memset(&x, 0, sizeof x);
+        x.valid = 1u;
+        x.proto_en = (uint8_t)(i & 1u);
+        x.proto = 6u;
+        x.police_en = (uint8_t)((i >> 1) & 1u);
+        x.policer = (uint8_t)(i & 3u);
+        x.src_ip = 0xC0A90100u + i;
+        x.src_mask = 0xFFFFFF00u;
+        x.dst_ip = 0xC0A901DCu;
+        x.dst_mask = 0xFFFFFFFFu;
+        x.sport_lo = (uint16_t)i;
+        x.sport_hi = (uint16_t)(i + 100u);
+        x.dport_lo = 22u;
+        x.dport_hi = 22u;
+        check(rtlnet_classifier_tuple_set(&g_ctx, i, &x) == RTLNET_CLS_OK, "tuple_set");
+        memset(&y, 0, sizeof y);
+        check(rtlnet_classifier_tuple_get(&g_ctx, i, &y) == RTLNET_CLS_OK && memcmp(&x, &y, sizeof x) == 0,
+              "tuple round trip");
+    }
+    check(mreg(RTLNET_CLS_REG_TUPLE(1u) + RTLNET_CLS_TUP_SPORT) == ((101u << 16) | 1u), "tuple SPORT packing");
+    check(mreg(RTLNET_CLS_REG_TABLE_MODE(RTLNET_CLS_TABLE_TUPLE)) == 0x01u, "tuple mode restored");
+    check(rtlnet_classifier_tuple_set(&g_ctx, g_tu, &x) == RTLNET_CLS_ERR_RANGE, "tuple index range");
+}
+
+static void test_rules(void)
+{
+    rtlnet_cls_rule_mode_t rm;
+    uint8_t data[4] = {0x08u, 0x00u, 0x45u, 0x00u};
+    uint8_t mask[4] = {0xFFu, 0xFFu, 0xF0u, 0x00u};
+    uint32_t r;
+    uint32_t b;
+    uint32_t reads;
+
+    init_ok();
+    for (r = 0u; r < g_nr; r++) {
+        check(rtlnet_classifier_rule_mode(&g_ctx, r, 1, 1, 1, 1, 2u) == RTLNET_CLS_OK, "rule_mode");
+        check(mreg(RTLNET_CLS_REG_RULE_MODE(r)) == 0x2Fu, "RULE_MODE packing");
+        check(rtlnet_classifier_get_rule_mode(&g_ctx, r, &rm) == RTLNET_CLS_OK && rm.enable && rm.exclude &&
+              rm.classify && rm.police_en && rm.policer == 2u, "get_rule_mode");
+        reads = g_status_reads;
+        check(rtlnet_classifier_rule_byte(&g_ctx, r, 63u, 0xF0u, RTLNET_CLS_OP_GE, 0x5Au) == RTLNET_CLS_OK,
+              "rule_byte");
+        check(mreg(RTLNET_CLS_REG_RULE_BASE + 0x100u * r + 4u * 63u) == 0xF0000D5Au, "rule byte word");
+        check(g_status_reads - reads >= RTLNET_CLS_SETTLE_READS, "rule settle reads before re-enable");
+        check(mreg(RTLNET_CLS_REG_RULE_MODE(r)) == 0x2Fu, "rule mode restored");
+        check(rtlnet_classifier_rule_pattern(&g_ctx, r, 12u, 4u, data, mask) == RTLNET_CLS_OK, "rule_pattern");
+        for (b = 0u; b < g_mdb; b++) {
+            uint32_t exp = 0u;
+            if (b >= 12u && b < 16u) {
+                exp = ((uint32_t)mask[b - 12u] << 24) | (0x8u << 8) | data[b - 12u];
+            }
+            checkf(mreg(RTLNET_CLS_REG_RULE_BASE + 0x100u * r + 4u * b) == exp, "rule pattern byte %u rule %u",
+                   b, r);
+        }
+    }
+    check(rtlnet_classifier_rule_mode(&g_ctx, g_nr, 1, 0, 0, 0, 0u) == RTLNET_CLS_ERR_RANGE, "rule range");
+    check(rtlnet_classifier_rule_byte(&g_ctx, 0u, g_mdb, 0u, RTLNET_CLS_OP_EQ, 0u) == RTLNET_CLS_ERR_RANGE,
+          "rule byte range");
+    check(rtlnet_classifier_rule_pattern(&g_ctx, 0u, 60u, 8u, data, NULL) == RTLNET_CLS_ERR_RANGE,
+          "rule pattern range");
+    check(rtlnet_classifier_rule_pattern(&g_ctx, 0u, 0u, 4u, NULL, NULL) == RTLNET_CLS_ERR_ARG, "rule pattern NULL");
+}
+
+static void test_policers(void)
+{
+    rtlnet_cls_policer_t ps;
+    uint32_t p;
+
+    init_ok();
+    for (p = 0u; p < g_np; p++) {
+        check(rtlnet_classifier_policer_set(&g_ctx, p, 1, 10u + p, 100u + p) == RTLNET_CLS_OK, "policer_set");
+        g_pol_cnt[p][0] = 7u + p;
+        g_pol_cnt[p][1] = 5u;
+        g_pol_cnt[p][2] = 2u + p;
+        check(rtlnet_classifier_policer_get(&g_ctx, p, &ps) == RTLNET_CLS_OK, "policer_get");
+        check(ps.enable == 1u && ps.limit_pkts == 10u + p && ps.window_ms == 100u + p && ps.seen == 7u + p &&
+              ps.passed == 5u && ps.dropped == 2u + p && ps.budget == 10u + p, "policer fields");
+    }
+    check(rtlnet_classifier_policer_set(&g_ctx, g_np, 1, 1u, 1u) == RTLNET_CLS_ERR_RANGE, "policer range");
+    check(rtlnet_classifier_policer_get(&g_ctx, 0u, NULL) == RTLNET_CLS_ERR_ARG, "policer_get NULL");
+}
+
+static void test_counters(void)
+{
+    rtlnet_cls_counters_t c;
+    uint32_t i;
+
+    init_ok();
+    for (i = 0u; i < RTLNET_CLS_NUM_COUNTERS; i++) {
+        g_cnt[i] = 1000u + i;
+    }
+    check(rtlnet_classifier_counters(&g_ctx, &c) == RTLNET_CLS_OK, "counters");
+    check(c.frames == 1000u && c.passed == 1001u && c.dropped == 1002u && c.mode_dropped == 1003u &&
+          c.police_dropped == 1004u && c.overrun_dropped == 1015u, "counter fields");
+    for (i = 0u; i < 6u; i++) {
+        check(c.table_hit[i] == 1005u + i, "table hit counters");
+    }
+    check(c.rule_hit[0] == 1011u && c.rule_hit[1] == 1012u && c.rule_hit[2] == 0u && c.rule_hit[3] == 0u,
+          "rule hit counters of built rules only");
+    (void)rtlnet_classifier_set_mode(&g_ctx, RTLNET_CLS_MODE_PASS_ON_MATCH);
+    check(rtlnet_classifier_clear_counters(&g_ctx) == RTLNET_CLS_OK && g_cnt_clear_count == 1u && g_cnt[0] == 0u,
+          "clear_counters");
+    check(g_mode == (uint32_t)RTLNET_CLS_MODE_PASS_ON_MATCH, "clear_counters keeps MODE");
+    check(rtlnet_classifier_counters(&g_ctx, NULL) == RTLNET_CLS_ERR_ARG, "counters NULL");
+}
+
+static void test_clear_all(void)
+{
+    init_ok();
+    (void)rtlnet_classifier_set_mode(&g_ctx, RTLNET_CLS_MODE_PASS_ALL);
+    (void)rtlnet_classifier_table_mode(&g_ctx, RTLNET_CLS_TABLE_IP, 1, 0, RTLNET_CLS_CMP_SINGLE, 0, 0);
+    (void)rtlnet_classifier_policer_set(&g_ctx, 1u, 1, 5u, 5u);
+    g_reg[(RTLNET_CLS_REG_ENTRY(3u, 0u) + RTLNET_CLS_ENT_CTRL) / 4u] = RTLNET_CLS_ENT_VALID;
+    check(rtlnet_classifier_clear_all(&g_ctx) == RTLNET_CLS_OK && g_clear_count == 1u, "clear_all");
+    check(g_mode == 0u && mreg(RTLNET_CLS_REG_TABLE_MODE(3u)) == 0u &&
+          mreg(RTLNET_CLS_REG_POLICER(1u) + RTLNET_CLS_POL_CTRL) == 0u &&
+          mreg(RTLNET_CLS_REG_ENTRY(3u, 0u) + RTLNET_CLS_ENT_CTRL) == 0u, "power-up state after clear_all");
+    g_clear_stuck = 1;
+    check(rtlnet_classifier_clear_all(&g_ctx) == RTLNET_CLS_ERR_TIMEOUT, "clear_all timeout");
+    g_clear_stuck = 0;
+}
+
+static void test_helpers(void)
+{
+    static const uint8_t mac[6] = {0x02u, 0x49u, 0x4Bu, 0x52u, 0x4Eu, 0x01u};
+    rtlnet_cls_entry_t e;
+    rtlnet_cls_tuple_t x;
+
+    init_ok();
+    (void)rtlnet_classifier_table_mode(&g_ctx, RTLNET_CLS_TABLE_MAC, 0, 1, RTLNET_CLS_CMP_RANGE, 0, 1);
+    check(rtlnet_classifier_mac_filter(&g_ctx, 2u, mac, RTLNET_CLS_SIDE_BOTH, RTLNET_CLS_ACT_GATE) == RTLNET_CLS_OK,
+          "mac_filter");
+    (void)rtlnet_classifier_table_entry_get(&g_ctx, RTLNET_CLS_TABLE_MAC, 2u, &e);
+    check(e.valid && e.src_en && e.dst_en && e.both && !e.police_en && e.src_value == 0x02494B524E01ull &&
+          e.dst_value == 0x02494B524E01ull, "mac_filter entry");
+    check(mreg(RTLNET_CLS_REG_TABLE_MODE(0u)) == (RTLNET_CLS_TM_ENABLE | RTLNET_CLS_TM_EXCLUDE | RTLNET_CLS_TM_VLAN_AWARE),
+          "mac_filter table mode keeps EXCLUDE / VLAN_AWARE, sets single");
+    check(rtlnet_classifier_mac_filter(&g_ctx, 0u, mac, (rtlnet_cls_side_t)7, 0u) == RTLNET_CLS_ERR_ARG, "mac side bad");
+
+    check(rtlnet_classifier_ethertype_filter(&g_ctx, 1u, 0x0800u, 0x0806u, RTLNET_CLS_ACT_POLICE(3u)) == RTLNET_CLS_OK,
+          "ethertype_filter");
+    (void)rtlnet_classifier_table_entry_get(&g_ctx, RTLNET_CLS_TABLE_ETHERTYPE, 2u, &e);
+    check(e.valid && e.src_en && e.src_value == 0x0800u && e.police_en && e.policer == 3u, "ethertype low entry");
+    (void)rtlnet_classifier_table_entry_get(&g_ctx, RTLNET_CLS_TABLE_ETHERTYPE, 3u, &e);
+    check(!e.valid && e.src_value == 0x0806u, "ethertype high entry");
+    check(mreg(RTLNET_CLS_REG_TABLE_MODE(1u)) == 0x05u, "ethertype table range");
+    check(rtlnet_classifier_ethertype_filter(&g_ctx, g_te / 2u, 1u, 2u, 0u) == RTLNET_CLS_ERR_RANGE, "ethertype pair range");
+    check(rtlnet_classifier_ethertype_filter(&g_ctx, 0u, 3u, 2u, 0u) == RTLNET_CLS_ERR_ARG, "ethertype lo > hi");
+
+    check(rtlnet_classifier_ipv4_filter(&g_ctx, 0u, RTLNET_CLS_SIDE_DST, 0xC0A90100u, 0xFFFFFF00u,
+                                        RTLNET_CLS_ACT_CLASSIFY) == RTLNET_CLS_OK, "ipv4_filter");
+    (void)rtlnet_classifier_table_entry_get(&g_ctx, RTLNET_CLS_TABLE_IP, 0u, &e);
+    check(e.valid && !e.src_en && e.dst_en && e.dst_value == 0xC0A90100u, "ipv4 value entry");
+    (void)rtlnet_classifier_table_entry_get(&g_ctx, RTLNET_CLS_TABLE_IP, 1u, &e);
+    check(e.dst_value == 0xFFFFFF00u, "ipv4 mask entry");
+    check(mreg(RTLNET_CLS_REG_TABLE_MODE(3u)) == (0x09u | RTLNET_CLS_TM_CLASSIFY), "ipv4 table mask, classify");
+
+    check(rtlnet_classifier_port_filter(&g_ctx, 2u, 6u, RTLNET_CLS_SIDE_EITHER, 20u, 25u, RTLNET_CLS_ACT_GATE) ==
+          RTLNET_CLS_OK, "port_filter");
+    (void)rtlnet_classifier_table_entry_get(&g_ctx, RTLNET_CLS_TABLE_PORT, 4u, &e);
+    check(e.valid && e.src_en && e.dst_en && !e.both && e.proto_en && e.proto == 6u && e.src_value == 20u,
+          "port low entry");
+    (void)rtlnet_classifier_table_entry_get(&g_ctx, RTLNET_CLS_TABLE_PORT, 5u, &e);
+    check(e.dst_value == 25u, "port high entry");
+    check(mreg(RTLNET_CLS_REG_TABLE_MODE(4u)) == 0x05u, "port table range");
+
+    check(rtlnet_classifier_acl_add(&g_ctx, 4u, 6u, 0xC0A90100u, 0xFFFFFF00u, 0xC0A901DCu, 0xFFFFFFFFu, 0u, 65535u,
+                                    22u, 22u, RTLNET_CLS_ACT_POLICE(1u)) == RTLNET_CLS_OK, "acl_add");
+    (void)rtlnet_classifier_tuple_get(&g_ctx, 4u, &x);
+    check(x.valid && x.proto_en && x.proto == 6u && x.police_en && x.policer == 1u && x.src_ip == 0xC0A90100u &&
+          x.dport_lo == 22u && x.dport_hi == 22u && x.sport_hi == 65535u, "acl entry");
+    check(mreg(RTLNET_CLS_REG_TABLE_MODE(5u)) == 0x01u, "tuple table enabled, gating");
+    check(rtlnet_classifier_acl_add(&g_ctx, 0u, 0u, 0u, 0u, 0u, 0u, 5u, 4u, 0u, 0u, 0u) == RTLNET_CLS_ERR_ARG,
+          "acl sport lo > hi");
+}
+
+static void test_bcast_storm(void)
+{
+    uint32_t i;
+    uint32_t c;
+
+    init_ok();
+    /* Leftover configuration that config_bcast_storm must remove. */
+    (void)rtlnet_classifier_table_mode(&g_ctx, RTLNET_CLS_TABLE_IP, 1, 0, RTLNET_CLS_CMP_SINGLE, 0, 0);
+    (void)rtlnet_classifier_rule_mode(&g_ctx, 0u, 1, 0, 0, 0, 0u);
+    (void)rtlnet_classifier_policer_set(&g_ctx, 2u, 1, 1u, 1u);
+    check(rtlnet_classifier_config_bcast_storm(&g_ctx, 10u, 100u) == RTLNET_CLS_OK, "config_bcast_storm(10, 100)");
+    check(g_clear_count == 1u, "bcast storm starts from CLEAR_TABLES");
+    check(g_mode == (uint32_t)RTLNET_CLS_MODE_PASS_ALL, "bcast storm MODE = PASS_ALL");
+    check(mreg(RTLNET_CLS_REG_TABLE_MODE(0u)) == (RTLNET_CLS_TM_ENABLE | RTLNET_CLS_TM_CLASSIFY),
+          "MAC table enabled, classify-only, single compare");
+    for (i = 1u; i < 6u; i++) {
+        check(mreg(RTLNET_CLS_REG_TABLE_MODE(i)) == 0u, "other tables disabled");
+    }
+    check(mreg(RTLNET_CLS_REG_RULE_MODE(0u)) == 0u, "rules disabled");
+    c = mreg(RTLNET_CLS_REG_ENTRY(0u, 0u) + RTLNET_CLS_ENT_CTRL);
+    check(c == (RTLNET_CLS_ENT_VALID | RTLNET_CLS_ENT_DST_EN | RTLNET_CLS_ENT_POLICE_EN | 0xFFFFu),
+          "entry 0: valid, destination, police with policer 0");
+    check(mreg(RTLNET_CLS_REG_ENTRY(0u, 0u) + RTLNET_CLS_ENT_DST_LO) == 0xFFFFFFFFu &&
+          mreg(RTLNET_CLS_REG_ENTRY(0u, 0u) + RTLNET_CLS_ENT_DST_HI) == 0xFFFFu, "entry 0 destination FF:FF:FF:FF:FF:FF");
+    check(mreg(RTLNET_CLS_REG_POLICER(0u) + RTLNET_CLS_POL_CTRL) == 1u &&
+          mreg(RTLNET_CLS_REG_POLICER(0u) + RTLNET_CLS_POL_LIMIT) == 10u &&
+          mreg(RTLNET_CLS_REG_POLICER(0u) + RTLNET_CLS_POL_WINDOW) == 100u, "policer 0 = 10 frames / 100 ms");
+    check(mreg(RTLNET_CLS_REG_POLICER(2u) + RTLNET_CLS_POL_CTRL) == 0u, "other policers disabled");
+    check(rtlnet_classifier_bcast_storm_enable(&g_ctx, 0) == RTLNET_CLS_OK &&
+          mreg(RTLNET_CLS_REG_POLICER(0u) + RTLNET_CLS_POL_CTRL) == 0u, "bcast_storm_enable(0)");
+    check(mreg(RTLNET_CLS_REG_POLICER(0u) + RTLNET_CLS_POL_LIMIT) == 10u, "disable keeps the limit");
+    check(rtlnet_classifier_bcast_storm_enable(&g_ctx, 1) == RTLNET_CLS_OK &&
+          mreg(RTLNET_CLS_REG_POLICER(0u) + RTLNET_CLS_POL_CTRL) == 1u, "bcast_storm_enable(1)");
+    check(rtlnet_classifier_config_bcast_storm(NULL, 10u, 100u) == RTLNET_CLS_ERR_ARG, "bcast storm NULL");
+}
+
+int main(int argc, char **argv)
+{
+    int inject = (argc > 1 && strcmp(argv[1], "--inject-failure") == 0);
+
+    test_init();
+    test_mode();
+    test_table_mode();
+    test_entries();
+    test_tuples();
+    test_rules();
+    test_policers();
+    test_counters();
+    test_clear_all();
+    test_helpers();
+    test_bcast_storm();
+    check(g_protocol_violations == 0, "update protocol: no entry or rule word written while enabled");
+    if (inject) {
+        check(0, "INJECT_FAILURE negative control");
+    }
+    if (g_fails == 0 && g_checks > 0) {
+        printf("TEST PASS: rtlnet_classifier_host checks=%d\n", g_checks);
+        return 0;
+    }
+    printf("TEST FAIL: rtlnet_classifier_host fails=%d checks=%d first=%s\n", g_fails, g_checks, g_first);
+    return 1;
+}
