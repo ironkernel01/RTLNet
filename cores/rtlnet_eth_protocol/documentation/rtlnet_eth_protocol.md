@@ -446,19 +446,22 @@ gcc -std=c11 -Wall -Wextra -Werror -DRTLNET_HOST_TEST -Icores/rtlnet_common/driv
 
 ## 6. Synthesis
 
-Vivado 2025.2, out of context, xc7a200tsbg484-1, `DHCP_ENABLE=0, IPERF_ENABLE=0, UDP_ENABLE=0`, other
-parameters default (ARP and ICMP in): `rtlnet_synth_check: PASS`, 0 critical warnings.
+Vivado 2025.2, out of context, xc7a200tsbg484-1, `scripts/rtlnet_synth_check.tcl` through `scripts/rtlnet_vivado.ps1`,
+10-22-2026. Every leaf built (ARP, ICMP, DHCP, iperf, UDP socket), other parameters default, `CPU_CLASSIFIER_ENABLE=0`
+(the classifier core is not in the tree yet): `rtlnet_synth_check: PASS`, 0 critical warnings, with the CPU path and
+without it (`CPU_PATH_ENABLE=0`) for the cost of the path.
 
-| Resource | Used |
-|---|---|
-| Slice LUTs | 2142 (2069 logic, 73 memory: the filter's data delay line as SRLs) |
-| Slice registers | 3544 |
-| Block RAM tiles | 8 (7 RAMB36 + 2 RAMB18: ingress 4 + 1, egress 2 + 1, ICMP payload 1) |
-| DSP | 0 |
+| Resource | CPU path built | `CPU_PATH_ENABLE=0` | CPU path cost |
+|---|---:|---:|---:|
+| Slice LUTs | 9432 (9359 logic, 73 memory) | 8983 (8910 logic, 73 memory) | +449 |
+| Slice registers | 12737 | 11727 | +1010 |
+| Block RAM tiles | 24.5 (21 RAMB36 + 7 RAMB18) | 17.5 (15 RAMB36 + 5 RAMB18) | +7 (CPU RX 4 + 1, CPU TX 2 + 1) |
+| DSP | 2 | 2 | 0 |
 
-Warnings: constant application ports (UDP disabled), unused inputs, and `filemgmt 56-12` duplicate-file
-notices because each nested core filelist includes `rtlnet_common.f` (Vivado reads each file once; the
-simulation runner removes duplicates). Timing is not analysed by an out-of-context synthesis.
+Warnings: unconnected XPM ports, removed unused registers, and `filemgmt 56-12` duplicate-file notices because each
+nested core filelist includes `rtlnet_common.f` (Vivado reads each file once; the simulation runner removes
+duplicates). The earlier ARP+ICMP-only build (2142 LUTs, 3544 registers, 8 BRAM tiles) is superseded by this one.
+Timing is not analysed by an out-of-context synthesis.
 
 ## 7. Driver
 
