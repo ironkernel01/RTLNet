@@ -1,0 +1,4 @@
+# rtlnet_icmp regression: <bench> <filelist> [tag] [defines=A,B] [plusargs=X,Y] [expectfail]
+tb_rtlnet_icmp  cores/rtlnet_icmp/testbench/tb_rtlnet_icmp.f
+tb_rtlnet_icmp  cores/rtlnet_icmp/testbench/tb_rtlnet_icmp.f  generic  defines=RTLNET_TECH_GENERIC
+tb_rtlnet_icmp  cores/rtlnet_icmp/testbench/tb_rtlnet_icmp.f  neg      plusargs=INJECT_FAILURE  expectfail
