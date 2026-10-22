@@ -121,6 +121,13 @@ simulator version (observed 10-22-2026: `crc32_byte` over "123456789" gave 0x8D0
 correct 0xCBF43926 inside `for`, with identical iteration). RTLNet bench code therefore uses
 `for (int i = 0; i < $size(q); i++)`, never `foreach`. Synthesizable RTL never iterates queues and is unaffected.
 
+A width cast whose width is a parameter-derived localparam (`DELAY_W'(REPLY_DELAY_CYCLES)`) loaded 0 inside
+`always_ff` in this simulator (observed 10-22-2026 in the ARP leaf). Declare a typed localparam of the target
+width instead (`localparam logic [DELAY_W-1:0] DELAY = REPLY_DELAY_CYCLES;`) and assign that.
+
+Active-HDL rejects continuously driven nets passed as `ref` task arguments; pass a selector or sample the net
+inside the task instead.
+
 ## 7. Revision history
 
 | Revision | Change |

@@ -24,11 +24,15 @@ proc read_filelist {repo path} {
     if {[regexp {^-f\s+(.+)$} $line -> sub]} { read_filelist $repo [string trim $sub]; continue }
     if {[regexp {^\+incdir\+(.+)$} $line -> d]} { lappend ::incdirs [file join $repo $d]; continue }
     if {[regexp {^\+define\+} $line]} continue
-    read_verilog -sv [file join $repo $line]
+    set src [file normalize [file join $repo $line]]
+    if {[lsearch -exact $::read_files $src] >= 0} continue
+    lappend ::read_files $src
+    read_verilog -sv $src
   }
   close $f
 }
 set ::incdirs {}
+set ::read_files {}
 read_filelist $repo $fl
 # Generics as name=value, or as "name value" pairs (cmd.exe splits batch
 # arguments at '=' when Vivado is launched through vivado.bat).

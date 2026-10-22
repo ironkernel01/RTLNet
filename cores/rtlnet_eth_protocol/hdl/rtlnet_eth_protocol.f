@@ -5,7 +5,7 @@
 -f cores/rtlnet_icmp/hdl/rtlnet_icmp.f
 # -f cores/rtlnet_dhcp/hdl/rtlnet_dhcp.f
 # -f cores/rtlnet_iperf/hdl/rtlnet_iperf.f
-# -f cores/rtlnet_udp_socket/hdl/rtlnet_udp_socket.f
+-f cores/rtlnet_udp_socket/hdl/rtlnet_udp_socket.f
 cores/rtlnet_eth_protocol/hdl/rtlnet_eth_protocol_ingress.sv
 cores/rtlnet_eth_protocol/hdl/rtlnet_eth_protocol_regs.sv
 cores/rtlnet_eth_protocol/hdl/rtlnet_eth_protocol.sv

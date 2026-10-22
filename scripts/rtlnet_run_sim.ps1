@@ -48,6 +48,10 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# powershell -File delivers '-Defines A,B' as one string: split every entry on commas.
+$Defines  = @($Defines  | ForEach-Object { $_ -split ',' } | Where-Object { $_ -ne '' })
+$PlusArgs = @($PlusArgs | ForEach-Object { $_ -split ',' } | Where-Object { $_ -ne '' })
+
 $Repo     = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $AldecBin = 'C:/Aldec/Active-HDL-11.1-x64/BIN'
 $Vsimsa   = Join-Path $AldecBin 'vsimsa.exe'
