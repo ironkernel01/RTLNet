@@ -84,8 +84,14 @@ section 15 port lists). This page lists the rules a core must follow to be accep
 
 ## 6. Synthesis check
 
-`vivado -mode batch -nojournal -log <log> -source scripts/rtlnet_synth_check.tcl -tclargs <top> <filelist> xc7a200tsbg484-1 [NAME value ...]`
-must report `rtlnet_synth_check: PASS` with 0 critical warnings for every new synthesizable top. Record the
+Always launch Vivado through `scripts/rtlnet_vivado.ps1` (machine-wide limit of two concurrent Vivado jobs):
+
+```
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rtlnet_vivado.ps1 -Tcl scripts/rtlnet_synth_check.tcl `
+  -Log .sim/synth/<top>.log -TclArgs <top>,<filelist>,xc7a200tsbg484-1[,NAME=VALUE,...]
+```
+
+It must report `rtlnet_synth_check: PASS` with 0 critical warnings for every new synthesizable top. Record the
 utilization in the core documentation.
 
 ## 7. Documentation
