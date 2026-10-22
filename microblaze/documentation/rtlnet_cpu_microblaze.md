@@ -54,7 +54,7 @@ not use them). The frame streams are in `clk`; the protocol wrapper's CPU FIFOs 
 | `axi_timer_0` | AXI Timer 2.0 | two 32-bit counters: counter 0 free running (ticks, delays), counter 1 the 1 ms interrupt |
 | `axi_intc_0` | AXI INTC 4.1 | 12 inputs from `irq_concat`; kinds detected from the sources (level; UART edge) |
 | `irq_concat` | inline concat 1.0 | `{dma_s2mm, dma_mm2s, uart, timer, irq[7:0]}` |
-| `axi_dma_0` | AXI DMA 7.1 | simple (direct register) mode, no scatter-gather, 64-bit memory side and 64-bit streams, no realignment engine, `c_sg_length_width` 14 (16383-byte transfers), bursts 16 |
+| `axi_dma_0` | AXI DMA 7.1 | simple (direct register) mode, no scatter-gather, 64-bit memory side and 64-bit streams, realignment engine on MM2S only (transmit buffers at any byte address) and none on S2MM, `c_sg_length_width` 14 (16383-byte transfers), bursts 16 |
 | `axi_bram_ctrl_0` + `axi_bram` | AXI BRAM controller 4.1 + Block Memory Generator 8.4 | AXI4, 64-bit, single port; **128 KiB = 32 RAMB36**, the DMA frame buffers |
 | `axi_periph` | AXI Interconnect 2.1 | 1 slave (M_AXI_DP), 7 masters: UART, timer, INTC, MDM, `M_AXI_RTLNET`, DMA registers, memory path |
 | `axi_mem` | AXI Interconnect 2.1 | 3 slaves (memory path from `axi_periph`, DMA MM2S, DMA S2MM), 1 master (AXI BRAM controller); 32 -> 64-bit conversion for the CPU path |
