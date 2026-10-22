@@ -229,10 +229,14 @@ module rtlnet_classifier_line #(
   // Next-state of the three quantities the line enable depends on, so the
   // enable itself is a register: the output slice ready, the ingress valid
   // and the frame position at the line input.
+  // in_valid_n uses s_ready_q == !sk_valid, which holds in every clock
+  // except the reset clock (both 0); in that clock mid_frame_n is 0, so the
+  // input term (a beat offered next clock, or between frames) is unchanged.
+  // The input term is one 6-input function, shift_n one more LUT.
   always_comb begin
     o_ready_n   = (m_axis_tready || !m_axis_tvalid) ? 1'b1 :
                   (gate_valid && out_s_ready)       ? 1'b0 : out_s_ready;
-    in_valid_n  = (shift_q || !in_valid) ? (sk_valid || (s_axis_tvalid && s_ready_q)) : 1'b1;
+    in_valid_n  = (shift_q || !in_valid) ? (sk_valid || s_axis_tvalid) : 1'b1;
     mid_frame_n = take ? !in_last : mid_frame;
     shift_n     = o_ready_n && (in_valid_n || !mid_frame_n);
   end
@@ -337,7 +341,11 @@ module rtlnet_classifier_line #(
   // Simulation checks: a verdict is present for every frame reaching the end
   // of the line; the queue never overflows; the line never shifts a gated
   // beat away while the slice refuses it.
+  logic sim_run = 1'b0;
   always @(posedge clk) begin
+    sim_run <= (resetn === 1'b1);
+    if (sim_run && resetn === 1'b1 && (s_ready_q == sk_valid))
+      $error("rtlnet_classifier_line: ingress ready is not the inverse of the skid valid");
     if (resetn === 1'b1) begin
       if (pop && !head_ok)
         $error("rtlnet_classifier_line: frame reached the end of the delay line before its verdict");

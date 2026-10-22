@@ -3,7 +3,7 @@
 | Item | Value |
 |---|---|
 | Core | `rtlnet_classifier` |
-| Status | Specification of the core being built (10-22-2026) |
+| Status | Built and verified (10-22-2026): RTL `hdl/`, driver `driver/`, bench `testbench/`; as-built details and deviations in section 11 |
 | Language | SystemVerilog-2012 (RTL), C11 (driver) |
 | Clock | `axis_clk` of the stream it filters (`cpu_axis_clk` 100 MHz on the CPU path; the MAC client clock on a main-ingress instance) |
 | Registers | AXI4-Lite, `s_axi_aclk`, 4 KiB window, internal `rtlnet_axil_cdc` to `axis_clk`; protocol sub-map 0x8000 for the CPU-path instance |
@@ -66,8 +66,10 @@ pass-all.
 
 Derived: `DELAY_BEATS = MATCH_DEPTH_BYTES / 8 + VERDICT_LATENCY`, where `VERDICT_LATENCY` is the clock count from a
 frame's last compared beat to its final verdict (table scan `TABLE_ENTRIES / TABLE_LANES` + capture + combiner +
-policer stages; 8 with the defaults, so `DELAY_BEATS` = 16). An elaboration `$fatal` stops a parameter set whose
-verdict could arrive after the frame's first beat leaves the delay line.
+policer stages). As built (section 11.2): `VERDICT_LATENCY = WIN + 15` with `WIN = max(TABLE_ENTRIES, TUPLE_ENTRIES) /
+TABLE_LANES`, so the defaults give `VERDICT_LATENCY` = 23 and `DELAY_BEATS` = 31 (the original estimate of 8 / 16
+predates the two-LUT-level pipelining of section 6a). An elaboration `$fatal` stops a parameter set whose verdict
+could arrive after the frame's first beat leaves the delay line.
 
 ## 3. Field extractor
 
@@ -245,11 +247,12 @@ Vivado (Spartan UltraScale+) — with zero failing setup/hold endpoints and a lo
 | 0x004 | `VERSION` | RO | register-map date code |
 | 0x008 | `CAPS` | RO | `TABLE_ENTRIES`, `TUPLE_ENTRIES`, `NUM_RULES`, `NUM_POLICERS`, `TABLE_LANES`, `MATCH_DEPTH_BYTES` |
 | 0x00C | `CTRL` | RW | bits 1:0 `MODE` (reset 00 = DROP_ALL), bit8 `CLEAR_TABLES` (pulse: invalidate every entry, disable every table/rule/policer, MODE back to DROP_ALL), bit16 `CNT_CLEAR` |
-| 0x010 | `STATUS` | RO | `CLEARING`, current MODE, delay-line stall seen (sticky) |
+| 0x010 | `STATUS` | RO | bit0 `CLEARING`, bits 9:8 current MODE, bit16 delay-line stall seen (sticky, cleared by `CNT_CLEAR`) |
+| 0x014 | `LATENCY` | RO | as built: bits 7:0 `DELAY_BEATS`, bits 15:8 `VERDICT_LATENCY` |
 | 0x020 + 4t | `TABLE_MODE[t]` | RW | 4.2; t = 0 MAC, 1 ETHERTYPE, 2 VLAN, 3 IP, 4 PORT, 5 TUPLE |
 | 0x040 + 4r | `RULE_MODE[r]` | RW | 5.2 |
-| 0x080..0x0FC | counters | RO | `FRAMES`, `PASSED`, `DROPPED`, `MODE_DROPPED`, `POLICE_DROPPED`, `TABLE_HIT[t]` (6), `RULE_HIT[r]` |
-| 0x100 + 0x20p | `POLICER[p]` | RW/RO | `+0` CTRL (bit0 ENABLE), `+4` LIMIT_PKTS, `+8` WINDOW_MS, `+C` SEEN, `+10` PASSED, `+14` DROPPED |
+| 0x080..0x0FC | counters | RO | 0x080 `FRAMES`, 0x084 `PASSED`, 0x088 `DROPPED`, 0x08C `MODE_DROPPED`, 0x090 `POLICE_DROPPED`, 0x094 + 4t `TABLE_HIT[t]` (6), 0x0AC + 4r `RULE_HIT[r]` (4), as built: 0x0BC `OVERRUN_DROPPED` |
+| 0x100 + 0x20p | `POLICER[p]` | RW/RO | `+0` CTRL (bit0 ENABLE), `+4` LIMIT_PKTS, `+8` WINDOW_MS, `+C` SEEN, `+10` PASSED, `+14` DROPPED, as built: `+18` BUDGET (RO, frames left in the window) |
 | 0x400 + 0x100t + 0x10e | `TABLE[t].ENTRY[e]` | RW | t = 0..4: `+0` SRC_VALUE[31:0], `+4` {VALID, SRC_EN, DST_EN, BOTH, PROTO_EN, POLICE_EN, POLICER, PROTO, SRC_VALUE[47:32]}, `+8` DST_VALUE[31:0], `+C` DST_VALUE[47:32] |
 | 0x900 + 0x20e | `TUPLE.ENTRY[e]` | RW | `+0` {VALID, PROTO_EN, POLICE_EN, POLICER, PROTO}, `+4` SRC_IP, `+8` SRC_MASK, `+C` DST_IP, `+10` DST_MASK, `+14` {SPORT_HI, SPORT_LO}, `+18` {DPORT_HI, DPORT_LO} |
 | 0xC00 + 0x100r + 4b | `RULE[r].BYTE[b]` | RW | 5.1 (b = 0..MATCH_DEPTH_BYTES-1; with more than 64 bytes the rule stride grows, see CAPS) |
