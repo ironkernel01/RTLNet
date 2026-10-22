@@ -51,6 +51,7 @@
  *  Revision    Author                          Description
  * ---------------------------------------------------------------------------
  *  10-22-2026  MenuBuilder AI / Steve Spano    Initial generation (hierarchical modes)
+ *  10-22-2026  MenuBuilder AI / Steve Spano    END in privileged mode; Menu_Redisplay for asynchronous events
  * ===========================================================================
  */
 #include "menu.h"
@@ -457,6 +458,18 @@ void Menu_PrintPrompt(void)
 {
     const MenuModeDef *md = menu_mode_def(g_mode);
     Menu_Write((md != NULL) ? md->prompt : "rtlnet?");
+}
+
+/**
+ * @brief Print the prompt and the line typed so far (after an asynchronous
+ *        message such as a link event).
+ * @return None.
+ */
+void Menu_Redisplay(void)
+{
+    Menu_PrintPrompt();
+    g_line[g_len] = '\0';
+    Menu_Write(g_line);
 }
 
 /**

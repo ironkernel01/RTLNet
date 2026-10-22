@@ -82,6 +82,15 @@ uint32_t plat_uptime_ms(void)
 }
 
 /*
+ * plat_ticks -- free-running 32-bit cpu_clk tick counter.
+ * Returns: AXI Timer 0 count.
+ */
+uint32_t plat_ticks(void)
+{
+    return timer_ticks();
+}
+
+/*
  * plat_delay_us -- busy-wait.
  * Returns: nothing.
  */

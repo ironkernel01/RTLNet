@@ -12,6 +12,7 @@
 # every mode; END in priv and the configuration modes.
 
 REVISION:10-22-2026:Initial hierarchical command set
+REVISION:10-22-2026:Network commands on the core drivers; phy, clear, iperf, advertise, duplex, mac-address
 
 # ---------------------------------------------------------------------------
 # Modes
@@ -29,6 +30,7 @@ MODE-ENTER:cli_enter_socket:config:SOCKET [INDEX]:config-sock:rtlnet(config-sock
 KEYWORD:exec:SHOW:Show running system information
 KEYWORD:priv:DEBUG:Raw register access
 KEYWORD:priv:LED:Set a user LED (2..7)
+KEYWORD:priv:PHY:PHY registers over MDIO
 KEYWORD:config:IP:Global IP configuration
 KEYWORD:config:NO:Negate a command or set its default
 KEYWORD:config:NO ECHO:UDP echo server
@@ -44,14 +46,14 @@ KEYWORD:config-sock:NO:Negate a command or set its default
 # ---------------------------------------------------------------------------
 cli_show_version:exec:SHOW VERSION:Board, register map, build and firmware identity
 cli_show_system:exec:SHOW SYSTEM:Clocks, uptime, switches, buttons and PHY pins
-cli_show_interfaces:exec:SHOW INTERFACES:Ethernet interface status (MAC core)
-cli_show_phy:exec:SHOW PHY:PHY link and registers (MDIO core)
-cli_show_ip:exec:SHOW IP:IPv4 address, mask and gateway (protocol core)
-cli_show_arp:exec:SHOW ARP:ARP responder status (ARP leaf)
-cli_show_dhcp:exec:SHOW DHCP:DHCP client state and lease (DHCP leaf)
-cli_show_iperf:exec:SHOW IPERF:iperf server statistics (iperf leaf)
-cli_show_sockets:exec:SHOW SOCKETS:UDP socket table (UDP socket leaf)
-cli_show_counters:exec:SHOW COUNTERS:MAC and protocol frame counters
+cli_show_interfaces:exec:SHOW INTERFACES:Ethernet link, MAC status and frame counters
+cli_show_phy:exec:SHOW PHY:PHY identity, RX delay, link, advertisement and partner
+cli_show_ip:exec:SHOW IP:Node MAC, static and effective IPv4 address, mask and gateway
+cli_show_arp:exec:SHOW ARP:ARP responder counters
+cli_show_dhcp:exec:SHOW DHCP:DHCP client state, lease and counters
+cli_show_iperf:exec:SHOW IPERF:iperf server port and statistics
+cli_show_sockets:exec:SHOW SOCKETS:UDP socket table, UDP echo and counters
+cli_show_counters:exec:SHOW COUNTERS:Frame counters of every core
 
 # ---------------------------------------------------------------------------
 # Privileged exec
@@ -60,6 +62,10 @@ cli_show_running:priv:SHOW RUNNING-CONFIG:Current configuration
 cli_disable:priv:DISABLE:Leave privileged exec mode
 cli_debug_read:priv:DEBUG READ [ADDR]:Read a 32-bit word (hex 0x... or decimal address)
 cli_debug_write:priv:DEBUG WRITE [ADDR] [VALUE]:Write a 32-bit word
+cli_phy_read:priv:PHY READ [REG]:Read a PHY register (0..31) over MDIO
+cli_phy_write:priv:PHY WRITE [REG] [VALUE]:Write a PHY register (0..31) over MDIO
+cli_phy_dump:priv:PHY DUMP:Read PHY registers 0..31
+cli_clear_counters:priv:CLEAR COUNTERS:Clear the counters of every core
 cli_led_on:priv:LED [N] ON:Turn user LED n (2..7) on
 cli_led_off:priv:LED [N] OFF:Turn user LED n (2..7) off
 cli_reload:priv:RELOAD:Restart the firmware (soft restart)
@@ -67,27 +73,35 @@ cli_reload:priv:RELOAD:Restart the firmware (soft restart)
 # ---------------------------------------------------------------------------
 # Global configuration
 # ---------------------------------------------------------------------------
-cli_ip_gateway:config:IP DEFAULT-GATEWAY [ADDR]:Set the IPv4 default gateway
-cli_no_ip_gateway:config:NO IP DEFAULT-GATEWAY:Remove the IPv4 default gateway
-cli_echo_enable:config:ECHO ENABLE {SOCKET}:Enable the UDP echo server (all sockets, or one)
+cli_ip_gateway:config:IP DEFAULT-GATEWAY [ADDR]:Set the static IPv4 default gateway
+cli_no_ip_gateway:config:NO IP DEFAULT-GATEWAY:Remove the static default gateway (0.0.0.0)
+cli_echo_enable:config:ECHO ENABLE {SOCKET}:Enable the UDP echo server (configured socket, or the one given)
 cli_no_echo_enable:config:NO ECHO ENABLE:Disable the UDP echo server
+cli_echo_socket:config:ECHO SOCKET [INDEX]:Echo on socket 0..3, or "any"
+cli_iperf_port:config:IPERF PORT [PORT]:iperf server UDP port (default 5001)
 
 # ---------------------------------------------------------------------------
 # Interface configuration (eth0)
 # ---------------------------------------------------------------------------
 cli_if_speed:config-if:SPEED [MBPS]:Link speed: 10, 100, 1000 or auto
-cli_if_autoneg:config-if:AUTONEG:Enable auto-negotiation
-cli_if_no_autoneg:config-if:NO AUTONEG:Disable auto-negotiation (forced speed)
-cli_if_shutdown:config-if:SHUTDOWN:Disable the interface
+cli_if_duplex:config-if:DUPLEX [MODE]:Duplex: full, half or auto (the MAC is full duplex only)
+cli_if_autoneg:config-if:AUTONEG:Enable auto-negotiation (speed/duplex limit the advertisement)
+cli_if_no_autoneg:config-if:NO AUTONEG:Disable auto-negotiation (forced 10 or 100 Mb/s)
+cli_if_advertise:config-if:ADVERTISE [MODES]:Advertise modes, e.g. 10f,100f,1000f or all
+cli_if_no_advertise:config-if:NO ADVERTISE:Advertisement from speed and duplex again
+cli_if_shutdown:config-if:SHUTDOWN:Disable the interface (MAC receive and transmit)
 cli_if_no_shutdown:config-if:NO SHUTDOWN:Enable the interface
 cli_if_ip_address:config-if:IP ADDRESS [ADDR] [MASK]:Set the static IPv4 address and mask
-cli_if_no_ip_address:config-if:NO IP ADDRESS:Remove the static IPv4 address
+cli_if_no_ip_address:config-if:NO IP ADDRESS:Remove the static IPv4 address (0.0.0.0)
+cli_if_ip_netmask:config-if:IP NETMASK [MASK]:Set the static netmask
+cli_if_mac:config-if:MAC-ADDRESS [MAC]:Set the node MAC address (aa:bb:cc:dd:ee:ff)
 
 # ---------------------------------------------------------------------------
 # DHCP client configuration
 # ---------------------------------------------------------------------------
 cli_dhcp_start:config-dhcp:START:Start DHCP discovery now
 cli_dhcp_stop:config-dhcp:STOP:Stop the DHCP client and release the lease
+cli_dhcp_renew:config-dhcp:RENEW:Renew the lease now
 cli_dhcp_auto:config-dhcp:AUTO:Start DHCP automatically on link up
 cli_dhcp_no_auto:config-dhcp:NO AUTO:Do not start DHCP on link up
 
@@ -96,6 +110,6 @@ cli_dhcp_no_auto:config-dhcp:NO AUTO:Do not start DHCP on link up
 # ---------------------------------------------------------------------------
 cli_sock_open:config-sock:OPEN [PORT]:Open the socket on a local UDP port
 cli_sock_close:config-sock:CLOSE:Close the socket
-cli_sock_remote:config-sock:REMOTE [ADDR] [PORT]:Set the remote IPv4 address and UDP port
+cli_sock_remote:config-sock:REMOTE [ADDR] [PORT] {MAC}:Remote IPv4 address, UDP port and next-hop MAC
 cli_sock_connect:config-sock:CONNECT-ON-RECEIVE:Follow the sender of the last datagram
 cli_sock_no_connect:config-sock:NO CONNECT-ON-RECEIVE:Keep the configured remote address

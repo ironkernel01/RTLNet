@@ -84,6 +84,9 @@
 #define RTLNET_FW_NAME              "rtlnet-fw"
 #define RTLNET_FW_VERSION           "10-22-2026"
 
+/* Free-running tick (AXI Timer 0 at cpu_clk). */
+#define RTLNET_PLAT_TICKS_PER_US    (RTLNET_PLAT_CPU_CLK_HZ / 1000000u)
+
 /* Heartbeat: led[1] toggles every RTLNET_PLAT_HEARTBEAT_MS. */
 #define RTLNET_PLAT_HEARTBEAT_MS    500u
 
@@ -92,6 +95,7 @@ void     plat_init(void);
 void     plat_console_write(const char *s, size_t n);
 int      plat_console_getc(void);
 uint32_t plat_uptime_ms(void);
+uint32_t plat_ticks(void);
 void     plat_delay_us(uint32_t us);
 void     plat_delay_ms(uint32_t ms);
 void     plat_poll(void);

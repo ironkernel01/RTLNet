@@ -223,6 +223,18 @@ void rtlnet_host_reg_write32(uintptr_t addr, uint32_t value)
 }
 
 /**
+ * @brief MDIO driver host hook (rtlnet_mdio.c under RTLNET_HOST_TEST): the
+ *        MDC half-period spin takes no time in the model.
+ * @param loops Spin count requested by the driver.
+ * @return None.
+ */
+void rtlnet_host_spin(uint32_t loops);
+void rtlnet_host_spin(uint32_t loops)
+{
+    (void)loops;
+}
+
+/**
  * @brief Platform start: time origin, LEDs cleared.
  * @return None.
  */
@@ -267,6 +279,16 @@ int plat_console_getc(void)
 uint32_t plat_uptime_ms(void)
 {
     return (uint32_t)(((uint64_t)(clock() - g_t0) * 1000u) / (uint64_t)CLOCKS_PER_SEC);
+}
+
+/**
+ * @brief Free-running tick of the host model (microseconds of processor time
+ *        times RTLNET_PLAT_TICKS_PER_US).
+ * @return Tick count.
+ */
+uint32_t plat_ticks(void)
+{
+    return (uint32_t)(((uint64_t)(clock() - g_t0) * 1000000u / (uint64_t)CLOCKS_PER_SEC) * RTLNET_PLAT_TICKS_PER_US);
 }
 
 /**

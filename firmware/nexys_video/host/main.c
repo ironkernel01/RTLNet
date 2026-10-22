@@ -39,6 +39,7 @@
  *  Revision    Author                          Description
  * ---------------------------------------------------------------------------
  *  10-22-2026  MenuBuilder AI / Steve Spano    Initial hierarchical command set
+ *  10-22-2026  MenuBuilder AI / Steve Spano    Network commands on the core drivers; demo expectations updated
  * ===========================================================================
  */
 #include <stdio.h>    /* printf, getchar */
@@ -60,7 +61,7 @@ typedef struct {
 
 static int         g_checks;
 static int         g_fails;
-static const char *g_first_fail;
+static char        g_first_fail[256];
 
 /**
  * @brief Count one check; report and remember a failure.
@@ -73,8 +74,8 @@ static void demo_check(int ok, const char *msg)
     g_checks++;
     if (!ok) {
         g_fails++;
-        if (g_first_fail == NULL) {
-            g_first_fail = msg;
+        if (g_first_fail[0] == '\0') {
+            (void)snprintf(g_first_fail, sizeof(g_first_fail), "%s", msg);
         }
         printf("\nCHECK FAILED: %s\n", msg);
     }
@@ -165,15 +166,14 @@ static const demo_step_t g_steps[] = {
     { "sh?", { "show - Show running system information", NULL, NULL, NULL }, NULL, MENU_MODE_EXEC },
     { "\x03", { "^C", NULL, NULL, NULL }, NULL, MENU_MODE_EXEC },
     { "show i\r", { "% Ambiguous command: \"i\"", NULL, NULL, NULL }, NULL, MENU_MODE_EXEC },
-    { "show ip\r", { "% PROTOCOL not present in this build", "Configured: address 192.169.1.220", NULL, NULL },
-      NULL, MENU_MODE_EXEC },
+    { "show ip\r", { "% PROTOCOL not present in this build", NULL, NULL, NULL }, NULL, MENU_MODE_EXEC },
     { "show interfaces\r", { "% MAC not present in this build (ID 0x00000000 at 0x44A01000, expected 0x4D414331 \"MAC1\")",
-      "eth0 configuration: speed auto", NULL, NULL }, NULL, MENU_MODE_EXEC },
+      NULL, NULL, NULL }, NULL, MENU_MODE_EXEC },
     { "show phy\r", { "% MDIO not present in this build", NULL, NULL, NULL }, NULL, MENU_MODE_EXEC },
     { "show arp\r", { "% ARP not present in this build", NULL, NULL, NULL }, NULL, MENU_MODE_EXEC },
     { "show dhcp\r", { "% DHCP not present in this build", NULL, NULL, NULL }, NULL, MENU_MODE_EXEC },
     { "show iperf\r", { "% IPERF not present in this build", NULL, NULL, NULL }, NULL, MENU_MODE_EXEC },
-    { "show sockets\r", { "% UDP socket not present in this build", "closed", NULL, NULL }, NULL, MENU_MODE_EXEC },
+    { "show sockets\r", { "% UDP socket not present in this build", NULL, NULL, NULL }, NULL, MENU_MODE_EXEC },
     { "show counters\r", { "% MAC not present", "% PROTOCOL not present", NULL, NULL }, NULL, MENU_MODE_EXEC },
     { "show\r", { "% Incomplete command.", NULL, NULL, NULL }, NULL, MENU_MODE_EXEC },
     { "bogus\r", { "^", "% Invalid input detected at '^' marker.", NULL, NULL }, NULL, MENU_MODE_EXEC },
@@ -224,7 +224,7 @@ static const demo_step_t g_steps[] = {
     { "end\r", { NULL, NULL, NULL, NULL }, NULL, MENU_MODE_PRIV },
     { "show running-config\r", { " speed 100", " no autoneg", " ip address 10.0.0.2 255.255.255.0", " open 7" },
       NULL, MENU_MODE_PRIV },
-    { "show run\r", { "socket 1", " remote 10.0.0.9 5000", "ip default-gateway 10.0.0.1", "echo enable 2" },
+    { "show run\r", { "socket 1", " remote 10.0.0.9 5000", "ip default-gateway 10.0.0.1", "echo socket 2" },
       NULL, MENU_MODE_PRIV },
     { "!!\r", { "show run", " no auto", NULL, NULL }, NULL, MENU_MODE_PRIV },
     { "\x1b[A\r", { "! RTLNet running configuration", NULL, NULL, NULL }, NULL, MENU_MODE_PRIV },
@@ -282,8 +282,8 @@ static int demo_run(int inject_failure)
     host_model_set_core(RTLNET_PLAT_MAC_BASE, RTLNET_ID_MAC);
     host_capture_clear();
     demo_type("show interfaces\r");
-    demo_check(strstr(host_capture_text(), "MAC core present at 0x44A01000: ID \"MAC1\", register map 10-22-2026") != NULL,
-               "present MAC core reported");
+    demo_check(strstr(host_capture_text(), "eth0 is down") != NULL &&
+               strstr(host_capture_text(), "MAC speed       :") != NULL, "present MAC core reported through its driver");
     demo_check(strstr(host_capture_text(), "not present") == NULL, "present core not reported absent");
     host_model_set_core(RTLNET_PLAT_MAC_BASE, 0u);
 
@@ -306,6 +306,11 @@ static int demo_run(int inject_failure)
     }
 
     verdict_msg = (g_checks == 0) ? "no checks ran" : g_first_fail;
+    for (char *q = g_first_fail; *q != '\0'; q++) {
+        if (*q == '\r' || *q == '\n') {
+            *q = ' ';
+        }
+    }
     if (g_fails == 0 && g_checks > 0) {
         printf("\nTEST PASS: menu_demo checks=%d\n", g_checks);
         return 0;

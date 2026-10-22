@@ -5,8 +5,9 @@
 | Board | Digilent Nexys Video, XC7A200T-1SBG484C, Realtek RTL8211E-VL |
 | Document revision | 10-22-2026 |
 | Top | `boards/nexys_video/hdl/rtlnet_nexys_video_top.sv` (`rtlnet_nexys_video_top`) |
-| Builds | CPU-only (default, built and on hardware); network (`RTLNET_WITH_NETWORK`, written, elaborated against port stubs, not built) |
+| Builds | network (`build.ps1 -Network`, `RTLNET_WITH_NETWORK`: MAC, MDIO, protocol wrapper with ARP/ICMP/DHCP/iperf/UDP socket leaves, UDP echo) and CPU-only (default); both built, timing met, on hardware |
 | Tools | Vivado 2025.2, MicroBlaze GCC 13.3, Active-HDL 11.1 |
+| Firmware | one image for both builds (`firmware/nexys_video`); absent cores are probed and reported "not present in this build" |
 
 ## 1. Files
 
@@ -18,13 +19,17 @@
 | `hdl/rtlnet_nexys_video.f`, `hdl/rtlnet_nexys_video_network.f` | filelists (CPU-only; network cores) |
 | `constraints/rtlnet_nexys_video.xdc` | pins, I/O standards, `sys_clk` 10 ns, asynchronous pin false paths, configuration |
 | `constraints/rtlnet_nexys_video_cpu_only.xdc` | CPU-only build: RGMII receive pins as asynchronous levels |
+| `constraints/rtlnet_nexys_video_rgmii.xdc` | network build: RGMII timing (read after synthesis, section 5.1) |
 | `scripts/build_bitstream.tcl` | non-project build with gates (section 5) |
-| `scripts/build.ps1` | firmware + bitstream + merge (+ `-Program`, `-Test`) |
+| `scripts/build.ps1` | firmware + bitstream + merge (+ `-Network`, `-Program`, `-Test`) |
 | `scripts/merge_elf.ps1` | updatemem: firmware ELF into the LMB BRAM |
 | `scripts/program.ps1`, `scripts/program.tcl` | JTAG programming (hw_server, `program_hw_devices`) |
-| `scripts/cli_test.ps1` | console test over the USB-UART (COM4) |
-| `testbench/tb_rtlnet_nexys_video_top.sv` (+ `.f`, `regression.txt`) | board bench with the CPU BFM |
-| `../../scripts/rtlnet_constrain_cdc.tcl` | crossing constraints by cell name |
+| `scripts/cli_test.ps1` | console test over the USB-UART (COM4), either build |
+| `scripts/net_test.ps1` | hardware network test: board side over the CLI, host side from the PC NIC when it is up |
+| `testbench/tb_rtlnet_nexys_video_top.sv` (+ `.f`) | CPU-only board bench with the CPU BFM |
+| `testbench/tb_rtlnet_nexys_video_net.sv` (+ `.f`) | network board bench: BFM + RTL8211E model, ARP / ICMP / UDP echo / DHCP at 10/100/1000 |
+| `testbench/regression.txt` | board regression lines (both benches, negative controls) |
+| `../../scripts/rtlnet_constrain_cdc.tcl` | crossing constraints and report_cdc waivers by cell name |
 
 ## 2. Clocks and resets
 
@@ -101,16 +106,101 @@ clear/preset endpoints outside `rtlnet_reset_sync` and the vendor block design, 
 Critical/Warning or an unwaived methodology finding, 24 critical warnings during implementation,
 40 write_bitstream, 41 write_mem_info.
 
-Methodology waivers (printed on every run): LUTAR-1 on the reset AND (every driven pin must be a
-`u_rst_*/pipe_reg[*]/CLR`), LUTAR-1 inside the vendor MDM, TIMING-9 (vendor MDM BSCAN clock groups)
-only while report_cdc has no Critical/Warning finding.
+Methodology waivers (printed on every run, each an explicit rule with its reason):
+
+| Rule | Scope | Reason |
+|---|---|---|
+| LUTAR-1 | the reset AND: the LUT `u_rst_*/pipe[*]_i_1*` and every pin it drives a `u_rst_*/pipe_reg[*]/CLR` | `rst_arstn = cpu_resetn & mmcm_locked` into the `rtlnet_reset_sync` chains only; glitch argument in the board top header |
+| LUTAR-1 | LUT and pins inside `u_cpu/u_bd/` | vendor MDM JTAG control logic |
+| TIMING-9 | any | allowed only because report_cdc (gated) has no Critical/Warning finding left; the asynchronous groups are the MDM BSCAN clocks of the vendor IP |
+| TIMING-47 | false paths between `rgmii_rxc_v` and `rgmii_rxc` | RGMII same-edge capture: the opposite-edge setup and same-edge hold pairs describe no capture (MAC documentation section 6) |
+
+The report_cdc gate parses the ID summary of `report_cdc -details` (the clock-pair summary of a plain
+`report_cdc` carries no IDs; the gate fails when the ID table is missing).
 
 CDC constraints (`scripts/rtlnet_constrain_cdc.tcl`, sourced after synthesis): classes sync, reset,
-gray, fifo, axil_cdc by cell name; per-class counts printed; `::rtlnet_cdc_required` is
-`{sync reset}` for the CPU-only build and all five for the network build (zero matches of a required
-class is an error).
+gray, fifo, axil_cdc by cell name; per-class counts and a per-instance list
+(`build/reports/cdc_instances.txt`) are written; `::rtlnet_cdc_required` is `{sync reset}` for the
+CPU-only build and all five for the network build (zero matches of a required class is an error);
+`::rtlnet_cdc_expect` pins the instance counts (network: fifo 7, axil_cdc 3, gray 5; CPU-only: 0, 0,
+0), so a crossing added or lost by a core change fails the build until reviewed. For the findings
+report_cdc cannot recognize the script creates native waivers (`create_waiver -type CDC`), scoped to
+one instance's source and destination registers with the protocol as the reason: CDC-6 on every Gray
+bus (`gray_src` -> `gray_dst_ff[0]`, FIFO `s_gray`/`m_gray` -> `*_m1`/`*_s1`) and on the FIFO event
+toggles (`events_s` -> `events_m1`), CDC-1 and CDC-15 on the `rtlnet_axil_cdc` held bundles
+(`req_*_hold`, `rsp_*_hold`). report_cdc lists them as waived; anything else still fails the gate.
+
+### 5.1 RGMII constraints (network build)
+
+`constraints/rtlnet_nexys_video_rgmii.xdc`, read after synthesis (it names pin-layer cells), from the
+MAC's board constraints block: `rgmii_rxc` 8 ns on `eth_rxck` plus the virtual launch clock
+`rgmii_rxc_v`; input delays -1.2 / -2.8 ns on both edges (PHY RX delay on, RTL8211E Table 65
+setup/hold >= 1.2 ns); same-edge multicycle 0 / -1 and four edge-pair false paths; `rgmii_txc`
+generated on `eth_txck` from `*/u_rgmii_io/u_txc_oddr` (clk125_90); output delays +-1.0 ns on both
+edges; IODELAY group `rtlnet_rgmii` on the IDELAYCTRL and the five IDELAYE2; SLEW FAST on the transmit
+pins. IOB packing: the IDDR/ODDR are ILOGIC/OLOGIC cells. MDC/MDIO/PHY reset/interrupt stay false
+paths (`rtlnet_nexys_video.xdc`). No clock groups.
+
+### 5.2 Firmware network manager
+
+`firmware/nexys_video/src/rtlnet_netmgr.c` (called from `main.c`): probes every core; MDIO core
+init, MDC calibration against the AXI timer, wait for the core's PHY power-on reset plus 30 ms,
+RTL8211E ID check, RX delay on (page 0xA4 register 28, read back), advertisement (full duplex
+10/100/1000 by default) and AN restart; MAC init; protocol addresses (MAC kept from the wrapper's
+reset value, static 192.169.1.220/24, gateway 192.169.1.1); DHCP AUTO flag; iperf port 5001; socket 0
+open on port 7 with connect-on-receive; UDP echo on socket 0. Link monitor every 250 ms (PHYSR):
+link up programs the MAC speed, RX/TX enable (unless `shutdown`), LINK_UP, waits for the receive
+path, prints `%LINK: eth0 up, <speed> Mb/s <duplex> duplex`, and starts DHCP when `auto` is set and
+no lease is held; link down clears LINK_UP and prints `%LINK: eth0 down`; DHCP lease changes print
+`%DHCP: bound ...` / `%DHCP: lease lost`. LEDs: led[2] link, led[3] DHCP lease (the `led` command can
+override them until the next event).
 
 ## 6. Results
+
+### 6.1 Network build
+
+Network build of commit d2aa3977 (tree clean), 10-22-2026, Vivado 2025.2, `build.ps1 -Network`:
+
+| Item | Result |
+|---|---|
+| Synthesis / implementation | 0 critical warnings; bitstream build 694 s |
+| Timing (post-route) | WNS +0.221 ns, WHS +0.017 ns, WPWS +0.264 ns; 0 failing setup, hold and pulse-width endpoints |
+| RGMII interface (1000 Mb/s budget) | receive `rgmii_rxc_v` -> `rgmii_rxc` setup +0.221 / hold +0.243 ns (tap 12); transmit clk125 -> `rgmii_txc` setup +0.269 / hold +0.274 ns |
+| Intra-clock WNS | cpu_clk +1.936, proto_clk +2.375, clk125 +1.514, axis_clk +4.675, rgmii_rxc +3.014 ns |
+| Utilization (post-route) | 12783 LUTs (9.55 %), 16902 FFs (6.32 %), 54.5 BRAM tiles (14.93 %), 5 DSP48 (0.68 %) |
+| By instance (LUT / FF / RAMB36 + RAMB18) | u_protocol 8505 / 11659 / 15 + 5; u_cpu 2451 / 2094 / 32 + 0; u_mac 1064 / 1679 / 4 + 2; u_echo 296 / 648; u_sysregs 252 / 533; u_decoder 136 / 130; u_mdio 49 / 98 |
+| CDC constraints | sync 26 instances / 118 first stages; reset 8 / 32 CLR pins (6 board + 2 MAC); gray 5 / 160; fifo 7 / 68; axil_cdc 3 / 200; counts equal the expectation; 32 report_cdc waivers created |
+| report_cdc | unwaived: Info only (CDC-3, CDC-9); waived endpoints CDC-1 x159, CDC-6 x188, CDC-15 x237, all inside the crossing primitives; every clock pair "Safely Timed", 0 unsafe, 0 unknown |
+| Methodology | LUTAR-1 x3, TIMING-9 x1, TIMING-47 x4, all matched by the waivers of section 5 |
+| Asynchronous clear endpoints | 32 in `rtlnet_reset_sync` (24 board, 8 MAC), 45 vendor block design, 0 elsewhere; 0 latches |
+| Firmware | `firmware.elf` text 51856 B, data 4 B, bss + stack 23520 B |
+
+Board simulation (Active-HDL 11.1, `scripts/rtlnet_regression.ps1 -Match tb_rtlnet_nexys_video`):
+
+| Line | Result |
+|---|---|
+| `tb_rtlnet_nexys_video_top` | TEST PASS, 74 checks |
+| `tb_rtlnet_nexys_video_top` `neg` | TEST FAIL as required |
+| `tb_rtlnet_nexys_video_net` `g100` | TEST PASS, 74 checks: core IDs, MDIO bring-up through the MDIO core (PHYID, RX delay with read-back, PHYSR), MAC qualified, ARP reply, ICMP echo reply (56-byte payload), UDP echo on port 7 (100 bytes), DHCP DISCOVER/OFFER/REQUEST/ACK with the bench as server, lease 192.169.1.77 with the effective IP switched, ARP for the lease, MAC counters 6 RX / 6 TX, no PHY timing violation |
+| `tb_rtlnet_nexys_video_net` `g1000` | TEST PASS, 74 checks |
+| `tb_rtlnet_nexys_video_net` `g10` | TEST PASS, 74 checks (a first run with a 400 us frame timeout failed at the DHCP REQUEST, which proves the checks fail; the timeout is now x10 at 10 Mb/s) |
+| `tb_rtlnet_nexys_video_net` `neg` | TEST FAIL as required |
+
+Hardware (board cabled to a 10/100 router at 192.169.1.1), network image d2aa3977:
+
+| Check | Result |
+|---|---|
+| Start-up | `Network: MAC ok, MDIO ok, PHY ok (ID 0x001CC915, RX delay reg 0xAD77 -> 0xAD77), protocol ok` |
+| PHY | RTL8211E ID 0x001CC915, RX delay on, AN complete, partner 10h/10f/100h/100f, MDC half period 346 ns |
+| Link | `%LINK: eth0 up, 100 Mb/s full duplex, MAC receive ready`; MAC RXC rate 102-103, receive path running |
+| DHCP | `%DHCP: bound 192.169.1.199 mask 255.255.255.0 router 192.169.1.1 lease 43200 s`; effective IP switched; renew and stop/start (release, discover, offer, request, ack) both worked |
+| Traffic | renew: MAC rx good / tx +1 each, RX_BAD 0; the router ARPed the board and got replies (ARP requests = replies) |
+| 10 Mb/s | `speed 10` (advertise 10f): link down/up, 10 Mb/s full duplex, RXC rate 10, renew + stop/start DHCP + ARP replies; `speed auto` back to 100 Mb/s |
+| Scripts | `net_test.ps1`: PASS 18/18 board-side, 4 host checks BLOCKED (PC NIC disconnected); `cli_test.ps1`: PASS 15/15 |
+| Cold start | after JTAG configuration: link up 100 Mb/s and a DHCP lease acquired from scratch (discover/offer/request/ack 1 each), MAC rx 2 / tx 2 |
+| Host tests (arp, ping 0/64/1472 x20, UDP echo client, iperf -u) | not run: the PC's wired NIC "Ethernet" (ASIX USB, 192.169.1.178) is disconnected; no iperf 2 binary on PATH |
+
+### 6.2 CPU-only build
 
 CPU-only build of commit f34a8bac (tree clean), 10-22-2026, Vivado 2025.2, `build.ps1 -Test`:
 
@@ -129,40 +219,37 @@ CPU-only build of commit f34a8bac (tree clean), 10-22-2026, Vivado 2025.2, `buil
 | JTAG | `program.ps1`: xc7a200t_0 programmed in 1.9 s, DONE high |
 | Console | `cli_test.ps1` on COM4: PASS 15/15 |
 | Board bench | `tb_rtlnet_nexys_video_top` TEST PASS 74 checks (3 s); `+INJECT_FAILURE` TEST FAIL; a perturbed clock expectation TEST FAIL |
-| Host harness | `menu.exe --demo` TEST PASS 202 checks; `--inject-failure` TEST FAIL |
+| Host harness | `menu.exe --demo` TEST PASS 202 checks; `--inject-failure` TEST FAIL (199 checks with the network command set) |
+
+Re-run of the CPU-only build with the network-phase gates (commit 78db4daa, tree clean): PASS, WNS
++0.745 ns, WHS +0.066 ns, 0 failing endpoints, 2862 LUTs, CDC counts fifo/axil_cdc/gray 0 as expected,
+report_cdc Info only; the network-phase firmware on it prints "Network cores not in this build." and
+`cli_test.ps1` passes 15/15.
 
 Also exercised by hand on the board: `show ?`, `sh?`, the ambiguous `show i`, `no ?` in config-if,
 Ctrl-C, Ctrl-Z, up-arrow recall, `!!`, backspace, `reload` (banner again, firmware uptime restarted,
 hardware UPTIME_MS continuing). The PHY leaves reset (rst_n 1) and its receive clock toggles.
 
-## 7. Network integration checklist
+## 7. Network integration (done 10-22-2026) and what remains
 
-1. Filelists `cores/rtlnet_eth_mac/hdl/rtlnet_eth_mac.f`, `cores/rtlnet_mdio/hdl/rtlnet_mdio.f`,
-   `cores/rtlnet_eth_protocol/hdl/rtlnet_eth_protocol.f`, `cores/rtlnet_udp_echo/hdl/rtlnet_udp_echo.f`
-   (listed in `hdl/rtlnet_nexys_video_network.f`); then `build.ps1 -Network`.
-2. Instances already in the top under `RTLNET_WITH_NETWORK` (ports per section 15, elaborated against
-   port stubs on 10-22-2026): `u_mac` (`rtlnet_eth_mac`, RGMII pins, decoder slave 1),
-   `u_mdio` (`rtlnet_mdio`, MDC, MDIO through `u_mdio_iobuf`, `eth_rst_b`, `eth_int_b`, irq[0], slave 2),
-   `u_protocol` (`rtlnet_eth_protocol`, MAC RX/TX streams, app_clk = proto_clk, slave 4, 16-bit window
-   address), `u_echo` (`rtlnet_udp_echo` on the socket payload streams, slave 3). The classifier window
-   stays a stub. NET_STATUS carries the MAC/protocol status levels (synchronized in the system
-   registers); the `ev_*` pulses are unconnected.
-3. Constraints to add to `constraints/rtlnet_nexys_video.xdc` (network build only, e.g. a
-   `rtlnet_nexys_video_rgmii.xdc` read when `network 1`): `create_clock -period 8.000` on `eth_rxck`
-   (125 MHz; 10/100 rates are slower and covered); `set_input_delay -clock` rxck (min/max, both edges)
-   on `eth_rxd[*]`/`eth_rxctl` from the RTL8211E RGMII timing with the PHY RX delay on; a
-   `create_generated_clock` on `eth_txck` from the MAC's TXC ODDR under `u_mac/u_rgmii_io` (source
-   clk125_90) and `set_output_delay` on `eth_txd[*]`/`eth_txctl` against it; the IDELAYCTRL /
-   IODELAY group of the pin layer if the MAC does not set it; no clock groups (crossings are the
-   MAC's packet FIFOs and `rtlnet_axil_cdc`, constrained by the CDC script).
-4. The CDC script then requires gray, fifo and axil_cdc matches; check the printed counts against the
-   number of FIFOs (`u_*_fifo`) and register crossings in the cores.
-5. Firmware: the same image runs; the core probes report "present" once the IDs read back, and each
-   core's driver (`cores/<core>/driver`) is wired into `cli/cli_commands.c` (show/config callbacks)
-   and the main loop (link monitor, MAC speed follow, DHCP on link-up).
+Integrated: `u_mac`, `u_mdio`, `u_protocol` (every leaf), `u_echo` under `RTLNET_WITH_NETWORK`, the
+RGMII constraints, the CDC classes and counts, every core driver in the firmware (CLI and network
+manager), the network board bench, and the hardware bring-up of section 6.1.
+
+Open:
+
+1. Host-side hardware tests (PC ARP entry, ping sweep 0/64/1472 x20, UDP echo client, iperf -u):
+   `net_test.ps1` runs them as soon as the PC NIC "Ethernet" is connected; no iperf 2 binary is on
+   this PC (none was downloaded).
+2. 1000 Mb/s on hardware needs a gigabit partner (simulated and constrained; the router is 10/100).
+3. RX IDELAY tap sweep on hardware (the MAC documentation's procedure); the build meets the 1000 Mb/s
+   RGMII budget with tap 12 (balanced +0.22 / +0.24 ns).
+4. The `ev_*` pulse outputs of the MAC and the protocol wrapper are unconnected (LED or interrupt use).
+5. Interrupts (PHY INTB through `rtlnet_mdio` irq[0]) are wired but the firmware polls.
 
 ## 8. Revision history
 
 | Revision | Change |
 |---|---|
 | 10-22-2026 | Initial version: CPU-only board top, build flow, bring-up |
+| 10-22-2026 | Network integration: RGMII XDC, CDC counts and waivers, network board bench, firmware network manager and driver-backed CLI, hardware results at 100 and 10 Mb/s |
