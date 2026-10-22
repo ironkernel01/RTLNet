@@ -24,7 +24,9 @@
 //     enabled: BOTH 1 = AND, 0 = OR; neither: no hit), absent fields never
 //     hit, PORT table only: PROTO_EN requires the frame's IP protocol to
 //     equal PROTO. COMPARE 11 is reserved and never hits.
-//   * Timing: 16-bit compare lanes (equality, less-than, masked equality)
+//   * Timing: 16-bit compare lanes (equality, less-than), the masked
+//     difference (field ^ value) & mask registered per bit and reduced to
+//     16-bit zero flags in the next stage
 //     registered, merged most-significant first in the next stage, then side
 //     hit, entry hit and rtlnet_classifier_hitacc (lane reduce, window
 //     accumulate, result latch): TABLE_STAGES registers after the first
@@ -83,6 +85,7 @@ module rtlnet_classifier_table #(
   localparam int EB    = rtlnet_pkg::clog2i(ENTRIES);             // entry index bits
   localparam int CH    = (FW + 15) / 16;                           // 16-bit compare chunks
   localparam int FWX   = 16 * CH;                                  // field width rounded to chunks
+  localparam int FWM   = FWX;                                      // masked-difference width
   localparam int W0_W  = (FW < 32) ? FW : 32;
   localparam int W3_W  = (FW > 32) ? FW - 32 : 1;
   localparam int WCNT  = (WIN > 1) ? rtlnet_pkg::clog2i(WIN) : 1;
@@ -250,6 +253,10 @@ module rtlnet_classifier_table #(
 
   logic [LANES-1:0][47:0]    v_src48;
   logic [LANES-1:0][47:0]    v_dst48;
+  logic [FWM-1:0]            fm_src;
+  logic [FWM-1:0]            fm_dst;
+  logic [LANES-1:0][FWM-1:0] vm_src;
+  logic [LANES-1:0][FWM-1:0] vm_dst;
 
   always_comb begin
     fx_src         = '0;
@@ -261,7 +268,15 @@ module rtlnet_classifier_table #(
       v_dst48[l] = {rd_w3[l], rd_w2[l]};
       v_src[l]   = v_src48[l][FWX-1:0];
       v_dst[l]   = v_dst48[l][FWX-1:0];
+      vm_src[l]  = '0;
+      vm_dst[l]  = '0;
+      vm_src[l][FW-1:0] = v_src48[l][FW-1:0];
+      vm_dst[l][FW-1:0] = v_dst48[l][FW-1:0];
     end
+    fm_src         = '0;
+    fm_src[FW-1:0] = f_src;
+    fm_dst         = '0;
+    fm_dst[FW-1:0] = f_dst;
   end
 
   // ---------------------------------------------------------------------------
@@ -288,10 +303,10 @@ module rtlnet_classifier_table #(
   // ---------------------------------------------------------------------------
   logic [LANES-1:0][CH-1:0] c1_eq_s;
   logic [LANES-1:0][CH-1:0] c1_lt_s;
-  logic [LANES-1:0][CH-1:0] c1_meq_s;
+  logic [LANES-1:0][FWM-1:0] c1_md_s;     // (field ^ value) & mask, even lanes
   logic [LANES-1:0][CH-1:0] c1_eq_d;
   logic [LANES-1:0][CH-1:0] c1_lt_d;
-  logic [LANES-1:0][CH-1:0] c1_meq_d;
+  logic [LANES-1:0][FWM-1:0] c1_md_d;
   logic [LANES-1:0][15:0]   c1_ctl;      // control word bits [31:16]
   logic [LANES-1:0]         c1_pok;      // protocol qualifier passes
   logic                     c1_sp;
@@ -305,10 +320,10 @@ module rtlnet_classifier_table #(
     if (!resetn) begin
       c1_eq_s  <= '0;
       c1_lt_s  <= '0;
-      c1_meq_s <= '0;
+      c1_md_s  <= '0;
       c1_eq_d  <= '0;
       c1_lt_d  <= '0;
-      c1_meq_d <= '0;
+      c1_md_d  <= '0;
       c1_ctl   <= '0;
       c1_pok   <= '0;
       c1_sp    <= 1'b0;
@@ -321,12 +336,17 @@ module rtlnet_classifier_table #(
         for (int c = 0; c < CH; c++) begin
           c1_eq_s[l][c]  <= (fx_src[16*c +: 16] == v_src[l][16*c +: 16]);
           c1_lt_s[l][c]  <= (fx_src[16*c +: 16] <  v_src[l][16*c +: 16]);
-          c1_meq_s[l][c] <= (((fx_src[16*c +: 16] ^ v_src[l][16*c +: 16]) &
-                              v_src[(l | 1)][16*c +: 16]) == 16'h0000);
           c1_eq_d[l][c]  <= HAS_DST && (fx_dst[16*c +: 16] == v_dst[l][16*c +: 16]);
           c1_lt_d[l][c]  <= HAS_DST && (fx_dst[16*c +: 16] <  v_dst[l][16*c +: 16]);
-          c1_meq_d[l][c] <= HAS_DST && ((((fx_dst[16*c +: 16] ^ v_dst[l][16*c +: 16]) &
-                                          v_dst[(l | 1)][16*c +: 16]) == 16'h0000));
+        end
+        // Masked difference of a pair (even lane: value, odd lane: mask),
+        // one LUT per bit; odd lanes have none (all ones: never zero).
+        if ((l % 2) == 0) begin
+          c1_md_s[l] <= (fm_src ^ vm_src[l]) & vm_src[(l | 1)];
+          c1_md_d[l] <= HAS_DST ? ((fm_dst ^ vm_dst[l]) & vm_dst[(l | 1)]) : '1;
+        end else begin
+          c1_md_s[l] <= '1;
+          c1_md_d[l] <= '1;
         end
         c1_ctl[l] <= rd_w1[l][31:16];
         c1_pok[l] <= !HAS_PROTO || !rd_w1[l][FE_PROTO_EN] ||
@@ -345,10 +365,10 @@ module rtlnet_classifier_table #(
   // ---------------------------------------------------------------------------
   logic [LANES-1:0] c2_eq_s;
   logic [LANES-1:0] c2_lt_s;
-  logic [LANES-1:0] c2_meq_s;
+  logic [LANES-1:0][CH-1:0] c2_mz_s;     // 16-bit chunk of the masked difference is zero
   logic [LANES-1:0] c2_eq_d;
   logic [LANES-1:0] c2_lt_d;
-  logic [LANES-1:0] c2_meq_d;
+  logic [LANES-1:0][CH-1:0] c2_mz_d;
   logic [LANES-1:0][15:0] c2_ctl;
   logic [LANES-1:0] c2_pok;
   logic             c2_sp;
@@ -375,10 +395,10 @@ module rtlnet_classifier_table #(
     if (!resetn) begin
       c2_eq_s  <= '0;
       c2_lt_s  <= '0;
-      c2_meq_s <= '0;
+      c2_mz_s  <= '0;
       c2_eq_d  <= '0;
       c2_lt_d  <= '0;
-      c2_meq_d <= '0;
+      c2_mz_d  <= '0;
       c2_ctl   <= '0;
       c2_pok   <= '0;
       c2_sp    <= 1'b0;
@@ -390,10 +410,10 @@ module rtlnet_classifier_table #(
       for (int l = 0; l < LANES; l++) begin
         c2_eq_s[l]  <= &c1_eq_s[l];
         c2_lt_s[l]  <= merge_lt(c1_lt_s[l], c1_eq_s[l]);
-        c2_meq_s[l] <= &c1_meq_s[l];
+        for (int c = 0; c < CH; c++) c2_mz_s[l][c] <= (c1_md_s[l][16*c +: 16] == 16'h0000);
         c2_eq_d[l]  <= &c1_eq_d[l];
         c2_lt_d[l]  <= merge_lt(c1_lt_d[l], c1_eq_d[l]);
-        c2_meq_d[l] <= &c1_meq_d[l];
+        for (int c = 0; c < CH; c++) c2_mz_d[l][c] <= (c1_md_d[l][16*c +: 16] == 16'h0000);
       end
       c2_ctl   <= c1_ctl;
       c2_pok   <= c1_pok;
@@ -449,8 +469,8 @@ module rtlnet_classifier_table #(
             c3_act[l] <= ((l % 2) == 0);
           end
           CMP_MASK: begin
-            c3_s[l]   <= ((l % 2) == 0) && c2_sp && c2_meq_s[l];
-            c3_d[l]   <= ((l % 2) == 0) && c2_dp && c2_meq_d[l];
+            c3_s[l]   <= ((l % 2) == 0) && c2_sp && (&c2_mz_s[l]);
+            c3_d[l]   <= ((l % 2) == 0) && c2_dp && (&c2_mz_d[l]);
             c3_act[l] <= ((l % 2) == 0);
           end
           default: begin

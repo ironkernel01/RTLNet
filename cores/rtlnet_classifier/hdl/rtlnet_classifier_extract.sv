@@ -4,6 +4,9 @@
 //   each frame from the engine tap, decides which frames the table engines
 //   judge, and loads the per-table field snapshot the table engines compare.
 // Overview:
+//   * X stage: the tap is registered once more together with the header
+//     compares of each lane position, so capture and flag updates are one
+//     LUT level from flops.
 //   * Capture: frame bytes 0..8*CAP_BEATS-1 (CAP_BEATS = min(6, MATCH_BEATS))
 //     with a present bit per byte (tkeep); a byte of a shorter frame is
 //     absent, never zero. Flags registered as their beat arrives: is_vlan
@@ -153,18 +156,75 @@ module rtlnet_classifier_extract #(
 
   // Beat slots: slot k loads beat k; beat 0 also clears the keep bits of
   // the later slots, so a short frame leaves them absent.
+  // X stage: the tap delayed one clock, with the header compares of each
+  // lane position registered (two LUT levels); the flag updates below add
+  // the lane's keep bit (one LUT from flops).
+  logic             x_valid;
+  logic [63:0]      x_data;
+  logic [7:0]       x_keep;
+  logic [IDX_W-1:0] x_idx;
+  logic             x_first;
+  logic             x_judge;
+  logic             xe_vlan;          // beat lanes 4..5 = 0x8100 (bytes 12..13 on beat 1)
+  logic             xe_etu_ip;        // lanes 4..5 = 0x0800
+  logic             xe_ihl_u;         // lane 6 = 0x45 (byte 14)
+  logic             xe_ett_ip;        // lanes 0..1 = 0x0800 (bytes 16..17 on beat 2)
+  logic             xe_ihl_t;         // lane 2 = 0x45 (byte 18)
+  logic             xe_frag_u;        // lanes 4..5 & 0x3FFF = 0 (bytes 20..21)
+  logic             xe_l4_u;          // lane 7 is 6 or 17 (byte 23)
+  logic             xe_frag_t;        // lanes 0..1 & 0x3FFF = 0 (bytes 24..25 on beat 3)
+  logic             xe_l4_t;          // lane 3 is 6 or 17 (byte 27)
+
+  always_ff @(posedge clk) begin
+    if (!resetn) begin
+      x_valid   <= 1'b0;
+      x_data    <= '0;
+      x_keep    <= '0;
+      x_idx     <= '0;
+      x_first   <= 1'b0;
+      x_judge   <= 1'b0;
+      xe_vlan   <= 1'b0;
+      xe_etu_ip <= 1'b0;
+      xe_ihl_u  <= 1'b0;
+      xe_ett_ip <= 1'b0;
+      xe_ihl_t  <= 1'b0;
+      xe_frag_u <= 1'b0;
+      xe_l4_u   <= 1'b0;
+      xe_frag_t <= 1'b0;
+      xe_l4_t   <= 1'b0;
+    end else begin
+      x_valid   <= tap_valid;
+      x_data    <= tap_data;
+      x_keep    <= tap_keep;
+      x_idx     <= tap_idx;
+      x_first   <= tap_first;
+      x_judge   <= tap_valid && tap_judge;
+      xe_vlan   <= ({tap_data[39:32], tap_data[47:40]} == ETYPE_VLAN);
+      xe_etu_ip <= ({tap_data[39:32], tap_data[47:40]} == ETYPE_IPV4);
+      xe_ihl_u  <= (tap_data[55:48] == VER_IHL5);
+      xe_ett_ip <= ({tap_data[7:0], tap_data[15:8]} == ETYPE_IPV4);
+      xe_ihl_t  <= (tap_data[23:16] == VER_IHL5);
+      xe_frag_u <= (({tap_data[39:32], tap_data[47:40]} & FRAG_MASK) == 16'h0000);
+      xe_l4_u   <= ((tap_data[63:56] == PROTO_TCP) || (tap_data[63:56] == PROTO_UDP));
+      xe_frag_t <= (({tap_data[7:0], tap_data[15:8]} & FRAG_MASK) == 16'h0000);
+      xe_l4_t   <= ((tap_data[31:24] == PROTO_TCP) || (tap_data[31:24] == PROTO_UDP));
+    end
+  end
+
+  // Beat slots: slot k loads beat k; beat 0 also clears the keep bits of
+  // the later slots, so a short frame leaves them absent.
   always_ff @(posedge clk) begin
     if (!resetn) begin
       for (int k = 0; k < CAP_BEATS; k++) begin
         cap_data[k] <= '0;
         cap_keep[k] <= '0;
       end
-    end else if (tap_valid) begin
+    end else if (x_valid) begin
       for (int k = 0; k < CAP_BEATS; k++) begin
-        if (tap_idx == k) begin
-          cap_data[k] <= tap_data;
-          cap_keep[k] <= tap_keep;
-        end else if (tap_first) begin
+        if (x_idx == k) begin
+          cap_data[k] <= x_data;
+          cap_keep[k] <= x_keep;
+        end else if (x_first) begin
           cap_keep[k] <= '0;
         end
       end
@@ -184,7 +244,7 @@ module rtlnet_classifier_extract #(
     end
   end
 
-  // Header flags, each registered from the tap as its beat arrives and
+  // Header flags, each loaded from the X-stage compare of its beat and
   // cleared by the first beat of the next frame.
   always_ff @(posedge clk) begin
     if (!resetn) begin
@@ -197,8 +257,8 @@ module rtlnet_classifier_extract #(
       fl_frag_t <= 1'b0;
       fl_l4_u   <= 1'b0;
       fl_l4_t   <= 1'b0;
-    end else if (tap_valid) begin
-      if (tap_first) begin
+    end else if (x_valid) begin
+      if (x_first) begin
         fl_vlan   <= 1'b0;
         fl_etu_ip <= 1'b0;
         fl_ihl_u  <= 1'b0;
@@ -209,24 +269,20 @@ module rtlnet_classifier_extract #(
         fl_l4_u   <= 1'b0;
         fl_l4_t   <= 1'b0;
       end
-      // Beat 1: bytes 8..15 (EtherType 12..13, untagged version/IHL 14).
-      if (tap_idx == 1) begin
-        fl_vlan   <= tap_keep[5] && ({tap_data[39:32], tap_data[47:40]} == ETYPE_VLAN);
-        fl_etu_ip <= tap_keep[5] && ({tap_data[39:32], tap_data[47:40]} == ETYPE_IPV4);
-        fl_ihl_u  <= tap_keep[6] && (tap_data[55:48] == VER_IHL5);
+      if (x_idx == 1) begin
+        fl_vlan   <= xe_vlan && x_keep[5];
+        fl_etu_ip <= xe_etu_ip && x_keep[5];
+        fl_ihl_u  <= xe_ihl_u && x_keep[6];
       end
-      // Beat 2: bytes 16..23 (inner EtherType 16..17, tagged IHL 18,
-      // untagged flags/offset 20..21, untagged protocol 23).
-      if (tap_idx == 2) begin
-        fl_ett_ip <= tap_keep[1] && ({tap_data[7:0], tap_data[15:8]} == ETYPE_IPV4);
-        fl_ihl_t  <= tap_keep[2] && (tap_data[23:16] == VER_IHL5);
-        fl_frag_u <= tap_keep[5] && (({tap_data[39:32], tap_data[47:40]} & FRAG_MASK) == 16'h0000);
-        fl_l4_u   <= tap_keep[7] && ((tap_data[63:56] == PROTO_TCP) || (tap_data[63:56] == PROTO_UDP));
+      if (x_idx == 2) begin
+        fl_ett_ip <= xe_ett_ip && x_keep[1];
+        fl_ihl_t  <= xe_ihl_t && x_keep[2];
+        fl_frag_u <= xe_frag_u && x_keep[5];
+        fl_l4_u   <= xe_l4_u && x_keep[7];
       end
-      // Beat 3: bytes 24..31 (tagged flags/offset 24..25, tagged protocol 27).
-      if (tap_idx == 3) begin
-        fl_frag_t <= tap_keep[1] && (({tap_data[7:0], tap_data[15:8]} & FRAG_MASK) == 16'h0000);
-        fl_l4_t   <= tap_keep[3] && ((tap_data[31:24] == PROTO_TCP) || (tap_data[31:24] == PROTO_UDP));
+      if (x_idx == 3) begin
+        fl_frag_t <= xe_frag_t && x_keep[1];
+        fl_l4_t   <= xe_l4_t && x_keep[3];
       end
     end
   end
@@ -242,7 +298,7 @@ module rtlnet_classifier_extract #(
       judge_acc <= 1'b0;
       judge_ovr <= 1'b0;
     end else begin
-      judge_q   <= tap_valid && tap_judge;
+      judge_q   <= x_judge;
       judge_acc <= accept;
       judge_ovr <= judge_q && busy_q;
       if (accept) begin

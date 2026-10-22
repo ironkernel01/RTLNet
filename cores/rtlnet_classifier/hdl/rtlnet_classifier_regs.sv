@@ -22,12 +22,14 @@
 //     word (clr_active / clr_addr); STATUS.CLEARING is set meanwhile and
 //     entry writes are ignored. A zero entry is invalid (VALID = 0) and a
 //     zero rule byte is don't-care.
-//   * Reads: the slave holds reg_rd_addr from the address handshake and
-//     takes reg_rd_data two clocks after reg_rd_en, three after the
-//     address; the read path uses all three: R1 sixteen-to-one group muxes
-//     (two LUT levels), R2 group select (two LUT levels), and one LUT
-//     selecting the mirror output (whose READ_LATENCY 2 read runs from the
-//     same address). No read has a side effect.
+//   * Reads: the slave takes reg_rd_data three clocks after latching the
+//     read address that rtlnet_axil_cdc holds on its AR channel; the read
+//     path runs freely from that held address: R0 and R1 four-to-one muxes
+//     (one LUT level each), R2 group select (two LUT levels), and one LUT
+//     selecting the mirror output (whose READ_LATENCY 2 read runs from
+//     reg_rd_addr). No read has a side effect.
+//   * Writes are pre-decoded (address block, word, entry-word class) into
+//     registers alongside W1, so every enable is one LUT from flops.
 //   * Policer restart: a write to a policer's CTRL, LIMIT_PKTS or
 //     WINDOW_MS pulses cfg_pol_restart for that policer.
 // Language: SystemVerilog-2012.
@@ -251,17 +253,42 @@ module rtlnet_classifier_regs #(
   logic [P-1:0] wr_pwin;
   logic       clear_req;
 
+  // Pre-decode of the slave strobe, registered alongside W1: the address
+  // block (byte offset [11:6], qualified by the strobe) and the word in the
+  // block ([5:2]). Each W1 target is then the AND of one bit of each.
+  logic [7:0]  pd_blk;            // block 0x000, 0x040, .., 0x1C0 written
+  logic [15:0] pd_word;           // word index 0..15 in the block
+  logic        pd_df;             // defined field-table entry word
+  logic        pd_dt;             // defined tuple entry word
+  logic        pd_dr;             // defined rule byte
+
+  always_ff @(posedge clk) begin
+    if (!resetn) begin
+      pd_blk  <= '0;
+      pd_word <= '0;
+      pd_df   <= 1'b0;
+      pd_dt   <= 1'b0;
+      pd_dr   <= 1'b0;
+    end else begin
+      for (int j = 0; j < 8; j++)  pd_blk[j]  <= reg_wr_en && (reg_wr_addr[11:6] == 6'(j));
+      for (int k = 0; k < 16; k++) pd_word[k] <= (reg_wr_addr[5:2] == 4'(k));
+      pd_df <= (reg_wr_addr[11:8] >= 4'h4) && (reg_wr_addr[11:8] <= 4'h8) && (reg_wr_addr[7:4] < TABLE_ENTRIES);
+      pd_dt <= ((reg_wr_addr[11:8] == 4'h9) || (reg_wr_addr[11:8] == 4'hA)) &&
+               ({reg_wr_addr[9], reg_wr_addr[7:5]} < TUPLE_ENTRIES) && (reg_wr_addr[4:2] < TUPLE_WORDS);
+      pd_dr <= (reg_wr_addr[11:10] == 2'b11) && ((reg_wr_addr[9:2] >> SB) < R) &&
+               ((reg_wr_addr[9:2] & (STRIDE_WORDS - 1)) < MATCH_DEPTH_BYTES);
+    end
+  end
+
+  // W1 targets (one LUT from the pre-decode registers).
   always_comb begin
-    wr_ctrl = w1_en && (w1_addr == REG_CTRL);
-    for (int t = 0; t < 6; t++) wr_tmode[t] = w1_en && (w1_addr == (REG_TABLE_MODE + 12'(4 * t)));
-    for (int r = 0; r < R; r++) wr_rmode[r] = w1_en && (w1_addr == (REG_RULE_MODE + 12'(4 * r)));
+    wr_ctrl = pd_blk[0] && pd_word[REG_CTRL[5:2]];
+    for (int t = 0; t < 6; t++) wr_tmode[t] = pd_blk[0] && pd_word[8 + t];
+    for (int r = 0; r < R; r++) wr_rmode[r] = pd_blk[1] && pd_word[r];
     for (int p = 0; p < P; p++) begin
-      wr_pctrl[p]  = w1_en && (p < NUM_POLICERS) &&
-                     (w1_addr == (REG_POLICER + 12'(32 * p) + 12'(4 * POL_CTRL)));
-      wr_plimit[p] = w1_en && (p < NUM_POLICERS) &&
-                     (w1_addr == (REG_POLICER + 12'(32 * p) + 12'(4 * POL_LIMIT)));
-      wr_pwin[p]   = w1_en && (p < NUM_POLICERS) &&
-                     (w1_addr == (REG_POLICER + 12'(32 * p) + 12'(4 * POL_WINDOW)));
+      wr_pctrl[p]  = (p < NUM_POLICERS) && pd_blk[4 + p / 2] && pd_word[8 * (p % 2) + POL_CTRL];
+      wr_plimit[p] = (p < NUM_POLICERS) && pd_blk[4 + p / 2] && pd_word[8 * (p % 2) + POL_LIMIT];
+      wr_pwin[p]   = (p < NUM_POLICERS) && pd_blk[4 + p / 2] && pd_word[8 * (p % 2) + POL_WINDOW];
     end
     clear_req = wr_ctrl && w1_data[CTRL_CLEAR_TABLES];
   end
@@ -271,18 +298,22 @@ module rtlnet_classifier_regs #(
   // ---------------------------------------------------------------------------
   logic       clearing;
   logic [9:0] clr_cnt;
+  logic       clr_last;          // clr_cnt is the last word (registered compare)
 
   // Runs after reset and on CLEAR_TABLES: 1024 clocks of zero writes.
   always_ff @(posedge clk) begin
     if (!resetn) begin
       clearing <= 1'b1;
       clr_cnt  <= '0;
+      clr_last <= 1'b0;
     end else if (clear_req) begin
       clearing <= 1'b1;
       clr_cnt  <= '0;
+      clr_last <= 1'b0;
     end else if (clearing) begin
-      clr_cnt <= clr_cnt + 1'b1;
-      if (clr_cnt == CLR_LAST) clearing <= 1'b0;
+      clr_cnt  <= clr_cnt + 1'b1;
+      clr_last <= (clr_cnt == CLR_LAST - 10'd1);
+      if (clr_last) clearing <= 1'b0;
     end
   end
 
@@ -332,30 +363,10 @@ module rtlnet_classifier_regs #(
   // ---------------------------------------------------------------------------
   // Configuration write bus and the readback mirror.
   // ---------------------------------------------------------------------------
-  logic        def_word;          // W1 address is a defined entry word
-  logic [3:0]  a_hi;
-  logic [3:0]  a_ent;
-  logic [3:0]  tu_ent;
-  logic [7:0]  rw;
   logic        m_we;
   logic [9:0]  m_wa;
   logic [31:0] m_wd;
   logic [31:0] mirror_q;
-
-  assign a_hi   = w1_addr[11:8];
-  assign a_ent  = w1_addr[7:4];
-  assign tu_ent = {w1_addr[9], w1_addr[7:5]};
-  assign rw     = w1_addr[9:2];
-
-  always_comb begin
-    def_word = 1'b0;
-    if (a_hi >= 4'h4 && a_hi <= 4'h8)                       // field tables 0..4
-      def_word = (a_ent < TABLE_ENTRIES);
-    else if (a_hi == 4'h9 || a_hi == 4'hA)                  // tuple entries
-      def_word = (tu_ent < TUPLE_ENTRIES) && (w1_addr[4:2] < TUPLE_WORDS);
-    else if (a_hi >= 4'hC)                                  // rule bytes
-      def_word = ((rw >> SB) < R) && ((rw & (STRIDE_WORDS - 1)) < MATCH_DEPTH_BYTES);
-  end
 
   // Write bus and mirror write port; the clear sequence owns both while it
   // runs.
@@ -380,7 +391,7 @@ module rtlnet_classifier_regs #(
         m_wa <= clr_cnt;
         m_wd <= '0;
       end else begin
-        m_we <= w1_en && def_word;
+        m_we <= w1_en && (pd_df || pd_dt || pd_dr);
         m_wa <= w1_addr[11:2];
         m_wd <= w1_data;
       end
@@ -408,9 +419,16 @@ module rtlnet_classifier_regs #(
   );
 
   // ---------------------------------------------------------------------------
-  // Read path: R1 group muxes, R2 group select, mirror select.
+  // Read path: R0 / R1 four-to-one muxes, R2 group select, mirror select.
+  // The read address held by rtlnet_axil_cdc on the slave's AR channel
+  // (m_araddr) is valid in the clock before the slave latches it into
+  // reg_rd_addr, and stays unchanged until the response; the slave takes
+  // reg_rd_data three clocks after that latch, so R0, R1 and R2 run freely
+  // from m_araddr.
   // ---------------------------------------------------------------------------
   logic [7:0][15:0][31:0] grp_in;
+  logic [7:0][3:0][31:0]  r0_q;
+  logic [11:0]            r0_addr;
   logic [7:0][31:0]       r1_grp;
   logic [11:0]            r1_addr;
   logic [31:0]            r2_mux;
@@ -445,16 +463,22 @@ module rtlnet_classifier_regs #(
     end
   end
 
-  // R1 from the slave's held read address; R2 one clock later.
+  // R0: word within each quad (address [3:2]); R1: quad within the group
+  // ([5:4]); R2: group ([8:6]), zero outside 0x000..0x1FF.
   always_ff @(posedge clk) begin
     if (!resetn) begin
+      r0_q      <= '0;
+      r0_addr   <= '0;
       r1_grp    <= '0;
       r1_addr   <= '0;
       r2_mux    <= '0;
       r2_mirror <= 1'b0;
     end else begin
-      for (int g = 0; g < 8; g++) r1_grp[g] <= grp_in[g][reg_rd_addr[5:2]];
-      r1_addr   <= reg_rd_addr;
+      for (int g = 0; g < 8; g++)
+        for (int q = 0; q < 4; q++) r0_q[g][q] <= grp_in[g][4 * q + m_araddr[3:2]];
+      r0_addr <= m_araddr;
+      for (int g = 0; g < 8; g++) r1_grp[g] <= r0_q[g][r0_addr[5:4]];
+      r1_addr   <= r0_addr;
       r2_mux    <= (r1_addr[11:9] == 3'b000) ? r1_grp[r1_addr[8:6]] : 32'd0;
       r2_mirror <= (r1_addr[11:10] != 2'b00);
     end

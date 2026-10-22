@@ -177,10 +177,10 @@ package rtlnet_classifier_pkg;
   // Pipeline stage counts (registers on the decision path)
   // ---------------------------------------------------------------------------
   // Delay line entry: the beat taken into slot 0 is registered into the
-  // engine tap (1), the field capture registers (1) and the per-table
-  // snapshot loaded by an accepted judge (1).
+  // engine tap (1), the extractor's compare stage and capture registers (2)
+  // and the per-table snapshot loaded by an accepted judge (1).
   localparam int TAP_STAGES      = 1;
-  localparam int CAPTURE_STAGES  = 1;
+  localparam int CAPTURE_STAGES  = 2;
   localparam int SNAPSHOT_STAGES = 1;
   // Table engine from its first compare cycle: chunk compare, chunk merge,
   // side hit, entry hit, lane reduce, window accumulate, result latch.

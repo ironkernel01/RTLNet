@@ -196,8 +196,8 @@ module rtlnet_classifier_tuple #(
   // C1: per-lane compares in 16-bit lanes.
   // ---------------------------------------------------------------------------
   logic [LANES-1:0]      c1_peq;
-  logic [LANES-1:0][1:0] c1_smeq;
-  logic [LANES-1:0][1:0] c1_dmeq;
+  logic [LANES-1:0][31:0] c1_smd;     // (sip ^ SRC_IP) & SRC_MASK
+  logic [LANES-1:0][31:0] c1_dmd;
   logic [LANES-1:0]      c1_s_lt_lo;
   logic [LANES-1:0]      c1_s_gt_hi;
   logic [LANES-1:0]      c1_s_any;
@@ -217,8 +217,8 @@ module rtlnet_classifier_tuple #(
   always_ff @(posedge clk) begin
     if (!resetn) begin
       c1_peq     <= '0;
-      c1_smeq    <= '0;
-      c1_dmeq    <= '0;
+      c1_smd     <= '0;
+      c1_dmd     <= '0;
       c1_s_lt_lo <= '0;
       c1_s_gt_hi <= '0;
       c1_s_any   <= '0;
@@ -237,12 +237,9 @@ module rtlnet_classifier_tuple #(
     end else begin
       for (int l = 0; l < LANES; l++) begin
         c1_peq[l] <= (f_proto == rd_w[l][TW_CTRL][TE_PROTO_LSB +: 8]);
-        for (int c = 0; c < 2; c++) begin
-          c1_smeq[l][c] <= (((f_sip[16*c +: 16] ^ rd_w[l][TW_SRC_IP][16*c +: 16]) &
-                             rd_w[l][TW_SRC_MASK][16*c +: 16]) == 16'h0000);
-          c1_dmeq[l][c] <= (((f_dip[16*c +: 16] ^ rd_w[l][TW_DST_IP][16*c +: 16]) &
-                             rd_w[l][TW_DST_MASK][16*c +: 16]) == 16'h0000);
-        end
+        // Masked address differences, one LUT per bit.
+        c1_smd[l] <= (f_sip ^ rd_w[l][TW_SRC_IP]) & rd_w[l][TW_SRC_MASK];
+        c1_dmd[l] <= (f_dip ^ rd_w[l][TW_DST_IP]) & rd_w[l][TW_DST_MASK];
         c1_s_lt_lo[l] <= (f_sport < rd_w[l][TW_SPORT][15:0]);
         c1_s_gt_hi[l] <= (rd_w[l][TW_SPORT][31:16] < f_sport);
         c1_s_any[l]   <= (rd_w[l][TW_SPORT] == 32'hFFFF_0000);
@@ -266,8 +263,8 @@ module rtlnet_classifier_tuple #(
   // C2: merge address halves and port bounds.
   // ---------------------------------------------------------------------------
   logic [LANES-1:0]      c2_pok;
-  logic [LANES-1:0]      c2_sip;
-  logic [LANES-1:0]      c2_dip;
+  logic [LANES-1:0][1:0] c2_sip;      // 16-bit halves of the masked difference are zero
+  logic [LANES-1:0][1:0] c2_dip;
   logic [LANES-1:0]      c2_sport;
   logic [LANES-1:0]      c2_dport;
   logic [LANES-1:0]      c2_valid;
@@ -295,8 +292,10 @@ module rtlnet_classifier_tuple #(
     end else begin
       for (int l = 0; l < LANES; l++) begin
         c2_pok[l]   <= !c1_pen[l] || c1_peq[l];
-        c2_sip[l]   <= &c1_smeq[l];
-        c2_dip[l]   <= &c1_dmeq[l];
+        for (int c = 0; c < 2; c++) begin
+          c2_sip[l][c] <= (c1_smd[l][16*c +: 16] == 16'h0000);
+          c2_dip[l][c] <= (c1_dmd[l][16*c +: 16] == 16'h0000);
+        end
         c2_sport[l] <= c1_s_any[l] || (c1_l4 && !c1_s_lt_lo[l] && !c1_s_gt_hi[l]);
         c2_dport[l] <= c1_d_any[l] || (c1_l4 && !c1_d_lt_lo[l] && !c1_d_gt_hi[l]);
       end
@@ -332,7 +331,7 @@ module rtlnet_classifier_tuple #(
       c3_is0   <= 1'b0;
     end else begin
       for (int l = 0; l < LANES; l++) begin
-        c3_x[l] <= c2_valid[l] && c2_ip && c2_pok[l] && c2_sip[l] && c2_dip[l];
+        c3_x[l] <= c2_valid[l] && c2_ip && c2_pok[l] && (&c2_sip[l]) && (&c2_dip[l]);
         c3_y[l] <= c2_sport[l] && c2_dport[l];
       end
       c3_pe    <= c2_pe;

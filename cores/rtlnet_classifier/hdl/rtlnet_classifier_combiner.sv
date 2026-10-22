@@ -398,6 +398,8 @@ module rtlnet_classifier_combiner #(
   generate
     for (gp = 0; gp < P; gp++) begin : g_pol
       logic [31:0]   limit_q;
+      logic          win_zero;
+      logic [31:0]   win_dec;
       logic [31:0]   win_m1;
       logic          restart_q;
       logic [PW-1:0] pre;
@@ -413,15 +415,21 @@ module rtlnet_classifier_combiner #(
       logic [31:0]   passed_c;
       logic [31:0]   dropped_c;
 
-      // Configuration copies: WINDOW_MS 0 acts as 1.
+      // Configuration copies: WINDOW_MS 0 acts as 1 (zero test and
+      // decrement registered separately, then selected). The restart pulse
+      // reaches the policer after win_m1 has settled.
       always_ff @(posedge clk) begin
         if (!resetn) begin
           limit_q   <= '0;
+          win_zero  <= 1'b1;
+          win_dec   <= '0;
           win_m1    <= '0;
           restart_q <= 1'b0;
         end else begin
           limit_q   <= cfg_pol_limit[gp];
-          win_m1    <= (cfg_pol_window[gp] == 32'd0) ? 32'd0 : cfg_pol_window[gp] - 32'd1;
+          win_zero  <= (cfg_pol_window[gp] == 32'd0);
+          win_dec   <= cfg_pol_window[gp] - 32'd1;
+          win_m1    <= win_zero ? 32'd0 : win_dec;
           restart_q <= cfg_pol_restart[gp];
         end
       end

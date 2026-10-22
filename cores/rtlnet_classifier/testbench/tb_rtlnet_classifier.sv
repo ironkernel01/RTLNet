@@ -1102,7 +1102,7 @@ module tb_rtlnet_classifier;
                        verdict_latency));
     tb_check(delay_beats == dut.DELAY_BEATS && verdict_latency == dut.VERDICT_LATENCY,
              "LATENCY register equals the DUT localparams");
-    tb_check(verdict_latency == WIN_B + 14, $sformatf("VERDICT_LATENCY %0d = table words %0d + 14", verdict_latency,
+    tb_check(verdict_latency == WIN_B + 15, $sformatf("VERDICT_LATENCY %0d = table words %0d + 15", verdict_latency,
                                                       WIN_B));
     r_expect(A_CTRL, 32'h0, "CTRL power-up");
     r_expect(A_STATUS, 32'h0, "STATUS after the power-up clear");

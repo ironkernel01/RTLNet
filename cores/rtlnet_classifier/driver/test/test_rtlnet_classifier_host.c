@@ -165,7 +165,7 @@ uint32_t rtlnet_host_reg_read32(uintptr_t addr)
         return model_caps();
     }
     if (off == RTLNET_CLS_REG_LATENCY) {
-        uint32_t v = (g_te > g_tu ? g_te : g_tu) / g_lanes + 14u;
+        uint32_t v = (g_te > g_tu ? g_te : g_tu) / g_lanes + 15u;
         return (g_mdb / 8u + v) | (v << 8);
     }
     if (off == RTLNET_CLS_REG_CTRL) {
@@ -302,7 +302,7 @@ static void test_init(void)
           g_ctx.num_policers == g_np && g_ctx.table_lanes == g_lanes && g_ctx.match_depth_bytes == g_mdb,
           "CAPS decoded");
     check(g_ctx.rule_stride == 0x100u, "rule stride 0x100 at 64 bytes");
-    check(g_ctx.delay_beats == 8u + 22u && g_ctx.verdict_latency == 22u, "LATENCY decoded");
+    check(g_ctx.delay_beats == 8u + 23u && g_ctx.verdict_latency == 23u, "LATENCY decoded");
     g_mdb = 128u;
     g_nr = 2u;
     init_ok();
