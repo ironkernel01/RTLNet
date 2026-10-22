@@ -173,7 +173,7 @@ The board top instances `u_cpu` with exactly the section 15.6 ports. A replaceme
 | CPU path control | `src/rtlnet_cpupath.c/.h` | CPU-path classifier configuration (broadcast storm default, filter tables, policers), wrapper CPU-path counters |
 | lwIP glue | `src/rtlnet_lwip.c/.h`, `src/lwip/lwipopts.h` | `InitLWIP()`, `sys_now`, main-loop service, status and counters |
 | netif | `src/rtlnet_lwip_netif.c/.h` | the AXI DMA: receive ring, transmit, frame counters |
-| applications | `src/rtlnet_tcp_echo.c/.h` | TCP echo server, port 7 |
+| applications | `src/rtlnet_tcp_echo.c/.h`, `src/rtlnet_tcp_iperf.c/.h` | TCP echo server (port 7); TCP iperf 2 server (lwIP's `lwiperf`, compiled in place, port 5001); both run at the same time, both on at boot |
 | CLI | `cli/menu.c`, `cli/cli_commands.c`, generated `cli/menu_table.c`, `cli/menu_commands.h`, `cli/MenuDocumentation.md` | MenuBuilder hierarchical rules (`cli/MenuBuilder_hierarchical.md`) |
 | desktop harness | `host/main.c`, `host/host_platform.c`, `host/host_lwip_stub.c` | scripted `--demo` of the real CLI and network manager against a register model |
 | host test | `test/tcp_echo_client.py` | TCP echo test from the PC |
@@ -190,7 +190,23 @@ then forever: one console character into the line editor, `plat_poll` (heartbeat
 consistency check). Only the 1 ms timer interrupt runs outside the loop; it increments the tick and
 nothing else.
 
-### 9.3 InitLWIP()
+### 9.3 InitPHY()
+
+`InitPHY()` (`src/rtlnet_netmgr.c`, declared next to `InitLWIP()` in `rtlnet_netmgr.h`) is the whole RTL8211E
+bring-up in one place, in this order: MDIO driver on the MDIO core; wait for the core's power-on PHY reset,
+then 30 ms settle; MDC calibration against the AXI timer; PHY probe (ID 0x001C/0xC915); RGMII RX delay on
+(page 0xA4 register 28) with read-back; LEDs (`rtlnet_phy_rtl8211e_leds_default`: LINK steady, ACT blinking,
+USER off; LCR 0x0070 / LACR 0x0010 on extended page 0x2C, read back); EEE advertisement off
+(`rtlnet_phy_rtl8211e_set_eee_advert(mdio, 0)`, MMD 7.60; EEE makes the RJ45 LEDs blink); the configured
+advertisement or forced speed; auto-negotiation restart. It returns `NETMGR_PHY_OK` or the first failing
+step (`NETMGR_PHY_NO_MDIO`, `_POR_TIMEOUT`, `_NOT_FOUND`, `_RXDLY_FAIL`, `_LED_FAIL`, `_EEE_FAIL`,
+`_AN_FAIL`) and prints one line (`PHY: RTL8211E ID 0x001CC915, RX delay 0xAD77 -> 0xAD77, ...`). The boot
+sequence is `InitPHY()` then `InitLWIP()`; CLI `phy reset` pulses the PHY reset pin and calls `InitPHY()` again,
+so RX delay, LEDs and EEE are always re-applied. `show phy` prints the LED registers and the EEE
+advertisement; `phy mmd read|write` (Clause 45 over Clause 22) and `phy c45 read|write` (native Clause 45
+frames, which the RTL8211E does not answer) are privileged debug commands.
+
+### 9.4 InitLWIP()
 
 The protocol wrapper owns the node identity; lwIP must use the same MAC and IPv4 address, because the
 hardware leaves answer ARP and ping for that address and lwIP only sees unclaimed frames. `InitLWIP()`
@@ -211,7 +227,7 @@ DHCP bound, lost or bound to a new address; `netmgr_apply_addresses` (CLI `ip ad
 `ip default-gateway`, `mac-address`, `no ip ...`); and every 250 ms as a consistency check (a no-op while
 the values agree). `show tcp` prints the netif identity, the RTL identity it follows and the call history.
 
-### 9.4 lwIP netif on the AXI DMA
+### 9.5 lwIP netif on the AXI DMA
 
 Receive (polled): four 2 KiB buffers in the AXI BRAM form a ring; one S2MM simple transfer is armed at a
 time. On completion the next buffer is armed at once, the length is read from the S2MM length register, the
@@ -220,17 +236,23 @@ counted (`rx_no_pbuf`); an S2MM error status resets the DMA and re-arms (`rx_err
 no transfer is armed the wrapper's 16 KiB CPU receive FIFO holds the frames. Transmit: `linkoutput` copies
 the pbuf chain into one of two 2 KiB TX buffers, waits at most 2 ms for the previous MM2S transfer and
 starts the next one (`tx_timeouts`, `tx_too_long`, `tx_errors`). No caches exist, so the buffers need no
-flush or invalidate.
+flush or invalidate. A channel counts as busy only while it runs and is not idle: `XAxiDma_Busy` reports a
+halted channel (never started, or after a reset) as busy, which kept the first transmit waiting forever.
 
-### 9.5 lwIP configuration and memory
+### 9.6 lwIP configuration and memory
 
 NO_SYS 1, raw API, IPv4, ARP, ICMP, UDP, TCP; no DHCP, AutoIP, IGMP, DNS, IPv6 in lwIP (the RTL DHCP
 leaf owns the address). Sizes for the TCP echo server and the TCP iperf server running together:
-`MEM_SIZE` 24 KiB, `PBUF_POOL_SIZE` 24 x 1536 B, `MEMP_NUM_TCP_PCB` 12, `MEMP_NUM_TCP_PCB_LISTEN` 4,
-`MEMP_NUM_TCP_SEG` 48, `TCP_MSS` 1460, `TCP_WND` and `TCP_SND_BUF` 4 x MSS (5840 B). Everything lwIP
+`MEM_SIZE` 32 KiB, `PBUF_POOL_SIZE` 32 x 1536 B, `MEMP_NUM_TCP_PCB` 12, `MEMP_NUM_TCP_PCB_LISTEN` 4,
+`MEMP_NUM_TCP_SEG` 64, `TCP_MSS` 1460, `TCP_WND` and `TCP_SND_BUF` 4 x MSS (5840 B). Everything lwIP
 allocates is in the LMB (`.bss`); the AXI BRAM holds only the 12 KiB of DMA buffers.
 
-### 9.6 CPU path control and the CLI
+The window is bounded by the protocol wrapper's CPU receive FIFO, not by lwIP memory: a PC sends a whole
+window per connection at line rate while the CPU drains slower, so the sum of the open windows must fit the
+FIFO. With the 16 KiB FIFO four echo connections of 4 MSS overflowed it (24 CPU FIFO drops, retransmission
+stalls of about 0.4 s); the board top now builds the FIFO with 32 KiB (`CPU_RX_FIFO_KB` 32).
+
+### 9.7 CPU path control and the CLI
 
 `rtlnet_cpupath.c` keeps the classifier configuration (the running configuration) and writes it through the
 classifier driver: default MODE pass-all, MAC entry 0 destination FF:FF:FF:FF:FF:FF policed by policer 0,
@@ -239,18 +261,20 @@ first InitLWIP. The classifier driver and the wrapper's CPU-path register functi
 with this firmware: until they are in the tree the configuration is kept, `show` commands report "driver
 not in this firmware build", and a bitstream without the classifier reports it absent.
 
-CLI additions (75 commands in all, MenuBuilder hierarchical rules, `cli/MenuDocumentation.md`):
-`show tcp`, `show cpu-path`, `show storm-control`, `show classifier`; config `tcp echo enable|disable`,
-`tcp echo port <n>`, `classifier mode|policer|mac|ethertype|acl|defaults`, `no classifier
+CLI additions (83 commands in all, MenuBuilder hierarchical rules, `cli/MenuDocumentation.md`):
+`show tcp`, `show cpu-path`, `show storm-control`, `show classifier`, `show iperf` in two sections ("UDP (RTL
+core)" from the iperf leaf, "TCP (firmware, lwIP)" from the lwiperf report: result, peer, bytes, duration,
+kbit/s); privileged `phy reset`, `phy mmd read|write`, `phy c45 read|write`; config `tcp echo enable|disable`,
+`tcp echo port <n>`, `iperf tcp enable|disable`, `iperf tcp port <n>`, `classifier mode|policer|mac|ethertype|acl|defaults`, `no classifier
 mac|ethertype|acl|policer <n>`; config-if `storm-control broadcast <packets> <ms>`, `storm-control broadcast
 enable|disable`, `no storm-control broadcast`. `show running-config` prints the storm-control, TCP echo and
 classifier lines; `show counters` and `clear counters` include the DMA, classifier and TCP echo counters.
 The engine limits grew for the ACL syntax (14 tokens, 14 parameters, 160-character lines, 88 table entries).
 
-### 9.7 Size
+### 9.8 Size
 
-Build of record (commit 874f3966): text 139304 B, data 2104 B, bss 127732 B, heap 2 KiB, stack 8 KiB,
-271 KiB of the 512 KiB LMB. The CLI and drivers are compiled `-Os`, the frame path (netif, lwIP glue,
+Build of record (commit a9e043e6, with lwiperf): text 153724 B, data 2104 B, bss 151624 B, heap 2 KiB,
+stack 8 KiB, 307 KiB of the 512 KiB LMB (commit 874f3966 without lwiperf: 271 KiB). The CLI and drivers are compiled `-Os`, the frame path (netif, lwIP glue,
 TCP echo, lwIP) `-O2`. With the 256 KiB LMB the image did not link (`.bss` overflow), which is why the LMB
 is 512 KiB.
 
@@ -281,7 +305,12 @@ closed port (FAIL, connection refused).
 | Desktop harness | TEST PASS 248 checks; negative control TEST FAIL |
 | Board bench `tb_rtlnet_nexys_video_top` with the simulation stand-in | TEST PASS 74 checks |
 
-Details: `boards/nexys_video/documentation/rtlnet_nexys_video.md` section 6.3.
+| Network build (commit a9e043e6) with the CPU path to the protocol wrapper | WNS +0.221 ns, WHS +0.018 ns; CDC fifo 9 / gray 6 as expected |
+| Network board bench (simulation stand-in DMA tasks) | TEST PASS 85 checks at 10/100/1000 Mb/s: claimed frames stay out of the CPU queue, an unclaimed datagram reaches the CPU byte-exact, a CPU frame leaves on the PHY, wrapper CPU counters agree; a perturbed check fails |
+| Hardware TCP echo | `tcp_echo_client.py` PASS, 4 concurrent connections, 1 B .. 64 KiB |
+| Hardware TCP iperf (lwiperf) | 68.4 Mbit/s PC -> board alone; 51.6 Mbit/s together with TCP echo (PASS) and RTL UDP iperf 20.9 Mbit/s (0 lost) |
+
+Details: `boards/nexys_video/documentation/rtlnet_nexys_video.md` sections 6.3 and 6.4.
 
 ## 12. Limitations and open points
 

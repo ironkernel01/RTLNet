@@ -26,6 +26,7 @@
 | `scripts/program.ps1`, `scripts/program.tcl` | JTAG programming (hw_server, `program_hw_devices`) |
 | `scripts/cli_test.ps1` | console test over the USB-UART (COM4), either build |
 | `scripts/net_test.ps1` | hardware network test: board side over the CLI, host side from the PC NIC when it is up |
+| `scripts/tcp_test.ps1` | hardware test of the CPU network path: lwIP TCP echo, TCP iperf (lwiperf), both together with the RTL UDP iperf |
 | `testbench/tb_rtlnet_nexys_video_top.sv` (+ `.f`) | CPU-only board bench with the MicroBlaze simulation stub |
 | `testbench/tb_rtlnet_nexys_video_net.sv` (+ `.f`) | network board bench: sim stub + RTL8211E model, ARP / ICMP / UDP echo / DHCP at 10/100/1000 |
 | `testbench/regression.txt` | board regression lines (both benches, negative controls) |
@@ -282,6 +283,32 @@ CPU-only build of commit 874f3966 (tree clean), 10-22-2026, Vivado 2025.2: the b
 | Soft restart | `reload`: banner again, firmware uptime restarted (2487 ms against 35309 ms hardware), interrupts running again |
 | Host harness | `menu.exe --demo` TEST PASS 248 checks; `--inject-failure` TEST FAIL |
 | Board bench | `tb_rtlnet_nexys_video_top` TEST PASS 74 checks with `rtlnet_microblaze_sim_stub` |
+
+### 6.4 Network build with the CPU network path
+
+Network build of commit a9e043e6 (tree clean), 10-22-2026: protocol wrapper with the CPU path
+(`CPU_PATH_ENABLE` 1, `CPU_RX_FIFO_KB` 32, `CPU_TX_FIFO_KB` 8, `CPU_CLASSIFIER_ENABLE` 0 until the classifier
+core lands), u_cpu's DMA streams on `s_axis_cpu_eth_*` / `m_axis_cpu_eth_*` in cpu_clk.
+
+| Item | Result |
+|---|---|
+| Timing (post-route) | WNS +0.221 ns, WHS +0.018 ns, WPWS +0.264 ns; 0 failing endpoints |
+| Utilization | 16169 LUTs (12.08 %), 21183 FFs (7.92 %), 196.5 BRAM tiles (53.84 %), 5 DSP48 |
+| CDC | fifo 9, gray 6, axil_cdc 3 instances, as expected (`build_bitstream.tcl`) |
+| Firmware | text 153724 B, data 2104 B, bss 151624 B (lwIP with the echo and iperf servers): 307 KiB of 512 KiB |
+| Console | `cli_test.ps1` PASS 27/27; start-up: `PHY: RTL8211E ID 0x001CC915, RX delay 0xAD77 -> 0xAD77, MDC half period 266 ns, LEDs LINK steady, ACT blink, USER off; EEE off, auto-negotiation restarted`, `CPU path: DMA ok, classifier absent, lwIP up (TCP echo, TCP iperf)` |
+| PHY LEDs / EEE | `show phy`: LCR 0x0070, LACR 0x0010 (read back), MMD 7.60 = 0x0000 (EEE not advertised); the LED behaviour itself was not observed (no view of the board) |
+| lwIP identity | `show tcp`: netif MAC 02:49:4b:52:4e:01, IPv4 192.169.1.199 / 24, gateway 192.169.1.1 (the DHCP lease), "RTL identity: matches" |
+| TCP echo alone | `tcp_echo_client.py`, 4 connections x 76 messages (1 B .. 64 KiB, 2.36 MB each way), byte-exact: PASS, 14.0 Mbit/s each way over Wi-Fi with the 16 KiB FIFO; 15.7 Mbit/s (4 x 38 messages) over the wired PC NIC with the 32 KiB FIFO |
+| TCP iperf alone | iperf 2.2.2 `-c 192.169.1.199 -t 10` (PC wired NIC 192.169.1.178): 68.4 Mbit/s PC -> board |
+| iperf reverse modes | `-r` (tradeoff): "expected reverse connect did not occur" (lwiperf did not connect back to the PC); `-R` (reverse on the same connection): 0 bytes, "recvn failed: Connection timed out" (lwiperf has no reverse mode); only PC -> board works |
+| Together | TCP echo (2 connections x 76 messages) PASS, TCP iperf 51.6 Mbit/s, RTL UDP iperf `-u -b 20M` 20.9 Mbit/s, 0/17828 lost; `tcp_test.ps1`: TCP_TEST PASS 5/5 |
+| Board counters after the runs | DMA receive 165436 frames, no pbuf 0, errors 0; transmit 164660, timeouts 0; wrapper: CPU FIFO drops 4 of 165439 frames to the CPU; lwIP heap max 21668 of 32768, pbuf pool max 2 of 32 |
+| CPU RX FIFO | 16 KiB: four echo connections overflowed it (24 drops, 0.4 s retransmission stalls); 32 KiB: 4 drops over the whole test, no stall in the echo latencies |
+
+The TCP numbers are CPU bound: every received frame is copied from the AXI BRAM into a pool pbuf
+(uncached 32-bit reads over AXI), lwIP checksums it in software, and every ACK or echo segment is copied back
+into a DMA buffer; the 100 MHz MicroBlaze has no caches. CPU load was not instrumented.
 
 ## 7. Network integration (done 10-22-2026) and what remains
 
