@@ -31,7 +31,7 @@
  * (src/rtlnet_netmgr.c, which owns the running configuration and applies it),
  * board registers through src/rtlnet_board.c, the CPU network path through
  * src/rtlnet_cpupath.c (classifier), src/rtlnet_lwip.c (lwIP, InitLWIP) and
- * src/rtlnet_tcp_echo.c. Every network command first
+ * src/lwip/rtlnet_tcp_echo.c. Every network command first
  * probes its core's ID register; a core absent from the build answers ID 0
  * and the command prints "<core> not present in this build", so the same
  * firmware runs on the CPU-only and the network bitstream. Configuration

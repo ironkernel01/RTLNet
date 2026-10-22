@@ -171,9 +171,9 @@ The board top instances `u_cpu` with exactly the section 15.6 ports. A replaceme
 | RTLNet drivers | `cores/<core>/driver/*.c`, compiled in place | each core's registers |
 | network manager | `src/rtlnet_netmgr.c/.h` | PHY bring-up, link monitor, DHCP auto-start, addresses, CPU path bring-up, InitLWIP calls |
 | CPU path control | `src/rtlnet_cpupath.c/.h` | CPU-path classifier configuration (broadcast storm default, filter tables, policers), wrapper CPU-path counters |
-| lwIP glue | `src/rtlnet_lwip.c/.h`, `src/lwip/lwipopts.h` | `InitLWIP()`, `sys_now`, main-loop service, status and counters |
-| netif | `src/rtlnet_lwip_netif.c/.h` | the AXI DMA: receive ring, transmit, frame counters |
-| applications | `src/rtlnet_tcp_echo.c/.h`, `src/rtlnet_tcp_iperf.c/.h` | TCP echo server (port 7); TCP iperf 2 server (lwIP's `lwiperf`, compiled in place, port 5001); both run at the same time, both on at boot |
+| lwIP glue | `src/lwip/rtlnet_lwip.c/.h`, `src/lwip/lwipopts.h` | `InitLWIP()`, `sys_now`, main-loop service, status and counters |
+| netif | `src/lwip/rtlnet_lwip_netif.c/.h` | the AXI DMA: receive ring, transmit, frame counters |
+| applications | `src/lwip/rtlnet_tcp_echo.c/.h`, `src/lwip/rtlnet_tcp_iperf.c/.h` | TCP echo server (port 7); TCP iperf 2 server (lwIP's `lwiperf`, compiled in place, port 5001); both run at the same time, both on at boot |
 | CLI | `cli/menu.c`, `cli/cli_commands.c`, generated `cli/menu_table.c`, `cli/menu_commands.h`, `cli/MenuDocumentation.md` | MenuBuilder hierarchical rules (`cli/MenuBuilder_hierarchical.md`) |
 | desktop harness | `host/main.c`, `host/host_platform.c`, `host/host_lwip_stub.c` | scripted `--demo` of the real CLI and network manager against a register model |
 | host test | `test/tcp_echo_client.py` | TCP echo test from the PC |
@@ -210,7 +210,7 @@ frames, which the RTL8211E does not answer) are privileged debug commands.
 
 The protocol wrapper owns the node identity; lwIP must use the same MAC and IPv4 address, because the
 hardware leaves answer ARP and ping for that address and lwIP only sees unclaimed frames. `InitLWIP()`
-(`src/rtlnet_lwip.c`) reads the MAC and the effective IP, netmask and gateway through the
+(`src/lwip/rtlnet_lwip.c`) reads the MAC and the effective IP, netmask and gateway through the
 `rtlnet_eth_protocol` driver and:
 
 | Call | Action | Result |

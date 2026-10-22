@@ -2,7 +2,7 @@
 # -----------------------------------------------------------------------------
 # File: tcp_echo_client.py
 # Purpose: host-side test of the firmware TCP echo server (lwIP raw API,
-#   port 7, microblaze/firmware/src/rtlnet_tcp_echo.c) over the board's CPU
+#   port 7, microblaze/firmware/src/lwip/rtlnet_tcp_echo.c) over the board's CPU
 #   network path. Python standard library only.
 # Overview:
 #   * Opens --conns concurrent connections to <host>:<port>; each connection

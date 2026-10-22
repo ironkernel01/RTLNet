@@ -85,7 +85,7 @@ $drvSrcs = @(
     'cores/rtlnet_classifier/driver/rtlnet_classifier.c'
 ) | Where-Object { Test-Path -LiteralPath (Join-Path $Repo $_) }
 $inc = @(
-    "-I$Fw/src", "-I$Fw/cli",
+    "-I$Fw/src", "-I$Fw/src/lwip", "-I$Fw/cli",
     "-I$Repo/cores/rtlnet_common/driver",
     "-I$Repo/microblaze/driver"
 ) + ($drvCores | Where-Object { Test-Path -LiteralPath (Join-Path $Repo "cores/$_/driver") } |
@@ -175,8 +175,8 @@ _end = .;
     $objs = @()
     $fwSrcs = @(
         'src/main.c', 'src/rtlnet_platform.c', 'src/rtlnet_board.c', 'src/rtlnet_fmt.c', 'src/rtlnet_netmgr.c',
-        'src/rtlnet_cpupath.c', 'src/rtlnet_lwip.c', 'src/rtlnet_lwip_netif.c', 'src/rtlnet_tcp_echo.c',
-        'src/rtlnet_tcp_iperf.c',
+        'src/rtlnet_cpupath.c', 'src/lwip/rtlnet_lwip.c', 'src/lwip/rtlnet_lwip_netif.c', 'src/lwip/rtlnet_tcp_echo.c',
+        'src/lwip/rtlnet_tcp_iperf.c',
         'cli/menu.c', 'cli/menu_table.c', 'cli/cli_commands.c'
     ) | ForEach-Object { "$Fw/$_" }
     foreach ($s in ($fwSrcs + ($drvSrcs | ForEach-Object { "$Repo/$_" }))) {

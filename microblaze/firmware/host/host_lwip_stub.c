@@ -6,8 +6,8 @@
  *
  * Role: the harness (host gcc) compiles the CLI, the network manager and the
  * board layer against a register model, but no lwIP and no AXI DMA. This file
- * provides the signatures of src/rtlnet_lwip.h, src/rtlnet_lwip_netif.h and
- * src/rtlnet_tcp_echo.h and src/rtlnet_tcp_iperf.h: InitLWIP reports that lwIP does not run here, the
+ * provides the signatures of src/lwip/rtlnet_lwip.h, src/lwip/rtlnet_lwip_netif.h and
+ * src/lwip/rtlnet_tcp_echo.h and src/lwip/rtlnet_tcp_iperf.h: InitLWIP reports that lwIP does not run here, the
  * DMA is absent, and the TCP echo and iperf configuration is stored so the running
  * configuration and the CLI commands behave as on the target.
  */
