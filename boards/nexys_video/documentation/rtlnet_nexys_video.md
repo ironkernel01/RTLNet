@@ -221,7 +221,7 @@ characterization run), i.e. datagrams lost on the PC's Wi-Fi leg or in the route
 At 10 Mb/s, where the Wi-Fi leg has ample headroom, nothing is lost in either direction. The client offers about
 94 Mbit/s whatever `-b` asks (the 1470-byte ceiling on 100 Mb/s Ethernet is 95.6 Mbit/s).
 
-iperf binary: iperf 2.2.2 (pthreads, community build) at `C:\IronKernel	ools\iperf\iperf.exe`, outside the
+iperf binary: iperf 2.2.2 (pthreads, community build) at `C:\IronKernel\tools\iperf\iperf.exe`, outside the
 repository; `net_test.ps1` finds it there (or via `-Iperf <path>` or PATH).
 
 1000 Mb/s on hardware still needs a gigabit link partner (the router is 10/100).
