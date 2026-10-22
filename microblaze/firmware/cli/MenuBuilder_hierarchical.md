@@ -89,7 +89,7 @@ Rules checked by the generator (`gen_menu.py` refuses the file otherwise):
 1. Every mode of the set is defined exactly once (MODE-ROOT for `exec`, one MODE-ENTER for each other).
 2. FUNCTION names are lower_snake_case C identifiers, unique; `-` only on MODE-ENTER (mode change
    without a callback). A MODE-ENTER callback returning nonzero rejects the entry (`interface eth1`).
-3. Keywords are upper case letters, digits and `-`; parameters `[A-Z0-9_]`; at most 16 tokens of at
+3. Keywords are upper case letters, digits and `-`; parameters `[A-Z0-9_]`; at most 14 tokens of at
    most 23 characters and at most 14 parameters (`MENU_MAX_SYNTAX_TOKENS`, `MENU_MAX_TOKEN_TEXT`,
    `MENU_MAX_ARGS`).
 4. No two commands available in one mode have the same shape (same keywords, parameters in the same

@@ -1,68 +1,38 @@
 @echo off
 REM Build script for the RTLNet CLI desktop harness (Windows / GCC) and the
-REM MicroBlaze firmware. Run from microblaze\firmware.
+REM MicroBlaze firmware. Run from microblaze\firmware. The source lists live
+REM once, in build.ps1; this file only selects its options.
 REM   build.bat           compile and link build\menu.exe (host harness)
 REM   build.bat run       build + interactive mode
 REM   build.bat demo      build + scripted --demo session (TEST PASS/FAIL)
 REM   build.bat clean     remove build artifacts
-REM   build.bat firmware  MicroBlaze build\firmware.elf (build.ps1)
-REM Revision: 10-22-2026 (initial version)
+REM   build.bat firmware  MicroBlaze build\firmware.elf (BSP from the XSA)
+REM Revision: 10-22-2026 (initial version; delegates to build.ps1)
 
 setlocal
-set CFLAGS=-std=c11 -Wall -Wextra -Werror -pedantic -O2 -DRTLNET_HOST_TEST -Isrc -Icli -Ihost -I..\..\cores\rtlnet_common\driver -I..\driver
-
 if "%1"=="clean"    goto clean
 if "%1"=="demo"     goto demo
 if "%1"=="run"      goto run
 if "%1"=="firmware" goto firmware
 
 :build
-if not exist build mkdir build
-echo Compiling host\main.c...
-gcc %CFLAGS% -c host\main.c -o build\main.o
+powershell -NoProfile -ExecutionPolicy Bypass -File build.ps1 -NoFirmware -HostHarness
 if errorlevel 1 goto fail
-echo Compiling host\host_platform.c...
-gcc %CFLAGS% -c host\host_platform.c -o build\host_platform.o
-if errorlevel 1 goto fail
-echo Compiling cli\menu.c...
-gcc %CFLAGS% -c cli\menu.c -o build\menu.o
-if errorlevel 1 goto fail
-echo Compiling cli\menu_table.c...
-gcc %CFLAGS% -c cli\menu_table.c -o build\menu_table.o
-if errorlevel 1 goto fail
-echo Compiling cli\cli_commands.c...
-gcc %CFLAGS% -c cli\cli_commands.c -o build\cli_commands.o
-if errorlevel 1 goto fail
-echo Compiling src\rtlnet_board.c...
-gcc %CFLAGS% -c src\rtlnet_board.c -o build\rtlnet_board.o
-if errorlevel 1 goto fail
-echo Compiling src\rtlnet_fmt.c...
-gcc %CFLAGS% -c src\rtlnet_fmt.c -o build\rtlnet_fmt.o
-if errorlevel 1 goto fail
-echo Linking build\menu.exe...
-gcc %CFLAGS% -o build\menu.exe build\main.o build\host_platform.o build\menu.o build\menu_table.o build\cli_commands.o build\rtlnet_board.o build\rtlnet_fmt.o
-if errorlevel 1 goto fail
-echo Build succeeded.
-if "%1"=="demo" goto demo_run
-if "%1"=="run"  goto run_run
 goto end
 
 :clean
-del /q build\*.o build\menu.exe build\firmware.elf build\firmware.map 2>nul
 if exist build\obj rmdir /s /q build\obj
-echo Clean done.
+del /q build\menu.exe build\firmware.elf build\firmware.map build\lscript.ld 2>nul
+echo Clean done (the generated BSP in build\ws is kept; delete build\ws to regenerate it).
 goto end
 
 :demo
-if not exist build\menu.exe goto build
-:demo_run
-build\menu.exe --demo
+powershell -NoProfile -ExecutionPolicy Bypass -File build.ps1 -NoFirmware -Demo
 if errorlevel 1 goto fail
 goto end
 
 :run
-if not exist build\menu.exe goto build
-:run_run
+if not exist build\menu.exe powershell -NoProfile -ExecutionPolicy Bypass -File build.ps1 -NoFirmware -HostHarness
 build\menu.exe
 goto end
 

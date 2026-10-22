@@ -1,16 +1,19 @@
 <#
 -------------------------------------------------------------------------------
 File: build.ps1
-Purpose: one-command build of the RTLNet Nexys Video image: firmware ELF,
-  bitstream (Vivado, gated), firmware merged into the block RAM, and
+Purpose: one-command build of the RTLNet Nexys Video image: bitstream
+  (Vivado, gated) with its hardware export (XSA), firmware ELF on the BSP
+  generated from that XSA, firmware merged into the block RAM, and
   optionally JTAG programming and the console test.
 Overview:
-  1. microblaze/firmware/build.ps1 -Demo: CLI table check, firmware.elf,
-     host harness and its scripted demo (TEST PASS required).
-  2. build_bitstream.tcl through scripts/rtlnet_vivado.ps1 (machine-wide
+  1. build_bitstream.tcl through scripts/rtlnet_vivado.ps1 (machine-wide
      Vivado slot); BUILD_ID from git rev-parse --short=8 HEAD and the dirty
      flag from git status, both inside the Tcl. -Network defines
-     RTLNET_WITH_NETWORK (needs the network cores' filelists).
+     RTLNET_WITH_NETWORK (needs the network cores' filelists). Writes
+     build/rtlnet_nexys_video.xsa (write_hw_platform -fixed).
+  2. microblaze/firmware/build.ps1 -Demo -Xsa build/rtlnet_nexys_video.xsa:
+     CLI table check, BSP from the XSA (Vitis), firmware.elf, host harness
+     and its scripted demo (TEST PASS required).
   3. merge_elf.ps1: updatemem -> build/rtlnet_nexys_video.bit.
   4. -Program: program.ps1 (JTAG). -Test: cli_test.ps1 on -Port (implies
      -Program).
@@ -22,6 +25,7 @@ Usage:
     [-Network] [-SkipFirmware] [-Program] [-Test] [-Port COM4]
 Revision: 10-22-2026
   * 10-22-2026: initial version.
+  * 10-22-2026: bitstream before firmware (the BSP comes from the XSA).
 -------------------------------------------------------------------------------
 #>
 param(
@@ -46,16 +50,17 @@ function Step([string]$name, [scriptblock]$body) {
     if ($rc -ne 0) { Write-Output "RTLNET_BUILD: FAIL at '$name' (exit $rc)"; exit $rc }
 }
 
-if (-not $SkipFirmware) {
-    Step 'firmware' { powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Repo 'microblaze\firmware\build.ps1') -Demo }
-}
 $net = $(if ($Network) { '1' } else { '0' })
 Step 'bitstream' {
     & (Join-Path $Repo 'scripts\rtlnet_vivado.ps1') -Tcl (Join-Path $PSScriptRoot 'build_bitstream.tcl') `
-        -Log (Join-Path $Build 'build_bitstream.log') -TclArgs @('network', $net)
+        -Log (Join-Path $Build 'build_bitstream.log') -TclArgs "network,$net"
 }
 Get-Content -LiteralPath (Join-Path $Build 'build_bitstream.log') | Where-Object { $_ -match '^(rtlnet_build|rtlnet_cdc):' } |
     ForEach-Object { Write-Output "  $_" }
+if (-not $SkipFirmware) {
+    Step 'firmware' { powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Repo 'microblaze\firmware\build.ps1') -Demo `
+        -Xsa (Join-Path $Build 'rtlnet_nexys_video.xsa') }
+}
 Step 'merge' { powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'merge_elf.ps1') }
 if ($Program -or $Test) {
     Step 'program' { powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'program.ps1') }

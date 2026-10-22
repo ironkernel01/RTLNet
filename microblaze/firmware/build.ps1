@@ -168,7 +168,9 @@ _end = .;
     New-Item -ItemType Directory -Force -Path $objDir | Out-Null
     $lwipInc = @("-I$Fw/src/lwip", '-isystem', "$LwipDir/src/include", '-isystem', "$LwipDir/contrib/ports/xilinx/include")
     $sysInc  = @('-isystem', $bspInc, "-specs=$bspSpec")
-    $cflags  = $common + @('-O2', '-g', '-ffunction-sections', '-fdata-sections')
+    # -O2 on the frame path (netif, lwIP glue, TCP echo, lwIP), -Os elsewhere (CLI, drivers).
+    $cflags  = $common + @('-g', '-ffunction-sections', '-fdata-sections')
+    $fastSrc = @('rtlnet_lwip_netif', 'rtlnet_lwip', 'rtlnet_tcp_echo')
     $objs = @()
     $fwSrcs = @(
         'src/main.c', 'src/rtlnet_platform.c', 'src/rtlnet_board.c', 'src/rtlnet_fmt.c', 'src/rtlnet_netmgr.c',
@@ -177,7 +179,8 @@ _end = .;
     ) | ForEach-Object { "$Fw/$_" }
     foreach ($s in ($fwSrcs + ($drvSrcs | ForEach-Object { "$Repo/$_" }))) {
         $o = Join-Path $objDir (([System.IO.Path]::GetFileNameWithoutExtension($s)) + '.o')
-        Invoke-Step $MbGcc ($mbflags + $cflags + $inc + $lwipInc + $sysInc + @('-c', $s, '-o', $o))
+        $opt = $(if ($fastSrc -contains [System.IO.Path]::GetFileNameWithoutExtension($s)) { '-O2' } else { '-Os' })
+        Invoke-Step $MbGcc ($mbflags + $cflags + @($opt) + $inc + $lwipInc + $sysInc + @('-c', $s, '-o', $o))
         $objs += $o
     }
     # lwIP core: third-party sources, compiled in place with their own warning level.
