@@ -489,6 +489,109 @@ two streams connect directly.
 
 ---
 
+## 15. Core port lists (integration contract)
+
+These port lists are binding: cores are built in parallel and connected by the board top by name. All resets
+are **synchronous, active low**, generated in the board top by one `rtlnet_reset_sync` per clock from one
+assertion (button AND MMCM lock), so the two sides of every packet FIFO reset together. A core that owns an
+internal clock (the MAC's `rx_clk`) generates that domain's reset itself. AXI4-Lite slaves are 32-bit data,
+`s_axi_aclk` = `cpu_clk`; a core whose registers live in another clock puts `rtlnet_axil_cdc` inside itself.
+
+### 15.1 `rtlnet_eth_mac`
+
+| Group | Ports |
+|---|---|
+| clocks | `clk125`, `clk125_90`, `clk200`, `axis_clk`, `s_axi_aclk` |
+| resets | `clk125_resetn`, `clk200_resetn`, `axis_resetn`, `s_axi_aresetn` |
+| RGMII pins | in `rgmii_rxc`, `rgmii_rxd[3:0]`, `rgmii_rx_ctl`; out `rgmii_txc`, `rgmii_txd[3:0]`, `rgmii_tx_ctl` |
+| RX client (axis_clk) | out `m_axis_rx_tdata[63:0]`, `m_axis_rx_tkeep[7:0]`, `m_axis_rx_tvalid`, `m_axis_rx_tlast`; in `m_axis_rx_tready` |
+| TX client (axis_clk) | in `s_axis_tx_tdata[63:0]`, `s_axis_tx_tkeep[7:0]`, `s_axis_tx_tvalid`, `s_axis_tx_tlast`; out `s_axis_tx_tready` |
+| registers | `s_axi_*` slave, `ADDR_W` 12 |
+| status (axis_clk, registered) | `stat_link_up` (firmware-set link flag), `stat_speed[1:0]` (00 10M, 01 100M, 10 1000M), `stat_rx_clk_ok`, `ev_rx_good`, `ev_rx_bad`, `ev_tx_frame` (one-clock pulses, for LEDs) |
+
+Parameters: `RX_FIFO_KB` 8, `TX_FIFO_KB` 8, `MAX_FRAME_BYTES` 1518, `RX_IDELAY_TAP` 12, `RAM_STYLE` "block".
+The pin layer is `` `RTLNET_RGMII_IO `` (AMD: `rtlnet_rgmii_io_amd7`), instanced inside the MAC with a fixed
+instance name `u_rgmii_io`; the board XDC names its cells by that path.
+
+### 15.2 `rtlnet_mdio`
+
+| Group | Ports |
+|---|---|
+| clock, reset | `clk` (cpu_clk), `resetn` |
+| registers | `s_axi_*` slave, `ADDR_W` 12 |
+| MDIO pins (board top owns the IOBUF) | out `mdc`, `mdio_o`, `mdio_t` (1 = release the line); in `mdio_i` (asynchronous) |
+| PHY control | out `phy_rst_n` (register; held low `POR_RESET_MS` after reset, then released; firmware can pulse it); in `phy_int_n` (asynchronous) |
+| interrupt | out `irq` (level: PHY interrupt asserted and enabled) |
+
+Parameters: `CLK_HZ` 100_000_000, `POR_RESET_MS` 20.
+
+### 15.3 `rtlnet_eth_protocol`
+
+| Group | Ports |
+|---|---|
+| clocks | `axis_clk`, `proto_clk`, `app_clk`, `s_axi_aclk` |
+| resets | `axis_resetn`, `proto_resetn`, `app_resetn`, `s_axi_aresetn` |
+| from MAC RX (axis_clk) | in `s_axis_tdata[63:0]`, `s_axis_tkeep[7:0]`, `s_axis_tvalid`, `s_axis_tlast`; out `s_axis_tready` (a flop, never back-pressures) |
+| to MAC TX (axis_clk) | out `m_axis_tdata[63:0]`, `m_axis_tkeep[7:0]`, `m_axis_tvalid`, `m_axis_tlast`; in `m_axis_tready` |
+| application RX, socket payload out (app_clk) | out `m_axis_app_tdata[63:0]`, `m_axis_app_tkeep[7:0]`, `m_axis_app_tvalid`, `m_axis_app_tlast`; in `m_axis_app_tready` |
+| application TX, socket payload in (app_clk) | in `s_axis_app_tdata[63:0]`, `s_axis_app_tkeep[7:0]`, `s_axis_app_tvalid`, `s_axis_app_tlast`; out `s_axis_app_tready` |
+| registers | `s_axi_*` slave, `ADDR_W` 16 (64 KiB sub-map of section 6.1) |
+| status (proto_clk, registered, LEDs only) | `stat_ip_valid`, `stat_dhcp_bound`, `ev_rx_frame`, `ev_tx_frame` |
+
+Parameters: `PROTO_CLK_HZ` 50_000_000, `INGRESS_FIFO_KB` 16, `EGRESS_FIFO_KB` 8, `ARP_ENABLE`/`ICMP_ENABLE`/
+`DHCP_ENABLE`/`IPERF_ENABLE`/`UDP_ENABLE` 1, `ICMP_BUF_KB` 2, `DHCP_BUF_KB` 1, `IPERF_PORT` 5001,
+`NUM_SOCKETS` 4, `UDP_RX_BUF_KB` 16, `UDP_TX_BUF_KB` 8, `RAM_STYLE` "block". Queue instance names
+`u_ingress_fifo`, `u_egress_fifo`.
+
+### 15.4 Leaves (instanced inside `rtlnet_eth_protocol`)
+
+Every leaf has exactly the contract ports of section 7.5:
+
+```
+module rtlnet_<leaf> #(...) (
+  input  logic        clk, resetn,                       // proto_clk
+  input  logic        enable,
+  input  logic [63:0] s_axis_tdata,  input logic [7:0] s_axis_tkeep,
+  input  logic        s_axis_tvalid, s_axis_tlast,  output logic s_axis_tready,
+  output logic [63:0] m_axis_tdata,  output logic [7:0] m_axis_tkeep,
+  output logic        m_axis_tvalid, m_axis_tlast,  input  logic m_axis_tready,
+  input  logic [47:0] local_mac,     input  logic [31:0] local_ip,
+  output logic        busy,
+  input  logic        reg_wr_en,     input  logic [11:0] reg_wr_addr, input logic [31:0] reg_wr_data,
+  input  logic        reg_rd_en,     input  logic [11:0] reg_rd_addr, output logic [31:0] reg_rd_data
+  <leaf-specific ports below>
+);
+```
+
+| Leaf | Module | Leaf-specific ports | Parameters |
+|---|---|---|---|
+| ARP | `rtlnet_arp` | none | `REPLY_DELAY_CYCLES` 1250 |
+| ICMP | `rtlnet_icmp` | none | `ICMP_BUF_KB` 2, `RAM_STYLE` |
+| DHCP | `rtlnet_dhcp` | out `lease_valid` (level), `lease_ip[31:0]`, `lease_mask[31:0]`, `lease_router[31:0]`, `lease_server[31:0]`, `lease_time_s[31:0]` (all registered, change only on an ACK or a lease loss) | `MS_CYCLES` 50_000, `DHCP_BUF_KB` 1, `RAM_STYLE` |
+| iperf | `rtlnet_iperf` | none | `CLK_HZ` 50_000_000, `UDP_PORT` 5001, `MAX_DGRAM_BYTES` 1472 |
+| UDP socket | `rtlnet_udp_socket` | `app_clk`, `app_resetn`, the two application streams of 15.3 (`m_axis_app_*`, `s_axis_app_*`), in `local_mask[31:0]`, `local_gateway[31:0]` | `NUM_SOCKETS` 4, `UDP_RX_BUF_KB` 16, `UDP_TX_BUF_KB` 8, `RAM_STYLE` |
+
+`local_ip` is the wrapper's effective address (the DHCP lease while `lease_valid`, else the static address).
+DHCP control (start, stop, renew now, auto-start) lives in the DHCP leaf's own registers.
+
+### 15.5 `rtlnet_udp_echo`
+
+| Group | Ports |
+|---|---|
+| clocks, resets | `app_clk`, `app_resetn`, `s_axi_aclk`, `s_axi_aresetn` |
+| from socket layer (app_clk) | in `s_axis_tdata[63:0]`, `s_axis_tkeep[7:0]`, `s_axis_tvalid`, `s_axis_tlast`; out `s_axis_tready` |
+| to socket layer (app_clk) | out `m_axis_tdata[63:0]`, `m_axis_tkeep[7:0]`, `m_axis_tvalid`, `m_axis_tlast`; in `m_axis_tready` |
+| registers | `s_axi_*` slave, `ADDR_W` 12 (internal `rtlnet_axil_cdc` to `app_clk`) |
+
+### 15.6 `rtlnet_cpu_microblaze`
+
+| Group | Ports |
+|---|---|
+| clock, reset | `clk` (cpu_clk 100 MHz), `resetn` |
+| console | in `uart_rxd`, out `uart_txd` |
+| register master | `m_axi_*` AXI4-Lite master, 32-bit address |
+| interrupts | in `irq[7:0]` |
+
 ## 14. Revision history
 
 | Revision | Change |

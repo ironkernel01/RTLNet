@@ -1,7 +1,8 @@
 <#
 -------------------------------------------------------------------------------
 File: rtlnet_regression.ps1
-Purpose: run every bench in scripts/rtlnet_regression.txt through
+Purpose: run every bench listed in scripts/rtlnet_regression.txt and in each
+  core's cores/<core>/testbench/regression.txt (same line format) through
   rtlnet_run_sim.ps1, sequentially (one Active-HDL seat), and fail if any
   bench fails.
 Usage: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rtlnet_regression.ps1 [-Match <regex>]
@@ -13,7 +14,10 @@ param([string]$Match = '.')
 $ErrorActionPreference = 'Stop'
 $Repo   = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $Runner = Join-Path $PSScriptRoot 'rtlnet_run_sim.ps1'
-$list   = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'rtlnet_regression.txt')
+$list   = @(Get-Content -LiteralPath (Join-Path $PSScriptRoot 'rtlnet_regression.txt'))
+foreach ($f in (Get-ChildItem -Path (Join-Path $Repo 'cores'), (Join-Path $Repo 'boards') -Recurse -Filter regression.txt -ErrorAction SilentlyContinue | Sort-Object FullName)) {
+    $list += Get-Content -LiteralPath $f.FullName
+}
 $pass = 0; $fail = 0; $failed = @()
 foreach ($raw in $list) {
     $line = ($raw -replace '#.*$', '').Trim()

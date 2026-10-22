@@ -1,8 +1,3 @@
-# RTLNet regression list: <bench> <filelist> [tag] [defines=A,B] [plusargs=X,Y] [expectfail]
-# Run with: powershell -File scripts/rtlnet_regression.ps1
-tb_rtlnet_packet_fifo   cores/rtlnet_common/testbench/tb_rtlnet_packet_fifo.f
-tb_rtlnet_packet_fifo   cores/rtlnet_common/testbench/tb_rtlnet_packet_fifo.f  generic  defines=RTLNET_TECH_GENERIC
-tb_rtlnet_packet_fifo   cores/rtlnet_common/testbench/tb_rtlnet_packet_fifo.f  neg      plusargs=INJECT_FAILURE  expectfail
-tb_rtlnet_axil          cores/rtlnet_common/testbench/tb_rtlnet_axil.f
-tb_rtlnet_primitives    cores/rtlnet_common/testbench/tb_rtlnet_primitives.f
-tb_rtlnet_primitives    cores/rtlnet_common/testbench/tb_rtlnet_primitives.f  generic  defines=RTLNET_TECH_GENERIC
+# RTLNet system-level regression entries: <bench> <filelist> [tag] [defines=A,B] [plusargs=X,Y] [expectfail]
+# Per-core benches live in cores/<core>/testbench/regression.txt (and boards/<board>/testbench/regression.txt);
+# scripts/rtlnet_regression.ps1 collects all of them.

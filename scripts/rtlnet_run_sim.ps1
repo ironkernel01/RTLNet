@@ -5,13 +5,15 @@ Purpose: run one RTLNet self-checking testbench in Aldec Active-HDL (batch,
   vsimsa) and turn its verdict into an exit code.
 Overview:
   * Serializes simulator use: the workstation has one Active-HDL seat. A
-    delete-on-close lock file (.sim/activehdl.lock) admits one runner at a
-    time; the runner also waits while any avhdl / avhdl_core / vsimsa process
-    it does not own is running. It never stops another process.
-  * Builds the vendor simulation libraries once, in place from the Vivado
-    install (nothing copied into the repository): library `xpm`
-    (xpm_memory, xpm_cdc) and `unisims_ver` (the primitives the RTLNet pin
-    layers and board tops use, plus glbl). Stamp: .sim/xlib/xlib.done.
+    machine-wide delete-on-close lock file (%LOCALAPPDATA%/RTLNet/
+    activehdl.lock, shared by every checkout and git worktree) admits one
+    runner at a time; the runner also waits while any avhdl / avhdl_core /
+    vsimsa process it does not own is running. It never stops another process.
+  * Builds the vendor simulation libraries once per Vivado version, in place
+    from the Vivado install (nothing copied into the repository), into
+    %LOCALAPPDATA%/RTLNet/xlib-2025.2: library `xpm` (xpm_memory, xpm_cdc)
+    and `unisims_ver` (the primitives the RTLNet pin layers and board tops
+    use, plus glbl). Stamp: xlib.done.
   * Expands the bench filelist (paths relative to the repository root,
     nested `-f`, `+incdir+`, `+define+`, `#`/`//` comments) into an absolute
     design.f in .sim/<bench>[_<tag>]/.
@@ -51,7 +53,8 @@ $AldecBin = 'C:/Aldec/Active-HDL-11.1-x64/BIN'
 $Vsimsa   = Join-Path $AldecBin 'vsimsa.exe'
 $Vivado   = 'C:/Xilinx/2025.2/Vivado'
 $SimRoot  = Join-Path $Repo '.sim'
-$XlibDir  = Join-Path $SimRoot 'xlib'
+$Shared   = Join-Path $env:LOCALAPPDATA 'RTLNet'
+$XlibDir  = Join-Path $Shared 'xlib-2025.2'
 $RunName  = if ($Tag) { "${Bench}_$Tag" } else { $Bench }
 $WorkDir  = Join-Path $SimRoot $RunName
 
@@ -63,11 +66,12 @@ function To-Fwd([string]$p) { return ($p -replace '\\', '/') }
 
 if (-not (Test-Path -LiteralPath $Vsimsa)) { throw "Active-HDL vsimsa not found at $Vsimsa" }
 New-Item -ItemType Directory -Force -Path $SimRoot | Out-Null
+New-Item -ItemType Directory -Force -Path $Shared | Out-Null
 
 # -----------------------------------------------------------------------------
 # One seat: acquire the delete-on-close lock, then wait for foreign simulators.
 # -----------------------------------------------------------------------------
-$LockPath = Join-Path $SimRoot 'activehdl.lock'
+$LockPath = Join-Path $Shared 'activehdl.lock'
 $Lock = $null
 $deadline = (Get-Date).AddSeconds($LockWaitSeconds)
 while ($null -eq $Lock) {

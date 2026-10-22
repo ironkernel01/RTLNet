@@ -61,7 +61,7 @@ package rtlnet_pkg;
   // Default node address: a locally administered unicast MAC (bit 1 of octet 0
   // set, bit 0 clear) and a static IPv4 address. Firmware overrides both.
   localparam logic [47:0] DEFAULT_LOCAL_MAC = 48'h02_49_4B_52_4E_01;
-  localparam logic [31:0] DEFAULT_LOCAL_IP  = {8'd192, 8'd168, 8'd1, 8'd220};
+  localparam logic [31:0] DEFAULT_LOCAL_IP  = {8'd192, 8'd169, 8'd1, 8'd220};
 
   // ---------------------------------------------------------------------------
   // Byte-order helpers: bus order (first wire byte in bits [7:0]) <-> number
