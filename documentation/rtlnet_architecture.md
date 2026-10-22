@@ -31,6 +31,7 @@ network stack: every protocol runs in logic, and the CPU only configures and mon
 | UDP socket layer | `rtlnet_udp_socket` | N bound ports, payload streams to and from applications |
 | UDP echo server | `rtlnet_udp_echo` | application on the socket payload streams: returns every datagram to its sender |
 | Frame filter/classifier | `rtlnet_classifier` | **designed, not built yet** (section 13) |
+| CPU network path | `rtlnet_eth_protocol` CPU port + `microblaze/` | every frame no enabled leaf claims goes to the CPU (`cpu_axis_ethernet_stream`, AXI DMA); the CPU sends frames back the same way; lwIP runs a TCP echo server on it |
 | CPU core | `rtlnet_cpu_microblaze` | MicroBlaze block design behind a vendor-neutral core port list; replaceable by a Nios V / RISC-V core with the same ports |
 | Board top | `boards/nexys_video/hdl/rtlnet_nexys_video_top.sv` | the Nexys Video "Top.sv": clocks, resets, pins, CPU core, address decode, LEDs |
 
@@ -61,9 +62,10 @@ RTLNet/
     rtlnet_arp/  rtlnet_icmp/  rtlnet_dhcp/  rtlnet_iperf/
     rtlnet_udp_socket/  rtlnet_udp_echo/
     rtlnet_classifier/            documentation only until it is built
-    rtlnet_cpu_microblaze/        CPU core: MicroBlaze block design Tcl + SystemVerilog wrapper; bus-functional model
+  microblaze/                     everything MicroBlaze: CPU core (hdl, driver, testbench, documentation) and
+                                  firmware/ (CLI + lwIP TCP echo application; BSP, drivers and lwIP are generated or
+                                  compiled in place from the AMD install, never copied)
   boards/nexys_video/             board top ("Top.sv"), XDC, build scripts, board bench
-  firmware/nexys_video/           MicroBlaze CLI application (start-up, UART, menu, commands)
   scripts/                        shared simulation and constraint scripts
 ```
 
@@ -208,7 +210,7 @@ Protocol sub-map (offset inside 0x1_0000):
 
 Other MicroBlaze peripherals sit in the block design's own map (LMB BRAM `0x0000_0000` 128 KiB, UART Lite
 `0x4060_0000`, interrupt controller `0x4120_0000`, MDM `0x4140_0000`, Timer `0x41C0_0000`). The single source of
-these addresses for firmware is `cores/rtlnet_cpu_microblaze/driver/rtlnet_cpu_microblaze.h`.
+these addresses for firmware is `microblaze/driver/rtlnet_cpu_microblaze.h`.
 
 ---
 
@@ -286,6 +288,18 @@ crossing; only the filter's copy of the MAC crosses into `axis_clk` (level synch
 stability filter). Ingress counters (filtered, queued, dropped) count in `axis_clk` and reach the register file
 through `rtlnet_gray_sync`.
 
+**CPU network path (`cpu_axis_ethernet_stream`).** The dequeue controller presents every frame to the leaves and,
+in parallel, copies it toward the CPU RX packet FIFO (`u_cpu_rx_fifo`, `proto_clk` to `cpu_axis_clk`). The copy's
+last beat is held until the frame's claim verdict is final: the moment the dequeue controller would admit the next
+frame (gap elapsed and no leaf busy). If any enabled leaf pulsed `claim` for the frame, the copy is dropped (written
+with `s_bad`); otherwise it is committed and the CPU receives it on `m_axis_cpu_eth_*`. A full CPU RX FIFO drops the
+frame and counts it; the leaves are never back-pressured. The CPU transmits complete Ethernet frames (no FCS) on
+`s_axis_cpu_eth_*` into the CPU TX packet FIFO (`u_cpu_tx_fifo`, `cpu_axis_clk` to `proto_clk`), which is the
+lowest-priority arbiter source. With `CTRL.CPU_PATH_ENABLE` clear nothing is copied and CPU frames are discarded.
+The CPU network stack (lwIP) uses the same MAC and the wrapper's effective IP; the hardware leaves answer ARP
+requests and pings for that address, so lwIP only ever sees what no leaf claims (TCP, ARP replies to its own
+requests, other UDP, other ICMP).
+
 ### 7.5 The leaf contract
 
 Every protocol leaf (ARP, ICMP, DHCP, iperf, UDP socket) is a `proto_clk` module with:
@@ -299,6 +313,7 @@ Every protocol leaf (ARP, ICMP, DHCP, iperf, UDP socket) is a `proto_clk` module
 | status | `busy` | registered; rises within 12 clocks of the last beat of any frame the leaf acts on, held until it can take a new frame |
 | registers | `reg_wr_en`, `reg_wr_addr[11:0]`, `reg_wr_data`, `reg_rd_en`, `reg_rd_addr[11:0]`, `reg_rd_data` | the wrapper's internal register bus (already in `proto_clk`); read data valid the clock after `reg_rd_en` |
 | enable | `enable` | from the wrapper's leaf-enable register; a disabled leaf ignores frames and sends nothing |
+| claim | `claim` | registered one-clock pulse for each frame the leaf consumes (answers, or accepts as its own), issued after that frame's last beat and no later than the clock its `busy` falls (or within 12 clocks when it never raises `busy`); frames no leaf claims go to the CPU path |
 
 The wrapper guarantees one frame at a time, at least 16 idle clocks after each frame, and no frame while any
 leaf is busy. A leaf is still self-protecting: a frame that starts while it is not idle is ignored whole.
@@ -424,26 +439,32 @@ vendor neutral so another soft or hard processor drops in with a wrapper of the 
 | interrupts | `irq[7:0]` level inputs (PHY interrupt, DHCP event, ...) |
 
 `rtlnet_cpu_microblaze.sv` wraps the block design `rtlnet_cpu` (Tcl-generated from
-`cores/rtlnet_cpu_microblaze/hdl/rtlnet_cpu_bd.tcl`): MicroBlaze (little endian, 32-bit, no MMU, hardware
+`microblaze/hdl/rtlnet_cpu_bd.tcl`): MicroBlaze (little endian, 32-bit, no MMU, hardware
 multiplier/divider/barrel shifter), 128 KiB LMB BRAM, MDM (JTAG debug), AXI UART Lite (115200 8N1), AXI Timer,
 AXI interconnect, the exported AXI4-Lite master and an interrupt controller. A Nios V core would be
 `rtlnet_cpu_niosv.sv` around a Platform Designer system with the same ports; the RTL below the decoder does
-not change. `cores/rtlnet_cpu_microblaze/testbench/rtlnet_cpu_bfm.sv` has the same ports and drives scripted
+not change. `microblaze/testbench/rtlnet_cpu_bfm.sv` has the same ports and drives scripted
 AXI4-Lite transactions for the board bench.
 
-Firmware (`firmware/nexys_video`) is freestanding C11 built with `mb-gcc` (own start-up, linker script, no
-vendor BSP); the ELF is merged into the bitstream BRAM with `updatemem`. Layers:
+The block design also carries an AXI DMA (simple mode, 64-bit streams, `S2MM` from `s_axis_eth_*`, `MM2S` to
+`m_axis_eth_*`, both interrupts on the INTC) and an AXI BRAM for DMA buffers and the lwIP heap; the LMB BRAM is
+256 KiB.
 
-| Layer | Files | Owns |
-|---|---|---|
-| start-up | `crt0.S`, `rtlnet_fw.ld` | vectors, stack, `.bss` clear, `main` |
-| platform | `uart.c`, `timer.c`, `mmio.h` | UART Lite, AXI timer, register access |
-| drivers | `cores/<core>/driver/*.c` | one file per core, the only code that touches that core's registers |
-| CLI | `menu.c`, `menu.h` (MenuBuilder rules), `cli_commands.c` | command parsing and help; no register access |
-| application | `main.c`, `netmgr.c` | link monitor (MDIO poll, MAC speed follow), DHCP start on link-up |
+Firmware (`microblaze/firmware`) is C11 built with `mb-gcc` against a standalone BSP that is **generated at build time
+from the hardware export (XSA) by the Vitis tools in the AMD install** (standalone OS, `axidma`, `uartlite`,
+`tmrctr`, `intc` drivers and the `lwip220` library, NO_SYS raw API). Nothing from the install is copied into the
+repository; the generated BSP lives in the ignored build folder. Layers:
+
+| Layer | Owns |
+|---|---|
+| BSP (generated) | start-up, vectors, Xilinx drivers, `xil_printf`, lwIP core |
+| platform (`microblaze/firmware/src`) | UART console on XUartLite, millisecond tick on XTmrCtr, interrupt setup on XIntc |
+| RTLNet drivers | `cores/<core>/driver/*.c`, compiled in place, the only code that touches each core's registers |
+| network | `rtlnet_netmgr.c` (PHY/MAC/DHCP management), `rtlnet_lwip_netif.c` (lwIP netif on the AXI DMA and the `cpu_axis_ethernet_stream`), `rtlnet_tcp_echo.c` (lwIP raw-API TCP echo server, port 7) |
+| CLI | `menu.c`, `cli_commands.c` (MenuBuilder hierarchical rules) |
 
 CLI: a light network-switch style hierarchy built on the MenuBuilder rules
-(`firmware/nexys_video/cli/MenuBuilder_hierarchical.md`, command source `cli_commands.txt`):
+(`microblaze/firmware/cli/MenuBuilder_hierarchical.md`, command source `cli_commands.txt`):
 
 | Mode (prompt) | Entered by | Examples |
 |---|---|---|
@@ -546,12 +567,16 @@ Parameters: `CLK_HZ` 100_000_000, `POR_RESET_MS` 20.
 | application RX, socket payload out (app_clk) | out `m_axis_app_tdata[63:0]`, `m_axis_app_tkeep[7:0]`, `m_axis_app_tvalid`, `m_axis_app_tlast`; in `m_axis_app_tready` |
 | application TX, socket payload in (app_clk) | in `s_axis_app_tdata[63:0]`, `s_axis_app_tkeep[7:0]`, `s_axis_app_tvalid`, `s_axis_app_tlast`; out `s_axis_app_tready` |
 | registers | `s_axi_*` slave, `ADDR_W` 16 (64 KiB sub-map of section 6.1) |
+| CPU clock | `cpu_axis_clk` (cpu_clk), `cpu_axis_resetn` |
+| `cpu_axis_ethernet_stream` ingress: unclaimed frames to the CPU (cpu_axis_clk) | out `m_axis_cpu_eth_tdata[63:0]`, `m_axis_cpu_eth_tkeep[7:0]`, `m_axis_cpu_eth_tvalid`, `m_axis_cpu_eth_tlast`; in `m_axis_cpu_eth_tready` |
+| `cpu_axis_ethernet_stream` egress: frames from the CPU (cpu_axis_clk) | in `s_axis_cpu_eth_tdata[63:0]`, `s_axis_cpu_eth_tkeep[7:0]`, `s_axis_cpu_eth_tvalid`, `s_axis_cpu_eth_tlast`; out `s_axis_cpu_eth_tready` |
 | status (proto_clk, registered, LEDs only) | `stat_ip_valid`, `stat_dhcp_bound`, `ev_rx_frame`, `ev_tx_frame` |
 
 Parameters: `PROTO_CLK_HZ` 50_000_000, `INGRESS_FIFO_KB` 16, `EGRESS_FIFO_KB` 8, `ARP_ENABLE`/`ICMP_ENABLE`/
 `DHCP_ENABLE`/`IPERF_ENABLE`/`UDP_ENABLE` 1, `ICMP_BUF_KB` 2, `DHCP_BUF_KB` 1, `IPERF_PORT` 5001,
-`NUM_SOCKETS` 4, `UDP_RX_BUF_KB` 16, `UDP_TX_BUF_KB` 8, `RAM_STYLE` "block". Queue instance names
-`u_ingress_fifo`, `u_egress_fifo`.
+`NUM_SOCKETS` 4, `UDP_RX_BUF_KB` 16, `UDP_TX_BUF_KB` 8, `CPU_PATH_ENABLE` 1, `CPU_RX_FIFO_KB` 16, `CPU_TX_FIFO_KB` 8,
+`RAM_STYLE` "block". Queue instance names `u_ingress_fifo`, `u_egress_fifo`, `u_cpu_rx_fifo`, `u_cpu_tx_fifo`. Arbiter
+priority: UDP socket, ICMP, ARP, DHCP, iperf, CPU.
 
 ### 15.4 Leaves (instanced inside `rtlnet_eth_protocol`)
 
@@ -567,6 +592,7 @@ module rtlnet_<leaf> #(...) (
   output logic        m_axis_tvalid, m_axis_tlast,  input  logic m_axis_tready,
   input  logic [47:0] local_mac,     input  logic [31:0] local_ip,
   output logic        busy,
+  output logic        claim,                             // one-clock pulse per consumed frame
   input  logic        reg_wr_en,     input  logic [11:0] reg_wr_addr, input logic [31:0] reg_wr_data,
   input  logic        reg_rd_en,     input  logic [11:0] reg_rd_addr, output logic [31:0] reg_rd_data
   <leaf-specific ports below>
@@ -593,7 +619,7 @@ DHCP control (start, stop, renew now, auto-start) lives in the DHCP leaf's own r
 | to socket layer (app_clk) | out `m_axis_tdata[63:0]`, `m_axis_tkeep[7:0]`, `m_axis_tvalid`, `m_axis_tlast`; in `m_axis_tready` |
 | registers | `s_axi_*` slave, `ADDR_W` 12 (internal `rtlnet_axil_cdc` to `app_clk`) |
 
-### 15.6 `rtlnet_cpu_microblaze`
+### 15.6 `rtlnet_cpu_microblaze` (in `microblaze/`)
 
 | Group | Ports |
 |---|---|
@@ -601,9 +627,12 @@ DHCP control (start, stop, renew now, auto-start) lives in the DHCP leaf's own r
 | console | in `uart_rxd`, out `uart_txd` |
 | register master | `m_axi_*` AXI4-Lite master, 32-bit address |
 | interrupts | in `irq[7:0]` |
+| Ethernet frames to the network (clk) | out `m_axis_eth_tdata[63:0]`, `m_axis_eth_tkeep[7:0]`, `m_axis_eth_tvalid`, `m_axis_eth_tlast`; in `m_axis_eth_tready` (AXI DMA MM2S; to the wrapper's `s_axis_cpu_eth_*`) |
+| Ethernet frames from the network (clk) | in `s_axis_eth_tdata[63:0]`, `s_axis_eth_tkeep[7:0]`, `s_axis_eth_tvalid`, `s_axis_eth_tlast`; out `s_axis_eth_tready` (AXI DMA S2MM; from the wrapper's `m_axis_cpu_eth_*`) |
 
 ## 14. Revision history
 
 | Revision | Change |
 |---|---|
 | 10-22-2026 | Initial architecture; all RTL in SystemVerilog; CPU as a replaceable core; one technology include file; Active-HDL simulation; CPU port list, BD address map and CLI hierarchy aligned with the built cores |
+| 10-22-2026 | CPU network path (`cpu_axis_ethernet_stream`, leaf `claim`), AXI DMA, lwIP TCP echo server, `microblaze/` folder, BSP generated from the AMD install |
