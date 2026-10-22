@@ -374,6 +374,23 @@ in "refused". An idle test ends after 10 s. A `-P` greater than 1 therefore runs
 (5001 by default, or `-L`): the first run of `iperf.exe` raises the Windows prompt; a blocked connect-back
 shows as "aborted" or no second report.
 
+**Hardware results** (image with the CPU-path classifier, firmware at the commit of this section, PC wired NIC
+192.169.1.178 to the board at 192.169.1.199, `iperf.exe` 2.2.2, `-t 10`, two runs each; the PC line is the
+client summary, the board line is `show iperf` after the run):
+
+| Mode | PC side | Board side (`show iperf`) |
+|---|---|---|
+| plain (pc->board) | 68.5, 68.4 Mbit/s | pc->board 85983232 B in 10038 ms, 68526 kbit/s; 85852160 B in 10037 ms, 68428 kbit/s |
+| `-R` | 29.3, 29.3 Mbit/s (`[ *1]`, 10.00 s, 34.9 MBytes) | board->pc reverse 36584680 B in 10000 ms, 29267 kbit/s (both runs) |
+| `-r` | forward 68.6, 68.6 Mbit/s; connect-back 27.3, 27.1 Mbit/s | pc->board 85983232 B, 68553 kbit/s; board->pc tradeoff 34442860 B in 10092 ms, 27303 kbit/s (second run 34253060 B, 27144 kbit/s) |
+| `-d` | forward 31.4, 31.5 Mbit/s; connect-back 15.6, 15.6 Mbit/s (sum 46.8) | pc->board 39452672 B, 31436 kbit/s; board->pc dual 19685180 B in 10099 ms, 15593 kbit/s (second run 19647220 B, 15565 kbit/s) |
+
+The connect-back to the PC's port 5001 was not blocked by Windows Firewall; nothing was changed. `-R` is
+reported as measured, 29.3 Mbit/s against 68.5 Mbit/s PC -> board (not tuned in this change). Both runs
+carry exactly the same byte count (36584680), which points to a send rate set by the 4 x MSS window and the
+round trip through the CPU path rather than by the PC; this is not yet analysed. A second test of the same
+mode is refused (the "refused" counter); after the whole run `show iperf` reads tests 35, refused 0.
+
 **Tests without the board.**
 `build.ps1 -NoFirmware -LwipTest` builds the lwIP core from the install, `rtlnet_lwiperf.c` and a scripted
 iperf client into one host process (lwIP's 127.0.0.1 interface) and sends the captured headers: plain with
@@ -412,7 +429,7 @@ closed port (FAIL, connection refused).
 | CPU-only board build (commit 874f3966), post-route | WNS +0.701 ns, WHS +0.014 ns, 0 failing endpoints; 5294 LUTs, 5564 FFs, 162 BRAM tiles |
 | XSA -> BSP (Vitis Python API) | `RTLNET_BSP: PASS` |
 | Hardware: CLI over the USB-UART on the BSP-based firmware | `cli_test.ps1` PASS 27/27; `reload` works; 1 ms interrupt tick equals the hardware uptime |
-| Desktop harness | TEST PASS 248 checks; negative control TEST FAIL |
+| Desktop harness | TEST PASS 292 checks; negative control TEST FAIL |
 | Desktop harness with the classifier register model (`host_platform.c`) | TEST PASS 292 checks: boot call and generic rewrite leave identical registers, every classifier command written through the driver, counters read back |
 | Board bench `tb_rtlnet_nexys_video_top` with the simulation stand-in | TEST PASS 74 checks |
 
@@ -422,7 +439,8 @@ closed port (FAIL, connection refused).
 | Hardware TCP iperf (install lwiperf) | 68.4 Mbit/s PC -> board alone; 51.6 Mbit/s together with TCP echo (PASS) and RTL UDP iperf 20.9 Mbit/s (0 lost) |
 | `rtlnet_lwiperf` desktop loopback test | `LWIPERF_LOOPBACK: PASS checks=69` (plain, -R, -r, -d, busy, abort, restart, heap) |
 | Stock iperf 2.2.2 client against the Python board emulator | plain, -R, -r, -d complete with both directions in the summary |
-| Hardware iperf, board -> PC (-R, -r, -d) | see 9.9 (measured after the firmware merge) |
+| Hardware iperf with `rtlnet_lwiperf` (classifier image, wired NIC to the DHCP address 192.169.1.199, `-t 10`, two runs each) | PC -> board 68.5 / 68.4 Mbit/s; `-R` 29.3 / 29.3 Mbit/s; `-r` 68.6 then 27.3 / 27.1 Mbit/s; `-d` 31.4 / 31.5 Mbit/s with 15.6 / 15.6 Mbit/s; the board's `show iperf` agrees with the client (section 9.9) |
+| Hardware `tcp_test.ps1` / `tcp_echo_client.py` / `cli_test.ps1` | `TCP_TEST: PASS 8/8`; `TCP_ECHO_TEST: PASS conns=4 messages=152`; `CLI_TEST: PASS 27/27`; lwIP heap used 124 B after 35 tests (no leak) |
 
 Details: `boards/nexys_video/documentation/rtlnet_nexys_video.md` sections 6.3 and 6.4.
 

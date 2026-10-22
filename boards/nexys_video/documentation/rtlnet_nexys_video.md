@@ -26,7 +26,7 @@
 | `scripts/program.ps1`, `scripts/program.tcl` | JTAG programming (hw_server, `program_hw_devices`) |
 | `scripts/cli_test.ps1` | console test over the USB-UART (COM4), either build |
 | `scripts/net_test.ps1` | hardware network test: board side over the CLI, host side from the PC NIC when it is up |
-| `scripts/tcp_test.ps1` | hardware test of the CPU network path: lwIP TCP echo, TCP iperf (lwiperf), both together with the RTL UDP iperf |
+| `scripts/tcp_test.ps1` | hardware test of the CPU network path: lwIP TCP echo, TCP iperf (rtlnet_lwiperf: PC -> board, `-R`, `-r`, `-d`), both together with the RTL UDP iperf |
 | `testbench/tb_rtlnet_nexys_video_top.sv` (+ `.f`) | CPU-only board bench with the MicroBlaze simulation stub |
 | `testbench/tb_rtlnet_nexys_video_net.sv` (+ `.f`) | network board bench: sim stub + RTL8211E model, ARP / ICMP / UDP echo / DHCP at 10/100/1000 |
 | `testbench/regression.txt` | board regression lines (both benches, negative controls) |
@@ -305,7 +305,7 @@ core lands), u_cpu's DMA streams on `s_axis_cpu_eth_*` / `m_axis_cpu_eth_*` in c
 | lwIP identity | `show tcp`: netif MAC 02:49:4b:52:4e:01, IPv4 192.169.1.199 / 24, gateway 192.169.1.1 (the DHCP lease), "RTL identity: matches" |
 | TCP echo alone | `tcp_echo_client.py`, 4 connections x 76 messages (1 B .. 64 KiB, 2.36 MB each way), byte-exact: PASS, 14.0 Mbit/s each way over Wi-Fi with the 16 KiB FIFO; 15.7 Mbit/s (4 x 38 messages) over the wired PC NIC with the 32 KiB FIFO |
 | TCP iperf alone | iperf 2.2.2 `-c 192.169.1.199 -t 10` (PC wired NIC 192.169.1.178): 68.4 Mbit/s PC -> board |
-| iperf reverse modes | `-r` (tradeoff): "expected reverse connect did not occur" (lwiperf did not connect back to the PC); `-R` (reverse on the same connection): 0 bytes, "recvn failed: Connection timed out" (lwiperf has no reverse mode); only PC -> board works |
+| iperf board -> PC modes (`rtlnet_lwiperf`, classifier image, `-t 10`, two runs each) | `-R` (reverse on the same connection): 29.3 Mbit/s, 29.3 Mbit/s; `-r` (tradeoff, board connects back to the PC's listener): PC -> board 68.6 Mbit/s, then board -> PC 27.3 / 27.1 Mbit/s; `-d` (dual): PC -> board 31.4 / 31.5 Mbit/s while board -> PC 15.6 / 15.6 Mbit/s; no firewall block of the connect-back. Before `rtlnet_lwiperf` (install lwiperf) `-r` and `-R` did not work |
 | Together | TCP echo (2 connections x 76 messages) PASS, TCP iperf 51.6 Mbit/s, RTL UDP iperf `-u -b 20M` 20.9 Mbit/s, 0/17828 lost; `tcp_test.ps1`: TCP_TEST PASS 5/5 |
 | Board counters after the runs | DMA receive 165436 frames, no pbuf 0, errors 0; transmit 164660, timeouts 0; wrapper: CPU FIFO drops 4 of 165439 frames to the CPU; lwIP heap max 21668 of 32768, pbuf pool max 2 of 32 |
 | CPU RX FIFO | 16 KiB: four echo connections overflowed it (24 drops, 0.4 s retransmission stalls); 32 KiB: 4 drops over the whole test, no stall in the echo latencies |
@@ -347,7 +347,7 @@ Hardware (board at 192.169.1.199 by DHCP, PC wired NIC "Ethernet" 192.169.1.178)
 | Start-up | `show classifier`: hardware MODE pass-all, STATUS 0x00000100, 16 + 16 entries, 2 rules, 4 policers, 64 bytes compared, delay line 31 beats, verdict latency 23 clocks (the build parameters of the classifier documentation) |
 | `cli_test.ps1` | `CLI_TEST: PASS 27/27` |
 | `net_test.ps1 -Nic Ethernet -Speed 100` | `NET_TEST: PASS 25/25` (ping 0/64/1472 x20 no loss, UDP echo client 200 datagrams, iperf UDP 90 Mb/s PC -> board 94.1 Mbit/s 0/40093 lost, board -> PC 94.4 Mbit/s 0/40126 lost, 10 Mb/s forced and restored) |
-| `tcp_test.ps1` | `TCP_TEST: PASS 5/5` (echo 4 connections 9.6 Mbit/s, TCP iperf 68.6 Mbit/s PC -> board, together: echo PASS, iperf 51.5 Mbit/s, UDP 20.9 Mbit/s 0/17837 lost) |
+| `tcp_test.ps1` | `TCP_TEST: PASS 5/5` before `rtlnet_lwiperf` (echo 4 connections 9.6 Mbit/s, TCP iperf 68.6 Mbit/s PC -> board, together: echo PASS, iperf 51.5 Mbit/s, UDP 20.9 Mbit/s 0/17837 lost); with `rtlnet_lwiperf` `TCP_TEST: PASS 8/8` (also `-R` 29.3, `-r` 27.3 and `-d` 15.6 Mbit/s board -> PC; together: echo PASS, iperf 51.3 Mbit/s, UDP 20.9 Mbit/s 0/17835 lost) |
 | `show phy` | LCR 0x0070, LACR 0x0010 (read back, ext page 0x2C), EEE: MMD 7.60 = 0x0000 (off); RX delay 0x8575 -> 0xAD75; 100 Mb/s full duplex, partner 10h/10f/100h/100f |
 | Broadcast flood | see below |
 
