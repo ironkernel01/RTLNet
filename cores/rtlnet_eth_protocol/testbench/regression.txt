@@ -1,0 +1,7 @@
+# rtlnet_eth_protocol regression: <bench> <filelist> [tag] [defines=A,B] [plusargs=X,Y] [expectfail]
+# Clock pairs: CLKPAIR=1 axis 62.5 / proto 50 MHz, 2 axis 156.25 / proto 50 MHz, 3 axis 50 / proto 62.5 MHz.
+tb_rtlnet_eth_protocol  cores/rtlnet_eth_protocol/testbench/tb_rtlnet_eth_protocol.f  p62_50   plusargs=CLKPAIR=1
+tb_rtlnet_eth_protocol  cores/rtlnet_eth_protocol/testbench/tb_rtlnet_eth_protocol.f  p156_50  plusargs=CLKPAIR=2
+tb_rtlnet_eth_protocol  cores/rtlnet_eth_protocol/testbench/tb_rtlnet_eth_protocol.f  p50_62   plusargs=CLKPAIR=3
+tb_rtlnet_eth_protocol  cores/rtlnet_eth_protocol/testbench/tb_rtlnet_eth_protocol.f  generic  defines=RTLNET_TECH_GENERIC
+tb_rtlnet_eth_protocol  cores/rtlnet_eth_protocol/testbench/tb_rtlnet_eth_protocol.f  neg      plusargs=INJECT_FAILURE  expectfail
