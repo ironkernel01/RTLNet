@@ -124,7 +124,6 @@ module rtlnet_tcp_offload_analyze #(
   endfunction
 
   typedef struct packed {
-    logic       v;
     logic       last;
     logic       first;
     logic [8:0] idx;
@@ -159,6 +158,7 @@ module rtlnet_tcp_offload_analyze #(
   logic        cnt_first = 1'b1;
   logic [1:0]  frame_cfg = '0;
   ctl_t        c1 = '0, c2 = '0, c3 = '0, c4 = '0, c5 = '0;
+  logic [5:1]  cv = '0;                  // valid of P1..P5 (the only reset registers of the control pipeline)
   logic [63:0] p1_data = '0;
   logic        tag3 = 1'b0, tag4 = 1'b0, tag5 = 1'b0;
 
@@ -177,13 +177,16 @@ module rtlnet_tcp_offload_analyze #(
     end
   end
 
-  // P1 and the per-beat control pipeline P2..P5 (one-hot position and flags
-  // are decoded from the counter register, two LUT levels).
+  // Valid chain P1..P5.
   always_ff @(posedge clk) begin
-    if (!resetn) begin
-      c1 <= '0; c2 <= '0; c3 <= '0; c4 <= '0; c5 <= '0;
-    end else if (en) begin
-      c1.v     <= fire;
+    if (!resetn)  cv <= '0;
+    else if (en)  cv <= {cv[4:1], fire};
+  end
+
+  // P1 and the per-beat control pipeline P2..P5 (one-hot position and flags are decoded from the
+  // counter register, two LUT levels; no reset: the valid chain qualifies every use).
+  always_ff @(posedge clk) begin
+    if (en) begin
       c1.last  <= s_last;
       c1.first <= cnt_first;
       c1.idx   <= cnt_idx;
@@ -207,29 +210,41 @@ module rtlnet_tcp_offload_analyze #(
   // ---------------------------------------------------------------------------
   // Header capture from P1 (registers visible one clock later)
   // ---------------------------------------------------------------------------
-  logic        cap_tag = 1'b0, cap_ip = 1'b0;
+  logic        cap_tag_a = 1'b0, cap_ip_a = 1'b0, cap_hi0 = 1'b0;      // EtherType byte compares (halves)
   logic [7:0]  cap_vi = '0;
-  logic        cap2_ip = 1'b0, cap2_fragu = 1'b0, cap3_fragt = 1'b0;
+  logic        cap2_ip_a = 1'b0, cap2_ip_b = 1'b0;
+  logic        cap2_fragu_a = 1'b0, cap2_fragu_b = 1'b0, cap3_fragt_a = 1'b0, cap3_fragt_b = 1'b0;
+  logic        cap_tag, cap_ip, cap2_ip, cap2_fragu, cap3_fragt;
+
+  assign cap_tag    = cap_tag_a && cap_hi0;
+  assign cap_ip     = cap_ip_a && cap_hi0;
+  assign cap2_ip    = cap2_ip_a && cap2_ip_b;
+  assign cap2_fragu = cap2_fragu_a || cap2_fragu_b;
+  assign cap3_fragt = cap3_fragt_a || cap3_fragt_b;
   logic [7:0]  cap2_vi = '0, cap2_proto = '0, cap3_proto = '0;
   logic [15:0] cap2_tlu = '0, cap2_tlt = '0;
 
   always_ff @(posedge clk) begin
     if (en) begin
-      if (c1.v && c1.pos[1]) begin
-        cap_tag <= (p1_data[47:32] == 16'h0081);          // bytes 12,13 = 81 00
-        cap_ip  <= (p1_data[47:32] == 16'h0008);          // bytes 12,13 = 08 00
+      if (cv[1] && c1.pos[1]) begin
+        cap_tag_a <= (p1_data[39:32] == 8'h81);           // byte 12 = 81 (tag)
+        cap_ip_a  <= (p1_data[39:32] == 8'h08);           // byte 12 = 08 (IPv4)
+        cap_hi0   <= (p1_data[47:40] == 8'h00);           // byte 13 = 00
         cap_vi  <= p1_data[55:48];                        // byte 14: version / IHL (untagged)
       end
-      if (c1.v && c1.pos[2]) begin
-        cap2_ip    <= (p1_data[15:0] == 16'h0008);        // bytes 16,17 = 08 00 (tagged)
+      if (cv[1] && c1.pos[2]) begin
+        cap2_ip_a  <= (p1_data[7:0] == 8'h08);            // bytes 16,17 = 08 00 (tagged)
+        cap2_ip_b  <= (p1_data[15:8] == 8'h00);
         cap2_vi    <= p1_data[23:16];                     // byte 18: version / IHL (tagged)
         cap2_tlu   <= {p1_data[7:0], p1_data[15:8]};      // bytes 16,17: total length (untagged)
         cap2_tlt   <= {p1_data[39:32], p1_data[47:40]};   // bytes 20,21: total length (tagged)
-        cap2_fragu <= |{p1_data[47:40], p1_data[37:32]};  // bytes 20,21: MF / offset (untagged)
+        cap2_fragu_a <= |p1_data[47:40];                  // bytes 20,21: MF / offset (untagged)
+        cap2_fragu_b <= |p1_data[37:32];
         cap2_proto <= p1_data[63:56];                     // byte 23: protocol (untagged)
       end
-      if (c1.v && c1.pos[3]) begin
-        cap3_fragt <= |{p1_data[15:8], p1_data[5:0]};     // bytes 24,25: MF / offset (tagged)
+      if (cv[1] && c1.pos[3]) begin
+        cap3_fragt_a <= |p1_data[15:8];                   // bytes 24,25: MF / offset (tagged)
+        cap3_fragt_b <= |p1_data[5:0];
         cap3_proto <= p1_data[31:24];                     // byte 27: protocol (tagged)
       end
     end
@@ -416,7 +431,7 @@ module rtlnet_tcp_offload_analyze #(
   // ---------------------------------------------------------------------------
   logic [2:0] lf [6:11];
   logic [2:0] lf5;
-  assign lf5 = {c5.v, c5.last, c5.first};
+  assign lf5 = {cv[5], c5.last, c5.first};
 
   always_ff @(posedge clk) begin
     if (!resetn) begin
@@ -501,7 +516,7 @@ module rtlnet_tcp_offload_analyze #(
   logic [1:0]  f2_cfg = '0;
 
   // F3: header decision, length tests, pseudo-header extra.
-  logic        f3_hdr = 1'b0, f3_ge8 = 1'b0, f3_ge20 = 1'b0, f3_lneg = 1'b0, f3_bneg = 1'b0, f3_ipv4 = 1'b0;
+  logic        f3_hdr = 1'b0, f3_g8a = 1'b0, f3_g8b = 1'b0, f3_g20b = 1'b0, f3_lneg = 1'b0, f3_bneg = 1'b0, f3_ipv4 = 1'b0;
   logic [16:0] f3_extra = '0;
   logic [12:0] f3_fl = '0;
   logic [4:0]  f3_x = '0;
@@ -551,8 +566,9 @@ module rtlnet_tcp_offload_analyze #(
 
       f3_hdr   <= f2_et && f2_ver && f2_ihl5 && !f2_aneg && !f2_short && !f2_ovf;
       f3_ipv4  <= f2_et && f2_ver && !f2_short && !f2_ovf;
-      f3_ge8   <= |f2_l4len[15:3];
-      f3_ge20  <= (|f2_l4len[15:5]) || (f2_l4len[4] && (f2_l4len[3] || f2_l4len[2]));
+      f3_g8a   <= |f2_l4len[15:8];                       // L4 length >= 256
+      f3_g8b   <= |f2_l4len[7:3];                        // L4 length >= 8 within the low byte
+      f3_g20b  <= (|f2_l4len[7:5]) || (f2_l4len[4] && (f2_l4len[3] || f2_l4len[2]));   // >= 20 within the low byte
       f3_lneg  <= f2_lneg;
       f3_bneg  <= f2_bneg;
       f3_extra <= {1'b0, f2_l4len} + {9'd0, f2_proto};
@@ -570,7 +586,7 @@ module rtlnet_tcp_offload_analyze #(
       f4.is_ipv4 <= f3_ipv4;
       f4.l4_cand <= f3_hdr && (f3_tcp || f3_udp) && !f3_frag;
       f4.l4_elig <= f3_hdr && (f3_tcp || f3_udp) && !f3_frag && !f3_lneg && !f3_bneg
-                    && (f3_udp ? f3_ge8 : f3_ge20);
+                    && (f3_g8a || (f3_udp ? f3_g8b : f3_g20b));
       f4.tag     <= f3_tag;
       f4.tcp     <= f3_tcp && f3_ipv4;
       f4.udp     <= f3_udp && f3_ipv4;
@@ -612,7 +628,7 @@ module rtlnet_tcp_offload_analyze #(
   // ---------------------------------------------------------------------------
   logic [16:0] j1_ip = '0;
   logic [25:0] j1_l4 = '0;
-  logic        j1_fnz = 1'b0;
+  logic        j1_fa = 1'b0, j1_fb = 1'b0;
   logic [15:0] j2_ip = '0;
   logic [16:0] j2_l4 = '0;
   logic        j2_fnz = 1'b0;
@@ -629,10 +645,11 @@ module rtlnet_tcp_offload_analyze #(
     if (en) begin
       j1_ip  <= {1'b0, acc_ip[15:0]} + {7'd0, acc_ip[25:16]};
       j1_l4  <= acc_l4 + {9'd0, j_extra};
-      j1_fnz <= |acc_fl[15:0];
+      j1_fa  <= |acc_fl[15:8];
+      j1_fb  <= |acc_fl[7:0];
       j2_ip  <= j1_ip[15:0] + {15'd0, j1_ip[16]};
       j2_l4  <= {1'b0, j1_l4[15:0]} + {7'd0, j1_l4[25:16]};
-      j2_fnz <= j1_fnz;
+      j2_fnz <= j1_fa || j1_fb;
       j3_ip  <= j2_ip;
       j3_ipg <= (j2_ip == 16'hFFFF);
       j3_l4  <= j2_l4[15:0] + {15'd0, j2_l4[16]};

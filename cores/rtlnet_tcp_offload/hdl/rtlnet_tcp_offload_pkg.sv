@@ -88,8 +88,9 @@ package rtlnet_tcp_offload_pkg;
   // Pipeline latency of rtlnet_tcp_offload_analyze (enabled clocks, final
   // beat offered -> result record on the outputs).
   localparam int ANALYZE_LAT = 16;
-  // Transmit: result record -> sideband entry written (one consumer stage).
-  localparam int TX_SB_LAT   = ANALYZE_LAT + 1;
+  // Transmit: final beat accepted by the buffer -> sideband entry written (one input register stage
+  // in front of the engine, one consumer stage behind it).
+  localparam int TX_SB_LAT   = ANALYZE_LAT + 2;
   // Receive: result record -> trailer register (one trailer stage); the data
   // delay line has this many slots.
   localparam int RX_DELAY    = ANALYZE_LAT + 1;

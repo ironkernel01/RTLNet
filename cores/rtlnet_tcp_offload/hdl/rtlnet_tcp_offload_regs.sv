@@ -180,17 +180,42 @@ module rtlnet_tcp_offload_regs #(
   // ---------------------------------------------------------------------------
   // CTRL and the counter clear pulse
   // ---------------------------------------------------------------------------
-  logic [2:0] ctrl;
-  logic       cnt_clear;
+  logic [2:0]  ctrl;
+  logic        cnt_clear;
+  logic        w0_en;
+  logic        w0_hi0;
+  logic        w0_ctrl;
+  logic        w0_clr;
+  logic [31:0] w0_data;
+  logic        w1_ctrl;
+  logic        w1_clr;
+  logic [31:0] w1_data;
 
+  // W0: strobe and the two halves of the address compare; W1: the decoded targets; then the update.
+  // Every register enable is one LUT from flops.
   always_ff @(posedge clk) begin
     if (!resetn) begin
+      w0_en     <= 1'b0;
+      w0_hi0    <= 1'b0;
+      w0_ctrl   <= 1'b0;
+      w0_clr    <= 1'b0;
+      w0_data   <= 32'd0;
+      w1_ctrl   <= 1'b0;
+      w1_clr    <= 1'b0;
+      w1_data   <= 32'd0;
       ctrl      <= 3'b000;
       cnt_clear <= 1'b0;
     end else begin
-      cnt_clear <= 1'b0;
-      if (reg_wr_en && reg_wr_addr == REG_CTRL)      ctrl      <= reg_wr_data[2:0];
-      if (reg_wr_en && reg_wr_addr == REG_CNT_CLEAR) cnt_clear <= reg_wr_data[0];
+      w0_en     <= reg_wr_en;
+      w0_hi0    <= (reg_wr_addr[11:5] == 7'd0);
+      w0_ctrl   <= (reg_wr_addr[4:0] == REG_CTRL[4:0]);
+      w0_clr    <= (reg_wr_addr[4:0] == REG_CNT_CLEAR[4:0]);
+      w0_data   <= reg_wr_data;
+      w1_ctrl   <= w0_en && w0_hi0 && w0_ctrl;
+      w1_clr    <= w0_en && w0_hi0 && w0_clr;
+      w1_data   <= w0_data;
+      cnt_clear <= w1_clr && w1_data[0];
+      if (w1_ctrl) ctrl <= w1_data[2:0];
     end
   end
 

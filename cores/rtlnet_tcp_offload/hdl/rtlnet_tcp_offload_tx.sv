@@ -154,6 +154,10 @@ module rtlnet_tcp_offload_tx #(
   // Checksum engine on the beats the FIFO accepts
   // ---------------------------------------------------------------------------
   logic        fire;
+  logic        an_fire = 1'b0;
+  logic [63:0] an_d = '0;
+  logic [7:0]  an_k = '0;
+  logic        an_l = 1'b0;
   logic        r_v;
   logic [1:0]  r_cfg;
   logic        r_tag, r_ipv4, r_udp, r_hdr, r_cand, r_elig, r_l4good, r_ovf;
@@ -162,16 +166,25 @@ module rtlnet_tcp_offload_tx #(
 
   assign fire = in_v && fifo_rdy;
 
+  // One register stage between the buffer's (combinational) ready and the engine.
+  always_ff @(posedge clk) begin
+    if (!resetn) an_fire <= 1'b0;
+    else         an_fire <= fire;
+    an_d <= in_d;
+    an_k <= in_k;
+    an_l <= in_l;
+  end
+
   rtlnet_tcp_offload_analyze #(
     .RX_MODE (1'b0)
   ) u_an (
     .clk           (clk),
     .resetn        (resetn),
     .en            (1'b1),
-    .fire          (fire),
-    .s_data        (in_d),
-    .s_keep        (in_k),
-    .s_last        (in_l),
+    .fire          (an_fire),
+    .s_data        (an_d),
+    .s_keep        (an_k),
+    .s_last        (an_l),
     .cfg_in        ({cfg_l4, cfg_ip}),
     .res_v         (r_v),
     .res_cfg       (r_cfg),
@@ -367,25 +380,28 @@ module rtlnet_tcp_offload_tx #(
   // ---------------------------------------------------------------------------
   logic [5:0] inflight = '0;
   logic       in_first = 1'b1;
-  logic       dec_take;
-  logic       inc_first;
+  logic       inc_q = 1'b0;
+  logic       dec_q = 1'b0;
 
-  assign inc_first = fire && in_first;
-  assign dec_take  = take && ff_l;
-
+  // Frame start and frame end events are registered before they count (keeps the buffer's
+  // ready logic out of the counter), and idle waits for them.
   always_ff @(posedge clk) begin
     if (!resetn) begin
       inflight <= '0;
       in_first <= 1'b1;
+      inc_q    <= 1'b0;
+      dec_q    <= 1'b0;
       idle     <= 1'b1;
     end else begin
-      if (fire) in_first <= in_l;
-      case ({inc_first, dec_take || ev_drop})
+      if (an_fire) in_first <= an_l;
+      inc_q <= an_fire && in_first;
+      dec_q <= (take && ff_l) || ev_drop;
+      case ({inc_q, dec_q})
         2'b10:   inflight <= inflight + 6'd1;
         2'b01:   inflight <= inflight - 6'd1;
         default: inflight <= inflight;
       endcase
-      idle <= (inflight == 6'd0) && !in_v && !p_v && !m_axis_tvalid && !inc_first;
+      idle <= (inflight == 6'd0) && !in_v && !p_v && !m_axis_tvalid && !inc_q && !dec_q && !an_fire;
     end
   end
 

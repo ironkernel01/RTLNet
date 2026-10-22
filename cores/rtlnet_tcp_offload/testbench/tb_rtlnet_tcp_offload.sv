@@ -715,7 +715,7 @@ module tb_rtlnet_tcp_offload;
     u_axi.rd(R_STATUS, rv);
     tb_check(rv == 32'h3, $sformatf("STATUS idle bits at start = %08x", rv));
     u_axi.rd(R_LAT, rv);
-    tb_check(rv[7:0] == 8'd17 && rv[15:8] == 8'd17, $sformatf("LATENCY = %08x", rv));
+    tb_check(rv[7:0] == 8'd18 && rv[15:8] == 8'd17, $sformatf("LATENCY = %08x", rv));
     for (int v = 0; v < 8; v++) begin
       set_ctrl(32'(v));
       u_axi.rd(R_CTRL, rv);

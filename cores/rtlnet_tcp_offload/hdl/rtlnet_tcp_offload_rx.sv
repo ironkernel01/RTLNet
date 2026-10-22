@@ -187,6 +187,8 @@ module rtlnet_tcp_offload_rx (
   // ---------------------------------------------------------------------------
   logic [63:0] trl = '0;
   logic        t_ipok, t_verified, t_l4ok;
+  logic        trl_e_ver = 1'b0, trl_e_ipbad = 1'b0, trl_e_l4bad = 1'b0, trl_e_unver = 1'b0;   // event decodes
+  logic        vany_q = 1'b0;
 
   assign t_ipok     = r_hdr && r_ipg;
   assign t_verified = r_hdr && r_elig && !r_unone;
@@ -199,6 +201,10 @@ module rtlnet_tcp_offload_rx (
       trl[TRL_FLAGS_LSB +: 16] <= {8'd0, t_verified, t_l4ok, t_ipok, r_frag, r_tag, r_udp, r_tcp, r_ipv4};
       trl[TRL_L4OFF_LSB +: 8]  <= r_hdr ? {1'b0, r_l4s} : 8'd0;
       trl[TRL_MARKER_LSB +: 8] <= TRAILER_MARKER;
+      trl_e_ver   <= t_verified && t_ipok && t_l4ok;
+      trl_e_ipbad <= r_ipv4 && !t_ipok;
+      trl_e_l4bad <= t_verified && !t_l4ok;
+      trl_e_unver <= !t_verified;
     end
   end
 
@@ -266,12 +272,13 @@ module rtlnet_tcp_offload_rx (
       idle          <= 1'b1;
     end else begin
       ev_frame      <= deliver_last;
-      ev_verified   <= deliver_last && trl[TRL_FLAGS_LSB + TRLF_VERIFIED] && trl[TRL_FLAGS_LSB + TRLF_IP_OK]
-                       && trl[TRL_FLAGS_LSB + TRLF_L4_OK];
-      ev_ip_bad     <= deliver_last && trl[TRL_FLAGS_LSB + TRLF_IS_IPV4] && !trl[TRL_FLAGS_LSB + TRLF_IP_OK];
-      ev_l4_bad     <= deliver_last && trl[TRL_FLAGS_LSB + TRLF_VERIFIED] && !trl[TRL_FLAGS_LSB + TRLF_L4_OK];
-      ev_unverified <= deliver_last && !trl[TRL_FLAGS_LSB + TRLF_VERIFIED];
-      idle          <= !(|v_ch) && !tr_pend && !in_v && !m_axis_tvalid;
+      ev_verified   <= deliver_last && trl_e_ver;
+      ev_ip_bad     <= deliver_last && trl_e_ipbad;
+      ev_l4_bad     <= deliver_last && trl_e_l4bad;
+      ev_unverified <= deliver_last && trl_e_unver;
+      // vany_q lags the line by one clock; v_ch[0] covers the beat that just entered.
+      vany_q        <= |v_ch;
+      idle          <= !vany_q && !v_ch[0] && !tr_pend && !in_v && !m_axis_tvalid;
     end
   end
 
