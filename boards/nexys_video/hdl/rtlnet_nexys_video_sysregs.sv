@@ -7,7 +7,7 @@
 // Overview:
 //   * AXI4-Lite slave through rtlnet_axil_slave (ADDR_W 12, full-word writes
 //     only); registered read mux, undefined offsets read 0.
-//   * Register map defined in firmware/nexys_video/src/rtlnet_nexys_video_sysregs.h
+//   * Register map defined in microblaze/firmware/src/rtlnet_nexys_video_sysregs.h
 //     (the single definition); the REG_* localparams below mirror it.
 //   * Every asynchronous input (switches, buttons, MMCM lock, PHY pins, RGMII
 //     receive pin levels, network status levels, clock beacons) enters through

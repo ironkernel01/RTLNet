@@ -5,7 +5,7 @@ Purpose: one-command build of the RTLNet Nexys Video image: firmware ELF,
   bitstream (Vivado, gated), firmware merged into the block RAM, and
   optionally JTAG programming and the console test.
 Overview:
-  1. firmware/nexys_video/build.ps1 -Demo: CLI table check, firmware.elf,
+  1. microblaze/firmware/build.ps1 -Demo: CLI table check, firmware.elf,
      host harness and its scripted demo (TEST PASS required).
   2. build_bitstream.tcl through scripts/rtlnet_vivado.ps1 (machine-wide
      Vivado slot); BUILD_ID from git rev-parse --short=8 HEAD and the dirty
@@ -47,7 +47,7 @@ function Step([string]$name, [scriptblock]$body) {
 }
 
 if (-not $SkipFirmware) {
-    Step 'firmware' { powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Repo 'firmware\nexys_video\build.ps1') -Demo }
+    Step 'firmware' { powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Repo 'microblaze\firmware\build.ps1') -Demo }
 }
 $net = $(if ($Network) { '1' } else { '0' })
 Step 'bitstream' {

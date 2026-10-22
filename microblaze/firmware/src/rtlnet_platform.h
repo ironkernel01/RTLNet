@@ -29,7 +29,7 @@
  *       0x44A1_5000        UDP socket leaf            "UDPS"
  *     0x44A2_0000   4 KiB  CLASSIFIER (reserved, reads 0)
  *
- * The CPU-core part comes from cores/rtlnet_cpu_microblaze/driver/
+ * The CPU-core part comes from microblaze/driver/
  * rtlnet_cpu_microblaze.h (single definition, matches rtlnet_cpu_bd.tcl);
  * the RTLNet window offsets match architecture section 6.1 and the decoder
  * parameters of boards/nexys_video/hdl/rtlnet_nexys_video_top.sv. Windows of

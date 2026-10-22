@@ -3,7 +3,7 @@
 | Item | Value |
 |---|---|
 | Document revision | 10-22-2026 |
-| Applies to | every file under `cores/`, `boards/`, `firmware/`, `scripts/` |
+| Applies to | every file under `cores/`, `microblaze/`, `boards/`, `scripts/` |
 
 Read `documentation/rtlnet_architecture.md` first (bus, register conventions, address map, leaf contract,
 section 15 port lists). This page lists the rules a core must follow to be accepted.

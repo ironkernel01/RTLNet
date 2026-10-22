@@ -19,7 +19,7 @@
 #   * Interrupts: INTC inputs 0..7 = port irq[7:0] (level, active high),
 #     8 = AXI Timer, 9 = UART Lite.
 #   * Address map (documented in documentation/rtlnet_cpu_microblaze.md and
-#     firmware/nexys_video/src/rtlnet_platform.h; keep all three in step):
+#     microblaze/firmware/src/rtlnet_platform.h; keep all three in step):
 #       0x0000_0000  128 KiB  LMB BRAM (ILMB + DLMB)
 #       0x4060_0000   64 KiB  AXI UART Lite
 #       0x4120_0000   64 KiB  AXI INTC

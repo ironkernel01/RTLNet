@@ -7,7 +7,7 @@
 | Top | `boards/nexys_video/hdl/rtlnet_nexys_video_top.sv` (`rtlnet_nexys_video_top`) |
 | Builds | network (`build.ps1 -Network`, `RTLNET_WITH_NETWORK`: MAC, MDIO, protocol wrapper with ARP/ICMP/DHCP/iperf/UDP socket leaves, UDP echo) and CPU-only (default); both built, timing met, on hardware |
 | Tools | Vivado 2025.2, MicroBlaze GCC 13.3, Active-HDL 11.1 |
-| Firmware | one image for both builds (`firmware/nexys_video`); absent cores are probed and reported "not present in this build" |
+| Firmware | one image for both builds (`microblaze/firmware`); absent cores are probed and reported "not present in this build" |
 
 ## 1. Files
 
@@ -59,7 +59,7 @@ MAC 0x44A0_1000, MDIO 0x44A0_2000, ECHO 0x44A0_3000, PROTOCOL 0x44A1_0000 (64 Ki
 CLASSIFIER 0x44A2_0000 (reserved). Windows without a core are `rtlnet_axil_slave` stubs: OKAY,
 read data 0. Other addresses in the 1 MiB window: DECERR.
 
-System registers (single definition `firmware/nexys_video/src/rtlnet_nexys_video_sysregs.h`):
+System registers (single definition `microblaze/firmware/src/rtlnet_nexys_video_sysregs.h`):
 
 | Offset | Name | Access | Content |
 |---:|---|---|---|
@@ -143,7 +143,7 @@ paths (`rtlnet_nexys_video.xdc`). No clock groups.
 
 ### 5.2 Firmware network manager
 
-`firmware/nexys_video/src/rtlnet_netmgr.c` (called from `main.c`): probes every core; MDIO core
+`microblaze/firmware/src/rtlnet_netmgr.c` (called from `main.c`): probes every core; MDIO core
 init, MDC calibration against the AXI timer, wait for the core's PHY power-on reset plus 30 ms,
 RTL8211E ID check, RX delay on (page 0xA4 register 28, read back), advertisement (full duplex
 10/100/1000 by default) and AN restart; MAC init; protocol addresses (MAC kept from the wrapper's

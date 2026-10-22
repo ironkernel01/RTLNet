@@ -300,7 +300,7 @@ Keyword groups (help text when `?` lists a keyword shared by several commands):
 
 ## 8. Build instructions
 
-Desktop harness (host gcc), from `firmware/nexys_video`:
+Desktop harness (host gcc), from `microblaze/firmware`:
 
 ```
 build.bat          REM compile and link build/menu.exe

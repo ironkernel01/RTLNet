@@ -26,7 +26,7 @@ SPDX-License-Identifier: LGPL-2.1-or-later
 |---|---|
 | Revision | 10-22-2026 |
 | Extends | MenuBuilder (`FUNCTION:COMMAND:DESCRIPTION` menus, explicit `matched` dispatch, aligned help) |
-| First user | RTLNet Nexys Video firmware console (`firmware/nexys_video/cli`) |
+| First user | RTLNet Nexys Video firmware console (`microblaze/firmware/cli`) |
 | Input | `cli/cli_commands.txt` |
 | Generator / checker | `cli/gen_menu.py`, `cli/check_menu.py` |
 

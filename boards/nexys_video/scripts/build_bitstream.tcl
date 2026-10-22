@@ -8,7 +8,7 @@
 #   * Paths derive from this script's location (boards/nexys_video/scripts), so
 #     the build survives tree moves and does not depend on the working
 #     directory. Outputs go to boards/nexys_video/build/.
-#   * Steps: create the block design rtlnet_cpu (cores/rtlnet_cpu_microblaze/
+#   * Steps: create the block design rtlnet_cpu (microblaze/
 #     hdl/rtlnet_cpu_bd.tcl) under build/bd, generate output products with
 #     global synthesis, read the RTL through filelists, read the XDC,
 #     synth_design (top rtlnet_nexys_video_top, xc7a200tsbg484-1, generics
@@ -129,7 +129,7 @@ create_project -in_memory -part $PART
 set_property target_language Verilog [current_project]
 set_property default_lib xil_defaultlib [current_project]
 if {[catch {
-  source [file join $REPO cores rtlnet_cpu_microblaze hdl rtlnet_cpu_bd.tcl]
+  source [file join $REPO microblaze hdl rtlnet_cpu_bd.tcl]
   set bd_file [rtlnet_cpu_bd_create [file join $BUILD_DIR bd]]
   set_property synth_checkpoint_mode None [get_files $bd_file]
   generate_target all [get_files $bd_file]

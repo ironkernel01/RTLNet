@@ -1,5 +1,5 @@
 # RTLNet Nexys Video firmware: CLI desktop harness (host gcc) and MicroBlaze
-# firmware (mb-gcc, no vendor BSP). Run from firmware/nexys_video.
+# firmware (mb-gcc, no vendor BSP). Run from microblaze/firmware.
 #   make            build/menu.exe (host harness)
 #   make run        build + interactive mode
 #   make demo       build + scripted --demo session (TEST PASS/FAIL)
@@ -10,7 +10,7 @@
 
 CC       ?= gcc
 CFLAGS   ?= -std=c11 -Wall -Wextra -Werror -pedantic -O2
-INCLUDES := -Isrc -Icli -Ihost -I../../cores/rtlnet_common/driver -I../../cores/rtlnet_cpu_microblaze/driver
+INCLUDES := -Isrc -Icli -Ihost -I../../cores/rtlnet_common/driver -I../driver
 TARGET   := build/menu.exe
 OBJS     := build/main.o build/host_platform.o build/menu.o build/menu_table.o \
             build/cli_commands.o build/rtlnet_board.o build/rtlnet_fmt.o

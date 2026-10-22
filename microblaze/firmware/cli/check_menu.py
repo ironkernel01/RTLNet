@@ -41,8 +41,10 @@ import gen_menu  # noqa: E402
 
 
 def read(name):
+    """File text with line ends normalized to LF (a checkout may carry CRLF
+    through core.autocrlf; the generator writes LF)."""
     with open(os.path.join(HERE, name), encoding="utf-8", newline="") as fh:
-        return fh.read()
+        return fh.read().replace("\r\n", "\n")
 
 
 def function_defs(text):

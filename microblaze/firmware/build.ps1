@@ -12,11 +12,11 @@ Overview:
     code follows the anchored TEST PASS / TEST FAIL line.
   * -NoFirmware: skip the MicroBlaze build (harness only).
   * Exit code 0 only when every requested step succeeded.
-  * Compiler flags match the block design (cores/rtlnet_cpu_microblaze/hdl/
+  * Compiler flags match the block design (microblaze/hdl/
     rtlnet_cpu_bd.tcl): little endian, barrel shifter, pattern compare,
     hardware multiplier and divider, no FPU.
 Usage:
-  powershell -NoProfile -ExecutionPolicy Bypass -File firmware/nexys_video/build.ps1 [-HostHarness] [-Demo] [-NoFirmware]
+  powershell -NoProfile -ExecutionPolicy Bypass -File microblaze/firmware/build.ps1 [-HostHarness] [-Demo] [-NoFirmware]
 Revision: 10-22-2026
   * 10-22-2026: initial version.
 -------------------------------------------------------------------------------
@@ -53,7 +53,7 @@ $drvSrcs = @(
 $inc = @(
     "-I$Fw/src", "-I$Fw/cli",
     "-I$Repo/cores/rtlnet_common/driver",
-    "-I$Repo/cores/rtlnet_cpu_microblaze/driver"
+    "-I$Repo/microblaze/driver"
 ) + ($drvCores | ForEach-Object { "-I$Repo/cores/$_/driver" })
 $common = @('-std=c11', '-Wall', '-Wextra', '-Werror', '-pedantic')
 

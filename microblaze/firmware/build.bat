@@ -1,6 +1,6 @@
 @echo off
 REM Build script for the RTLNet CLI desktop harness (Windows / GCC) and the
-REM MicroBlaze firmware. Run from firmware\nexys_video.
+REM MicroBlaze firmware. Run from microblaze\firmware.
 REM   build.bat           compile and link build\menu.exe (host harness)
 REM   build.bat run       build + interactive mode
 REM   build.bat demo      build + scripted --demo session (TEST PASS/FAIL)
@@ -9,7 +9,7 @@ REM   build.bat firmware  MicroBlaze build\firmware.elf (build.ps1)
 REM Revision: 10-22-2026 (initial version)
 
 setlocal
-set CFLAGS=-std=c11 -Wall -Wextra -Werror -pedantic -O2 -DRTLNET_HOST_TEST -Isrc -Icli -Ihost -I..\..\cores\rtlnet_common\driver -I..\..\cores\rtlnet_cpu_microblaze\driver
+set CFLAGS=-std=c11 -Wall -Wextra -Werror -pedantic -O2 -DRTLNET_HOST_TEST -Isrc -Icli -Ihost -I..\..\cores\rtlnet_common\driver -I..\driver
 
 if "%1"=="clean"    goto clean
 if "%1"=="demo"     goto demo

@@ -6,7 +6,7 @@ Purpose: put the MicroBlaze firmware ELF into the LMB block RAM of the
 Overview:
   * Inputs (defaults): build/rtlnet_nexys_video_hw.bit and
     build/rtlnet_nexys_video.mmi from build_bitstream.tcl, and
-    firmware/nexys_video/build/firmware.elf.
+    microblaze/firmware/build/firmware.elf.
   * Verifies the MMI before use: one processor, InstPath
     u_cpu/u_bd/rtlnet_cpu_i/microblaze_0, little endian, an address space of
     0..131071 (128 KiB) and 32 RAMB36 bit lanes; and that the ELF exists and
@@ -31,7 +31,7 @@ $ErrorActionPreference = 'Stop'
 $Board = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $Repo  = (Resolve-Path (Join-Path $Board '..\..')).Path
 $Build = Join-Path $Board 'build'
-if (-not $Elf) { $Elf = Join-Path $Repo 'firmware\nexys_video\build\firmware.elf' }
+if (-not $Elf) { $Elf = Join-Path $Repo 'microblaze\firmware\build\firmware.elf' }
 if (-not $Mmi) { $Mmi = Join-Path $Build 'rtlnet_nexys_video.mmi' }
 if (-not $Bit) { $Bit = Join-Path $Build 'rtlnet_nexys_video_hw.bit' }
 if (-not $Out) { $Out = Join-Path $Build 'rtlnet_nexys_video.bit' }

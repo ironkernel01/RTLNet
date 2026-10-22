@@ -2,7 +2,7 @@
 // File: rtlnet_cpu_microblaze.sv
 // Purpose: the RTLNet CPU core: a vendor-neutral port list (architecture
 //   section 15.6) around the MicroBlaze block design `rtlnet_cpu`
-//   (cores/rtlnet_cpu_microblaze/hdl/rtlnet_cpu_bd.tcl).
+//   (microblaze/hdl/rtlnet_cpu_bd.tcl).
 // Overview:
 //   * The block design holds MicroBlaze, 128 KiB LMB BRAM, MDM, UART Lite
 //     (115200 8N1), AXI Timer, AXI INTC and the interconnect; its exported

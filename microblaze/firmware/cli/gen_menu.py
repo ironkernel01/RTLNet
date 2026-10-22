@@ -439,7 +439,7 @@ def gen_doc(model):
     for k in model["keywords"]:
         out.append(f"| {k['mode']} | `{k['path']}` | {md_escape(k['desc'])} |\n")
     out.append("\n## 8. Build instructions\n\n"
-               "Desktop harness (host gcc), from `firmware/nexys_video`:\n\n"
+               "Desktop harness (host gcc), from `microblaze/firmware`:\n\n"
                "```\nbuild.bat          REM compile and link build/menu.exe\n"
                "build.bat run      REM build + interactive mode (stdin/stdout)\n"
                "build.bat demo     REM build + scripted session, prints TEST PASS/FAIL\n"
@@ -472,8 +472,10 @@ def main(argv):
         path = os.path.join(HERE, name)
         old = None
         if os.path.exists(path):
+            # Line ends compare normalized: a checkout may carry CRLF
+            # (core.autocrlf) while the generator writes LF.
             with open(path, encoding="utf-8", newline="") as fh:
-                old = fh.read()
+                old = fh.read().replace("\r\n", "\n")
         if check_only:
             if old != text:
                 print(f"gen_menu: DIFFERS {name} (run python cli/gen_menu.py)")

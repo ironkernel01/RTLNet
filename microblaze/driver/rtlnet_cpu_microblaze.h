@@ -5,12 +5,12 @@
  *
  * Role: the single definition of the processor-side address map, vector
  * table and interrupt numbering of the block design `rtlnet_cpu`, created by
- * cores/rtlnet_cpu_microblaze/hdl/rtlnet_cpu_bd.tcl. The Tcl (assign_bd_address,
+ * microblaze/hdl/rtlnet_cpu_bd.tcl. The Tcl (assign_bd_address,
  * irq_concat) is the hardware side of this contract; change both together.
  * A drift shows as the firmware polling a peripheral that is not there: the
  * UART prints nothing and the timer reads 0.
  *
- * Firmware includes this through firmware/nexys_video/src/rtlnet_platform.h,
+ * Firmware includes this through microblaze/firmware/src/rtlnet_platform.h,
  * which adds the RTLNet register window map of the board.
  *
  * This header holds constants and contract prose only.

@@ -69,7 +69,7 @@ No clocking wizard: every clock pin is the `clk` port (`FREQ_HZ` 100 MHz).
 
 Interrupt inputs: 0..7 = `irq[7:0]`, 8 = timer, 9 = UART. Vectors: reset 0x00, user exception 0x08,
 interrupt 0x10, break 0x18, hardware exception 0x20. The single definition for software is
-`driver/rtlnet_cpu_microblaze.h`; `firmware/nexys_video/src/rtlnet_platform.h` includes it and adds the
+`driver/rtlnet_cpu_microblaze.h`; `microblaze/firmware/src/rtlnet_platform.h` includes it and adds the
 RTLNet window map. The INTC base is not listed in architecture section 6.1 (see section 9).
 
 Names other flows depend on: the MMI written by `write_mem_info` names the processor
@@ -80,7 +80,7 @@ Names other flows depend on: the MMI written by `write_mem_info` names the proce
 `mb-gcc` (GCC 13.3, `C:\Xilinx\2025.2\gnu\microblaze\nt\bin`) with flags that match the configuration:
 `-mcpu=v11.0 -mlittle-endian -mxl-barrel-shift -mxl-pattern-compare -mno-xl-soft-mul -mno-xl-soft-div`
 (no `-mhard-float`: no FPU). Multilib `le/bs/p/m` (libgcc for 64-bit division helpers). Freestanding,
-own start-up and linker script: see `firmware/nexys_video`.
+own start-up and linker script: see `microblaze/firmware`.
 
 ## 6. Replacing the processor (Nios V, another RISC-V)
 
