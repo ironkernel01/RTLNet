@@ -1,0 +1,7 @@
+# rtlnet_udp_socket regression: <bench> <filelist> [tag] [defines=A,B] [plusargs=X,Y] [expectfail]
+# proto_clk 50 MHz against app_clk 62.5 MHz (default), 100 MHz and 33.3 MHz; AMD XPM and GENERIC RAM models.
+tb_rtlnet_udp_socket   cores/rtlnet_udp_socket/testbench/tb_rtlnet_udp_socket.f
+tb_rtlnet_udp_socket   cores/rtlnet_udp_socket/testbench/tb_rtlnet_udp_socket.f  app100   defines=TB_APP_100
+tb_rtlnet_udp_socket   cores/rtlnet_udp_socket/testbench/tb_rtlnet_udp_socket.f  app33    defines=TB_APP_33
+tb_rtlnet_udp_socket   cores/rtlnet_udp_socket/testbench/tb_rtlnet_udp_socket.f  generic  defines=RTLNET_TECH_GENERIC
+tb_rtlnet_udp_socket   cores/rtlnet_udp_socket/testbench/tb_rtlnet_udp_socket.f  neg      plusargs=INJECT_FAILURE  expectfail
