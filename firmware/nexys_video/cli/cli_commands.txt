@@ -1,0 +1,101 @@
+# RTLNet Nexys Video CLI command set: the input of cli/gen_menu.py (format in
+# cli/MenuBuilder_hierarchical.md). Lines starting with '#' are comments.
+#
+#   REVISION:<MM-DD-YYYY>:<change>   (revision history of the command set)
+#   MODE-ROOT:<mode>:<prompt>:<mode description>
+#   MODE-ENTER:<FUNCTION or ->:<from mode>:<COMMAND>:<to mode>:<prompt>:<mode description>:<DESCRIPTION>
+#   KEYWORD:<mode>:<KEYWORD PATH>:<DESCRIPTION>
+#   <FUNCTION>:<mode>:<COMMAND>:<DESCRIPTION>
+#
+# Modes: exec, priv, config, config-if, config-dhcp, config-sock. Commands of
+# exec are also available in priv. Built-ins (engine): EXIT, HELP, ?, !! in
+# every mode; END in priv and the configuration modes.
+
+REVISION:10-22-2026:Initial hierarchical command set
+
+# ---------------------------------------------------------------------------
+# Modes
+# ---------------------------------------------------------------------------
+MODE-ROOT:exec:rtlnet>:User exec
+MODE-ENTER:-:exec:ENABLE:priv:rtlnet#:Privileged exec:Enter privileged exec mode
+MODE-ENTER:-:priv:CONFIGURE TERMINAL:config:rtlnet(config)#:Global configuration:Enter global configuration mode
+MODE-ENTER:cli_enter_interface:config:INTERFACE [IFNAME]:config-if:rtlnet(config-if)#:Interface configuration:Configure an interface (eth0)
+MODE-ENTER:-:config:IP DHCP:config-dhcp:rtlnet(config-dhcp)#:DHCP client configuration:Configure the DHCP client
+MODE-ENTER:cli_enter_socket:config:SOCKET [INDEX]:config-sock:rtlnet(config-sock)#:UDP socket configuration:Configure a UDP socket (index 0..3)
+
+# ---------------------------------------------------------------------------
+# Keyword groups (help text of a keyword shared by several commands)
+# ---------------------------------------------------------------------------
+KEYWORD:exec:SHOW:Show running system information
+KEYWORD:priv:DEBUG:Raw register access
+KEYWORD:priv:LED:Set a user LED (2..7)
+KEYWORD:config:IP:Global IP configuration
+KEYWORD:config:NO:Negate a command or set its default
+KEYWORD:config:NO ECHO:UDP echo server
+KEYWORD:config:ECHO:UDP echo server
+KEYWORD:config-if:IP:Interface IP configuration
+KEYWORD:config-if:NO:Negate a command or set its default
+KEYWORD:config-if:NO IP:Interface IP configuration
+KEYWORD:config-dhcp:NO:Negate a command or set its default
+KEYWORD:config-sock:NO:Negate a command or set its default
+
+# ---------------------------------------------------------------------------
+# User exec (also privileged exec)
+# ---------------------------------------------------------------------------
+cli_show_version:exec:SHOW VERSION:Board, register map, build and firmware identity
+cli_show_system:exec:SHOW SYSTEM:Clocks, uptime, switches, buttons and PHY pins
+cli_show_interfaces:exec:SHOW INTERFACES:Ethernet interface status (MAC core)
+cli_show_phy:exec:SHOW PHY:PHY link and registers (MDIO core)
+cli_show_ip:exec:SHOW IP:IPv4 address, mask and gateway (protocol core)
+cli_show_arp:exec:SHOW ARP:ARP responder status (ARP leaf)
+cli_show_dhcp:exec:SHOW DHCP:DHCP client state and lease (DHCP leaf)
+cli_show_iperf:exec:SHOW IPERF:iperf server statistics (iperf leaf)
+cli_show_sockets:exec:SHOW SOCKETS:UDP socket table (UDP socket leaf)
+cli_show_counters:exec:SHOW COUNTERS:MAC and protocol frame counters
+
+# ---------------------------------------------------------------------------
+# Privileged exec
+# ---------------------------------------------------------------------------
+cli_show_running:priv:SHOW RUNNING-CONFIG:Current configuration
+cli_disable:priv:DISABLE:Leave privileged exec mode
+cli_debug_read:priv:DEBUG READ [ADDR]:Read a 32-bit word (hex 0x... or decimal address)
+cli_debug_write:priv:DEBUG WRITE [ADDR] [VALUE]:Write a 32-bit word
+cli_led_on:priv:LED [N] ON:Turn user LED n (2..7) on
+cli_led_off:priv:LED [N] OFF:Turn user LED n (2..7) off
+cli_reload:priv:RELOAD:Restart the firmware (soft restart)
+
+# ---------------------------------------------------------------------------
+# Global configuration
+# ---------------------------------------------------------------------------
+cli_ip_gateway:config:IP DEFAULT-GATEWAY [ADDR]:Set the IPv4 default gateway
+cli_no_ip_gateway:config:NO IP DEFAULT-GATEWAY:Remove the IPv4 default gateway
+cli_echo_enable:config:ECHO ENABLE {SOCKET}:Enable the UDP echo server (all sockets, or one)
+cli_no_echo_enable:config:NO ECHO ENABLE:Disable the UDP echo server
+
+# ---------------------------------------------------------------------------
+# Interface configuration (eth0)
+# ---------------------------------------------------------------------------
+cli_if_speed:config-if:SPEED [MBPS]:Link speed: 10, 100, 1000 or auto
+cli_if_autoneg:config-if:AUTONEG:Enable auto-negotiation
+cli_if_no_autoneg:config-if:NO AUTONEG:Disable auto-negotiation (forced speed)
+cli_if_shutdown:config-if:SHUTDOWN:Disable the interface
+cli_if_no_shutdown:config-if:NO SHUTDOWN:Enable the interface
+cli_if_ip_address:config-if:IP ADDRESS [ADDR] [MASK]:Set the static IPv4 address and mask
+cli_if_no_ip_address:config-if:NO IP ADDRESS:Remove the static IPv4 address
+
+# ---------------------------------------------------------------------------
+# DHCP client configuration
+# ---------------------------------------------------------------------------
+cli_dhcp_start:config-dhcp:START:Start DHCP discovery now
+cli_dhcp_stop:config-dhcp:STOP:Stop the DHCP client and release the lease
+cli_dhcp_auto:config-dhcp:AUTO:Start DHCP automatically on link up
+cli_dhcp_no_auto:config-dhcp:NO AUTO:Do not start DHCP on link up
+
+# ---------------------------------------------------------------------------
+# UDP socket configuration
+# ---------------------------------------------------------------------------
+cli_sock_open:config-sock:OPEN [PORT]:Open the socket on a local UDP port
+cli_sock_close:config-sock:CLOSE:Close the socket
+cli_sock_remote:config-sock:REMOTE [ADDR] [PORT]:Set the remote IPv4 address and UDP port
+cli_sock_connect:config-sock:CONNECT-ON-RECEIVE:Follow the sender of the last datagram
+cli_sock_no_connect:config-sock:NO CONNECT-ON-RECEIVE:Keep the configured remote address
