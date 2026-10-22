@@ -200,7 +200,8 @@ void rtlnet_tcp_iperf_status(rtlnet_tcp_iperf_status_t *out)
     memset(out, 0, sizeof(*out));
     out->enabled = g_iperf_enable;
     out->port = g_iperf_port;
-    out->last_result = RTLNET_TCP_IPERF_NONE;
+    out->last.result = RTLNET_TCP_IPERF_NONE;
+    out->prev.result = RTLNET_TCP_IPERF_NONE;
 }
 
 /*
@@ -211,4 +212,14 @@ const char *rtlnet_tcp_iperf_result_name(int result)
 {
     (void)result;
     return "none yet";
+}
+
+/*
+ * rtlnet_tcp_iperf_dir_name -- harness: no lwiperf, only "unknown".
+ * Returns: the name.
+ */
+const char *rtlnet_tcp_iperf_dir_name(int dir)
+{
+    (void)dir;
+    return "unknown";
 }

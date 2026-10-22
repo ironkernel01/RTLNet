@@ -173,10 +173,11 @@ The board top instances `u_cpu` with exactly the section 15.6 ports. A replaceme
 | CPU path control | `src/rtlnet_cpupath.c/.h` | CPU-path classifier configuration (broadcast storm default, filter tables, policers), wrapper CPU-path counters |
 | lwIP glue | `src/lwip/rtlnet_lwip.c/.h`, `src/lwip/lwipopts.h` | `InitLWIP()`, `sys_now`, main-loop service, status and counters |
 | netif | `src/lwip/rtlnet_lwip_netif.c/.h` | the AXI DMA: receive ring, transmit, frame counters |
-| applications | `src/lwip/rtlnet_tcp_echo.c/.h`, `src/lwip/rtlnet_tcp_iperf.c/.h` | TCP echo server (port 7); TCP iperf 2 server (lwIP's `lwiperf`, compiled in place, port 5001); both run at the same time, both on at boot |
+| applications | `src/lwip/rtlnet_tcp_echo.c/.h`, `src/lwip/rtlnet_tcp_iperf.c/.h` | TCP echo server (port 7); TCP iperf 2 server (port 5001) status and CLI glue; both run at the same time, both on at boot |
+| iperf server | `src/lwip/rtlnet_lwiperf.c/.h` | the project copy of lwIP's `lwiperf` with the reverse (-R), tradeoff (-r) and dual (-d) modes (section 9.9) |
 | CLI | `cli/menu.c`, `cli/cli_commands.c`, generated `cli/menu_table.c`, `cli/menu_commands.h`, `cli/MenuDocumentation.md` | MenuBuilder hierarchical rules (`cli/MenuBuilder_hierarchical.md`) |
 | desktop harness | `host/main.c`, `host/host_platform.c`, `host/host_lwip_stub.c` | scripted `--demo` of the real CLI and network manager against a register model |
-| host test | `test/tcp_echo_client.py` | TCP echo test from the PC |
+| host tests | `test/tcp_echo_client.py`, `test/iperf_header_capture.py`, `test/iperf_board_emulator.py`, `test/lwiperf_loopback/` | TCP echo test from the PC; iperf 2 header capture; the board's iperf behavior in Python against the stock client; desktop loopback test of `rtlnet_lwiperf.c` |
 
 The hand-written start-up, linker script, UART, timer and string files of the first firmware are gone; the
 BSP provides those services. `rtlnet_fmt.c` stays as the console formatter (also used by the harness);
@@ -263,8 +264,9 @@ not in this firmware build", and a bitstream without the classifier reports it a
 
 CLI additions (83 commands in all, MenuBuilder hierarchical rules, `cli/MenuDocumentation.md`):
 `show tcp`, `show cpu-path`, `show storm-control`, `show classifier`, `show iperf` in two sections ("UDP (RTL
-core)" from the iperf leaf, "TCP (firmware, lwIP)" from the lwiperf report: result, peer, bytes, duration,
-kbit/s); privileged `phy reset`, `phy mmd read|write`, `phy c45 read|write`; config `tcp echo enable|disable`,
+core)" from the iperf leaf, "TCP (firmware, lwIP)" from the rtlnet_lwiperf reports: the last two tests with
+direction (pc->board, reverse -R, tradeoff -r, dual -d), result, peer, bytes, duration, kbit/s, plus the test counts
+per way and the refused connections); privileged `phy reset`, `phy mmd read|write`, `phy c45 read|write`; config `tcp echo enable|disable`,
 `tcp echo port <n>`, `iperf tcp enable|disable`, `iperf tcp port <n>`, `classifier mode|policer|mac|ethertype|acl|defaults`, `no classifier
 mac|ethertype|acl|policer <n>`; config-if `storm-control broadcast <packets> <ms>`, `storm-control broadcast
 enable|disable`, `no storm-control broadcast`. `show running-config` prints the storm-control, TCP echo and
@@ -273,16 +275,103 @@ The engine limits grew for the ACL syntax (14 tokens, 14 parameters, 160-charact
 
 ### 9.8 Size
 
-Build of record (commit a9e043e6, with lwiperf): text 153724 B, data 2104 B, bss 151624 B, heap 2 KiB,
-stack 8 KiB, 307 KiB of the 512 KiB LMB (commit 874f3966 without lwiperf: 271 KiB). The CLI and drivers are compiled `-Os`, the frame path (netif, lwIP glue,
+Build of record (rtlnet_lwiperf with -R, -r, -d): text 155788 B, data 2100 B, bss 151684 B, heap 2 KiB,
+stack 8 KiB, 308 KiB of the 512 KiB LMB (install lwiperf, commit a9e043e6: text 153724 B; without lwiperf, commit 874f3966: 271 KiB). The CLI and drivers are compiled `-Os`, the frame path (netif, lwIP glue,
 TCP echo, lwIP) `-O2`. With the 256 KiB LMB the image did not link (`.bss` overflow), which is why the LMB
 is 512 KiB.
+
+### 9.9 TCP iperf server (rtlnet_lwiperf)
+
+**The fork.** lwIP 2.2.0's `src/apps/lwiperf/lwiperf.c` and `lwip/apps/lwiperf.h` from the AMD install are
+copied to `src/lwip/rtlnet_lwiperf.c/.h` (the one exception to "nothing is copied from the install", asked for
+by the project owner). The original BSD licence block stays byte-for-byte at the top of both files, directly
+followed by a "Modified for RTLNet (10-22-2026)" note listing the changes; every change carries the grep tag
+`RTLNET-MOD`. `build.ps1` compiles the copy (strict `-Wall -Wextra -Werror -pedantic`) and no longer compiles
+the install's `apps/lwiperf/lwiperf.c`. Public symbols are `rtlnet_lwiperf_*` / `RTLNET_LWIPERF_*`, so nothing
+collides with the install's header.
+
+**Why.** The install's lwiperf receives PC -> board tests only (and has a client of its own that no PC
+tool talks to). The stock iperf 2.2.2 client also measures board -> PC with `-R` (reverse), `-r` (tradeoff)
+and `-d` (dual); those need a server that reads the 2.2 test header and sends. The copy also repairs defects
+of the original that the CPU path exposed: a header check every 128 KiB that aborted a running test when a
+segment boundary fell on the mark; a NULL dereference in the report after a connection error; `lwiperf_abort`
+freeing the state without closing the pcbs (the listener kept a dangling argument after `iperf tcp disable`
+or a port change); a bind that failed with ERR_USE for two minutes after a test (TIME_WAIT) and left the
+server off; a byte-limited test that ended at once; leaks on the start failure paths.
+
+**Client test header, captured.** `test/iperf_header_capture.py` listens on TCP and prints the first bytes of
+`iperf.exe -c 127.0.0.1 -p 5101 ...` (iperf 2.2.2, 29 September 2026). All fields are big-endian.
+
+| Offset | Field | plain (`-t 2`) | `-R` | `-r` | `-d` |
+|---|---|---|---|---|---|
+| 0 | flags | `40010080` | `44010080` | `C0010080` | `C0010081` |
+| 4 | numThreads (`-P`) | 1 | 1 | 1 | 1 |
+| 8 | mPort | 5101 (the `-p` port; with `-L <n>` the port the client listens on) | 5101 | 5101 | 5101 |
+| 12 | mBufLen (`-l`) | 0 | 0 | 0 | 0 |
+| 16 | mWinBand | 0 | 0 | 0 | 0 |
+| 20 | mAmount | `FFFFFF38` (-200, 2.00 s in 10 ms units); `-n 1M` gives `00100000` | same | same | same |
+| 24..31 | reserved | 0 | 0 | 0 | 0 |
+| 32 | upperflags (16 bit) | 0 | `0400` (REVERSE) | 0 | 0 |
+| 36..43 | version words | `0002 0002 0002 0003` | same | same | same |
+| 44..63 | reserved | 0 | 0 | 0 | 0 |
+
+Flag bits: `80000000` header version 1 (set by `-r` and `-d`: "answer test"); `40000000` extended header;
+`04000000` VERSION2 (set by `-R`); `00010000` header length present, the low byte `80` holding twice the
+length (64 bytes); `00000001` RUN_NOW (`-d`: the connect-back starts at once). The header is 64 bytes in
+every mode. After it, a plain test continues with the data pattern `0123456789...` in the same write; a `-R`
+client sends the 64 bytes and nothing else, then waits for the data. `-P 2` opens two connections with
+numThreads 2, each with its own header. Dumps (first 64 bytes, plain / `-R`):
+
+```
+40 01 00 80 00 00 00 01 00 00 13 ed 00 00 00 00  00 00 00 00 ff ff ff 38 00 00 00 00 00 00 00 00
+00 00 00 00 00 02 00 02 00 02 00 03 00 00 00 00  00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+44 01 00 80 00 00 00 01 00 00 13 ed 00 00 00 00  00 00 00 00 ff ff ff 38 00 00 00 00 00 00 00 00
+04 00 00 00 00 02 00 02 00 02 00 03 00 00 00 00  00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+```
+
+The parser takes the header length from flags (24 bytes when the extended-length bits are absent), reads it
+across segments, and decides: VERSION2 and upperflags REVERSE -> reverse; otherwise a receive test, with
+the connect-back when the answer-test flag is set (`RUN_NOW` clear: tradeoff, set: dual).
+
+**Modes** (`show iperf`, "TCP (firmware, lwIP)"):
+
+| Client | Server behavior | Report |
+|---|---|---|
+| `iperf -c <ip> -t N` | receives to the client's FIN | pc->board, bytes = payload without the header |
+| `-R` | sends the pattern on the same connection for mAmount (negative: 10 ms units; positive: bytes), then FIN | board->pc reverse (-R), bytes = acknowledged payload |
+| `-r` | receives; after the client's FIN connects to the client's address and mPort, writes a 24-byte header (flags 0, numThreads 1, mPort, mAmount) and the pattern for mAmount, FIN | pc->board, then board->pc tradeoff (-r) |
+| `-d` | connects back at once, while receiving | board->pc dual (-d), pc->board |
+
+Transmit rules: data comes from one static 1600-byte pattern buffer (no copy, no allocation); a segment is
+queued only when `tcp_sndbuf()` holds it, so a full buffer waits for the next acknowledgement (sent
+callback) or the 1 s poll; each callback writes at most 16 segments; the test ends when the requested
+time or bytes are queued and every byte is acknowledged. One test at a time per mode: receive, reverse and
+connect-back each have one slot; a second connection of a busy mode is refused after its header and counted
+in "refused". An idle test ends after 10 s. A `-P` greater than 1 therefore runs the first stream only.
+
+**Windows Firewall.** `-r` and `-d` need the PC to accept the board's connection to the client's listen port
+(5001 by default, or `-L`): the first run of `iperf.exe` raises the Windows prompt; a blocked connect-back
+shows as "aborted" or no second report.
+
+**Tests without the board.**
+`build.ps1 -NoFirmware -LwipTest` builds the lwIP core from the install, `rtlnet_lwiperf.c` and a scripted
+iperf client into one host process (lwIP's 127.0.0.1 interface) and sends the captured headers: plain with
+64-byte and 24-byte headers (exact byte counts), `-R` timed, byte-limited and with the header in five
+pieces, `-r` and `-d` connect-back (header fields, pattern, counts equal on both sides), busy refusal of a
+second receive and a second reverse test, abort of a running test, restart of the server on the same port,
+and the lwIP heap back at its start value; ends with `LWIPERF_LOOPBACK: PASS checks=69`. `test/iperf_board_emulator.py` implements the
+same behavior in Python and the stock client runs against it: all four modes print the client summaries
+(`-R` 891 Mbit/s, `-r` and `-d` both directions) on the PC loopback, which confirms the connect-back header
+and the close the client accepts.
 
 ## 10. Build and test commands
 
 ```
 powershell -NoProfile -ExecutionPolicy Bypass -File boards/nexys_video/scripts/build.ps1 [-Network] [-Program] [-Test]
 powershell -NoProfile -ExecutionPolicy Bypass -File microblaze/firmware/build.ps1 [-Xsa <xsa>] [-Bsp] [-Demo]
+powershell -NoProfile -ExecutionPolicy Bypass -File microblaze/firmware/build.ps1 -NoFirmware -LwipTest
+python microblaze/firmware/test/iperf_header_capture.py --port 5101 --run "plain=-t 2" --run "R=-t 2 -R"
+python microblaze/firmware/test/iperf_board_emulator.py --port 5001 --run "R=-t 3 -R" --run "r=-t 3 -r -L 5301"
 python microblaze/firmware/test/tcp_echo_client.py <board ip> [--conns 4] [--rounds 1]
 ```
 
@@ -308,7 +397,10 @@ closed port (FAIL, connection refused).
 | Network build (commit a9e043e6) with the CPU path to the protocol wrapper | WNS +0.221 ns, WHS +0.018 ns; CDC fifo 9 / gray 6 as expected |
 | Network board bench (simulation stand-in DMA tasks) | TEST PASS 85 checks at 10/100/1000 Mb/s: claimed frames stay out of the CPU queue, an unclaimed datagram reaches the CPU byte-exact, a CPU frame leaves on the PHY, wrapper CPU counters agree; a perturbed check fails |
 | Hardware TCP echo | `tcp_echo_client.py` PASS, 4 concurrent connections, 1 B .. 64 KiB |
-| Hardware TCP iperf (lwiperf) | 68.4 Mbit/s PC -> board alone; 51.6 Mbit/s together with TCP echo (PASS) and RTL UDP iperf 20.9 Mbit/s (0 lost) |
+| Hardware TCP iperf (install lwiperf) | 68.4 Mbit/s PC -> board alone; 51.6 Mbit/s together with TCP echo (PASS) and RTL UDP iperf 20.9 Mbit/s (0 lost) |
+| `rtlnet_lwiperf` desktop loopback test | `LWIPERF_LOOPBACK: PASS checks=69` (plain, -R, -r, -d, busy, abort, restart, heap) |
+| Stock iperf 2.2.2 client against the Python board emulator | plain, -R, -r, -d complete with both directions in the summary |
+| Hardware iperf, board -> PC (-R, -r, -d) | see 9.9 (measured after the firmware merge) |
 
 Details: `boards/nexys_video/documentation/rtlnet_nexys_video.md` sections 6.3 and 6.4.
 
@@ -329,3 +421,4 @@ Details: `boards/nexys_video/documentation/rtlnet_nexys_video.md` sections 6.3 a
 |---|---|
 | 10-22-2026 | Initial version: block design script, wrapper, driver header, bus-functional model |
 | 10-22-2026 | Moved to `microblaze/`; LMB 512 KiB; AXI DMA and 128 KiB AXI BRAM with the frame streams; simulation stand-in renamed `rtlnet_microblaze_sim_stub`; BSP generated from the XSA; firmware on the BSP with lwIP, InitLWIP, DMA netif, TCP echo, CPU path CLI |
+| 10-22-2026 | lwIP glue and applications moved to `src/lwip/`; iperf server forked as `rtlnet_lwiperf` with -R, -r and -d; captured iperf 2.2.2 test header; desktop loopback test |

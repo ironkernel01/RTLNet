@@ -770,9 +770,27 @@ int cli_show_dhcp(const MenuCommandContext *ctx)
 }
 
 /**
+ * @brief Print one TCP iperf test: direction, result, peer, bytes, duration, throughput.
+ * @param label Left column text.
+ * @param t     The test; result NONE prints "none yet".
+ */
+static void cli_tcp_iperf_test_line(const char *label, const rtlnet_tcp_iperf_test_t *t)
+{
+    char a[16];
+    if (t->result == RTLNET_TCP_IPERF_NONE) {
+        fmt_printf("  %s: none yet\n", label);
+        return;
+    }
+    fmt_printf("  %s: %s, %s, peer %s:%u, %u bytes in %u ms, %u kbit/s\n", label, rtlnet_tcp_iperf_dir_name(t->dir),
+               rtlnet_tcp_iperf_result_name(t->result), cli_ipv4_text(t->remote_ip, a), (unsigned)t->remote_port,
+               (unsigned)t->bytes, (unsigned)t->ms, (unsigned)t->kbps);
+}
+
+/**
  * @brief SHOW IPERF: the two iperf servers. "UDP (RTL core)": port and the
- *        last flow of the iperf leaf. "TCP (firmware, lwIP)": the lwiperf
- *        server and its last test report.
+ *        last flow of the iperf leaf. "TCP (firmware, lwIP)": the rtlnet_lwiperf
+ *        server, its last two test reports with direction (pc->board, reverse
+ *        -R, tradeoff -r, dual -d) and the test counts.
  * @param ctx Unused.
  * @return 0.
  */
@@ -780,7 +798,6 @@ int cli_show_iperf(const MenuCommandContext *ctx)
 {
     rtlnet_iperf_stats_t st;
     rtlnet_tcp_iperf_status_t t;
-    char a[16];
     (void)ctx;
     fmt_printf("UDP (RTL core)\n");
     if (cli_core_check(&g_core_iperf)) {
@@ -798,15 +815,17 @@ int cli_show_iperf(const MenuCommandContext *ctx)
     }
     rtlnet_tcp_iperf_status(&t);
     fmt_printf("TCP (firmware, lwIP)\n");
-    fmt_printf("iperf server on TCP port %u: %s, %s; tests %u\n", (unsigned)t.port, t.enabled ? "enabled" : "disabled",
-               t.listening ? "listening" : (t.lwip_running ? "not listening" : "waiting for lwIP"), (unsigned)t.tests);
-    if (t.last_result != RTLNET_TCP_IPERF_NONE) {
-        fmt_printf("  Last test       : %s, from %s:%u, %u bytes in %u ms, %u kbit/s\n",
-                   rtlnet_tcp_iperf_result_name(t.last_result), cli_ipv4_text(t.last_remote_ip, a),
-                   (unsigned)t.last_remote_port, (unsigned)t.last_bytes, (unsigned)t.last_ms, (unsigned)t.last_kbps);
-    } else {
-        fmt_printf("  Last test       : none yet\n");
+    fmt_printf("iperf server on TCP port %u: %s, %s; tests %u, refused %u\n", (unsigned)t.port,
+               t.enabled ? "enabled" : "disabled",
+               t.listening ? "listening" : (t.lwip_running ? "not listening" : "waiting for lwIP"), (unsigned)t.tests,
+               (unsigned)t.rejected);
+    cli_tcp_iperf_test_line("Last test       ", &t.last);
+    if (t.prev.result != RTLNET_TCP_IPERF_NONE) {
+        cli_tcp_iperf_test_line("Previous test   ", &t.prev);
     }
+    fmt_printf("  Tests by way    : pc->board %u, reverse -R %u, tradeoff -r %u, dual -d %u\n",
+               (unsigned)t.tests_dir[RTLNET_TCP_IPERF_DIR_RX], (unsigned)t.tests_dir[RTLNET_TCP_IPERF_DIR_REVERSE],
+               (unsigned)t.tests_dir[RTLNET_TCP_IPERF_DIR_TRADEOFF], (unsigned)t.tests_dir[RTLNET_TCP_IPERF_DIR_DUAL]);
     return 0;
 }
 
