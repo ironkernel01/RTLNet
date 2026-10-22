@@ -37,6 +37,7 @@
  *  10-22-2026  MenuBuilder AI / Steve Spano    Initial hierarchical command set
  *  10-22-2026  MenuBuilder AI / Steve Spano    Network commands on the core drivers; phy, clear, iperf, advertise, duplex, mac-address
  *  10-22-2026  MenuBuilder AI / Steve Spano    CPU network path: show tcp, show cpu-path, tcp echo, storm-control, classifier
+ *  10-22-2026  MenuBuilder AI / Steve Spano    TCP iperf server (lwiperf), phy reset
  * ===========================================================================
  */
 #include "menu.h"
@@ -80,7 +81,7 @@ const MenuCommandDef g_menu_commands[] = {
     { "cli_show_dhcp", MENU_MODE_EXEC, "SHOW DHCP",
       "DHCP client state, lease and counters", cli_show_dhcp, MENU_MODE_NONE },
     { "cli_show_iperf", MENU_MODE_EXEC, "SHOW IPERF",
-      "iperf server port and statistics", cli_show_iperf, MENU_MODE_NONE },
+      "iperf servers: UDP (RTL core) and TCP (firmware, lwIP)", cli_show_iperf, MENU_MODE_NONE },
     { "cli_show_sockets", MENU_MODE_EXEC, "SHOW SOCKETS",
       "UDP socket table, UDP echo and counters", cli_show_sockets, MENU_MODE_NONE },
     { "cli_show_counters", MENU_MODE_EXEC, "SHOW COUNTERS",
@@ -107,6 +108,8 @@ const MenuCommandDef g_menu_commands[] = {
       "Write a PHY register (0..31) over MDIO", cli_phy_write, MENU_MODE_NONE },
     { "cli_phy_dump", MENU_MODE_PRIV, "PHY DUMP",
       "Read PHY registers 0..31", cli_phy_dump, MENU_MODE_NONE },
+    { "cli_phy_reset", MENU_MODE_PRIV, "PHY RESET",
+      "Hardware PHY reset, then InitPHY (RX delay, LEDs, EEE, advertisement)", cli_phy_reset, MENU_MODE_NONE },
     { "cli_clear_counters", MENU_MODE_PRIV, "CLEAR COUNTERS",
       "Clear the counters of every core", cli_clear_counters, MENU_MODE_NONE },
     { "cli_led_on", MENU_MODE_PRIV, "LED [N] ON",
@@ -127,6 +130,12 @@ const MenuCommandDef g_menu_commands[] = {
       "Echo on socket 0..3, or \"any\"", cli_echo_socket, MENU_MODE_NONE },
     { "cli_iperf_port", MENU_MODE_CONFIG, "IPERF PORT [PORT]",
       "iperf server UDP port (default 5001)", cli_iperf_port, MENU_MODE_NONE },
+    { "cli_iperf_tcp_enable", MENU_MODE_CONFIG, "IPERF TCP ENABLE",
+      "Enable the TCP iperf server", cli_iperf_tcp_enable, MENU_MODE_NONE },
+    { "cli_iperf_tcp_disable", MENU_MODE_CONFIG, "IPERF TCP DISABLE",
+      "Disable the TCP iperf server", cli_iperf_tcp_disable, MENU_MODE_NONE },
+    { "cli_iperf_tcp_port", MENU_MODE_CONFIG, "IPERF TCP PORT [PORT]",
+      "TCP iperf server port (default 5001)", cli_iperf_tcp_port, MENU_MODE_NONE },
     { "cli_tcp_echo_enable", MENU_MODE_CONFIG, "TCP ECHO ENABLE",
       "Enable the TCP echo server", cli_tcp_echo_enable, MENU_MODE_NONE },
     { "cli_tcp_echo_disable", MENU_MODE_CONFIG, "TCP ECHO DISABLE",
@@ -219,6 +228,8 @@ const MenuKeywordDef g_menu_keywords[] = {
     { MENU_MODE_CONFIG, "NO ECHO", "UDP echo server" },
     { MENU_MODE_CONFIG, "ECHO", "UDP echo server" },
     { MENU_MODE_CONFIG, "TCP", "TCP applications on lwIP (CPU network path)" },
+    { MENU_MODE_CONFIG, "IPERF", "iperf servers (UDP in RTL, TCP in firmware)" },
+    { MENU_MODE_CONFIG, "IPERF TCP", "TCP iperf server (lwIP lwiperf, default port 5001)" },
     { MENU_MODE_CONFIG, "TCP ECHO", "TCP echo server (lwIP, default port 7)" },
     { MENU_MODE_CONFIG, "CLASSIFIER", "CPU-path classifier (filter tables, policers, mode)" },
     { MENU_MODE_CONFIG, "NO CLASSIFIER", "Clear a classifier entry or disable a policer" },

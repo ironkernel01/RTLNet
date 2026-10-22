@@ -7,8 +7,8 @@
  * Role: the harness (host gcc) compiles the CLI, the network manager and the
  * board layer against a register model, but no lwIP and no AXI DMA. This file
  * provides the signatures of src/rtlnet_lwip.h, src/rtlnet_lwip_netif.h and
- * src/rtlnet_tcp_echo.h: InitLWIP reports that lwIP does not run here, the
- * DMA is absent, and the TCP echo configuration is stored so the running
+ * src/rtlnet_tcp_echo.h and src/rtlnet_tcp_iperf.h: InitLWIP reports that lwIP does not run here, the
+ * DMA is absent, and the TCP echo and iperf configuration is stored so the running
  * configuration and the CLI commands behave as on the target.
  */
 #include <string.h>   /* memset */
@@ -16,11 +16,14 @@
 #include "rtlnet_lwip.h"
 #include "rtlnet_lwip_netif.h"
 #include "rtlnet_tcp_echo.h"
+#include "rtlnet_tcp_iperf.h"
 
 static rtlnet_netif_stats_t g_st;
 static int                  g_echo_enable;
 static uint16_t             g_echo_port;
 static uint32_t             g_init_calls;
+static int                  g_iperf_enable;
+static uint16_t             g_iperf_port;
 
 /*
  * InitLWIP -- harness: lwIP is not part of the desktop build.
@@ -168,4 +171,44 @@ int rtlnet_tcp_echo_conn(unsigned index, rtlnet_tcp_echo_conn_t *out)
  */
 void rtlnet_tcp_echo_clear_counters(void)
 {
+}
+
+/*
+ * rtlnet_tcp_iperf_config -- harness: store the setting.
+ * Returns: nothing.
+ */
+void rtlnet_tcp_iperf_config(int enable, uint16_t port)
+{
+    g_iperf_enable = enable ? 1 : 0;
+    g_iperf_port = port;
+}
+
+/*
+ * rtlnet_tcp_iperf_lwip_ready -- harness: never called.
+ * Returns: nothing.
+ */
+void rtlnet_tcp_iperf_lwip_ready(void)
+{
+}
+
+/*
+ * rtlnet_tcp_iperf_status -- harness: configuration, no session, no test.
+ * Returns: nothing.
+ */
+void rtlnet_tcp_iperf_status(rtlnet_tcp_iperf_status_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    out->enabled = g_iperf_enable;
+    out->port = g_iperf_port;
+    out->last_result = RTLNET_TCP_IPERF_NONE;
+}
+
+/*
+ * rtlnet_tcp_iperf_result_name -- harness: no lwiperf, only "none yet".
+ * Returns: the name.
+ */
+const char *rtlnet_tcp_iperf_result_name(int result)
+{
+    (void)result;
+    return "none yet";
 }

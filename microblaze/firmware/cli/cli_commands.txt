@@ -14,6 +14,7 @@
 REVISION:10-22-2026:Initial hierarchical command set
 REVISION:10-22-2026:Network commands on the core drivers; phy, clear, iperf, advertise, duplex, mac-address
 REVISION:10-22-2026:CPU network path: show tcp, show cpu-path, tcp echo, storm-control, classifier
+REVISION:10-22-2026:TCP iperf server (lwiperf), phy reset
 
 # ---------------------------------------------------------------------------
 # Modes
@@ -37,6 +38,8 @@ KEYWORD:config:NO:Negate a command or set its default
 KEYWORD:config:NO ECHO:UDP echo server
 KEYWORD:config:ECHO:UDP echo server
 KEYWORD:config:TCP:TCP applications on lwIP (CPU network path)
+KEYWORD:config:IPERF:iperf servers (UDP in RTL, TCP in firmware)
+KEYWORD:config:IPERF TCP:TCP iperf server (lwIP lwiperf, default port 5001)
 KEYWORD:config:TCP ECHO:TCP echo server (lwIP, default port 7)
 KEYWORD:config:CLASSIFIER:CPU-path classifier (filter tables, policers, mode)
 KEYWORD:config:NO CLASSIFIER:Clear a classifier entry or disable a policer
@@ -59,7 +62,7 @@ cli_show_phy:exec:SHOW PHY:PHY identity, RX delay, link, advertisement and partn
 cli_show_ip:exec:SHOW IP:Node MAC, static and effective IPv4 address, mask and gateway
 cli_show_arp:exec:SHOW ARP:ARP responder counters
 cli_show_dhcp:exec:SHOW DHCP:DHCP client state, lease and counters
-cli_show_iperf:exec:SHOW IPERF:iperf server port and statistics
+cli_show_iperf:exec:SHOW IPERF:iperf servers: UDP (RTL core) and TCP (firmware, lwIP)
 cli_show_sockets:exec:SHOW SOCKETS:UDP socket table, UDP echo and counters
 cli_show_counters:exec:SHOW COUNTERS:Frame counters of every core
 cli_show_tcp:exec:SHOW TCP:lwIP interface, TCP echo server, connections and counters
@@ -77,6 +80,7 @@ cli_debug_write:priv:DEBUG WRITE [ADDR] [VALUE]:Write a 32-bit word
 cli_phy_read:priv:PHY READ [REG]:Read a PHY register (0..31) over MDIO
 cli_phy_write:priv:PHY WRITE [REG] [VALUE]:Write a PHY register (0..31) over MDIO
 cli_phy_dump:priv:PHY DUMP:Read PHY registers 0..31
+cli_phy_reset:priv:PHY RESET:Hardware PHY reset, then InitPHY (RX delay, LEDs, EEE, advertisement)
 cli_clear_counters:priv:CLEAR COUNTERS:Clear the counters of every core
 cli_led_on:priv:LED [N] ON:Turn user LED n (2..7) on
 cli_led_off:priv:LED [N] OFF:Turn user LED n (2..7) off
@@ -91,6 +95,9 @@ cli_echo_enable:config:ECHO ENABLE {SOCKET}:Enable the UDP echo server (configur
 cli_no_echo_enable:config:NO ECHO ENABLE:Disable the UDP echo server
 cli_echo_socket:config:ECHO SOCKET [INDEX]:Echo on socket 0..3, or "any"
 cli_iperf_port:config:IPERF PORT [PORT]:iperf server UDP port (default 5001)
+cli_iperf_tcp_enable:config:IPERF TCP ENABLE:Enable the TCP iperf server
+cli_iperf_tcp_disable:config:IPERF TCP DISABLE:Disable the TCP iperf server
+cli_iperf_tcp_port:config:IPERF TCP PORT [PORT]:TCP iperf server port (default 5001)
 cli_tcp_echo_enable:config:TCP ECHO ENABLE:Enable the TCP echo server
 cli_tcp_echo_disable:config:TCP ECHO DISABLE:Disable the TCP echo server (open connections stay)
 cli_tcp_echo_port:config:TCP ECHO PORT [PORT]:TCP echo server port (default 7)

@@ -17,14 +17,19 @@
  *
  * Memory (all in the LMB block RAM, .bss; only the DMA buffers live in the
  * AXI BRAM, rtlnet_lwip_netif.c):
- *   MEM_SIZE                      24 KiB heap: tcp_write copies of echoed
- *                                 data and outgoing headers
- *   PBUF_POOL_SIZE x BUFSIZE      24 x 1536 B = 36 KiB: every received frame
+ *   MEM_SIZE                      32 KiB heap: tcp_write copies of echoed
+ *                                 data, outgoing headers, lwiperf state
+ *   PBUF_POOL_SIZE x BUFSIZE      32 x 1536 B = 48 KiB: every received frame
  *                                 is copied into a pool pbuf
- *   MEMP (PCBs, segments, pbufs)  about 12 KiB
- * TCP window and send buffer: 4 x MSS each (5840 B); with 4 concurrent
- * connections the receive side can hold 4 x 4 MSS = 16 segments of the 24
- * pool pbufs, leaving room for ARP and out-of-order data.
+ *   MEMP (PCBs, segments, pbufs)  about 16 KiB
+ * TCP window and send buffer: 4 x MSS each (5840 B). The bound is the
+ * wrapper's CPU receive FIFO, not lwIP memory: the PC sends a whole window
+ * per connection at line rate while the CPU drains slower, so the sum of
+ * the open windows must fit the FIFO (CPU_RX_FIFO_KB 32 in the board top:
+ * five connections of 4 MSS). With the 16 KiB FIFO, four echo connections
+ * of 4 MSS overflowed it (24 "CPU FIFO drops", retransmission stalls of
+ * about 0.4 s); frames dropped there show as "CPU FIFO drops" in show
+ * cpu-path and as TCP retransmissions.
  *
  * Drift consequence: a TCP_WND larger than the pool lets the peer send more
  * than lwIP can buffer; frames are then dropped in the netif (counted as
@@ -51,18 +56,18 @@
 #define MEM_LIBC_MALLOC                 0
 #define MEMP_MEM_MALLOC                 0
 #define MEM_ALIGNMENT                   4
-#define MEM_SIZE                        (24 * 1024)
+#define MEM_SIZE                        (32 * 1024)
 #define MEMP_NUM_PBUF                   16
 #define MEMP_NUM_RAW_PCB                1
 #define MEMP_NUM_UDP_PCB                2
 #define MEMP_NUM_TCP_PCB                12
 #define MEMP_NUM_TCP_PCB_LISTEN         4
-#define MEMP_NUM_TCP_SEG                48
+#define MEMP_NUM_TCP_SEG                64
 #define MEMP_NUM_REASSDATA              2
 #define MEMP_NUM_FRAG_PBUF              4
 #define MEMP_NUM_ARP_QUEUE              8
 #define MEMP_NUM_SYS_TIMEOUT            (LWIP_NUM_SYS_TIMEOUT_INTERNAL + 2)
-#define PBUF_POOL_SIZE                  24
+#define PBUF_POOL_SIZE                  32
 #define PBUF_POOL_BUFSIZE               1536
 #define PBUF_LINK_HLEN                  14
 #define ETH_PAD_SIZE                    0
@@ -133,6 +138,9 @@
 #define ICMP_STATS                      0
 #define IPFRAG_STATS                    0
 #define SYS_STATS                       0
+
+/* lwiperf (TCP iperf 2 server): idle timeout of a test connection. */
+#define LWIPERF_TCP_MAX_IDLE_SEC        10U
 
 /* LWIP_DEBUG stays undefined (lwIP tests it with #ifdef). */
 

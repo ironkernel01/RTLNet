@@ -22,8 +22,9 @@ Overview:
   4. Compile: firmware (src, cli) and the RTLNet core drivers
      (cores/<core>/driver, in place) with -std=c11 -Wall -Wextra -Werror
      -pedantic; lwIP 2.2.0 core, IPv4 and Ethernet sources from the install
-     (Vitis/data/embeddedsw/ThirdParty/sw_services/lwip220_v1_3/src/lwip-2.2.0)
-     in place with src/lwip/lwipopts.h. Nothing is copied from the install.
+     (Vitis/data/embeddedsw/ThirdParty/sw_services/lwip220_v1_3/src/lwip-2.2.0),
+     and its iperf application src/apps/lwiperf/lwiperf.c, in place with
+     src/lwip/lwipopts.h. Nothing is copied from the install.
   5. Link with the BSP start-up (crt0/crtinit through Xilinx.spec) and
      libraries; print the section sizes.
   * -HostHarness: also build build/menu.exe (stdin/stdout harness, register
@@ -170,11 +171,12 @@ _end = .;
     $sysInc  = @('-isystem', $bspInc, "-specs=$bspSpec")
     # -O2 on the frame path (netif, lwIP glue, TCP echo, lwIP), -Os elsewhere (CLI, drivers).
     $cflags  = $common + @('-g', '-ffunction-sections', '-fdata-sections')
-    $fastSrc = @('rtlnet_lwip_netif', 'rtlnet_lwip', 'rtlnet_tcp_echo')
+    $fastSrc = @('rtlnet_lwip_netif', 'rtlnet_lwip', 'rtlnet_tcp_echo', 'rtlnet_tcp_iperf')
     $objs = @()
     $fwSrcs = @(
         'src/main.c', 'src/rtlnet_platform.c', 'src/rtlnet_board.c', 'src/rtlnet_fmt.c', 'src/rtlnet_netmgr.c',
         'src/rtlnet_cpupath.c', 'src/rtlnet_lwip.c', 'src/rtlnet_lwip_netif.c', 'src/rtlnet_tcp_echo.c',
+        'src/rtlnet_tcp_iperf.c',
         'cli/menu.c', 'cli/menu_table.c', 'cli/cli_commands.c'
     ) | ForEach-Object { "$Fw/$_" }
     foreach ($s in ($fwSrcs + ($drvSrcs | ForEach-Object { "$Repo/$_" }))) {
@@ -188,7 +190,7 @@ _end = .;
                   'core/netif.c', 'core/pbuf.c', 'core/stats.c', 'core/sys.c', 'core/tcp.c', 'core/tcp_in.c',
                   'core/tcp_out.c', 'core/timeouts.c', 'core/udp.c', 'core/raw.c',
                   'core/ipv4/etharp.c', 'core/ipv4/icmp.c', 'core/ipv4/ip4.c', 'core/ipv4/ip4_addr.c',
-                  'core/ipv4/ip4_frag.c', 'netif/ethernet.c')
+                  'core/ipv4/ip4_frag.c', 'netif/ethernet.c', 'apps/lwiperf/lwiperf.c')
     $lwipFlags = @('-std=gnu11', '-O2', '-g', '-ffunction-sections', '-fdata-sections', '-w')
     foreach ($s in $lwipSrcs) {
         $o = Join-Path $objDir ('lwip_' + ($s -replace '[/\\]', '_') -replace '\.c$', '.o')

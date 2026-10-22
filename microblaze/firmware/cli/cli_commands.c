@@ -69,6 +69,7 @@
 #include "rtlnet_phy_rtl8211e.h"
 #include "rtlnet_platform.h"
 #include "rtlnet_tcp_echo.h"
+#include "rtlnet_tcp_iperf.h"
 #include "rtlnet_udp_echo.h"
 #include "rtlnet_udp_socket.h"
 
@@ -751,26 +752,107 @@ int cli_show_dhcp(const MenuCommandContext *ctx)
 }
 
 /**
- * @brief SHOW IPERF: server port and statistics of the last flow.
+ * @brief SHOW IPERF: the two iperf servers. "UDP (RTL core)": port and the
+ *        last flow of the iperf leaf. "TCP (firmware, lwIP)": the lwiperf
+ *        server and its last test report.
  * @param ctx Unused.
  * @return 0.
  */
 int cli_show_iperf(const MenuCommandContext *ctx)
 {
     rtlnet_iperf_stats_t st;
+    rtlnet_tcp_iperf_status_t t;
+    char a[16];
     (void)ctx;
-    if (!cli_core_check(&g_core_iperf)) {
+    fmt_printf("UDP (RTL core)\n");
+    if (cli_core_check(&g_core_iperf)) {
+        (void)rtlnet_iperf_read_stats(RTLNET_PLAT_IPERF_BASE, &st);
+        fmt_printf("iperf server on UDP port %u%s%s, reverse (-R) %s\n", (unsigned)st.udp_port,
+                   st.rx_active ? ", receiving" : "", st.tx_active ? ", sending" : "",
+                   st.reverse_allowed ? "allowed" : "off");
+        fmt_printf("  Last flow       : %u datagrams, %u bytes (low word), lost %u, out of order %u, jitter %u.%04u us\n",
+                   (unsigned)st.rx_datagrams, (unsigned)(uint32_t)st.rx_bytes, (unsigned)st.rx_lost,
+                   (unsigned)st.rx_outoforder, (unsigned)(st.jitter_us16 / 16u),
+                   (unsigned)((st.jitter_us16 % 16u) * 625u));
+        fmt_printf("  Duration        : %u us, requested rate %u b/s, reverse datagrams %u, reports %u\n",
+                   (unsigned)st.last_duration_us, (unsigned)st.req_rate_bps, (unsigned)st.tx_datagrams,
+                   (unsigned)st.reports_sent);
+    }
+    rtlnet_tcp_iperf_status(&t);
+    fmt_printf("TCP (firmware, lwIP)\n");
+    fmt_printf("iperf server on TCP port %u: %s, %s; tests %u\n", (unsigned)t.port, t.enabled ? "enabled" : "disabled",
+               t.listening ? "listening" : (t.lwip_running ? "not listening" : "waiting for lwIP"), (unsigned)t.tests);
+    if (t.last_result != RTLNET_TCP_IPERF_NONE) {
+        fmt_printf("  Last test       : %s, from %s:%u, %u bytes in %u ms, %u kbit/s\n",
+                   rtlnet_tcp_iperf_result_name(t.last_result), cli_ipv4_text(t.last_remote_ip, a),
+                   (unsigned)t.last_remote_port, (unsigned)t.last_bytes, (unsigned)t.last_ms, (unsigned)t.last_kbps);
+    } else {
+        fmt_printf("  Last test       : none yet\n");
+    }
+    return 0;
+}
+
+/**
+ * @brief IPERF TCP ENABLE.
+ * @param ctx Unused.
+ * @return 0.
+ */
+int cli_iperf_tcp_enable(const MenuCommandContext *ctx)
+{
+    (void)ctx;
+    netmgr_config()->tcp_iperf_enable = 1;
+    netmgr_apply_tcp_iperf();
+    return 0;
+}
+
+/**
+ * @brief IPERF TCP DISABLE: the lwiperf server session ends.
+ * @param ctx Unused.
+ * @return 0.
+ */
+int cli_iperf_tcp_disable(const MenuCommandContext *ctx)
+{
+    (void)ctx;
+    netmgr_config()->tcp_iperf_enable = 0;
+    netmgr_apply_tcp_iperf();
+    return 0;
+}
+
+/**
+ * @brief IPERF TCP PORT [PORT].
+ * @param ctx argv[0] = port 1..65535.
+ * @return 0, or -1 for a bad port.
+ */
+int cli_iperf_tcp_port(const MenuCommandContext *ctx)
+{
+    uint32_t p;
+    if (cli_parse_u32(ctx->argv[0], &p) != 0 || p == 0u || p > CLI_UDP_PORT_MAX) {
+        return cli_bad_value("TCP port (1..65535)", ctx->argv[0]);
+    }
+    netmgr_config()->tcp_iperf_port = p;
+    netmgr_apply_tcp_iperf();
+    return 0;
+}
+
+/**
+ * @brief PHY RESET: hardware reset of the PHY, then InitPHY again (RX delay,
+ *        LEDs, EEE, advertisement); the link monitor reports the link going
+ *        down and up.
+ * @param ctx Unused.
+ * @return 0, or -1 when the MDIO core is absent or InitPHY fails.
+ */
+int cli_phy_reset(const MenuCommandContext *ctx)
+{
+    int rc;
+    (void)ctx;
+    if (!cli_core_check(&g_core_mdio)) {
         return 0;
     }
-    (void)rtlnet_iperf_read_stats(RTLNET_PLAT_IPERF_BASE, &st);
-    fmt_printf("iperf server on UDP port %u%s%s, reverse (-R) %s\n", (unsigned)st.udp_port,
-               st.rx_active ? ", receiving" : "", st.tx_active ? ", sending" : "", st.reverse_allowed ? "allowed" : "off");
-    fmt_printf("  Last flow       : %u datagrams, %u bytes (low word), lost %u, out of order %u, jitter %u.%04u us\n",
-               (unsigned)st.rx_datagrams, (unsigned)(uint32_t)st.rx_bytes, (unsigned)st.rx_lost,
-               (unsigned)st.rx_outoforder, (unsigned)(st.jitter_us16 / 16u), (unsigned)((st.jitter_us16 % 16u) * 625u));
-    fmt_printf("  Duration        : %u us, requested rate %u b/s, reverse datagrams %u, reports %u\n",
-               (unsigned)st.last_duration_us, (unsigned)st.req_rate_bps, (unsigned)st.tx_datagrams,
-               (unsigned)st.reports_sent);
+    rc = netmgr_phy_reset();
+    if (rc != NETMGR_PHY_OK) {
+        fmt_printf("%% InitPHY failed (%d)\n", rc);
+        return -1;
+    }
     return 0;
 }
 
@@ -973,6 +1055,8 @@ int cli_show_running(const MenuCommandContext *ctx)
     fmt_printf("%secho enable\n", c->echo_enable ? "" : "no ");
     fmt_printf("iperf port %u\n!\n", (unsigned)c->iperf_port);
     fmt_printf("tcp echo port %u\ntcp echo %s\n!\n", (unsigned)c->tcp_echo_port, c->tcp_echo_enable ? "enable" : "disable");
+    fmt_printf("iperf tcp port %u\niperf tcp %s\n!\n", (unsigned)c->tcp_iperf_port,
+               c->tcp_iperf_enable ? "enable" : "disable");
     cli_print_classifier_config();
     fmt_printf("end\n");
     return 0;

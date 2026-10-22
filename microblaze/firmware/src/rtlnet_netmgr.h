@@ -27,7 +27,7 @@
  * gateway 192.169.1.1 (the protocol wrapper's reset values,
  * rtlnet_eth_protocol.h), UDP echo on socket 0 port 7 with connect-on-
  * receive, iperf on 5001, auto-negotiation advertising full duplex
- * 10/100/1000 (the MAC is full duplex only), TCP echo (lwIP) on port 7,
+ * 10/100/1000 (the MAC is full duplex only), TCP echo (lwIP) on port 7, TCP iperf (lwIP lwiperf) on port 5001,
  * classifier broadcast storm limit 10 frames per 100 ms.
  *
  * This header holds types, constants and signatures; rtlnet_netmgr.c holds
@@ -92,6 +92,8 @@ typedef struct {
     int      echo_socket;       /* -1 = any socket */
     int      tcp_echo_enable;   /* lwIP TCP echo server */
     uint32_t tcp_echo_port;
+    int      tcp_iperf_enable;  /* lwIP TCP iperf server (lwiperf) */
+    uint32_t tcp_iperf_port;
     netmgr_socket_cfg_t sock[NETMGR_NUM_SOCKETS];
 } netmgr_config_t;
 
@@ -146,6 +148,7 @@ int                     netmgr_apply_socket(unsigned index);
 int                     netmgr_apply_echo(void);
 void                    netmgr_apply_dhcp_auto(void);
 void                    netmgr_apply_tcp_echo(void);
+void                    netmgr_apply_tcp_iperf(void);
 void                    netmgr_config_defaults(void);
 
 #endif /* RTLNET_NETMGR_H */

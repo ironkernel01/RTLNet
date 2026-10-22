@@ -26,6 +26,7 @@
 #include "rtlnet_phy_rtl8211e.h"
 #include "rtlnet_platform.h"
 #include "rtlnet_tcp_echo.h"
+#include "rtlnet_tcp_iperf.h"
 #include "rtlnet_udp_echo.h"
 #include "rtlnet_udp_socket.h"
 
@@ -96,6 +97,8 @@ void netmgr_config_defaults(void)
     g_cfg.echo_socket = (int)NETMGR_ECHO_SOCKET;
     g_cfg.tcp_echo_enable = 1;
     g_cfg.tcp_echo_port = RTLNET_TCP_ECHO_PORT_DEFAULT;
+    g_cfg.tcp_iperf_enable = 1;
+    g_cfg.tcp_iperf_port = RTLNET_TCP_IPERF_PORT_DEFAULT;
     cpupath_config_defaults();
     for (unsigned i = 0; i < NETMGR_NUM_SOCKETS; i++) {
         netmgr_socket_cfg_t *k = &g_cfg.sock[i];
@@ -201,6 +204,16 @@ void netmgr_apply_addresses(void)
 void netmgr_apply_tcp_echo(void)
 {
     rtlnet_tcp_echo_config(g_cfg.tcp_echo_enable, (uint16_t)g_cfg.tcp_echo_port);
+}
+
+/*
+ * netmgr_apply_tcp_iperf -- TCP iperf server enable and port into the lwIP
+ * application (applied at once when lwIP runs, else when it starts).
+ * Returns: nothing.
+ */
+void netmgr_apply_tcp_iperf(void)
+{
+    rtlnet_tcp_iperf_config(g_cfg.tcp_iperf_enable, (uint16_t)g_cfg.tcp_iperf_port);
 }
 
 /*
@@ -411,6 +424,7 @@ void netmgr_init(void)
     g_present.cls = cpupath_cls_present();
     g_present.dma = (rtlnet_netif_hw_init() == 0);
     netmgr_apply_tcp_echo();
+    netmgr_apply_tcp_iperf();
 
     if (g_present.mac) {
         rtlnet_eth_mac_set_link(RTLNET_PLAT_MAC_BASE, 0);
@@ -440,7 +454,7 @@ void netmgr_init(void)
         fmt_printf("CPU path: DMA %s, classifier %s, lwIP %s\n", g_present.dma ? "ok" : "absent",
                    g_present.cls ? ((g_present.cpupath_rc == CPUPATH_OK) ? "broadcast storm limit 10/100 ms" :
                                     cpupath_result_text(g_present.cpupath_rc)) : "absent",
-                   (g_present.lwip_rc >= 0) ? "up (TCP echo port 7)" : "not started");
+                   (g_present.lwip_rc >= 0) ? "up (TCP echo, TCP iperf)" : "not started");
     } else {
         fmt_printf("Network cores not in this build. CPU path: DMA %s.\n", g_present.dma ? "ok" : "absent");
     }

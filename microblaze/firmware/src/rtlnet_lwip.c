@@ -13,6 +13,7 @@
 #include "rtlnet_lwip_netif.h"
 #include "rtlnet_platform.h"
 #include "rtlnet_tcp_echo.h"
+#include "rtlnet_tcp_iperf.h"
 
 #include "lwip/etharp.h"
 #include "lwip/init.h"
@@ -66,7 +67,7 @@ static uint32_t ip4_to_host(const ip4_addr_t *a)
  *      rtlnet_eth_protocol driver.
  *   3. First call: lwip_init(), netif_add with those values and
  *      ethernet_input, default, up, link as last reported; start the TCP
- *      applications. Returns RTLNET_LWIP_STARTED.
+ *      applications (echo on port 7, iperf on port 5001). Returns RTLNET_LWIP_STARTED.
  *   4. Later calls: a different MAC replaces netif->hwaddr and flushes the
  *      ARP table; a different IP, mask or gateway goes in with
  *      netif_set_addr (lwIP moves or aborts the affected PCBs and announces
@@ -110,6 +111,7 @@ int InitLWIP(void)
         }
         g_running = 1;
         rtlnet_tcp_echo_lwip_ready();
+        rtlnet_tcp_iperf_lwip_ready();
         rc = RTLNET_LWIP_STARTED;
     } else {
         if (memcmp(g_netif.hwaddr, mac, ETH_HWADDR_LEN) != 0) {

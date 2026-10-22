@@ -694,7 +694,7 @@ module rtlnet_nexys_video_top #(
     .UDP_RX_BUF_KB   (16),
     .UDP_TX_BUF_KB   (8),
     .CPU_PATH_ENABLE (1),
-    .CPU_RX_FIFO_KB  (16),
+    .CPU_RX_FIFO_KB  (32),            // holds the open TCP windows of several lwIP connections
     .CPU_TX_FIFO_KB  (8),
     // The CPU-path classifier joins the build when its core lands
     // (cores/rtlnet_classifier); until then the CPU receive stream is unfiltered.
