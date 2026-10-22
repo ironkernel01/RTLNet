@@ -25,6 +25,10 @@
 //     least 12 byte times, setup/hold within the model's 1 ns limits (and at
 //     10/100 at least 20 % of the nibble period) and the nominal TXC period.
 //   * PHY loopback (BMCR 0.14): a transmitted frame comes back byte-exact.
+//   * PHY link resolution: dropping the 1000 advertisement (GBCR) or the 100
+//     advertisement (ANAR) with restart-AN, or a forced 10 Mb/s BMCR, gives
+//     the expected PHYSR speed; the MAC follows and passes traffic; the
+//     defaults are restored the same way.
 //   * RX overflow with the client stalled: 6 frames, 4 stored, RX_OVERFLOW 2.
 //   * TX_EN = 0 discards queued frames without blocking s_axis_tx; RX_EN = 0
 //     holds the receive path in reset; a speed write that mismatches RXC
@@ -461,6 +465,10 @@ module tb_rtlnet_eth_mac;
     string  why;
     int     len;
     real    nib_ns;
+    real    setup_min;
+    real    hold_min;
+    setup_min = 1.0e9;
+    hold_min  = 1.0e9;
     for (int k = 0; k < n; k++) begin
       case (k)
         0:       len = 14;
@@ -489,6 +497,8 @@ module tb_rtlnet_eth_mac;
               tb_check(u_phy.last_gap_ns >= 12.0 * byte_ns - 0.01,
                        $sformatf("%s: TX gap before frame %0d = %0.1f ns (12 byte times = %0d ns)", what, k,
                                  u_phy.last_gap_ns, 12 * byte_ns));
+            if (u_phy.last_setup_min_ns < setup_min) setup_min = u_phy.last_setup_min_ns;
+            if (u_phy.last_hold_min_ns < hold_min)   hold_min  = u_phy.last_hold_min_ns;
             tb_check(u_phy.last_setup_min_ns >= 1.0 && u_phy.last_hold_min_ns >= 1.0,
                      $sformatf("%s: TX frame %0d setup %0.3f / hold %0.3f ns", what, k, u_phy.last_setup_min_ns,
                                u_phy.last_hold_min_ns));
@@ -502,6 +512,8 @@ module tb_rtlnet_eth_mac;
         end
       end
     join
+    $display("[%0t] tb_rtlnet_eth_mac: %s at code %0d: TX setup min %0.3f ns, hold min %0.3f ns, TXC period %0.3f ns",
+             $time, what, spd_code, setup_min, hold_min, u_phy.tx_period_ns);
     tb_check(u_phy.tx_period_ns > byte_ns * ((spd_code == 2'b10) ? 1.0 : 0.5) - 0.01 &&
              u_phy.tx_period_ns < byte_ns * ((spd_code == 2'b10) ? 1.0 : 0.5) + 0.01,
              $sformatf("%s: TXC period %0.2f ns", what, u_phy.tx_period_ns));
@@ -622,6 +634,8 @@ module tb_rtlnet_eth_mac;
     wait_phy_link(spd_code, "bring-up");
     mdio_rd_check(5'd1, 16'h0024, 16'h0024, "BMSR link / AN complete");
     mdio_rd_check(5'd10, 16'hFFFF, (spd_code == 2'b10) ? 16'h3800 : 16'h0000, "GBSR");
+    mdio_rd_check(5'd5, 16'hFFFF, (spd_code == 2'b10) ? 16'h45E1 : (spd_code == 2'b01) ? 16'h41E1 : 16'h4061,
+                  "ANLPAR of the model partner");
 
     // ---- MAC identity and reset state ----
     reg_check(REG_ID, 32'h4D414331, "ID");
@@ -753,6 +767,41 @@ module tb_rtlnet_eth_mac;
     tx_frames(1, 100, "after clear");
     #5us;
     check_counters("counting after CNT_CLEAR");
+
+    // ---- PHY link resolution: advertisement (1000, 100) or forced speed (10) ----
+    begin
+      logic [1:0] low;
+      logic [1:0] orig;
+      orig = spd_code;
+      if (spd_code == 2'b10) begin
+        mdio_write(5'd9, 16'h0000);                      // stop advertising 1000BASE-T
+        mdio_write(5'd0, 16'h1340);                      // restart auto-negotiation
+        low = 2'b01;
+      end else if (spd_code == 2'b01) begin
+        mdio_write(5'd4, 16'h0061);                      // advertise 10 Mb/s only
+        mdio_write(5'd0, 16'h1340);
+        low = 2'b00;
+      end else begin
+        mdio_write(5'd0, 16'h0100);                      // auto-negotiation off, forced 10 Mb/s full duplex
+        low = 2'b00;
+      end
+      mdio_rd_check(5'd0, 16'h0200, 16'h0000, "BMCR restart-AN bit self-clears");
+      #80us;
+      wait_phy_link(low, "advertisement / forced speed");
+      if (orig == 2'b00) mdio_rd_check(5'd5, 16'hFFFF, 16'h0000, "ANLPAR with auto-negotiation off");
+      mac_follow(low, "advertisement / forced speed");
+      rx_good_frames(1, 100, "advertisement / forced speed");
+      tx_frames(1, 100, "advertisement / forced speed");
+      mdio_write(5'd9, 16'h0200);
+      mdio_write(5'd4, 16'h05E1);
+      mdio_write(5'd0, 16'h1340);
+      #80us;
+      wait_phy_link(orig, "defaults restored");
+      mac_follow(orig, "defaults restored");
+      rx_good_frames(1, 100, "defaults restored");
+      #5us;
+      check_counters("after link resolution tests");
+    end
 
     // ---- Live speed walk (+WALK): PHY renegotiates, firmware follows ----
     if (walk) begin

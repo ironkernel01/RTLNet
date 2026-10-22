@@ -11,10 +11,10 @@
 //     After release the model waits RESET_SETTLE_NS (datasheet 30 ms; benches
 //     shorten it) before it answers MDIO, then LINK_UP_DELAY_NS (stands in for
 //     auto-negotiation; not a datasheet figure, verify) before link up.
-//   * Link: the link partner's highest speed is PARTNER_SPEED (run-time:
-//     set_partner_speed). With BMCR.ANE = 1 the link speed is the highest
-//     speed both sides advertise (local: GBCR 9.9/9.8 for 1000, ANAR 4.8/4.7
-//     for 100, ANAR 4.6/4.5 for 10), full duplex; with ANE = 0 it is the
+//   * Link: the link partner advertises every speed up to PARTNER_SPEED
+//     (run-time: set_partner_speed). With BMCR.ANE = 1 the link speed is the
+//     highest speed both sides advertise (local: GBCR 9.9/9.8 for 1000, ANAR
+//     4.8/4.7 for 100, ANAR 4.6/4.5 for 10), full duplex; with ANE = 0 it is the
 //     forced BMCR speed {0.6, 0.13} and duplex 0.8. A BMCR reset, restart-AN,
 //     a change of the ANE/speed/duplex/power-down bits, a partner speed change
 //     or set_cable(0/1) drops the link and brings it up again after the delay
@@ -251,20 +251,20 @@ module rtlnet_rtl8211e_model #(
     return (v === 1'b1);
   endfunction
 
-  // Highest common speed (auto-negotiation) or the forced speed; ok = 0 when
-  // nothing is advertised.
+  // Highest speed both sides advertise (auto-negotiation; the partner
+  // advertises every speed up to partner_spd) or the forced speed; ok = 0
+  // when there is no common speed.
   task automatic resolve(output logic [1:0] spd, output bit dup, output bit ok);
-    logic [1:0] local_max;
-    bit         any;
     if (bmcr[12]) begin
-      any = 1'b1;
-      if (gbcr[9] || gbcr[8])      local_max = 2'b10;
-      else if (anar[8] || anar[7]) local_max = 2'b01;
-      else if (anar[6] || anar[5]) local_max = 2'b00;
-      else                         any = 1'b0;
-      spd = (partner_spd < local_max) ? partner_spd : local_max;
+      ok  = 1'b1;
       dup = 1'b1;
-      ok  = any;
+      if (partner_spd >= 2'b10 && (gbcr[9] || gbcr[8]))      spd = 2'b10;
+      else if (partner_spd >= 2'b01 && (anar[8] || anar[7])) spd = 2'b01;
+      else if (anar[6] || anar[5])                           spd = 2'b00;
+      else begin
+        spd = 2'b00;
+        ok  = 1'b0;
+      end
     end else begin
       spd = {bmcr[6], bmcr[13]};
       if (spd == 2'b11) spd = 2'b10;
