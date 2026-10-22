@@ -167,10 +167,12 @@ write_checkpoint -force [file join $BUILD_DIR post_synth.dcp]
 # AXI4-Lite crossings.
 # Network build: the RGMII interface timing applies to the synthesized netlist
 # (it names pin-layer cells), then the expected crossing instances: packet
-# FIFOs u_mac/u_rx_fifo, u_mac/u_tx_fifo, the protocol ingress/egress queues
-# and the socket layer's RX/TX payload FIFOs plus the ICMP payload queue
-# (fifo 7); register crossings of the MAC, the protocol wrapper and the UDP
-# echo (axil_cdc 3); Gray counters (gray 5).
+# FIFOs u_mac/u_rx_fifo, u_mac/u_tx_fifo, u_protocol/u_ingress_fifo,
+# u_protocol/u_egress_fifo and the socket layer's u_rx_fifo, u_tx_fifo and
+# u_tx_desc_fifo (fifo 7); register crossings of the MAC, the protocol wrapper
+# and the UDP echo (axil_cdc 3); Gray counters u_mac/u_tx_count_sync and the
+# wrapper's four ingress/egress counter crossings (gray 5). A change of these
+# counts fails the build until the expectation is reviewed and updated here.
 if {$NETWORK} {
   set rgmii_xdc [file join $BOARD_DIR constraints rtlnet_nexys_video_rgmii.xdc]
   if {![file exists $rgmii_xdc]} { nv_exit 11 "XDC not found: $rgmii_xdc" }

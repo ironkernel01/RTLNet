@@ -39,6 +39,7 @@
  *  Revision    Author                          Description
  * ---------------------------------------------------------------------------
  *  10-22-2026  MenuBuilder AI / Steve Spano    Initial hierarchical command set
+ *  10-22-2026  MenuBuilder AI / Steve Spano    Network commands on the core drivers; demo expectations updated
  * ===========================================================================
  */
 #include <stdio.h>    /* printf, getchar */

@@ -51,6 +51,7 @@
  *  Revision    Author                          Description
  * ---------------------------------------------------------------------------
  *  10-22-2026  MenuBuilder AI / Steve Spano    Initial generation (hierarchical modes)
+ *  10-22-2026  MenuBuilder AI / Steve Spano    END in privileged mode; Menu_Redisplay for asynchronous events
  * ===========================================================================
  */
 #include "menu.h"
