@@ -294,10 +294,11 @@ void rtlnet_eth_protocol_read_counters(uintptr_t base, rtlnet_eth_protocol_count
 }
 
 /*
- * rtlnet_eth_protocol_clear_counters -- restart the four counters from 0
+ * rtlnet_eth_protocol_clear_counters -- restart every wrapper counter from 0
  * Steps:
  *   1. Read CTRL and write it back with CNT_CLEAR set (a self-clearing
- *      pulse; FILTER_ENABLE and LEAF_ENABLE are kept).
+ *      pulse; FILTER_ENABLE, CPU_PATH_ENABLE and LEAF_ENABLE are kept). The
+ *      ingress, egress, DELIVERED and CPU counters restart together.
  * Returns: nothing.
  */
 void rtlnet_eth_protocol_clear_counters(uintptr_t base)
@@ -305,4 +306,96 @@ void rtlnet_eth_protocol_clear_counters(uintptr_t base)
     uint32_t ctrl = rtlnet_reg_read32(base, RTLNET_PROTO_REG_CTRL);
 
     rtlnet_reg_write32(base, RTLNET_PROTO_REG_CTRL, ctrl | RTLNET_PROTO_CTRL_CNT_CLEAR);
+}
+
+/*
+ * rtlnet_eth_protocol_cpu_path_present -- is the CPU network path built
+ * Steps:
+ *   1. Read CAPS and test CPU_PATH_PRESENT.
+ * Returns: 1 when the wrapper has the CPU network path, 0 otherwise.
+ */
+int rtlnet_eth_protocol_cpu_path_present(uintptr_t base)
+{
+    return (rtlnet_reg_read32(base, RTLNET_PROTO_REG_CAPS) & RTLNET_PROTO_CAPS_CPU_PATH_PRESENT) != 0u;
+}
+
+/*
+ * rtlnet_eth_protocol_set_cpu_path_enable -- turn the CPU network path on or off
+ * Steps:
+ *   1. Reject an enable when the path is not built (CAPS); nothing is written.
+ *   2. Read CTRL (CNT_CLEAR reads 0), set or clear CPU_PATH_ENABLE, write CTRL
+ *      back. Off: no frame is copied to the CPU and CPU frames are discarded
+ *      (the change applies from the next frame boundary on each side).
+ * Returns: RTLNET_PROTO_OK, or RTLNET_PROTO_ERROR when enabling an absent path.
+ */
+int rtlnet_eth_protocol_set_cpu_path_enable(uintptr_t base, int enable)
+{
+    uint32_t ctrl;
+
+    if (enable && !rtlnet_eth_protocol_cpu_path_present(base)) {
+        return RTLNET_PROTO_ERROR;
+    }
+    ctrl = rtlnet_reg_read32(base, RTLNET_PROTO_REG_CTRL) & ~RTLNET_PROTO_CTRL_CNT_CLEAR;
+    if (enable) {
+        ctrl |= RTLNET_PROTO_CTRL_CPU_PATH_ENABLE;
+    } else {
+        ctrl &= ~RTLNET_PROTO_CTRL_CPU_PATH_ENABLE;
+    }
+    rtlnet_reg_write32(base, RTLNET_PROTO_REG_CTRL, ctrl);
+    return RTLNET_PROTO_OK;
+}
+
+/*
+ * rtlnet_eth_protocol_get_cpu_path_enable -- read the CPU network path enable
+ * Steps:
+ *   1. Read CTRL and test CPU_PATH_ENABLE (always 0 when the path is not built).
+ * Returns: 1 when enabled, 0 otherwise.
+ */
+int rtlnet_eth_protocol_get_cpu_path_enable(uintptr_t base)
+{
+    return (rtlnet_reg_read32(base, RTLNET_PROTO_REG_CTRL) & RTLNET_PROTO_CTRL_CPU_PATH_ENABLE) != 0u;
+}
+
+/*
+ * rtlnet_eth_protocol_get_cpu_rx_fifo_kb -- size of the CPU receive queue
+ * Steps:
+ *   1. Read CPU_CAPS and extract the receive size.
+ * Returns: CPU_RX_FIFO_KB, 0 without the CPU path.
+ */
+uint32_t rtlnet_eth_protocol_get_cpu_rx_fifo_kb(uintptr_t base)
+{
+    return (rtlnet_reg_read32(base, RTLNET_PROTO_REG_CPU_CAPS) >> RTLNET_PROTO_CPU_CAPS_RX_KB_SHIFT) &
+           RTLNET_PROTO_CAPS_BYTE_MASK;
+}
+
+/*
+ * rtlnet_eth_protocol_get_cpu_tx_fifo_kb -- size of the CPU transmit queue
+ * Steps:
+ *   1. Read CPU_CAPS and extract the transmit size.
+ * Returns: CPU_TX_FIFO_KB, 0 without the CPU path.
+ */
+uint32_t rtlnet_eth_protocol_get_cpu_tx_fifo_kb(uintptr_t base)
+{
+    return (rtlnet_reg_read32(base, RTLNET_PROTO_REG_CPU_CAPS) >> RTLNET_PROTO_CPU_CAPS_TX_KB_SHIFT) &
+           RTLNET_PROTO_CAPS_BYTE_MASK;
+}
+
+/*
+ * rtlnet_eth_protocol_read_cpu_counters -- read the CPU network path counters
+ * Steps:
+ *   1. Read DELIVERED_FRAMES, CPU_RX_FRAMES, CPU_RX_CLAIMED, CPU_RX_DROPPED,
+ *      CPU_TX_FRAMES, CPU_TX_DISCARDED, CPU_TX_REJECTED into *counters
+ *      (separate reads: a frame arriving between them is seen by the later
+ *      reads only).
+ * Returns: nothing.
+ */
+void rtlnet_eth_protocol_read_cpu_counters(uintptr_t base, rtlnet_eth_protocol_cpu_counters_t *counters)
+{
+    counters->delivered_frames = rtlnet_reg_read32(base, RTLNET_PROTO_REG_DELIVERED_FRAMES);
+    counters->cpu_rx_frames    = rtlnet_reg_read32(base, RTLNET_PROTO_REG_CPU_RX_FRAMES);
+    counters->cpu_rx_claimed   = rtlnet_reg_read32(base, RTLNET_PROTO_REG_CPU_RX_CLAIMED);
+    counters->cpu_rx_dropped   = rtlnet_reg_read32(base, RTLNET_PROTO_REG_CPU_RX_DROPPED);
+    counters->cpu_tx_frames    = rtlnet_reg_read32(base, RTLNET_PROTO_REG_CPU_TX_FRAMES);
+    counters->cpu_tx_discarded = rtlnet_reg_read32(base, RTLNET_PROTO_REG_CPU_TX_DISCARDED);
+    counters->cpu_tx_rejected  = rtlnet_reg_read32(base, RTLNET_PROTO_REG_CPU_TX_REJECTED);
 }

@@ -36,12 +36,18 @@
 //   9  output stalls (random and long) on every frame type; CNT_CLEAR.
 //   10 DUT B (DHCP_BUF_KB 2, distributed RAM) takes an 1100-byte OFFER that
 //      DUT A ignores; DUT C (default parameters) reports its CAPS and is silent.
+//   Claim (leaf contract 7.5): rtlnet_tb_leaf_claim_monitor on DUT A and B
+//   (timing, one per frame, never while disabled); every ignored frame of case
+//   5 gives no claim and the proof OFFER behind it exactly one; before
+//   CNT_CLEAR the claims equal OFFERS_RX + ACKS_RX + NAKS_RX; DUT B claims its
+//   OFFER and ACK; DUT C never claims.
 //   Run-wide: rtlnet_tb_leaf_busy_monitor, the sink's stream-rule checks, lease
 //   outputs change only on a binding ACK or a lease loss and read 0 without a
 //   lease, s_axis_tready always 1.
 // Language: SystemVerilog-2012 (simulation only).
 // Revision: 10-22-2026
 //   * 10-22-2026: initial version.
+//   * 10-22-2026: claim checks.
 // Clocks: clk 50 MHz (proto_clk). DUT A/B MS_CYCLES = 20: 1 ms = 20 clocks,
 //   1 s = 20 000 clocks.
 // -----------------------------------------------------------------------------
@@ -107,6 +113,9 @@ module tb_rtlnet_dhcp;
   logic [7:0]  m_tkeep;
   logic        m_tlast, m_tvalid, m_tready;
   logic        busy;
+  logic        claim;
+  logic        claim_b;
+  logic        claim_c;
   logic        enable = 1'b1;
   logic        reg_wr_en = 1'b0;
   logic [11:0] reg_wr_addr = '0;
@@ -131,7 +140,7 @@ module tb_rtlnet_dhcp;
     .s_axis_tready(s_tready),
     .m_axis_tdata(m_tdata), .m_axis_tkeep(m_tkeep), .m_axis_tvalid(m_tvalid), .m_axis_tlast(m_tlast),
     .m_axis_tready(m_tready),
-    .local_mac(CLIENT_MAC), .local_ip(32'hC0A8_0164), .busy(busy),
+    .local_mac(CLIENT_MAC), .local_ip(32'hC0A8_0164), .busy(busy), .claim(claim),
     .reg_wr_en(reg_wr_en), .reg_wr_addr(reg_wr_addr), .reg_wr_data(reg_wr_data),
     .reg_rd_en(reg_rd_en), .reg_rd_addr(reg_rd_addr), .reg_rd_data(reg_rd_data),
     .lease_valid(lease_valid), .lease_ip(lease_ip), .lease_mask(lease_mask), .lease_router(lease_router),
@@ -140,6 +149,9 @@ module tb_rtlnet_dhcp;
   rtlnet_tb_leaf_busy_monitor #(.NAME("dhcp_a")) u_busy_mon (
     .clk(clk), .resetn(resetn), .s_tvalid(s_tvalid), .s_tready(s_tready), .s_tlast(s_tlast),
     .m_tvalid(m_tvalid), .m_tready(m_tready), .m_tlast(m_tlast), .busy(busy));
+  rtlnet_tb_leaf_claim_monitor #(.NAME("dhcp_a")) u_claim_mon (
+    .clk(clk), .resetn(resetn), .enable(enable), .s_tvalid(s_tvalid), .s_tready(s_tready), .s_tlast(s_tlast),
+    .busy(busy), .claim(claim));
 
   // DUT B: 2 KiB distributed receive RAM, same timing. Own stream models.
   logic [63:0] sb_tdata, mb_tdata;
@@ -166,7 +178,7 @@ module tb_rtlnet_dhcp;
     .s_axis_tready(sb_tready),
     .m_axis_tdata(mb_tdata), .m_axis_tkeep(mb_tkeep), .m_axis_tvalid(mb_tvalid), .m_axis_tlast(mb_tlast),
     .m_axis_tready(mb_tready),
-    .local_mac(CLIENT_MAC), .local_ip(32'd0), .busy(busy_b),
+    .local_mac(CLIENT_MAC), .local_ip(32'd0), .busy(busy_b), .claim(claim_b),
     .reg_wr_en(rb_wr_en), .reg_wr_addr(rb_wr_addr), .reg_wr_data(rb_wr_data),
     .reg_rd_en(1'b0), .reg_rd_addr(12'd0), .reg_rd_data(rb_rd_data),
     .lease_valid(lease_valid_b), .lease_ip(lease_ip_b), .lease_mask(lease_mask_b), .lease_router(lease_router_b),
@@ -175,6 +187,9 @@ module tb_rtlnet_dhcp;
   rtlnet_tb_leaf_busy_monitor #(.NAME("dhcp_b")) u_busy_mon_b (
     .clk(clk), .resetn(resetn), .s_tvalid(sb_tvalid), .s_tready(sb_tready), .s_tlast(sb_tlast),
     .m_tvalid(mb_tvalid), .m_tready(mb_tready), .m_tlast(mb_tlast), .busy(busy_b));
+  rtlnet_tb_leaf_claim_monitor #(.NAME("dhcp_b")) u_claim_mon_b (
+    .clk(clk), .resetn(resetn), .enable(1'b1), .s_tvalid(sb_tvalid), .s_tready(sb_tready), .s_tlast(sb_tlast),
+    .busy(busy_b), .claim(claim_b));
 
   // DUT C: default parameters, never fed; register port only.
   logic        rc_rd_en = 1'b0;
@@ -190,7 +205,7 @@ module tb_rtlnet_dhcp;
     .s_axis_tdata(64'd0), .s_axis_tkeep(8'd0), .s_axis_tvalid(1'b0), .s_axis_tlast(1'b0), .s_axis_tready(sc_tready),
     .m_axis_tdata(mc_tdata), .m_axis_tkeep(mc_tkeep), .m_axis_tvalid(mc_tvalid), .m_axis_tlast(mc_tlast),
     .m_axis_tready(1'b1),
-    .local_mac(CLIENT_MAC), .local_ip(32'd0), .busy(busy_c),
+    .local_mac(CLIENT_MAC), .local_ip(32'd0), .busy(busy_c), .claim(claim_c),
     .reg_wr_en(1'b0), .reg_wr_addr(12'd0), .reg_wr_data(32'd0),
     .reg_rd_en(rc_rd_en), .reg_rd_addr(rc_rd_addr), .reg_rd_data(rc_rd_data),
     .lease_valid(lease_valid_c), .lease_ip(lc_ip), .lease_mask(lc_mask), .lease_router(lc_router),
@@ -231,7 +246,7 @@ module tb_rtlnet_dhcp;
         mon_errors++;
         tb_error("lease outputs not zero while lease_valid is 0");
       end
-      if (sc_tready !== 1'b1 || mc_tvalid !== 1'b0 || busy_c !== 1'b0) begin
+      if (sc_tready !== 1'b1 || mc_tvalid !== 1'b0 || busy_c !== 1'b0 || claim_c !== 1'b0) begin
         if (mon_errors < 4) tb_error("DUT C (default parameters, never fed) was not quiet");
         mon_errors++;
       end
@@ -288,8 +303,11 @@ module tb_rtlnet_dhcp;
     tb_check(d[2:0] == st, $sformatf("%s: state %0d, expected %0d", what, d[2:0], st));
   endtask
 
+  int claims_at_clear = 0;          // DUT A claims at the last CNT_CLEAR
+
   task automatic ctrl(input bit [31:0] bits);
     reg_write(R_CTRL, bits);
+    if ((bits & C_CLEAR) != 0) claims_at_clear = u_claim_mon.claims;
   endtask
 
   // ---------------------------------------------------------------------------
@@ -597,6 +615,17 @@ module tb_rtlnet_dhcp;
       exp_ident++;
     end
     expect_state(ST_INIT, {what, " quiesce"});
+    begin
+      bit [31:0] n_off;
+      bit [31:0] n_ack;
+      bit [31:0] n_nak;
+      reg_read(R_OFFERS, n_off);
+      reg_read(R_ACKS, n_ack);
+      reg_read(R_NAKS, n_nak);
+      tb_check(u_claim_mon.claims - claims_at_clear == int'(n_off + n_ack + n_nak),
+               $sformatf("%s: claims since CNT_CLEAR %0d = OFFERS_RX %0d + ACKS_RX %0d + NAKS_RX %0d", what,
+                         u_claim_mon.claims - claims_at_clear, n_off, n_ack, n_nak));
+    end
   endtask
 
   // ---------------------------------------------------------------------------
@@ -828,10 +857,12 @@ module tb_rtlnet_dhcp;
     bytes_t bad;
     string name;
     bit skip_proof;
+    int c0;
     skip_proof = 0;
     ctrl(C_START);
     expect_client(K_DISC, 0, 0, 0, BCAST_MAC, 200, xid, t, $sformatf("ignored %0d DISCOVER", which));
     reg_read(R_OFFERS, offers_before);
+    c0 = u_claim_mon.claims;
     s = srv_default(xid, OFFER_IP);
     opts = router_opts(8'd2, LONG_LEASE, MASK_24, ROUTER_IP);
     case (which)
@@ -947,11 +978,14 @@ module tb_rtlnet_dhcp;
     expect_silence(1000, {"ignored: ", name});
     expect_state(ST_SEL, {"ignored: ", name, " (state)"});
     reg_expect(R_OFFERS, offers_before, {"ignored: ", name, " (OFFERS_RX)"});
+    tb_check(u_claim_mon.claims == c0, $sformatf("ignored: %s: %0d claims, expected 0", name, u_claim_mon.claims - c0));
     // Proof the client still waits: the good OFFER is answered.
     g = srv_default(xid, OFFER_IP);
     send(srv_frame(g, router_opts(8'd2, LONG_LEASE, MASK_24, ROUTER_IP)));
     expect_client(K_SEL, 0, OFFER_IP, SERVER_IP, BCAST_MAC, 3000, x, t, {"after ignored: ", name});
     tb_check(x == xid, {"after ignored: ", name, " xid"});
+    tb_check(u_claim_mon.claims == c0 + 1, $sformatf("after ignored: %s: %0d claims for the good OFFER, expected 1", name,
+             u_claim_mon.claims - c0));
     ignored_cases++;
     quiesce(name);
   endtask
@@ -1209,6 +1243,18 @@ module tb_rtlnet_dhcp;
     expect_client(K_DISC, 0, 0, 0, BCAST_MAC, 2000, x, t, "stalled DISCOVER");
     u_sink.ready_pct = 100;
     quiesce("stalls");
+    begin
+      bit [31:0] n_off;
+      bit [31:0] n_ack;
+      bit [31:0] n_nak;
+      reg_read(R_OFFERS, n_off);
+      reg_read(R_ACKS, n_ack);
+      reg_read(R_NAKS, n_nak);
+      tb_check(u_claim_mon.claims - claims_at_clear == int'(n_off + n_ack + n_nak),
+               $sformatf("claims since CNT_CLEAR %0d = OFFERS_RX %0d + ACKS_RX %0d + NAKS_RX %0d",
+                         u_claim_mon.claims - claims_at_clear, n_off, n_ack, n_nak));
+      tb_check(u_claim_mon.claims > 40, $sformatf("claims seen over the run (%0d)", u_claim_mon.claims));
+    end
     ctrl(C_CLEAR);
     reg_expect(R_DISC, 0, "CNT_CLEAR DISCOVERS_SENT");
     reg_expect(R_OFFERS, 0, "CNT_CLEAR OFFERS_RX");
@@ -1253,6 +1299,7 @@ module tb_rtlnet_dhcp;
     repeat (6000) @(posedge clk);
     tb_check(lease_valid_b == 1 && lease_ip_b == OFFER_IP && lease_mask_b == MASK_24 && lease_router_b == ROUTER_IP,
              "DUT B bound from an 1100-byte ACK");
+    tb_check(u_claim_mon_b.claims == 2, $sformatf("DUT B claimed its OFFER and ACK (%0d claims)", u_claim_mon_b.claims));
   endtask
 
   // ---------------------------------------------------------------------------

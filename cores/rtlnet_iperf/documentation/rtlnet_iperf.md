@@ -42,6 +42,7 @@ The port list is the leaf contract of `documentation/rtlnet_architecture.md` 7.5
 | frame out | `m_axis_*` | registered outputs of one `rtlnet_axis_reg_slice`; no gap inside a frame |
 | address | `local_mac[47:0]`, `local_ip[31:0]` | destination match and source of every frame sent (one reading per frame) |
 | status | `busy` | registered: high from the clock after a last beat until that frame's accounting is done (10 clocks for a data datagram, about 140 for a FIN or a `-R` request, which use the divider) |
+| claim | `claim` | registered one-clock pulse for every datagram the classify step accounts (section 6.2), three clocks after its last beat |
 | registers | `reg_wr_en`, `reg_wr_addr[11:0]`, `reg_wr_data`, `reg_rd_en`, `reg_rd_addr[11:0]`, `reg_rd_data` | read data valid the clock after `reg_rd_en` and held |
 
 ## 3. Parameters
@@ -139,6 +140,13 @@ verified (the MAC's FCS covers the frame).
 | no flow, any other FIN | ignored |
 | open flow silent for `IDLE_TIMEOUT_MS` | closed, no report, statistics kept |
 
+`claim` (architecture 7.5) pulses in the clock after `S_AC_CLASSIFY` takes a datagram to `UDP_PORT`: data or FIN of
+the open flow, the first datagram of a new flow, a repeated FIN of the closed flow (report resent), an accepted `-R`
+request. It comes three clocks after the last beat while `busy` is high and is gated by `enable`. Datagrams the rules
+above ignore (another source while a flow is open, a late datagram behind the FIN, a FIN of no known flow, a `-R`
+request while REVERSE_ALLOWED is off or from the client being served) and every non-iperf frame are not claimed, so
+the wrapper copies them to the CPU network path.
+
 ### 6.3 Accounting (as the iperf 2 server's `Reporter.c`)
 
 Per datagram with sequence magnitude p > 0, `PacketID` starting at 0:
@@ -203,15 +211,17 @@ header is judged by the independent RFC 1071 oracle.
 | port / clear | UDP_PORT 6001: old port ignored, report from 6001; a frame starting 8 clocks after a FIN is skipped whole; CNT_CLEAR of every statistic, also in the middle of a flow without disturbing its report |
 | DUT B | 33.333333 MHz (fractional time base), `MAX_DGRAM_BYTES` 100: 20 ms flow duration exact to 1 us; `mBufLen` 1470 clamped to 100, 100-101 datagrams at 8 Mbit/s |
 | run-wide | `rtlnet_tb_leaf_busy_monitor` on both DUTs, sink stream rules, IP identification of every frame |
+| claim | `rtlnet_tb_leaf_claim_monitor` on both DUTs (timing, one per frame, never while disabled); every `run_flow` claims each datagram and its FIN; FIN retry 1, late datagram 0, FIN retry after it 1, unknown FIN 0, the 32-bit flow 13, another source while a flow is open 0 (the open flow's datagram 1, its FIN 1), each ignored-traffic case 0, a real ARP request 0, the 88-byte pair 2, an accepted `-R` request 1, a `-R` request with REVERSE_ALLOWED off 0 |
 
 Results (10-22-2026, Active-HDL 11.1):
 
 | Run | Result |
 |---|---|
-| `tb_rtlnet_iperf` (AMD) | PASS, 40 487 checks |
-| `tb_rtlnet_iperf` `RTLNET_TECH_GENERIC` | PASS, 40 487 checks |
+| `tb_rtlnet_iperf` (AMD) | PASS, 40 514 checks |
+| `tb_rtlnet_iperf` `RTLNET_TECH_GENERIC` | PASS, 40 514 checks |
 | `tb_rtlnet_iperf` `+INJECT_FAILURE` | TEST FAIL as required |
 | mutation runs (RTL perturbed in a scratch copy) | all 6 detected: duplicates not out of order; jitter updated on out-of-order datagrams; report datagrams = count instead of PacketID; no final datagram; busy never raised; error_cnt without the out-of-order subtraction |
+| claim mutation | claim for every datagram to the port (`classify_take` replaced by `is_iperf`): 4 failing checks (first "late datagram after the FIN") |
 | `test_rtlnet_iperf_driver` (host gcc 16.2) | PASS, 48 checks |
 | `mb-gcc -mlittle-endian -mcpu=v11.0 -std=c11 -Wall -Wextra -Werror -c` | clean |
 
@@ -238,3 +248,4 @@ Remaining warnings: unused upper `reg_wr_data` bits and the constant `s_axis_tre
 | Revision | Change |
 |---|---|
 | 10-22-2026 | Initial version |
+| 10-22-2026 | `claim` output (architecture 7.5, CPU network path); claim checks in the bench |

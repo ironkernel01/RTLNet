@@ -38,6 +38,7 @@ The port list is the leaf contract of `documentation/rtlnet_architecture.md` sec
 | frame out | `m_axis_tdata[63:0]`, `m_axis_tkeep[7:0]`, `m_axis_tvalid`, `m_axis_tlast`, `m_axis_tready` | registered outputs of one `rtlnet_axis_reg_slice`; 342-byte frames without gaps |
 | address | `local_mac[47:0]`, `local_ip[31:0]` | MAC octet 0 in `[47:40]`; `local_ip` is not used (the frames carry 0.0.0.0 or the leaf's own `lease_ip`, which is the effective address while `lease_valid`) |
 | status | `busy` | registered: high while a captured frame is received or parsed, and for the clock after the last beat of every frame |
+| claim | `claim` | registered one-clock pulse for every BOOTP reply the client machine accepts (section 5.2), in the clock `busy` falls |
 | registers | `reg_wr_en`, `reg_wr_addr[11:0]`, `reg_wr_data[31:0]`, `reg_rd_en`, `reg_rd_addr[11:0]`, `reg_rd_data[31:0]` | read data valid the clock after `reg_rd_en` and held until the next read |
 | lease | `lease_valid`, `lease_ip[31:0]`, `lease_mask[31:0]`, `lease_router[31:0]`, `lease_server[31:0]`, `lease_time_s[31:0]` | registered; first octet in `[31:24]`; load on a binding ACK, clear to 0 on a lease loss, change at no other time; 0 while `lease_valid` is 0 |
 
@@ -139,6 +140,12 @@ four data bytes, length >= 4; a router list gives its first address). Every othe
 too short, is skipped by its length; a repeated option replaces the earlier one. A 590-byte message parses in
 about 650 clocks; `busy` covers it.
 
+`claim` (architecture 7.5): the clock after the verdict, which is the clock `busy` falls, for a parsed reply with the
+current xid and `chaddr` that the client machine accepts in its state: an OFFER with option 54 while SELECTING, an ACK
+while REQUESTING or RENEWING, a NAK while REQUESTING or RENEWING (exactly the frames `OFFERS_RX`, `ACKS_RX` and
+`NAKS_RX` count). Gated by `enable`. Every ignored frame (wrong xid, an ACK while SELECTING, an OFFER while
+REQUESTING, any rule of the accept list failed) is not claimed, so the wrapper copies it to the CPU network path.
+
 ### 5.3 Transmit machine
 
 `S_TX_IDLE` takes a pending request and copies its descriptor (`local_mac`, xid and the client's `req_*` fields,
@@ -220,15 +227,17 @@ home-router option set (53, 54, 51, 58, 59, 1, 28, 3, 6 with two servers, 15, an
 | stalls | `m_axis_tready` 30 %, 3 % and 50 % on REQUEST, renewal, RELEASE, DISCOVER; CNT_CLEAR of all seven counters |
 | DUT B | `DHCP_BUF_KB` 2, distributed RAM: binds from an 1100-byte OFFER/ACK that DUT A ignores |
 | run-wide | `rtlnet_tb_leaf_busy_monitor`, sink stream rules, lease outputs change only on a binding ACK or a lease loss and are 0 without a lease, DUT C silent |
+| claim | `rtlnet_tb_leaf_claim_monitor` (`cores/rtlnet_eth_protocol/testbench`) on DUT A and B: never X, one pulse per frame at most, after the last beat and no later than the clock `busy` falls, never while disabled; each of the 29 ignored frames gives no claim and the proof OFFER behind it exactly one; at every quiesce and before CNT_CLEAR the claims since the last CNT_CLEAR equal `OFFERS_RX + ACKS_RX + NAKS_RX`; DUT B claims its OFFER and ACK (2); DUT C never claims |
 
 Results (10-22-2026, Active-HDL 11.1):
 
 | Run | Result |
 |---|---|
-| `tb_rtlnet_dhcp` (AMD XPM RAM) | PASS, 1088 checks |
-| `tb_rtlnet_dhcp` `RTLNET_TECH_GENERIC` | PASS, 1088 checks |
+| `tb_rtlnet_dhcp` (AMD XPM RAM) | PASS, 1198 checks |
+| `tb_rtlnet_dhcp` `RTLNET_TECH_GENERIC` | PASS, 1198 checks |
 | `tb_rtlnet_dhcp` `+INJECT_FAILURE` | TEST FAIL as required |
 | mutation runs (RTL perturbed in a scratch copy, bench unchanged) | all 6 detected: DISCOVER flags 0; cookie byte 281 unchecked; NAK while renewing keeps the lease; xid not compared; backoff not doubled; busy never raised |
+| claim mutations | claim on every parsed message for the xid (the state condition removed): 29 failing checks (first "ACK while selecting"); claim one clock late (after `busy` fell): 10 failing checks (the claim monitor's timing rule) |
 | `test_rtlnet_dhcp_driver` (host gcc 16.2) | PASS, 74 checks |
 | `mb-gcc -mlittle-endian -mcpu=v11.0 -std=c11 -Wall -Wextra -Werror -c` | clean |
 
@@ -258,3 +267,4 @@ The remaining warnings are the expected ones: `local_ip` and unused register-bus
 | Revision | Change |
 |---|---|
 | 10-22-2026 | Initial version |
+| 10-22-2026 | `claim` output (architecture 7.5, CPU network path); claim checks in the bench |

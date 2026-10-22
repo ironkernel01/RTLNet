@@ -1,9 +1,17 @@
 # rtlnet_eth_protocol regression: <bench> <filelist> [tag] [defines=A,B] [plusargs=X,Y] [expectfail]
-# Clock pairs: CLKPAIR=1 axis 62.5 / proto 50 MHz, 2 axis 156.25 / proto 50 MHz, 3 axis 50 / proto 62.5 MHz.
+# Clock pairs: CLKPAIR=1 axis 62.5 / proto 50 MHz, 2 axis 156.25 / proto 50 MHz, 3 axis 50 / proto 62.5 MHz;
+# cpu_axis_clk ~100 MHz in every run.
 tb_rtlnet_eth_protocol  cores/rtlnet_eth_protocol/testbench/tb_rtlnet_eth_protocol.f  p62_50   plusargs=CLKPAIR=1
 tb_rtlnet_eth_protocol  cores/rtlnet_eth_protocol/testbench/tb_rtlnet_eth_protocol.f  p156_50  plusargs=CLKPAIR=2
 tb_rtlnet_eth_protocol  cores/rtlnet_eth_protocol/testbench/tb_rtlnet_eth_protocol.f  p50_62   plusargs=CLKPAIR=3
 tb_rtlnet_eth_protocol  cores/rtlnet_eth_protocol/testbench/tb_rtlnet_eth_protocol.f  generic  defines=RTLNET_TECH_GENERIC
+tb_rtlnet_eth_protocol  cores/rtlnet_eth_protocol/testbench/tb_rtlnet_eth_protocol.f  nocpu    defines=TB_NO_CPU_PATH
 tb_rtlnet_eth_protocol  cores/rtlnet_eth_protocol/testbench/tb_rtlnet_eth_protocol.f  neg      plusargs=INJECT_FAILURE  expectfail
+# CPU network path with every leaf (classifier not built: CPU_CLASSIFIER_ENABLE 0).
+tb_rtlnet_eth_protocol_cpu  cores/rtlnet_eth_protocol/testbench/tb_rtlnet_eth_protocol_cpu.f  p62_50   plusargs=CLKPAIR=1
+tb_rtlnet_eth_protocol_cpu  cores/rtlnet_eth_protocol/testbench/tb_rtlnet_eth_protocol_cpu.f  p156_50  plusargs=CLKPAIR=2
+tb_rtlnet_eth_protocol_cpu  cores/rtlnet_eth_protocol/testbench/tb_rtlnet_eth_protocol_cpu.f  p50_62   plusargs=CLKPAIR=3
+tb_rtlnet_eth_protocol_cpu  cores/rtlnet_eth_protocol/testbench/tb_rtlnet_eth_protocol_cpu.f  generic  defines=RTLNET_TECH_GENERIC
+tb_rtlnet_eth_protocol_cpu  cores/rtlnet_eth_protocol/testbench/tb_rtlnet_eth_protocol_cpu.f  neg      plusargs=INJECT_FAILURE  expectfail
 tb_rtlnet_eth_protocol_regs  cores/rtlnet_eth_protocol/testbench/tb_rtlnet_eth_protocol_regs.f
 tb_rtlnet_eth_protocol_regs  cores/rtlnet_eth_protocol/testbench/tb_rtlnet_eth_protocol_regs.f  neg  plusargs=INJECT_FAILURE  expectfail

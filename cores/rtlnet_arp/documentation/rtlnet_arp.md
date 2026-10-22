@@ -26,6 +26,7 @@ Ports are exactly the leaf contract of architecture 15.4; the ARP leaf has no le
 | frame out | `m_axis_tdata[63:0]`, `m_axis_tkeep[7:0]`, `m_axis_tvalid`, `m_axis_tlast`, `m_axis_tready` | outputs of one `rtlnet_axis_reg_slice` (`u_tx_slice`); a started reply has no gaps |
 | address | `local_mac[47:0]`, `local_ip[31:0]` | wrapper `proto_clk` registers; MAC octet 0 in `[47:40]`, IP first octet in `[31:24]` |
 | status | `busy` | registered, see section 3.4 |
+| claim | `claim` | registered one-clock pulse for every request this leaf answers, see section 3.4 |
 | registers | `reg_wr_en`, `reg_wr_addr[11:0]`, `reg_wr_data[31:0]`, `reg_rd_en`, `reg_rd_addr[11:0]`, `reg_rd_data[31:0]` | read data registered, valid the clock after `reg_rd_en` |
 
 | Parameter | Default | Meaning |
@@ -108,6 +109,12 @@ slice. Frames that are not answered never raise `busy`. The reply's first beat l
 by the bench). One request at a time: a frame that starts while a reply is pending is ignored whole and
 counted in `IGNORED` if it is ARP.
 
+`claim` (architecture 7.5) pulses for one clock in the clock after the last beat of every request the leaf
+answers (a taken frame, enabled and idle at its first beat, every RFC 826 check passed, `ar$tpa = local_ip`),
+one clock before `busy` rises; it is gated by `enable` in that clock, so a disabled leaf never claims. Ignored ARP
+frames, requests for another address and frames that started while busy are not claimed, so the wrapper copies
+them to the CPU network path.
+
 ### 3.5 Clocks and resets
 
 One clock, `proto_clk`. The address inputs are `proto_clk` registers of the wrapper; there is no
@@ -134,9 +141,11 @@ an input frame's last beat.
 | address change | new MAC and IP used in the reply; the old IP no longer answered |
 | random | 150 mutated frames (field bit flips, sender/target and Ethernet address changes, truncations, lengths up to 300) with random stalls and gaps, each judged by the bench model `arp_classify` |
 | counters | `REQUESTS_FOR_US`, `REPLIES_SENT`, `IGNORED` equal the model's counts at three points; `CNT_CLEAR` zeroes them |
+| claim | `rtlnet_tb_leaf_claim_monitor` (`cores/rtlnet_eth_protocol/testbench`) on every harness: never X, at most one pulse per frame, after the last beat, before `busy` falls (or within 12 clocks), never while disabled; every `send_and_judge` frame gives exactly one claim when the model answers it and none otherwise; the cumulative claim count equals the answered requests at every counter check (chained, pending and wrong-rule frames included) |
 
-Results, 10-22-2026: `TEST PASS: tb_rtlnet_arp checks=2277` (AMD), the same with `RTLNET_TECH_GENERIC`;
-`+INJECT_FAILURE` reports `TEST FAIL`. Bench sensitivity proven by mutation: with the `ar$hln` check removed
+Results, 10-22-2026: `TEST PASS: tb_rtlnet_arp checks=2830` (AMD), the same with `RTLNET_TECH_GENERIC`;
+`+INJECT_FAILURE` reports `TEST FAIL`. Claim sensitivity: with `claim` pulsed at every frame end (the answer
+condition removed) the bench reports `TEST FAIL` (212 failing checks). Bench sensitivity proven by mutation: with the `ar$hln` check removed
 from the RTL the bench reports `TEST FAIL` (26 failing checks: the wrong-rule case and random frames).
 
 Driver: `testbench/host_test_rtlnet_arp.c` (mocked register window) `HOST TEST PASS checks=7`; the driver
@@ -170,3 +179,4 @@ sub-map base plus `RTLNET_PROTO_WIN_ARP` (0x1000). Enable/disable is the wrapper
 | Revision | Change |
 |---|---|
 | 10-22-2026 | Initial version |
+| 10-22-2026 | `claim` output (architecture 7.5, CPU network path); claim checks in the bench |

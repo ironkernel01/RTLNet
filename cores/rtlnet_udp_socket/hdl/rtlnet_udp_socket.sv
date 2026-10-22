@@ -27,6 +27,9 @@
 //     32-bit, wrap, and clear with CTRL bit 16 CNT_CLEAR. With CONNECT_ON_RX a
 //     delivered datagram loads the socket's REMOTE_* registers with its
 //     sender; a register write in the same clock takes precedence.
+//   * claim (leaf contract 7.5, registered one-clock pulse): from the receive
+//     engine, the clock after the last beat of a datagram whose destination
+//     port matches an enabled socket (delivered or dropped for a full FIFO).
 //   * Not used: local_gateway (the next-hop MAC is supplied by the application
 //     metadata or the socket registers; the layer resolves no addresses).
 //   * Clock-domain crossings: only the three packet FIFOs (Gray frame
@@ -36,6 +39,7 @@
 // Language: SystemVerilog-2012.
 // Revision: 10-22-2026
 //   * 10-22-2026: initial version.
+//   * 10-22-2026: claim output (leaf contract 7.5, CPU network path).
 // Clocks: clk (proto_clk): parser, frame builder, registers; app_clk: the two
 //   application streams and the transmit checker.
 // -----------------------------------------------------------------------------
@@ -76,6 +80,10 @@ module rtlnet_udp_socket #(
   // Leaf busy, proto_clk, registered: high while a received frame is being
   // processed.
   output logic        busy,
+
+  // Claim, proto_clk, registered one-clock pulse: the frame that just ended
+  // was a datagram for an enabled socket.
+  output logic        claim,
 
   // Wrapper register bus, proto_clk: one-clock strobes; read data valid the
   // clock after reg_rd_en.
@@ -304,7 +312,8 @@ module rtlnet_udp_socket #(
     .ev_remote_ip   (rx_ev_ip),
     .ev_remote_port (rx_ev_port),
     .ev_remote_mac  (rx_ev_mac),
-    .busy           (rx_busy)
+    .busy           (rx_busy),
+    .claim          (claim)
   );
 
   // RX packet FIFO, proto_clk -> app_clk: one datagram (16 metadata bytes +

@@ -41,6 +41,11 @@
 //     beat is handed to the output slice.
 //   * enable is sampled at a frame's first beat; a request accepted before a
 //     disable is still answered.
+//   * claim (registered one-clock pulse, architecture 7.5): the clock after
+//     S_CHECK accepts a request (every check passed, the reply follows), two
+//     clocks after its last beat and while busy is high; gated by enable, so a
+//     disabled leaf never claims. A rejected frame (bad checksum, size, not an
+//     echo request for local_ip) is not claimed and goes to the CPU path.
 //   * Registers (12-bit leaf register port, read data registered one clock
 //     after reg_rd_en): offsets and bits in
 //     cores/rtlnet_icmp/driver/rtlnet_icmp.h; the localparams below mirror it.
@@ -56,6 +61,7 @@
 // Language: SystemVerilog-2012 (synthesizable subset).
 // Revision: 10-22-2026
 //   * 10-22-2026: initial version.
+//   * 10-22-2026: claim output (leaf contract 7.5, CPU network path).
 // Clocks: clk (proto_clk) only; resetn synchronous to it, active low.
 // -----------------------------------------------------------------------------
 module rtlnet_icmp #(
@@ -91,6 +97,10 @@ module rtlnet_icmp #(
 
   // Leaf status (registered): high while a request is judged or answered.
   output logic        busy,
+
+  // Claim (registered one-clock pulse): the request that just ended is
+  // answered; two clocks after its last beat.
+  output logic        claim,
 
   // Leaf register port (proto_clk): write strobe, read strobe, read data one
   // clock after reg_rd_en.
@@ -297,6 +307,7 @@ module rtlnet_icmp #(
     if (!resetn) begin
       state               <= S_IDLE;
       busy                <= 1'b0;
+      claim               <= 1'b0;
       req_src_mac         <= '0;
       req_ethertype       <= '0;
       req_ver_ihl         <= '0;
@@ -322,6 +333,7 @@ module rtlnet_icmp #(
       reply_icmp_checksum <= '0;
       tx_word             <= '0;
     end else begin
+      claim <= 1'b0;
       case (state)
         // Bytes 0-7: taken only at a frame's first beat while enabled.
         S_IDLE: begin
@@ -414,6 +426,7 @@ module rtlnet_icmp #(
                                                       IP_PROTO_ICMP, local_ip_snap, req_src_ip);
           reply_icmp_checksum <= ~csum_fold16(sum_rest);
           if (request_ok) begin
+            claim <= enable;
             state <= S_TX_B0;
           end else begin
             busy  <= 1'b0;

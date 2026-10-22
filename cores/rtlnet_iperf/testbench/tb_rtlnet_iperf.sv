@@ -44,11 +44,18 @@
 //      accounting is skipped whole.
 //   10 DUT B at 33.333333 MHz (fractional microsecond time base): flow duration
 //      exact to the microsecond; MAX_DGRAM_BYTES 100 clamps the stream.
+//   Claim (leaf contract 7.5): rtlnet_tb_leaf_claim_monitor on DUT A and B
+//   (timing, one per frame, never while disabled); every flow claims each of
+//   its datagrams and its FIN; FIN retries and the open flow's datagrams claim
+//   one each; the late datagram, the unknown FIN, another source while a flow
+//   is open, every ignored-traffic frame and a -R request with REVERSE_ALLOWED
+//   off claim nothing; an accepted -R request claims one.
 //   Run-wide: rtlnet_tb_leaf_busy_monitor, the sink's stream-rule checks, busy
 //   low 16 clocks after the last beat of every data datagram.
 // Language: SystemVerilog-2012 (simulation only).
 // Revision: 10-22-2026
 //   * 10-22-2026: initial version.
+//   * 10-22-2026: claim checks.
 // Clocks: clk 50 MHz (DUT A, CLK_HZ 50 000 000: 50 clocks per microsecond);
 //   clk_b 33.333 MHz (DUT B).
 // -----------------------------------------------------------------------------
@@ -106,6 +113,8 @@ module tb_rtlnet_iperf;
   logic [63:0] s_tdata, m_tdata;
   logic [7:0]  s_tkeep, m_tkeep;
   logic        s_tlast, s_tvalid, s_tready, m_tlast, m_tvalid, m_tready, busy;
+  logic        claim;
+  logic        claim_b;
   logic        enable = 1'b1;
   logic        reg_wr_en = 1'b0;
   logic [11:0] reg_wr_addr = '0;
@@ -127,13 +136,16 @@ module tb_rtlnet_iperf;
     .s_axis_tready(s_tready),
     .m_axis_tdata(m_tdata), .m_axis_tkeep(m_tkeep), .m_axis_tvalid(m_tvalid), .m_axis_tlast(m_tlast),
     .m_axis_tready(m_tready),
-    .local_mac(DUT_MAC), .local_ip(DUT_IP), .busy(busy),
+    .local_mac(DUT_MAC), .local_ip(DUT_IP), .busy(busy), .claim(claim),
     .reg_wr_en(reg_wr_en), .reg_wr_addr(reg_wr_addr), .reg_wr_data(reg_wr_data),
     .reg_rd_en(reg_rd_en), .reg_rd_addr(reg_rd_addr), .reg_rd_data(reg_rd_data));
 
   rtlnet_tb_leaf_busy_monitor #(.NAME("iperf_a")) u_busy_mon (
     .clk(clk), .resetn(resetn), .s_tvalid(s_tvalid), .s_tready(s_tready), .s_tlast(s_tlast),
     .m_tvalid(m_tvalid), .m_tready(m_tready), .m_tlast(m_tlast), .busy(busy));
+  rtlnet_tb_leaf_claim_monitor #(.NAME("iperf_a")) u_claim_mon (
+    .clk(clk), .resetn(resetn), .enable(enable), .s_tvalid(s_tvalid), .s_tready(s_tready), .s_tlast(s_tlast),
+    .busy(busy), .claim(claim));
 
   // DUT B: 33.333333 MHz, MAX_DGRAM_BYTES 100.
   logic [63:0] sb_tdata, mb_tdata;
@@ -158,13 +170,25 @@ module tb_rtlnet_iperf;
     .s_axis_tready(sb_tready),
     .m_axis_tdata(mb_tdata), .m_axis_tkeep(mb_tkeep), .m_axis_tvalid(mb_tvalid), .m_axis_tlast(mb_tlast),
     .m_axis_tready(mb_tready),
-    .local_mac(DUT_MAC), .local_ip(DUT_IP), .busy(busy_b),
+    .local_mac(DUT_MAC), .local_ip(DUT_IP), .busy(busy_b), .claim(claim_b),
     .reg_wr_en(1'b0), .reg_wr_addr(12'd0), .reg_wr_data(32'd0),
     .reg_rd_en(rb_rd_en), .reg_rd_addr(rb_rd_addr), .reg_rd_data(rb_rd_data));
 
   rtlnet_tb_leaf_busy_monitor #(.NAME("iperf_b")) u_busy_mon_b (
     .clk(clk_b), .resetn(resetn_b), .s_tvalid(sb_tvalid), .s_tready(sb_tready), .s_tlast(sb_tlast),
     .m_tvalid(mb_tvalid), .m_tready(mb_tready), .m_tlast(mb_tlast), .busy(busy_b));
+  rtlnet_tb_leaf_claim_monitor #(.NAME("iperf_b")) u_claim_mon_b (
+    .clk(clk_b), .resetn(resetn_b), .enable(1'b1), .s_tvalid(sb_tvalid), .s_tready(sb_tready), .s_tlast(sb_tlast),
+    .busy(busy_b), .claim(claim_b));
+
+  // Claims of DUT A since claim_mark (the bench's per-case expectations).
+  int claim_mark = 0;
+  task automatic claims_expect(input int n, input string what);
+    repeat (20) @(posedge clk);
+    tb_check(u_claim_mon.claims - claim_mark == n, $sformatf("%s: %0d claims, expected %0d", what,
+             u_claim_mon.claims - claim_mark, n));
+    claim_mark = u_claim_mon.claims;
+  endtask
 
   // Cycle of every input last beat (DUT A and B).
   longint in_tlast_cyc = 0;
@@ -483,7 +507,9 @@ module tb_rtlnet_iperf;
     longint sent;
     bit [31:0] rd;
     real mean_real;
+    int c0;
     cur_port++;
+    c0 = u_claim_mon.claims;
     base = ((cyc / US) + 20) * US;
     for (int i = 0; i < $size(ids); i++) begin
       d = dg_new(0, MAC_A, IP_A, cur_port, plen);
@@ -528,6 +554,8 @@ module tb_rtlnet_iperf;
     reg_expect(R_DUR, 32'(fin_arr - arr_us[0]), {what, " LAST_DURATION_US"});
     reg_expect(R_RATE, (plen >= 80) ? RATE_10M : 32'd0, {what, " REQ_RATE_BPS"});
     reg_expect(R_STATUS, 32'h0001_0000, {what, " flow closed"});
+    tb_check(u_claim_mon.claims - c0 == $size(ids) + 1, $sformatf("%s: %0d claims, expected %0d (every datagram and the FIN)",
+             what, u_claim_mon.claims - c0, $size(ids) + 1));
   endtask
 
   // Regular schedule: ids in order, arrivals every `gap` us with optional
@@ -696,6 +724,7 @@ module tb_rtlnet_iperf;
     regular(10, 20, 0, ids, arr, snd);
     run_flow(ids, arr, snd, 500, 11, "flow before FIN retries");
     reg_read(R_REPS, reps);
+    claim_mark = u_claim_mon.claims;
     // Repeated FIN (the client repeats every 10 ms): the same report again.
     d = dg_new(0, MAC_A, IP_A, cur_port, 500);
     d.seq = -12;
@@ -712,22 +741,26 @@ module tb_rtlnet_iperf;
       exp_ident++;
     end
     reg_expect(R_REPS, reps + 1, "REPORTS_SENT counts the resend");
+    claims_expect(1, "FIN retry");
     // A late data datagram of the finished flow opens nothing; the next FIN
     // retry still gets the original report.
     d.seq = 7;
     send(dg_frame(d));
     expect_silence(300, "late datagram after the FIN");
+    claims_expect(0, "late datagram after the FIN");
     reg_expect(R_STATUS, 32'h0001_0000, "late datagram opens no flow");
     d.seq = -13;
     send(dg_frame(d));
     get_frame(rep1, 3000, ok);
     tb_check(ok && rep1.size() == 170 && get32(rep1, 86) == 32'(m_packet_id), "FIN retry after the late datagram");
     if (ok) exp_ident++;
+    claims_expect(1, "FIN retry after the late datagram");
     // An unknown FIN (other client) is ignored.
     d = dg_new(0, MAC_B, IP_B, PORT_B, 500);
     d.seq = -50;
     send(dg_frame(d));
     expect_silence(300, "unknown FIN");
+    claims_expect(0, "unknown FIN");
     // 32-bit sequence: short datagrams without the client header (flags read 0).
     ids = {}; arr = {}; snd = {};
     for (int i = 0; i < 12; i++) begin ids.push_back(i + 1); arr.push_back(i * 15); snd.push_back(i * 15); end
@@ -750,6 +783,7 @@ module tb_rtlnet_iperf;
       expect_report(MAC_A, IP_A, PORT_A, SRV_PORT, m_bytes, 0, 400, model_err(), 32'(m_ooo), 32'(m_packet_id),
                     0, 32'(((m_jcnt == 0) ? 0 : (m_jsum / m_jcnt)) >>> JF), "32-bit sequence flow");
     end
+    claims_expect(13, "32-bit sequence flow and its FIN");
     // Another source while a flow is open is ignored.
     d = dg_new(0, MAC_A, IP_A, PORT_A, 200);
     d.seq = 1;
@@ -761,12 +795,14 @@ module tb_rtlnet_iperf;
     send(dg_frame(d));
     expect_silence(500, "other source while a flow is open");
     reg_expect(R_RXD, 1, "other source not counted");
+    claims_expect(1, "open flow's first datagram claimed, other source not");
     d = dg_new(0, MAC_A, IP_A, PORT_A, 200);
     d.seq = -2;
     send(dg_frame(d));
     get_frame(f, 3000, ok);
     tb_check(ok && f.size() == 170 && get32(f, 86) == 2 && get32(f, 66) == 400, "open flow's FIN answered");
     if (ok) exp_ident++;
+    claims_expect(1, "open flow's FIN");
   endtask
 
   // ---------------------------------------------------------------------------
@@ -775,6 +811,7 @@ module tb_rtlnet_iperf;
   task automatic case_ignored();
     dg_t d;
     bytes_t f;
+    claim_mark = u_claim_mon.claims;
     for (int which = 0; which < 12; which++) begin
       d = dg_new(0, MAC_A, IP_A, PORT_A, 200);
       d.seq = 1;
@@ -813,6 +850,7 @@ module tb_rtlnet_iperf;
       send(f);
       expect_silence(400, $sformatf("ignored traffic %0d", which));
       reg_expect(R_STATUS, (which == 11) ? 32'h0 : 32'h0001_0000, $sformatf("ignored traffic %0d: no flow", which));
+      claims_expect(0, $sformatf("ignored traffic %0d", which));
       enable = 1'b1;
     end
     // A real ARP request to the DUT is not iperf.
@@ -821,6 +859,7 @@ module tb_rtlnet_iperf;
     push48(f, MAC_A); push32(f, IP_A); push48(f, 48'd0); push32(f, DUT_IP);
     send(pad60(f));
     expect_silence(300, "ARP request");
+    claims_expect(0, "ARP request");
     // UDP length exactly the frame (no padding): accepted.
     d = dg_new(0, MAC_A, IP_A, PORT_A, 88);
     d.seq = 1;
@@ -833,6 +872,7 @@ module tb_rtlnet_iperf;
       tb_check(ok && f.size() == 170 && get32(f, 66) == 176, "88-byte datagrams accepted");
       if (ok) exp_ident++;
     end
+    claims_expect(2, "88-byte datagram and FIN");
   endtask
 
   // ---------------------------------------------------------------------------
@@ -942,7 +982,9 @@ module tb_rtlnet_iperf;
     longint gmin;
     bit [31:0] d;
     // Paced: 100-byte payload at 8 Mbit/s = one datagram per 100 us for 10 ms.
+    claim_mark = u_claim_mon.claims;
     reverse_request(MAC_A, IP_A, PORT_A, 32'd100, 32'hFFFF_FFFF, 32'd8_000_000);
+    claims_expect(1, "-R request");
     repeat (300) @(posedge clk);
     reg_expect(R_STATUS, 32'h0001_0002, "tx_active during the stream");
     reg_expect(R_RATE, 32'd8_000_000, "REQ_RATE_BPS of the -R request");
@@ -1016,8 +1058,10 @@ module tb_rtlnet_iperf;
     end
     // REVERSE_ALLOWED off: the request starts nothing and opens no flow.
     reg_write(R_CTRL, 32'h0);
+    claim_mark = u_claim_mon.claims;
     reverse_request(MAC_A, IP_A, PORT_A, 32'd100, 32'hFFFF_FFFF, 32'd0);
     expect_silence(5000, "REVERSE_ALLOWED off");
+    claims_expect(0, "-R request with REVERSE_ALLOWED off");
     reg_expect(R_STATUS, 32'h0001_0000, "REVERSE_ALLOWED off: no stream, no flow");
     reg_write(R_CTRL, C_REV);
     // Disabling the leaf stops a stream with no final datagram.
