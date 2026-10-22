@@ -27,7 +27,8 @@ network stack: every protocol runs in logic, and the CPU only configures and mon
 | ARP responder | `rtlnet_arp` | RFC 826 replies for the local IPv4 address |
 | ICMP echo (ping) | `rtlnet_icmp` | RFC 792 echo reply, payload up to 1472 bytes |
 | DHCP client | `rtlnet_dhcp` | RFC 2131 DISCOVER/OFFER/REQUEST/ACK, renew, lease loss |
-| iperf 2 UDP server | `rtlnet_iperf` | `iperf -c <board> -u` with server report; `-R` reverse stream |
+| iperf 2 UDP server | `rtlnet_iperf` | `iperf -c <board> -u` with server report; `-R` reverse stream (RTL) |
+| iperf 2 TCP server | firmware (`lwiperf` on lwIP) | `iperf -c <board>` on TCP port 5001 through the CPU network path |
 | UDP socket layer | `rtlnet_udp_socket` | N bound ports, payload streams to and from applications |
 | UDP echo server | `rtlnet_udp_echo` | application on the socket payload streams: returns every datagram to its sender |
 | Frame filter/classifier | `rtlnet_classifier` | **designed, not built yet** (section 13) |
@@ -459,8 +460,10 @@ not change. `microblaze/rtlnet_microblaze_sim_stub.sv` (module `rtlnet_microblaz
 AXI4-Lite transactions for the board bench.
 
 The block design also carries an AXI DMA (simple mode, 64-bit streams, `S2MM` from `s_axis_eth_*`, `MM2S` to
-`m_axis_eth_*`, both interrupts on the INTC) and an AXI BRAM for DMA buffers and the lwIP heap; the LMB BRAM is
-256 KiB.
+`m_axis_eth_*`, both interrupts on the INTC) and an AXI BRAM for the DMA buffers; the LMB BRAM (256 KiB, up to
+512 KiB) holds code, stack, heap and the lwIP pools. **All firmware runs from internal block RAM only; no external
+memory (DDR) is used.** The MicroBlaze has **no caches**: code runs
+from the single-cycle LMB and the DMA buffers are accessed uncached, so no coherence handling exists.
 
 Firmware (`microblaze/firmware`) is C11 built with `mb-gcc` against a standalone BSP that is **generated at build time
 from the hardware export (XSA) by the Vitis tools in the AMD install** (standalone OS, `axidma`, `uartlite`,
@@ -472,7 +475,7 @@ repository; the generated BSP lives in the ignored build folder. Layers:
 | BSP (generated) | start-up, vectors, Xilinx drivers, `xil_printf`, lwIP core |
 | platform (`microblaze/firmware/src`) | UART console on XUartLite, millisecond tick on XTmrCtr, interrupt setup on XIntc |
 | RTLNet drivers | `cores/<core>/driver/*.c`, compiled in place, the only code that touches each core's registers |
-| network | `rtlnet_netmgr.c` (PHY/MAC/DHCP management), `rtlnet_lwip_netif.c` (lwIP netif on the AXI DMA and the `cpu_axis_ethernet_stream`), `rtlnet_tcp_echo.c` (lwIP raw-API TCP echo server, port 7) |
+| network | `rtlnet_netmgr.c` (PHY/MAC/DHCP management), `rtlnet_lwip_netif.c` (lwIP netif on the AXI DMA and the `cpu_axis_ethernet_stream`), `rtlnet_tcp_echo.c` (lwIP raw-API TCP echo server, port 7), TCP iperf server on port 5001 (lwIP's `lwiperf`, compiled in place from the install; the UDP iperf server on port 5001 is the RTL iperf leaf) |
 | CLI | `menu.c`, `cli_commands.c` (MenuBuilder hierarchical rules) |
 
 CLI: a light network-switch style hierarchy built on the MenuBuilder rules
