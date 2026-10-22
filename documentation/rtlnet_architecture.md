@@ -455,7 +455,7 @@ vendor neutral so another soft or hard processor drops in with a wrapper of the 
 multiplier/divider/barrel shifter), 128 KiB LMB BRAM, MDM (JTAG debug), AXI UART Lite (115200 8N1), AXI Timer,
 AXI interconnect, the exported AXI4-Lite master and an interrupt controller. A Nios V core would be
 `rtlnet_cpu_niosv.sv` around a Platform Designer system with the same ports; the RTL below the decoder does
-not change. `microblaze/testbench/rtlnet_cpu_bfm.sv` has the same ports and drives scripted
+not change. `microblaze/rtlnet_microblaze_sim_stub.sv` (module `rtlnet_microblaze_sim_stub`, the simulation stand-in for the CPU) has the same ports and drives scripted
 AXI4-Lite transactions for the board bench.
 
 The block design also carries an AXI DMA (simple mode, 64-bit streams, `S2MM` from `s_axis_eth_*`, `MM2S` to
@@ -501,7 +501,7 @@ mode or the next keywords of a partial command, unique prefixes are accepted (`s
 - `+INJECT_FAILURE` forces a failure; each bench is run once with it and must report `TEST FAIL`.
 - Oracles are independent of the RTL: a bit-serial CRC-32, an RFC 1071 checksum, bench-built expected frames.
 - Leaf benches include the shared busy-rule monitor.
-- Board bench: the real board top (MicroBlaze replaced by an AXI4-Lite bus-functional model) against an RTL8211E
+- Board bench: the real board top (MicroBlaze replaced by `microblaze/rtlnet_microblaze_sim_stub.sv`) against an RTL8211E
   RGMII/MDIO model at 10, 100 and 1000 Mb/s.
 
 Hardware: Vivado batch build with exit-code gates (synthesis, timing setup and hold, CDC report, utilization),
