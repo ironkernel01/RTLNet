@@ -852,10 +852,24 @@ module tb_rtlnet_dhcp;
       14: begin name = "EtherType IPv6"; s.ethertype = 16'h86DD; end
       15: begin name = "other unicast MAC"; s.eth_dst = OTHER_MAC; end
       16: begin name = "ACK while selecting"; opts[2] = 8'd5; end
-      17: begin name = "OFFER without option 54"; opts = cat(o_type(8'd2), o_addr(8'd51, LONG_LEASE)); opts.push_back(8'd255); end
-      18: begin name = "no option 53"; opts = cat(o_addr(8'd54, SERVER_IP), o_addr(8'd51, LONG_LEASE)); opts.push_back(8'd255); end
+      17: begin
+        name = "OFFER without option 54";
+        opts = cat(o_type(8'd2), o_addr(8'd51, LONG_LEASE));
+        opts.push_back(8'd255);
+      end
+      18: begin
+        name = "no option 53";
+        opts = cat(o_addr(8'd54, SERVER_IP), o_addr(8'd51, LONG_LEASE));
+        opts.push_back(8'd255);
+      end
       19: begin name = "no end option"; void'(opts.pop_back()); s.bootp_min = 0; end
-      20: begin name = "option past the datagram"; void'(opts.pop_back()); opts.push_back(8'd43); opts.push_back(8'd200); s.bootp_min = 0; end
+      20: begin
+        name = "option past the datagram";
+        void'(opts.pop_back());
+        opts.push_back(8'd43);
+        opts.push_back(8'd200);
+        s.bootp_min = 0;
+      end
       21: begin name = "IP total length past the frame"; s.ip_len_adj = 40; end
       22: begin name = "frame longer than the RAM"; s.bootp_min = 1100 - 42; end
       23: begin name = "leaf disabled"; end
