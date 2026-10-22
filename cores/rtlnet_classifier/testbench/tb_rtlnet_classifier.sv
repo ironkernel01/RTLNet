@@ -35,7 +35,8 @@
 //   * Plusargs: +INJECT_FAILURE (negative control), +SEED=<n>, +PERTURB=<k>
 //     (proves checks can fail: 1 expected latency +1, 2 model range upper
 //     bound exclusive, 3 model storm limit +1, 4 model LT as LE, 5 model
-//     drops VLAN awareness, 6 model counter FRAMES +1).
+//     drops VLAN awareness, 6 model counter FRAMES +1), +TRACE (per-frame
+//     engine results and model verdicts in the log).
 // Language: SystemVerilog-2012 (simulation only).
 // Revision: 10-22-2026
 //   * 10-22-2026: initial version.
@@ -1725,7 +1726,6 @@ module tb_rtlnet_classifier;
     phase_storm();
     phase_tables();
     phase_rules();
-    if ($test$plusargs("STOP_RULES")) tb_verdict("tb_rtlnet_classifier");
     phase_combination();
     phase_priority();
     phase_delay();

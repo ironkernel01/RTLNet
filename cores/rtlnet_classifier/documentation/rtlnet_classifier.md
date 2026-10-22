@@ -3,7 +3,7 @@
 | Item | Value |
 |---|---|
 | Core | `rtlnet_classifier` |
-| Status | Built and verified (10-22-2026): RTL `hdl/`, driver `driver/`, bench `testbench/`; as-built details and deviations in section 11 |
+| Status | Built and verified (10-22-2026): RTL `hdl/`, driver `driver/`, bench `testbench/`; as-built details and deviations in section 10 |
 | Language | SystemVerilog-2012 (RTL), C11 (driver) |
 | Clock | `axis_clk` of the stream it filters (`cpu_axis_clk` 100 MHz on the CPU path; the MAC client clock on a main-ingress instance) |
 | Registers | AXI4-Lite, `s_axi_aclk`, 4 KiB window, internal `rtlnet_axil_cdc` to `axis_clk`; protocol sub-map 0x8000 for the CPU-path instance |
@@ -66,7 +66,7 @@ pass-all.
 
 Derived: `DELAY_BEATS = MATCH_DEPTH_BYTES / 8 + VERDICT_LATENCY`, where `VERDICT_LATENCY` is the clock count from a
 frame's last compared beat to its final verdict (table scan `TABLE_ENTRIES / TABLE_LANES` + capture + combiner +
-policer stages). As built (section 11.2): `VERDICT_LATENCY = WIN + 15` with `WIN = max(TABLE_ENTRIES, TUPLE_ENTRIES) /
+policer stages). As built (section 10.2): `VERDICT_LATENCY = WIN + 15` with `WIN = max(TABLE_ENTRIES, TUPLE_ENTRIES) /
 TABLE_LANES`, so the defaults give `VERDICT_LATENCY` = 23 and `DELAY_BEATS` = 31 (the original estimate of 8 / 16
 predates the two-LUT-level pipelining of section 6a). An elaboration `$fatal` stops a parameter set whose verdict
 could arrive after the frame's first beat leaves the delay line.
@@ -295,7 +295,217 @@ CPU network path is used; until then the CPU receives nothing (drop-all).
 Gates: section 6a (156.25 MHz Artix-7 and 390.625 MHz UltraScale+ out-of-context with logic-level report; 100 MHz in
 the board build); zero failing setup/hold.
 
-## 10. Revision history
+## 10. As built (10-22-2026)
+
+### 10.1 Files and modules
+
+| File | Module | Content |
+|---|---|---|
+| `hdl/rtlnet_classifier.sv` | `rtlnet_classifier` | top: ports and parameters of section 2, derived localparams, elaboration checks, instances |
+| `hdl/rtlnet_classifier_pkg.sv` | `rtlnet_classifier_pkg` | register map (mirror of the driver header), bit layouts, operator codes, pipeline stage counts |
+| `hdl/rtlnet_classifier_regs.sv` | `rtlnet_classifier_regs` | `u_axil_cdc` (`rtlnet_axil_cdc`), `u_axil_slave` (`rtlnet_axil_slave`), control registers, configuration write bus, clear sequence, readback mirror `u_mirror_ram`, read path |
+| `hdl/rtlnet_classifier_line.sv` | `rtlnet_classifier_line` | ingress skid stage, registered line enable, `u_delay_line` (`rtlnet_shift_reg_core`), valid / start-of-frame flip-flop chains, verdict queue, gate, `u_out_slice` (`rtlnet_axis_reg_slice`), engine tap |
+| `hdl/rtlnet_classifier_extract.sv` | `rtlnet_classifier_extract` | field capture, header flags, judge acceptance, per-table snapshot |
+| `hdl/rtlnet_classifier_table.sv` | `rtlnet_classifier_table` | one field table (instances `u_tbl_mac`, `u_tbl_ethertype`, `u_tbl_vlan`, `u_tbl_ip`, `u_tbl_port`) |
+| `hdl/rtlnet_classifier_tuple.sv` | `rtlnet_classifier_tuple` | tuple (ACL) table `u_tuple` |
+| `hdl/rtlnet_classifier_hitacc.sv` | `rtlnet_classifier_hitacc` | lane reduce, window accumulation, lowest-index policing hit, result latch (shared by tables and tuple) |
+| `hdl/rtlnet_classifier_rule.sv` | `rtlnet_classifier_rule` | one positional rule engine (`g_rule[r].u_rule`) |
+| `hdl/rtlnet_classifier_combiner.sv` | `rtlnet_classifier_combiner` | token pipeline, match, MODE, policer selection and policers, verdicts, counters |
+| `hdl/rtlnet_classifier.f` | | filelist (starts with `-f cores/rtlnet_common/hdl/rtlnet_common.f`) |
+| `driver/rtlnet_classifier.h/.c` | | C driver (section 8, 10.6) |
+| `driver/test/` | | host unit test `test_rtlnet_classifier_host.c`, `build_test.ps1`, `Makefile` |
+| `testbench/tb_rtlnet_classifier.sv/.f`, `regression.txt` | | bench and regression list |
+| `testbench/rtlnet_classifier_timing.tcl` | | out-of-context implementation and LUT-level gate (section 10.8) |
+
+### 10.2 Frame path and latency
+
+| Quantity | Value (formula; defaults) |
+|---|---|
+| `WIN` (table words per frame) | `max(TABLE_ENTRIES, TUPLE_ENTRIES) / TABLE_LANES`; 8 |
+| `JUDGE_GAP` (clocks between accepted judges) | `max(WIN, 4)`; 8 |
+| `VERDICT_LATENCY` | tap 1 + capture 2 + snapshot 1 + (`WIN` - 1) + table 7 + combiner 3 + policer 1 + queue 1 = `WIN + 15`; 23 |
+| `DELAY_BEATS` | `MATCH_DEPTH_BYTES / 8 + VERDICT_LATENCY`; 31 |
+| s_axis to m_axis, gap-free frame, ready sink | `DELAY_BEATS + 2` clocks (ingress register + line + output slice); 33 clocks = 330 ns at 100 MHz |
+| `MATCH_DEPTH_BYTES` 128, `TABLE_LANES` 4 (bench build m128) | `WIN` 4, `VERDICT_LATENCY` 19, `DELAY_BEATS` 35 |
+| `MATCH_DEPTH_BYTES` 40, entries 8/4, lanes 2 (bench build m40) | `WIN` 4, `VERDICT_LATENCY` 19, `DELAY_BEATS` 24 |
+| Throughput | one beat per clock; back-to-back 60-byte frames with no idle clock (bench) |
+
+All of these are localparams computed from the stage counts in `rtlnet_classifier_pkg`; `LATENCY` (0x014) reports
+`DELAY_BEATS` and `VERDICT_LATENCY` of the build.
+
+Judge: a frame's decision starts at its "judge" beat, beat `MATCH_DEPTH_BYTES / 8 - 1` or the final beat of a
+shorter frame. The extractor snapshots every table field in the clock after the capture is complete; each table
+reads its words on a free-running rotating address and compares the snapshot during the `WIN` clocks after it loads,
+so every entry is seen once whatever the rotation phase (the lowest-index policing hit is still found: section 6.3).
+The rule engines judge each beat as it enters the line and finish 8 clocks after the judge beat; the combiner
+takes the rule results into a per-frame token and the table results `WIN + 6` clocks after the snapshot.
+
+### 10.3 Deviations from sections 1..9, and why
+
+| Section | Specification | As built | Reason |
+|---|---|---|---|
+| 2, 6a | `VERDICT_LATENCY` 8 (estimate), `DELAY_BEATS` 16 | 23 and 31 with the defaults (formula above) | the two-LUT-level stages of 6a (register-to-register compare lanes, merge, side hit, entry hit, reduce, accumulate, latch; three combiner stages) do not fit the original estimate; the derivation is mechanical as 6a requires |
+| 4.4 | each table starts scanning when its fields are captured (MAC beat 1, ... IP/port beat 4) | all tables compare at the judge beat, on a rotating read address | the scan then needs no per-table start and no field double-buffering; with `MATCH_DEPTH_BYTES` 64 it costs 2 clocks of latency against a beat-5 start (VLAN-aware ports are in beat 5) |
+| 4.4 | `$fatal` on scan clocks + capture beat against the minimum frame time at the configured clock and line rate | `$fatal` when `WIN` > 8 (8 clocks = one 60-byte frame at one beat per clock) | the core has no line-rate parameter; one beat per clock is the worst case of every RTLNet build |
+| 6.4 | the line shifts every clock; with no input beat a bubble enters | identical while the source is gap-free; while a frame is being received and its next beat is not yet offered, the line holds (no bubble enters inside a frame) | with bubbles inside a frame, the first beat reaches the end of the line before the frame's later beats are judged (a 1 Gb/s MAC on a 62.5 MHz stream offers one beat in four clocks); holding keeps "the verdict is present when the frame arrives" true for any source. Between frames the line still flushes freely, so a frame's tail never waits for the next frame's start, only for the gaps inside the next frame |
+| 6.4 | back-to-back frames of any size | frames whose judge beat comes less than `JUDGE_GAP` clocks after the previous accepted judge are dropped and counted (`OVERRUN_DROPPED`, 0x0BC) | the tables finish one frame per `WIN` clocks and the policer budget feedback needs 4 clocks. This can only happen to a frame shorter than 57 bytes (8 beats) following another frame closely; legal Ethernet frames (60 bytes or more) are never affected |
+| 7 | counters reach the register clock through `rtlnet_gray_sync` | the register file runs in `axis_clk` behind `rtlnet_axil_cdc` (as section 7 also states), so counters are read in their own clock; no Gray crossing exists | the two statements of section 7 conflict; the `rtlnet_axil_cdc` placement was kept |
+| 7 | table words RW | the engines' memories are write-only from the register side; reads come from a readback mirror (`u_mirror_ram`, 1024 x 32, written with every defined entry word and cleared with the tables): every defined word reads back as written, undefined offsets read 0 | `rtlnet_ram_core` port B belongs to the engine |
+| 7 | additions | `LATENCY` (0x014), `OVERRUN_DROPPED` (0x0BC), policer `BUDGET` (+0x18) | visibility of the derived latency, the overrun drop and the current window |
+| 7 | power-up: every entry invalid | after reset and after `CLEAR_TABLES` a 1024-clock clear sequence writes zero to every engine and mirror word (`STATUS.CLEARING`; entry writes are ignored meanwhile; the driver waits for it) | a warm reset must not leave valid entries in the memories, which have no reset |
+| 2 | parameter ranges | `TABLE_ENTRIES`, `TUPLE_ENTRIES` in {2, 4, 8, 16} (16 is the register-map limit), `TABLE_LANES` in {2, 4}, `NUM_RULES` 1..4 and `NUM_RULES x RULE_STRIDE` <= 0x400, `NUM_POLICERS` 1..4 (the policer fields are 2 bits), `AXIS_CLK_HZ` >= 4000 | each limit is an elaboration `$fatal` |
+
+### 10.4 Semantics fixed by the build (the specification left them open)
+
+* Field values are in number order (first wire byte most significant): MAC `00:11:22:33:44:55` = `0x001122334455`.
+* VLAN field: `{PCP, VID}` (15 bits) in data/mask compare, `VID` (PCP forced to 0) in single and range compare;
+  present only on a tagged frame. ETHERTYPE and VLAN have no destination side (an entry with only `DST_EN` never
+  hits). A non-VLAN-aware table on a tagged frame sees EtherType 0x8100, so its IP and port fields are absent.
+* `is_ipv4`: EtherType 0x0800 and byte `0x45` at the selected offsets. `has_l4`: `is_ipv4`, protocol 6 or 17, and
+  not a fragment (MF = 0 and fragment offset = 0). A field is present when its last byte was received within the
+  first `min(48, MATCH_DEPTH_BYTES)` bytes (so with 40 bytes the VLAN-aware L4 ports are absent, as section 2 says).
+* Range and data/mask pairs: the control word of the even entry governs the pair; the odd entry supplies only values.
+  `COMPARE` 11 never hits.
+* Tuple: a non-IPv4 frame never hits; a port range 0..65535 is "any" and also matches a frame without L4 ports
+  (ICMP, fragments); any other range requires `has_l4`.
+* Rules: the reference combination: OR of the contributions of the enabled gating rules (`match`, or `!match` for an
+  exclude rule), AND of `!match` when every enabled gating rule is an exclude rule, 1 with none.
+* Policers: a write to `CTRL`, `LIMIT_PKTS` or `WINDOW_MS` restarts the window and reloads the budget; each policer
+  has its own millisecond prescaler, so windows are exact from the restart (to within the 4-clock decision
+  pipeline). `SEEN`/`PASSED`/`DROPPED` count frames policed by an enabled policer. A policer index at or above
+  `NUM_POLICERS` acts as disabled.
+* Hit counters count judged frames that hit an enabled table or matched an enabled rule (gating or classify-only);
+  an overrun frame counts only in `FRAMES`, `DROPPED` and `OVERRUN_DROPPED`.
+* Rule updates: each rule keeps a per-byte don't-care vector beside its buffer; its suffix AND settles
+  `MATCH_DEPTH_BYTES / 8 + 8` clocks after a write, which the driver covers (rule disabled, `RTLNET_CLS_SETTLE_READS`
+  register reads before re-enabling).
+
+### 10.5 Register map summary (as built)
+
+| Offset | Name | Bits |
+|---:|---|---|
+| 0x000 | `ID` | `0x434C5346` ("CLSF") |
+| 0x004 | `VERSION` | `0x10222026` |
+| 0x008 | `CAPS` | [4:0] `TABLE_ENTRIES`, [9:5] `TUPLE_ENTRIES`, [12:10] `NUM_RULES`, [15:13] `NUM_POLICERS`, [20:16] `TABLE_LANES`, [26:21] `MATCH_DEPTH_BYTES / 8` |
+| 0x00C | `CTRL` | [1:0] `MODE` (reset 0), bit8 `CLEAR_TABLES` (pulse), bit16 `CNT_CLEAR` (pulse) |
+| 0x010 | `STATUS` | bit0 `CLEARING`, [9:8] `MODE`, bit16 `STALL_SEEN` |
+| 0x014 | `LATENCY` | [7:0] `DELAY_BEATS`, [15:8] `VERDICT_LATENCY` |
+| 0x020 + 4t | `TABLE_MODE[t]` | bit0 `ENABLE`, bit1 `EXCLUDE`, [3:2] `COMPARE`, bit4 `CLASSIFY`, bit7 `VLAN_AWARE` |
+| 0x040 + 4r | `RULE_MODE[r]` | bit0 `ENABLE`, bit1 `EXCLUDE`, bit2 `CLASSIFY`, bit3 `POLICE_EN`, [5:4] `POLICER` |
+| 0x080..0x0BC | counters | `FRAMES`, `PASSED`, `DROPPED`, `MODE_DROPPED`, `POLICE_DROPPED`, `TABLE_HIT[0..5]`, `RULE_HIT[0..3]`, `OVERRUN_DROPPED` |
+| 0x100 + 0x20p | `POLICER[p]` | `+0` CTRL bit0 `ENABLE`, `+4` `LIMIT_PKTS`, `+8` `WINDOW_MS`, `+C` `SEEN`, `+10` `PASSED`, `+14` `DROPPED`, `+18` `BUDGET` |
+| 0x400 + 0x100t + 0x10e | field entry | `+0` `SRC_VALUE[31:0]`; `+4` [31] `VALID`, [30] `SRC_EN`, [29] `DST_EN`, [28] `BOTH`, [27] `PROTO_EN`, [26] `POLICE_EN`, [25:24] `POLICER`, [23:16] `PROTO`, [15:0] `SRC_VALUE[47:32]`; `+8` `DST_VALUE[31:0]`; `+C` [15:0] `DST_VALUE[47:32]` |
+| 0x900 + 0x20e | tuple entry | `+0` [31] `VALID`, [30] `PROTO_EN`, [29] `POLICE_EN`, [9:8] `POLICER`, [7:0] `PROTO`; `+4` `SRC_IP`; `+8` `SRC_MASK`; `+C` `DST_IP`; `+10` `DST_MASK`; `+14` {`SPORT_HI`, `SPORT_LO`}; `+18` {`DPORT_HI`, `DPORT_LO`} |
+| 0xC00 + `RULE_STRIDE` r + 4b | rule byte | [7:0] `COMPARE`, [11:8] `OP`, [31:24] `MASK`; `RULE_STRIDE` = max(0x100, 4 x MATCH_DEPTH_BYTES rounded up to a power of two) |
+
+### 10.6 Driver API (`driver/rtlnet_classifier.h`)
+
+Every function takes the context filled by `rtlnet_classifier_init` as its first argument (one context per instance,
+so the CPU-path and a main-ingress instance can coexist) and returns `RTLNET_CLS_OK` (0) or a negative
+`RTLNET_CLS_ERR_ARG / _ID / _TIMEOUT / _RANGE / _NOT_INIT`. Boot sequence of the firmware network manager:
+
+```c
+static rtlnet_classifier_t g_cls;
+rtlnet_classifier_init(&g_cls, base + 0x8000u);          /* probe ID, VERSION, CAPS, LATENCY; wait CLEARING */
+rtlnet_classifier_config_bcast_storm(&g_cls, 10u, 100u);  /* broadcast storm limiter, MODE = PASS_ALL */
+```
+
+| Function | Use (CLI) |
+|---|---|
+| `init`, `get_status`, `set_mode`, `get_mode`, `clear_all` | `classifier mode ...`, `show classifier` |
+| `table_mode`, `get_table_mode`, `table_entry_set/get`, `tuple_set/get` | `classifier table ...`, `classifier acl ...` |
+| `rule_mode`, `get_rule_mode`, `rule_byte`, `rule_pattern` (whole rule as one data/mask pattern, other bytes don't-care) | `classifier rule ...` |
+| `policer_set`, `policer_get` (configuration, counters, budget) | `classifier policer ...`, `show storm-control` |
+| `counters`, `clear_counters` | `show classifier` |
+| `mac_filter` (single), `ethertype_filter` (range pair), `ipv4_filter` (data/mask pair), `port_filter` (range pair, protocol 0 = any), `acl_add` | helpers; `action` = `RTLNET_CLS_ACT_GATE` or `RTLNET_CLS_ACT_CLASSIFY`, optionally ORed with `RTLNET_CLS_ACT_POLICE(p)` |
+| `config_bcast_storm(ctx, limit_pkts, window_ms)` | `storm-control broadcast <packets> <milliseconds>` |
+| `bcast_storm_enable(ctx, on)` | `storm-control broadcast enable/disable` |
+
+Every set function follows the update protocol (table or rule disabled while its words change, then restored).
+The helpers set the table's `COMPARE` mode (single for MAC, range for EtherType and port, data/mask for IPv4) and
+keep its `EXCLUDE` and `VLAN_AWARE` bits; the pair helpers take a pair index (entries 2i, 2i+1).
+
+### 10.7 Verification record (10-22-2026)
+
+| Run | Configuration | Result |
+|---|---|---|
+| `tb_rtlnet_classifier` | defaults, AMD (XPM / SRLC32E models) | PASS, 17474 checks (67 s) |
+| `tb_rtlnet_classifier` generic | defaults, `RTLNET_TECH_GENERIC` | PASS, 17474 checks (60 s) |
+| `tb_rtlnet_classifier` m128 | `MATCH_DEPTH_BYTES` 128, `TABLE_LANES` 4, GENERIC | PASS, 17742 checks (75 s) |
+| `tb_rtlnet_classifier` m40 | `MATCH_DEPTH_BYTES` 40, entries 8/4, 4 rules, 2 policers, GENERIC | PASS, 13973 checks (59 s) |
+| `tb_rtlnet_classifier` neg | `+INJECT_FAILURE` | TEST FAIL as required |
+| driver host test | `driver/test/build_test.ps1` | PASS, 571 checks; `--inject-failure` reports TEST FAIL; `mb-gcc -mlittle-endian -mcpu=v11.0 -std=c11 -Wall -Wextra -Werror -c` clean |
+
+What the bench proves (each against the independent reference model, with hand-written expectations cross-checked
+against the model in the directed phases): power-up drop-all (30 frames, none out); each `MODE`; the broadcast storm
+configuration (10 per 100 ms, 3 per 20 ms, 0 per 10 ms; three windows each; exactly `LIMIT` broadcasts pass per
+window while every interleaved unicast passes; disabled limiter passes all); every field table in single, range
+and data/mask compare with source / destination / either / both, include, exclude, classify-only, VLAN-aware
+offsets, the PORT protocol qualifier, absent and truncated fields, fragments, IHL other than 5; tuple entries (TCP
+/24 to host port 22, UDP and out-of-range rejections, ICMP with any ports, non-IPv4); every rule operator at its
+boundary (compare value one below, equal, one above) with a mask; absent bytes against compare and don't-care
+operators, 1-, 13- and 14-byte frames; the rule-combination rule over all 16 include/exclude/classify/disabled
+pairs; policer priority (rules, tuple, MAC .. IP, lowest entry) and a disabled policer; every beat leaving exactly
+`DELAY_BEATS + 2` clocks after entry for frames of 60 to 1518 bytes including `MATCH_DEPTH_BYTES - 8 .. + 8`; 200
+back-to-back 60-byte frames with `s_axis_tready` never low and 1600 output beats at the exact latency; alternating
+pass/drop at full rate; overrun of back-to-back 20-byte frames; `CLEAR_TABLES` and readback of every word class; the
+update protocol; 10000 random frames under 20 random configurations (tagged/untagged, IPv4 TCP/UDP/ICMP/other,
+fragments, options, truncation, random gaps in the source, a random sink) with every counter and identity checked
+after each configuration; `STALL_SEEN`. RTL simulation assertions: verdict present at the end of the line, verdict
+queue overflow, line shifting a refused beat, ingress ready invariant, rule and table results aligned with the
+token stages.
+
+Proof that the checks can fail (each run must report TEST FAIL; all did): `+PERTURB=1` expected latency + 1;
+`+PERTURB=2` range upper bound exclusive in the model; `+PERTURB=3` storm limit + 1 in the model; `+PERTURB=4` model
+`<` as `<=`; `+PERTURB=5` model ignores VLAN awareness; `+PERTURB=6` model `FRAMES` + 1 per frame; RTL perturbation
+(scratch copy of the top) `DELAY_BEATS` = `MATCH_DEPTH_BYTES / 8 + VERDICT_LATENCY - 3`: stopped by the elaboration
+`$fatal`; with that check also removed, the late-verdict assertion fires and the bench reports TEST FAIL (`rtlnet_classifier_line: frame reached the end of the delay line before its
+verdict`).
+
+Run: `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rtlnet_regression.ps1 -Match classifier`.
+
+### 10.8 Synthesis, implementation and the 6a timing gate
+
+`testbench/rtlnet_classifier_timing.tcl` (run through `scripts/rtlnet_vivado.ps1`): out-of-context synthesis and
+implementation of `rtlnet_classifier`, `axis_clk` at the gate period, `s_axi_aclk` 10 ns, the register crossing bound
+by `scripts/rtlnet_constrain_cdc.tcl` (classes `sync`, `axil_cdc`); gates on zero failing setup and hold endpoints
+(queried with `get_timing_paths`) and on the LUT levels (LUT1..6 and MUXF7/8 counted, carry not) of the worst path
+to every `axis_clk` endpoint; writes the vendor `report_design_analysis -logic_level_distribution` as well.
+
+Results (Vivado 2025.2, final RTL, default parameters, `RAM_STYLE` "block"):
+
+| Gate | Part | `axis_clk` | WNS / WHS | Failing setup / hold | LUT levels, classifier logic | Result |
+|---|---|---|---|---|---|---|
+| 10G structure (6a) | xc7a200tsbg484-1 | 156.25 MHz (6.400 ns) | +1.515 ns / +0.059 ns | 0 / 0 | max 2 (6532 endpoints 0, 5697 at 1, 391 at 2) | PASS |
+| CPU path | xc7a200tsbg484-1 | 100 MHz (10.000 ns) | +3.310 ns / +0.047 ns | 0 / 0 | max 2 | PASS |
+| 25G structure (6a) | Spartan UltraScale+ at 390.625 MHz | not run | | | | not run: no UltraScale+ device data is installed (`get_parts xcsu*` and every other UltraScale family return nothing; only Artix-7 is installed) |
+| stress proxy | xc7a200tsbg484-3 | 250 MHz (4.000 ns) | +0.694 ns / +0.068 ns | 0 / 0 | max 2 | PASS; the worst path is one LUT and 2.83 ns of routing (`u_extract/fl_vlan` selecting the snapshot, high fanout) |
+
+12906 `axis_clk` endpoints analysed per run. Paths entirely inside the shared `rtlnet_common` modules
+`rtlnet_axil_cdc` / `rtlnet_axil_slave` (the AXI4-Lite master FSM of the crossing, 6 endpoints) have 3 LUT levels; they
+are reported and not gated (section 10.9). The vendor `report_design_analysis -logic_level_distribution` counts carry
+cells as levels (32-bit counters show up to 9: one LUT and eight CARRY4) and is kept next to the census
+(`<tag>_levels.rpt`).
+
+Utilization after implementation, xc7a200tsbg484-1, defaults: 3351 slice LUTs (3228 logic, 123 SRL: the 73-bit,
+31-slot delay line as SRLC32E plus control), 6217 flip-flops, 30 block RAM tiles (58 RAMB18 + 1 RAMB36: two lanes of
+per-word entry memories for five field tables and the tuple table, eight lanes per rule, the 4 KiB readback mirror),
+4 MUXF7, 0 DSP. `scripts/rtlnet_synth_check.tcl`: PASS, 0 critical warnings.
+
+### 10.9 Open issues
+
+* 390.625 MHz UltraScale+ gate not run: no UltraScale+ part is installed. The structure is at most two LUT levels
+  per stage; on Artix-7 -3 it closes at 250 MHz with the critical path dominated by routing of high-fanout
+  selects (VLAN-aware field select, snapshot load enable, `shift_q`). A 390 MHz build will likely need those nets
+  replicated (phys_opt does part of it) and should be run as soon as a device is installed.
+* `rtlnet_axil_cdc` (shared, `rtlnet_common`, outside this core): its master-side FSM has 3 LUT levels in
+  `axis_clk` (6 endpoints). It meets 156.25 MHz and 250 MHz with margin; meeting the letter of 6a needs a change in
+  `rtlnet_common` (register the request-toggle compare).
+* Sub-minimum frames (under 57 bytes) arriving back-to-back are dropped as overruns (10.3); legal Ethernet frames are
+  never affected.
+* The bench shares one Active-HDL seat; the full regression (5 runs) takes about 5 minutes.
+
+## 11. Revision history
 
 | Revision | Change |
 |---|---|
@@ -304,3 +514,4 @@ the board build); zero failing setup/hold.
 | 10-22-2026 | EtherType table, data/mask compare, tuple (ACL) table, classify-only, policers, global MODE with power-up DROP_ALL; first instance on the CPU path; driver API with the broadcast storm limiter as the first default configuration |
 | 10-22-2026 | Shift-register delay line of `MATCH_DEPTH_BYTES` (default 64) with verdict-gated valid at its output, in place of a store-and-forward FIFO |
 | 10-22-2026 | Binding timing structure for 10G/25G line rates: two LUT levels per stage, pipelined compares and reductions, derived verdict latency |
+| 10-22-2026 | As built: RTL, driver, bench and timing gate; section 10 records the as-built latencies, register-map additions (`LATENCY`, `OVERRUN_DROPPED`, `BUDGET`), deviations, verification and timing results |
