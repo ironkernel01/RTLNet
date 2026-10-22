@@ -40,7 +40,7 @@
 module rtlnet_tcp_offload_tx #(
   parameter string RAM_STYLE       = "block",       // frame buffer: "block" | "distributed"
   parameter string SB_RAM_STYLE    = "distributed", // sideband queue
-  parameter int    TX_BUF_KB       = 4,             // frame buffer, kilobytes (two 2 KiB slots per 4)
+  parameter int    TX_BUF_KB       = 8,             // frame buffer, kilobytes (one 2 KiB slot per 2)
   parameter int    MAX_FRAME_BYTES = 1518
 )(
   // Clock and synchronous active-low reset.

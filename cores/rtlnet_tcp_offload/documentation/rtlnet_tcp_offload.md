@@ -52,7 +52,7 @@ All four streams are the RTLNet stream (64-bit `tdata`, `tkeep` contiguous on th
 
 | Parameter | Default | Meaning |
 |---|---|---|
-| `TX_BUF_KB` | 4 | TX frame buffer in kilobytes (`rtlnet_packet_fifo`, 2 KiB slots: 4 = two frames) |
+| `TX_BUF_KB` | 8 | TX frame buffer in kilobytes (`rtlnet_packet_fifo`, 2 KiB slots: 8 = four frames, full rate for every size) |
 | `RAM_STYLE` | `"block"` | TX frame buffer RAM style |
 | `SB_RAM_STYLE` | `"distributed"` | TX sideband queue RAM style |
 | `MAX_FRAME_BYTES` | 1518 | largest frame; must give 256-word slots (1025..2048) |
@@ -65,7 +65,7 @@ Offsets and bits are defined once, in `driver/rtlnet_tcp_offload.h`; `hdl/rtlnet
 |---:|---|---|---|
 | 0x000 | `ID` | RO | `0x5443504F` |
 | 0x004 | `VERSION` | RO | `0x10222026` |
-| 0x008 | `CAPS` | RO | bit0 `TX_PRESENT`, bit1 `RX_PRESENT`, bit2 `INS_IP`, bit3 `INS_TCP`, bit4 `INS_UDP`, bit5 `VLAN`, [15:8] `TX_BUF_KB`, [26:16] largest frame in bytes. Reset value (default build) `0x05EE_043F` |
+| 0x008 | `CAPS` | RO | bit0 `TX_PRESENT`, bit1 `RX_PRESENT`, bit2 `INS_IP`, bit3 `INS_TCP`, bit4 `INS_UDP`, bit5 `VLAN`, [15:8] `TX_BUF_KB`, [26:16] largest frame in bytes. Reset value (default build, 8 KB) `0x05EE_083F` |
 | 0x00C | `CTRL` | RW | bit0 `tx_ip_csum`, bit1 `tx_l4_csum`, bit2 `rx_csum`. Power-up 0. Reads back exactly as written; bits 31:3 read 0 |
 | 0x010 | `STATUS` | RO | bit0 `TX_IDLE`: TX buffer, sideband queue and pipeline empty and no frame in progress. bit1 `RX_IDLE`: RX delay line empty and no trailer pending |
 | 0x014 | `LATENCY` | RO | [7:0] TX: clocks from the final beat accepted to the sideband entry written (18); [15:8] RX delay-line beats (17) |
@@ -252,7 +252,7 @@ Ordering (one firmware function, never mismatched):
 
 ## 9. Verification
 
-`tb_rtlnet_tcp_offload` (`regression.txt`: default technology, GENERIC, `TX_BUF_KB` 8, 16, negative control).
+`tb_rtlnet_tcp_offload` (`regression.txt`: default technology, GENERIC, `TX_BUF_KB` 4, 16, negative control; default 8).
 The reference model (`parse_frame`, `ref_tx`, `ref_rx`) is written from the protocol rules with the RFC 1071 sum
 of `rtlnet_tb_pkg` and shares no code with the RTL.
 

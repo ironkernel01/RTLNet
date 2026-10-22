@@ -26,8 +26,8 @@
 // Reference model: parse_frame / ref_tx / ref_rx below are written from the
 //   protocol rules (byte offsets, RFC 1071 inet_sum from rtlnet_tb_pkg) and share
 //   no code with the RTL.
-// Variants (defines): TB_TXO_BUF16 builds with TX_BUF_KB = 16 (eight slots) so
-//   small frames also run at full rate; RTLNET_TECH_GENERIC the behavioural RAM.
+// Variants (defines): the default is TX_BUF_KB = 8 (four slots, full rate for every size);
+//   TB_TXO_BUF4 builds the two-slot 4 KiB buffer (about 95 % for maximum frames), TB_TXO_BUF16 eight slots; RTLNET_TECH_GENERIC the behavioural RAM.
 // Language: SystemVerilog-2012 (simulation only).
 // Revision: 10-22-2026
 //   * 10-22-2026: initial version.
@@ -42,10 +42,10 @@ module tb_rtlnet_tcp_offload;
 
 `ifdef TB_TXO_BUF16
   localparam int TX_KB = 16;
-`elsif TB_TXO_BUF8
-  localparam int TX_KB = 8;
-`else
+`elsif TB_TXO_BUF4
   localparam int TX_KB = 4;
+`else
+  localparam int TX_KB = 8;
 `endif
 
   // ---------------------------------------------------------------------------
@@ -1019,17 +1019,15 @@ module tb_rtlnet_tcp_offload;
     set_ctrl(32'h7);
     burst_tx(14, 1514, per);
     $display("TXO THROUGHPUT tx 1514 bytes: period %f clocks (190 beats)", per);
-`ifdef TB_TXO_BUF16
-    tb_check(per > 190.0 && per <= 192.1, $sformatf("TX 1514-byte period %f, expected 191", per));
-`elsif TB_TXO_BUF8
-    tb_check(per > 190.0 && per <= 192.1, $sformatf("TX 1514-byte period %f, expected 191", per));
-`else
+`ifdef TB_TXO_BUF4
     tb_check(per > 190.0 && per <= 202.0, $sformatf("TX 1514-byte period %f, expected about 200 with two slots", per));
+`else
+    tb_check(per > 190.0 && per <= 192.1, $sformatf("TX 1514-byte period %f, expected 191", per));
 `endif
     burst_tx(40, 64, per);
     $display("TXO THROUGHPUT tx 64 bytes, TX_BUF_KB %0d: period %f clocks (8 beats)", TX_KB, per);
-`ifdef TB_TXO_BUF16
-    tb_check(per <= 10.1, $sformatf("TX 64-byte period %f exceeds 10 with eight slots", per));
+`ifndef TB_TXO_BUF4
+    tb_check(per <= 10.1, $sformatf("TX 64-byte period %f exceeds 10 with four or more slots", per));
 `endif
     burst_rx(14, 1514, 1'b1, per);
     $display("TXO THROUGHPUT rx 1514 bytes enabled: period %f clocks (190 beats + trailer)", per);

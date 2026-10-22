@@ -24,7 +24,7 @@
 //   Both resets synchronous, active low, asserted together.
 // -----------------------------------------------------------------------------
 module rtlnet_tcp_offload_regs #(
-  parameter int TX_BUF_KB       = 4,
+  parameter int TX_BUF_KB       = 8,
   parameter int MAX_FRAME_BYTES = 1518
 )(
   // AXI4-Lite slave, s_axi_aclk domain, 4 KiB window.

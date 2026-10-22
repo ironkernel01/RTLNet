@@ -1,6 +1,6 @@
 # rtlnet_tcp_offload regression: <bench> <filelist> [tag] [defines=A,B] [plusargs=X,Y] [expectfail]
 tb_rtlnet_tcp_offload   cores/rtlnet_tcp_offload/testbench/tb_rtlnet_tcp_offload.f
 tb_rtlnet_tcp_offload   cores/rtlnet_tcp_offload/testbench/tb_rtlnet_tcp_offload.f  generic  defines=RTLNET_TECH_GENERIC
-tb_rtlnet_tcp_offload   cores/rtlnet_tcp_offload/testbench/tb_rtlnet_tcp_offload.f  buf8     defines=TB_TXO_BUF8,RTLNET_TECH_GENERIC
+tb_rtlnet_tcp_offload   cores/rtlnet_tcp_offload/testbench/tb_rtlnet_tcp_offload.f  buf4     defines=TB_TXO_BUF4,RTLNET_TECH_GENERIC
 tb_rtlnet_tcp_offload   cores/rtlnet_tcp_offload/testbench/tb_rtlnet_tcp_offload.f  buf16    defines=TB_TXO_BUF16,RTLNET_TECH_GENERIC
 tb_rtlnet_tcp_offload   cores/rtlnet_tcp_offload/testbench/tb_rtlnet_tcp_offload.f  neg      defines=RTLNET_TECH_GENERIC  plusargs=INJECT_FAILURE  expectfail

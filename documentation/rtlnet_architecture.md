@@ -543,7 +543,7 @@ Y ms). Everything is configured through the AXI4-Lite slave by the C driver. Fir
 ## 14. `rtlnet_tcp_offload`
 
 Checksum offload on the CPU DMA stream, one stream clock (the CPU stream clock). Egress (DMA MM2S -> offload -> CPU TX
-FIFO) is store-and-forward: the frame is written whole into an `rtlnet_packet_fifo` (`TX_BUF_KB`, default 4 = two
+FIFO) is store-and-forward: the frame is written whole into an `rtlnet_packet_fifo` (`TX_BUF_KB`, default 8 = four
 maximum frames) while a streaming engine sums the IPv4 header and the TCP / UDP pseudo-header plus segment; a sideband
 queue carries the two checksums and their byte positions, and a registered byte-lane replace writes them into the frame
 as it leaves (IPv4 field at frame byte 24/25, +4 with one 802.1Q tag; L4 field at TCP +16 / UDP +6 from the L4 start;
@@ -683,7 +683,7 @@ DHCP control (start, stop, renew now, auto-start) lives in the DHCP leaf's own r
 | RX out, frames and trailers to the CPU DMA S2MM (clk) | out `m_axis_rx_tdata[63:0]`, `m_axis_rx_tkeep[7:0]`, `m_axis_rx_tvalid`, `m_axis_rx_tlast`; in `m_axis_rx_tready` |
 | registers | `s_axi_*` slave, `ADDR_W` 12 (internal `rtlnet_axil_cdc` to `clk`) |
 
-Parameters: `TX_BUF_KB` 4, `RAM_STYLE` "block", `SB_RAM_STYLE` "distributed", `MAX_FRAME_BYTES` 1518. Instance names the
+Parameters: `TX_BUF_KB` 8, `RAM_STYLE` "block", `SB_RAM_STYLE` "distributed", `MAX_FRAME_BYTES` 1518. Instance names the
 constraints depend on: `u_regs/u_axil_cdc`, `u_tx/u_tx_fifo`. Expected CDC census: `sync 2`, `axil_cdc 1`, `fifo 1`.
 All outputs are registered. In the CPU path the instance sits between `u_cpu_classifier` and the DMA S2MM stream (RX)
 and between the DMA MM2S stream and `u_cpu_tx_fifo` (TX).
