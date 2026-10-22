@@ -34,6 +34,7 @@ The leaf contract ports (architecture 7.5 / 15.4) come first, then the leaf-spec
 | frame out | `m_axis_tdata[63:0]`, `m_axis_tkeep[7:0]`, `m_axis_tvalid`, `m_axis_tlast`; in `m_axis_tready` | proto_clk | output of one `rtlnet_axis_reg_slice`; a started frame has no gaps |
 | address | `local_mac[47:0]`, `local_ip[31:0]` | proto_clk | MAC octet 0 in `[47:40]`, IP first octet in `[31:24]` |
 | status | `busy` | proto_clk | registered; see 4.2 |
+| claim | `claim` | proto_clk | registered one-clock pulse per datagram for an enabled socket; see 4.2 |
 | registers | `reg_wr_en`, `reg_wr_addr[11:0]`, `reg_wr_data[31:0]`, `reg_rd_en`, `reg_rd_addr[11:0]`, `reg_rd_data[31:0]` | proto_clk | read data valid the clock after `reg_rd_en` |
 | application clock | `app_clk`, `app_resetn` | app_clk | `app_resetn` released with `resetn` from one assertion |
 | application RX | out `m_axis_app_tdata[63:0]`, `m_axis_app_tkeep[7:0]`, `m_axis_app_tvalid`, `m_axis_app_tlast`; in `m_axis_app_tready` | app_clk | received datagrams (section 2) |
@@ -237,6 +238,13 @@ input frame and, for an accepted datagram, its last FIFO write, at most two cloc
 is therefore high at every input frame's last beat, well inside the 12-clock rule, and covers receive processing only:
 transmission never raises it, so the wrapper's dequeue is never held by outgoing traffic.
 
+`claim` (architecture 7.5) is armed at the beat-4 decision for a datagram that passes the header rules (`d_candidate`,
+not `d_bad`) and whose destination port matches an enabled socket, and pulses (registered) in the clock after the
+frame's last beat, while `busy` is still high; it is gated by `enable`. The datagram is claimed whether it is
+delivered, dropped for a full RX FIFO, or dropped by its late verdict (truncated, bad UDP checksum): it was for a
+bound port. Header rejections, unknown ports, frames for other hosts and frames that start while the engine is busy
+are not claimed, so the wrapper copies them to the CPU network path.
+
 ### 4.3 Transmit path
 
 `rtlnet_udp_socket_tx_check` (app_clk) accepts meta 0 only when both the TX payload FIFO and the descriptor FIFO have a
@@ -343,22 +351,24 @@ for byte, and every sent frame's IPv4 header summed to 0xFFFF.
 | concurrency | 30 random-length transmits and 30 receives at the same time with random stalls on both sinks, all exact and in order |
 | protection | a frame starting the clock after the previous one ends (leaf busy) is ignored whole; the next spaced frame is taken |
 | enable, clear | leaf disabled: frame ignored, transmit dropped and counted; re-enable; CNT_CLEAR zeroes all 22 counters |
+| claim | `rtlnet_tb_leaf_claim_monitor` (`cores/rtlnet_eth_protocol/testbench`): timing, one per frame, never while disabled; at every counter check the claims since the last CNT_CLEAR equal delivered + RX FIFO drops + late-verdict drops (six cases: two truncations, a 41-byte zero-length frame, three bad UDP checksums); header rejections, unknown ports, ignored frames, the frame starting while busy and the disabled leaf claim nothing |
 | always on | `rtlnet_tb_leaf_busy_monitor` (tready, reply/busy, stuck, X); busy high within 12 clocks of every input frame's last beat; no gap inside an output frame or an application datagram; stream rules of both sinks; the RTL's simulation checks (FIFO write refused, payload register overwritten, TX bubble) |
 
 Results (10-22-2026), `scripts/rtlnet_regression.ps1 -Match udp_socket`:
 
 | Run | Configuration | Result |
 |---|---|---|
-| `tb_rtlnet_udp_socket` | app_clk 62.5 MHz, AMD XPM model | PASS, 1104 checks |
-| `_app100` | app_clk 100 MHz | PASS, 1104 checks |
-| `_app33` | app_clk 33.3 MHz | PASS, 1104 checks |
-| `_generic` | `RTLNET_TECH_GENERIC` RAM model | PASS, 1104 checks |
+| `tb_rtlnet_udp_socket` | app_clk 62.5 MHz, AMD XPM model | PASS, 1115 checks |
+| `_app100` | app_clk 100 MHz | PASS, 1115 checks |
+| `_app33` | app_clk 33.3 MHz | PASS, 1115 checks |
+| `_generic` | `RTLNET_TECH_GENERIC` RAM model | PASS, 1115 checks |
 | `_neg` | `+INJECT_FAILURE` | TEST FAIL as required (fails=1) |
 
 Each check group was shown failing against a mutated copy of the RTL (restored afterwards): flush `tkeep` + 1 (134
 fails), UDP checksum never bad (22), highest socket index wins (28), fragment offset not checked (25), TTL 63 (216),
 transmit length check off (50), CONNECT_ON_RX off (8), `busy` tied low (busy-rise check), a bubble in a header beat
-(output-gap check).
+(output-gap check). A claim pulsed at the beat-4 decision, before the frame's last beat, fails the claim monitor
+(17 failing checks, first "claim 1 with only 0 frames ended").
 
 ### 7.2 With the echo core
 
@@ -444,3 +454,4 @@ How to put a new UDP application on the socket streams.
 | Revision | Change |
 |---|---|
 | 10-22-2026 | Initial version |
+| 10-22-2026 | `claim` output (architecture 7.5, CPU network path); claim checks in the bench |

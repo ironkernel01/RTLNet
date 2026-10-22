@@ -49,9 +49,15 @@
 //   * busy is a flop: high from the clock after a frame's first beat until
 //     the engine is idle again (the end of the frame or the datagram's last
 //     FIFO write, whichever is later).
+//   * claim (registered one-clock pulse, leaf contract 7.5): a datagram whose
+//     header passes the beat-4 rules and whose destination port matches an
+//     enabled socket (delivered, dropped for a full FIFO, or dropped later by
+//     its late verdict) is claimed in the clock after the frame's last beat,
+//     while busy is still high; gated by enable.
 // Language: SystemVerilog-2012.
 // Revision: 10-22-2026
 //   * 10-22-2026: initial version.
+//   * 10-22-2026: claim output.
 // Clocks: clk (proto_clk); resetn synchronous to it, active low.
 // -----------------------------------------------------------------------------
 module rtlnet_udp_socket_rx #(
@@ -100,8 +106,10 @@ module rtlnet_udp_socket_rx #(
   output logic [15:0]                  ev_remote_port,
   output logic [47:0]                  ev_remote_mac,
 
-  // Leaf busy (registered).
-  output logic                         busy
+  // Leaf busy (registered) and claim (registered one-clock pulse after the
+  // last beat of a datagram for an enabled socket).
+  output logic                         busy,
+  output logic                         claim
 );
 
   import rtlnet_pkg::*;
@@ -206,6 +214,7 @@ module rtlnet_udp_socket_rx #(
 
   logic        fifo_fire;
   logic        final_write;
+  logic        claim_pend;         // this frame matched an enabled socket at beat 4
 
   assign beat          = s_axis_tvalid;
   assign bytes_through = {1'b0, beat_idx, 3'b000} + (s_axis_tlast ? {8'd0, keep_bytes(s_axis_tkeep)} : 12'd8);
@@ -307,6 +316,24 @@ module rtlnet_udp_socket_rx #(
       in_frame <= !s_axis_tlast;
       if (s_axis_tlast)           beat_idx <= '0;
       else if (beat_idx != 8'hFF) beat_idx <= beat_idx + 8'd1;
+    end
+  end
+
+  // Claim: armed at the beat-4 decision for a datagram to an enabled socket,
+  // issued (registered) after the frame's last beat. The decision beat is
+  // never the last beat (d_bad), so the pulse always follows the frame end.
+  always_ff @(posedge clk) begin
+    if (!resetn) begin
+      claim_pend <= 1'b0;
+      claim      <= 1'b0;
+    end else begin
+      claim <= 1'b0;
+      if (d_beat && d_candidate && !d_bad && d_match) begin
+        claim_pend <= 1'b1;
+      end else if (beat && s_axis_tlast) begin
+        claim      <= claim_pend && enable;
+        claim_pend <= 1'b0;
+      end
     end
   end
 

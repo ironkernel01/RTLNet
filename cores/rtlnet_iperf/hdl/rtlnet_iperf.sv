@@ -60,12 +60,20 @@
 //     when 0) clamped to 16..MAX_DGRAM_BYTES; duration |mAmount| x 10 ms
 //     (negative mAmount) or BYTE_MODE_MS; rate lRate bit/s of payload (0 =
 //     as fast as m_axis_tready allows) by a token bucket in 1/65536 bits.
+//   * claim (registered one-clock pulse, architecture 7.5): a datagram to the
+//     UDP port that the classify step accounts (data or FIN of the open flow,
+//     the first datagram of a new flow, a repeated FIN that resends the
+//     report, an accepted -R request); issued the clock after classify, three
+//     clocks after the last beat while busy is high; gated by enable. Ignored
+//     datagrams (another source while a flow is open, late datagrams, a FIN of
+//     no known flow, a refused -R request) are not claimed.
 //   * Deviations (documented in the core guide): no TCP, no -r/-d tradeoff or
 //     dual tests, no enhanced (-e) report extension, sequence magnitudes and
 //     counters 32 bit, byte mode runs BYTE_MODE_MS, the upper rate word ignored.
 // Language: SystemVerilog-2012 (synthesizable subset).
 // Revision: 10-22-2026
 //   * 10-22-2026: initial version.
+//   * 10-22-2026: claim output (leaf contract 7.5, CPU network path).
 // Clocks: clk = proto_clk, CLK_HZ hertz; resetn synchronous, active low. No
 //   crossings.
 // -----------------------------------------------------------------------------
@@ -108,6 +116,10 @@ module rtlnet_iperf #(
   // Leaf status (registered): high from the clock after a last beat until the
   // accounting of that frame is complete.
   output logic        busy,
+
+  // Claim (registered one-clock pulse): the datagram that just ended is
+  // accounted by this server.
+  output logic        claim,
 
   // Register port (proto_clk): one-clock write strobe; read data valid the
   // clock after reg_rd_en and held.
@@ -414,6 +426,7 @@ module rtlnet_iperf #(
   logic        same_reverse;
   logic        is_reverse_req;
   logic        late_after_flow;
+  logic        classify_take;
   logic        idle_expired;
   logic signed [31:0] jit_d;
   logic [31:0] jit_abs;
@@ -451,6 +464,11 @@ module rtlnet_iperf #(
   assign same_reverse   = (rv_state == S_RV_RUN) && (rx_src_ip == rv_ip) && (rx_sport == rv_port);
   assign is_reverse_req = ((h_flags & FLAG_VERSION2) != 32'd0) && ((h_upper & UPPER_REVERSE) != 16'd0);
   assign late_after_flow = report_valid && same_flow && !seq_first;
+  // The classify step leaves S_AC_IDLE for this datagram (mirrors S_AC_CLASSIFY).
+  assign classify_take  = is_iperf && (rx_active ? same_flow :
+                                       !seq_neg  ? (is_reverse_req ? (reverse_allowed && !same_reverse) :
+                                                                     !late_after_flow) :
+                                                   (same_flow && report_valid));
   assign idle_expired   = (idle_us >= IDLE_TIMEOUT_US);
 
   // Jitter (RFC 3550 6.4.1 as iperf applies it): D = transit - last transit.
@@ -697,6 +715,12 @@ module rtlnet_iperf #(
         endcase
       end
     end
+  end
+
+  // claim: the classify step takes the datagram (one clock per frame).
+  always_ff @(posedge clk) begin
+    if (!resetn) claim <= 1'b0;
+    else         claim <= (ac_state == S_AC_CLASSIFY) && classify_take && enable;
   end
 
   // ---------------------------------------------------------------------------

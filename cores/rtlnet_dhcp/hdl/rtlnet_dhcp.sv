@@ -51,12 +51,20 @@
 //     OFFER_TIMEOUT_MS, doubled, capped at RETRY_CAP_MS, not randomised; secs
 //     field 0; a lease below LEASE_MIN_S is raised to LEASE_MIN_S; a missing
 //     option 51 gives 3600 s; timing from the ACK, not the REQUEST.
+//   * claim (registered one-clock pulse, architecture 7.5): a BOOTP reply for
+//     the client's current xid and chaddr that the client machine accepts in
+//     its state: an OFFER with option 54 while SELECTING, an ACK while
+//     REQUESTING or RENEWING, a NAK while REQUESTING or RENEWING (exactly the
+//     frames OFFERS_RX, ACKS_RX and NAKS_RX count); gated by enable. Issued the
+//     clock after the verdict, which is the clock busy falls. Other replies
+//     (an ACK while SELECTING, an OFFER while REQUESTING) are not claimed.
 //   * local_ip (the wrapper's effective address) is not used: the frames take
 //     0.0.0.0 or the leaf's own lease_ip, which is the effective address while
 //     lease_valid.
 // Language: SystemVerilog-2012 (synthesizable subset).
 // Revision: 10-22-2026
 //   * 10-22-2026: initial version.
+//   * 10-22-2026: claim output (leaf contract 7.5, CPU network path).
 // Clocks: clk = proto_clk (50 MHz on the Nexys Video, MS_CYCLES clocks per
 //   millisecond); resetn synchronous, active low. No crossings.
 // -----------------------------------------------------------------------------
@@ -102,6 +110,10 @@ module rtlnet_dhcp #(
   // Leaf status (registered): high while a captured frame is received or
   // parsed and for the clock after the last beat of any frame.
   output logic        busy,
+
+  // Claim (registered one-clock pulse): a reply for this client's xid was
+  // accepted; issued in the clock busy falls.
+  output logic        claim,
 
   // Register port (proto_clk), the wrapper's internal register bus: one-clock
   // write strobe; read data valid the clock after reg_rd_en and held.
@@ -958,6 +970,14 @@ module rtlnet_dhcp #(
   always_ff @(posedge clk) begin
     if (!resetn) busy <= 1'b0;
     else         busy <= (rx_state != S_RX_IDLE) || frame_end;
+  end
+
+  // claim: the client machine accepts the reply in its state (msg_ok is a
+  // one-clock pulse per parsed frame for the current xid).
+  always_ff @(posedge clk) begin
+    if (!resetn) claim <= 1'b0;
+    else         claim <= enable && ((got_offer && (cl_state == S_SELECTING)) || ack_binds ||
+                                     (got_nak && ((cl_state == S_REQUESTING) || (cl_state == S_RENEWING))));
   end
 
   // Receive RAM: one captured frame, written one clock behind the bus, read at

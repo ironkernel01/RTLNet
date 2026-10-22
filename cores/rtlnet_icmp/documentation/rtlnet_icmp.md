@@ -26,6 +26,7 @@ Ports are exactly the leaf contract of architecture 15.4; no leaf-specific ports
 | frame out | `m_axis_t*` | outputs of one `rtlnet_axis_reg_slice` (`u_tx_slice`); no gaps inside a reply |
 | address | `local_mac[47:0]`, `local_ip[31:0]` | wrapper `proto_clk` registers; one reading per frame |
 | status | `busy` | registered, section 3.4 |
+| claim | `claim` | registered one-clock pulse for every echo request this leaf answers, section 3.4 |
 | registers | `reg_wr_en`, `reg_wr_addr[11:0]`, `reg_wr_data`, `reg_rd_en`, `reg_rd_addr[11:0]`, `reg_rd_data` | read data valid the clock after `reg_rd_en` |
 
 | Parameter | Default | Meaning |
@@ -117,6 +118,11 @@ The reply's first beat leaves the slice 3 clocks after the clock in which the re
 accepted, whatever the size. A frame that starts while the leaf is not idle is ignored whole, including a
 valid request in its tail; the stored payload is never overwritten.
 
+`claim` (architecture 7.5) pulses for one clock in the clock after `S_CHECK` accepts a request (every check passed:
+header, size, padding, ICMP checksum), two clocks after its last beat and while `busy` is high; it is gated by
+`enable`. A request dropped for its size or checksum, any other ICMP type and any foreign frame are not claimed,
+so the wrapper copies them to the CPU network path.
+
 ### 3.5 Clocks and resets
 
 One clock, `proto_clk`; no crossing in this core.
@@ -144,9 +150,11 @@ busy-rise check (at most 12 clocks). Requests and expected replies are built by 
 | enable, address | disabled: ignored and not counted; new MAC/IP used, the old IP not answered |
 | random | 160 mutated frames (header bit flips, message bytes, Ethernet addresses, IP header checksum, truncations, extra padding) with random stalls and gaps, judged by the model |
 | counters | the four counters equal the model at four points; `CNT_CLEAR` zeroes them |
+| claim | `rtlnet_tb_leaf_claim_monitor` on both harnesses (timing, one per frame, never while disabled); every `send_and_judge` frame gives exactly one claim when the model answers it and none otherwise (dropped for size or checksum included); the cumulative count equals the answered requests at every counter check |
 
-Results, 10-22-2026: `TEST PASS: tb_rtlnet_icmp checks=10166` (AMD), the same with `RTLNET_TECH_GENERIC`;
-`+INJECT_FAILURE` reports `TEST FAIL`. Bench sensitivity proven by mutation: without the in-frame tracking
+Results, 10-22-2026: `TEST PASS: tb_rtlnet_icmp checks=11881` (AMD), the same with `RTLNET_TECH_GENERIC`;
+`+INJECT_FAILURE` reports `TEST FAIL`. Claim sensitivity: with `claim` pulsed for every frame reaching `S_CHECK`
+(the accept condition removed) the bench reports `TEST FAIL` (65 failing checks). Bench sensitivity proven by mutation: without the in-frame tracking
 (`!in_frame` removed from `S_IDLE`) the tail-request case answers at 12 junk beats and the bench reports
 `TEST FAIL` (7 failing checks); without the 64-byte padding bound it reports `TEST FAIL` (15 failing checks).
 
@@ -179,3 +187,4 @@ are unused input bits (`reg_wr_data`).
 | Revision | Change |
 |---|---|
 | 10-22-2026 | Initial version |
+| 10-22-2026 | `claim` output (architecture 7.5, CPU network path); claim checks in the bench |

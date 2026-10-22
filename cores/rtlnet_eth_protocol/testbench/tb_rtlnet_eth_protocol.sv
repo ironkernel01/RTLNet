@@ -28,11 +28,25 @@
 //     gateway and MAC changed through AXI4-Lite, ARP/ping answered for the new
 //     address and not the old; leaf-enable mask; a mixed ARP/ping burst;
 //     CNT_CLEAR.
+//   * CPU network path present (default; CPU_CLASSIFIER_ENABLE 0) with
+//     cpu_axis_clk 100 MHz and an always-ready CPU sink: every frame the
+//     sink receives is counted, CPU_RX_FRAMES equals it, DELIVERED_FRAMES
+//     equals the frames toward the leaves, and after CNT_CLEAR DELIVERED =
+//     CPU_RX_CLAIMED + CPU_RX_FRAMES + CPU_RX_DROPPED. rtlnet_tb_leaf_claim_
+//     monitor on the ARP and ICMP leaves; every answered ARP request and ping
+//     is claimed (claims = REPLIES_SENT + ECHO_REPLIES).
+//   * +define+TB_NO_CPU_PATH builds CPU_PATH_ENABLE = 0: CAPS bit 5 and
+//     CPU_CAPS read 0, CTRL bit 1 reads 0, m_axis_cpu_eth_tvalid stays 0 and
+//     s_axis_cpu_eth_tready 1.
+//   * The CPU path itself is proven in tb_rtlnet_eth_protocol_cpu.
 //   * +INJECT_FAILURE forces TEST FAIL (negative control).
 // Language: SystemVerilog-2012 (simulation only).
 // Revision: 10-22-2026
 //   * 10-22-2026: initial version.
-// Clocks: axis_clk, proto_clk (also app_clk), s_axi_aclk, per +CLKPAIR.
+//   * 10-22-2026: CPU network path ports, CAPS/CTRL with the CPU path, claim
+//     monitors and counts, TB_NO_CPU_PATH build.
+// Clocks: axis_clk, proto_clk (also app_clk), s_axi_aclk, per +CLKPAIR;
+//   cpu_axis_clk 100 MHz.
 // -----------------------------------------------------------------------------
 `timescale 1ns / 1ps
 
@@ -63,7 +77,19 @@ module tb_rtlnet_eth_protocol;
   localparam logic [15:0] R_EG_FRAMES  = 16'h004C;
   localparam logic [15:0] ARP_BASE     = 16'h1000;
   localparam logic [15:0] ICMP_BASE    = 16'h2000;
-  localparam logic [31:0] CTRL_DEFAULT = 32'h0000_0601;   // filter on, LEAF_ENABLE = ICMP | ARP
+`ifdef TB_NO_CPU_PATH
+  localparam int          CPU_PATH     = 0;
+`else
+  localparam int          CPU_PATH     = 1;
+`endif
+  localparam logic [15:0] R_CPU_CAPS   = 16'h0034;
+  localparam logic [15:0] R_DELIVERED  = 16'h0050;
+  localparam logic [15:0] R_CPU_RX     = 16'h0054;
+  localparam logic [15:0] R_CPU_CLAIM  = 16'h0058;
+  localparam logic [15:0] R_CPU_DROP   = 16'h005C;
+  // Filter on, CPU path on (when built), LEAF_ENABLE = ICMP | ARP.
+  localparam logic [31:0] CTRL_DEFAULT = 32'h0000_0601 | ((CPU_PATH != 0) ? 32'h2 : 32'h0);
+  localparam logic [31:0] CAPS_VALUE   = 32'h0008_1006 | ((CPU_PATH != 0) ? 32'h20 : 32'h0);
 
   localparam logic [47:0] DEF_MAC      = 48'h02_49_4B_52_4E_01;
   localparam logic [31:0] DEF_IP       = 32'hC0A901DC;
@@ -82,6 +108,8 @@ module tb_rtlnet_eth_protocol;
   logic axis_clk   = 1'b0;
   logic proto_clk  = 1'b0;
   logic s_axi_aclk = 1'b0;
+  logic cpu_clk    = 1'b0;
+  logic cpu_resetn     = 1'b0;
   logic axis_resetn    = 1'b0;
   logic proto_resetn   = 1'b0;
   logic s_axi_aresetn  = 1'b0;
@@ -109,6 +137,10 @@ module tb_rtlnet_eth_protocol;
     #2.1;
     forever #(axi_half) s_axi_aclk = ~s_axi_aclk;
   end
+  initial begin
+    #0.7;
+    forever #(4.9985) cpu_clk = ~cpu_clk;
+  end
 
   // One assertion for every domain, each released at its own clock.
   initial begin
@@ -116,6 +148,7 @@ module tb_rtlnet_eth_protocol;
     @(posedge axis_clk)   axis_resetn   <= 1'b1;
     @(posedge proto_clk)  proto_resetn  <= 1'b1;
     @(posedge s_axi_aclk) s_axi_aresetn <= 1'b1;
+    @(posedge cpu_clk)    cpu_resetn    <= 1'b1;
   end
 
   // ---------------------------------------------------------------------------
@@ -157,6 +190,16 @@ module tb_rtlnet_eth_protocol;
   logic        stat_dhcp_bound;
   logic        ev_rx_frame;
   logic        ev_tx_frame;
+  logic [63:0] cpu_m_tdata;
+  logic [7:0]  cpu_m_tkeep;
+  logic        cpu_m_tvalid;
+  logic        cpu_m_tlast;
+  logic        cpu_m_tready;
+  logic [63:0] cpu_s_tdata;
+  logic [7:0]  cpu_s_tkeep;
+  logic        cpu_s_tvalid;
+  logic        cpu_s_tlast;
+  logic        cpu_s_tready;
 
   // The wrapper with ARP and ICMP only.
   rtlnet_eth_protocol #(
@@ -167,7 +210,9 @@ module tb_rtlnet_eth_protocol;
     .ICMP_ENABLE     (1),
     .DHCP_ENABLE     (0),
     .IPERF_ENABLE    (0),
-    .UDP_ENABLE      (0)
+    .UDP_ENABLE      (0),
+    .CPU_PATH_ENABLE       (CPU_PATH),
+    .CPU_CLASSIFIER_ENABLE (0)
   ) dut (
     .axis_clk          (axis_clk),
     .proto_clk         (proto_clk),
@@ -214,6 +259,18 @@ module tb_rtlnet_eth_protocol;
     .s_axi_rresp       (rresp),
     .s_axi_rvalid      (rvalid),
     .s_axi_rready      (rready),
+    .cpu_axis_clk          (cpu_clk),
+    .cpu_axis_resetn       (cpu_resetn),
+    .m_axis_cpu_eth_tdata  (cpu_m_tdata),
+    .m_axis_cpu_eth_tkeep  (cpu_m_tkeep),
+    .m_axis_cpu_eth_tvalid (cpu_m_tvalid),
+    .m_axis_cpu_eth_tlast  (cpu_m_tlast),
+    .m_axis_cpu_eth_tready (cpu_m_tready),
+    .s_axis_cpu_eth_tdata  (cpu_s_tdata),
+    .s_axis_cpu_eth_tkeep  (cpu_s_tkeep),
+    .s_axis_cpu_eth_tvalid (cpu_s_tvalid),
+    .s_axis_cpu_eth_tlast  (cpu_s_tlast),
+    .s_axis_cpu_eth_tready (cpu_s_tready),
     .stat_ip_valid     (stat_ip_valid),
     .stat_dhcp_bound   (stat_dhcp_bound),
     .ev_rx_frame       (ev_rx_frame),
@@ -227,6 +284,14 @@ module tb_rtlnet_eth_protocol;
   rtlnet_tb_axis_sink #(.READY_PCT(100), .SEED(9), .NAME("m_axis")) u_sink (
     .clk(axis_clk), .resetn(axis_resetn), .tdata(m_tdata), .tkeep(m_tkeep), .tlast(m_tlast), .tvalid(m_tvalid),
     .tready(m_tready));
+
+  // CPU network streams: an always-ready sink, an idle source.
+  rtlnet_tb_axis_sink #(.READY_PCT(100), .SEED(13), .NAME("m_axis_cpu_eth")) u_cpu_sink (
+    .clk(cpu_clk), .resetn(cpu_resetn), .tdata(cpu_m_tdata), .tkeep(cpu_m_tkeep), .tlast(cpu_m_tlast),
+    .tvalid(cpu_m_tvalid), .tready(cpu_m_tready));
+  rtlnet_tb_axis_src #(.GAP_PCT(0), .SEED(15)) u_cpu_src (
+    .clk(cpu_clk), .tdata(cpu_s_tdata), .tkeep(cpu_s_tkeep), .tlast(cpu_s_tlast), .tvalid(cpu_s_tvalid),
+    .tready(cpu_s_tready));
 
   // CPU side.
   rtlnet_tb_axil_master #(.ADDR_W(16)) u_axi (
@@ -243,6 +308,12 @@ module tb_rtlnet_eth_protocol;
     .clk(proto_clk), .resetn(proto_resetn), .s_tvalid(dut.leaf_in_tvalid), .s_tready(dut.leaf_s_tready[2]),
     .s_tlast(dut.iq_last), .m_tvalid(dut.leaf_tvalid[2]), .m_tready(dut.leaf_tready[2]), .m_tlast(dut.leaf_tlast[2]),
     .busy(dut.leaf_busy[2]));
+  rtlnet_tb_leaf_claim_monitor #(.NAME("wrapper icmp")) u_icmp_claim (
+    .clk(proto_clk), .resetn(proto_resetn), .enable(dut.leaf_enable[1]), .s_tvalid(dut.leaf_in_tvalid),
+    .s_tready(dut.leaf_s_tready[1]), .s_tlast(dut.iq_last), .busy(dut.leaf_busy[1]), .claim(dut.leaf_claim[1]));
+  rtlnet_tb_leaf_claim_monitor #(.NAME("wrapper arp")) u_arp_claim (
+    .clk(proto_clk), .resetn(proto_resetn), .enable(dut.leaf_enable[2]), .s_tvalid(dut.leaf_in_tvalid),
+    .s_tready(dut.leaf_s_tready[2]), .s_tlast(dut.iq_last), .busy(dut.leaf_busy[2]), .claim(dut.leaf_claim[2]));
 
   // ---------------------------------------------------------------------------
   // Always-on monitors.
@@ -452,7 +523,9 @@ module tb_rtlnet_eth_protocol;
     // ---- Register map at reset: wrapper window.
     axi_expect(R_ID, 32'h50524F54, "ID");
     axi_expect(R_VERSION, 32'h10222026, "VERSION");
-    axi_expect(R_CAPS, 32'h0008_1006, "CAPS (ICMP, ARP present; 16/8 KB; 0 sockets)");
+    axi_expect(R_CAPS, CAPS_VALUE, "CAPS (ICMP, ARP present, CPU path per build; 16/8 KB; 0 sockets)");
+    axi_expect(R_CPU_CAPS, (CPU_PATH != 0) ? 32'h0000_0810 : 32'h0, "CPU_CAPS (CPU RX 16 KB, TX 8 KB)");
+    axi_expect(16'h8000, 32'h0, "classifier window (not built) reads 0");
     axi_expect(R_CTRL, CTRL_DEFAULT, "CTRL");
     axi_expect(R_STATUS, 32'h0000_0002, "STATUS (IP valid, static)");
     axi_expect(R_MAC_HI, 32'h0000_0249, "LOCAL_MAC_HI");
@@ -490,6 +563,8 @@ module tb_rtlnet_eth_protocol;
     axi_expect(R_STATIC_IP, DEF_IP, "STATIC_IP after a partial write");
     tb_check(stat_ip_valid === 1'b1 && stat_dhcp_bound === 1'b0, "LED status: IP valid, not DHCP");
     tb_check(app_m_tvalid === 1'b0 && app_s_tready === 1'b1, "UDP disabled: application ports idle");
+    if (CPU_PATH == 0) tb_check(cpu_m_tvalid === 1'b0 && cpu_s_tready === 1'b1,
+                                "CPU path not built: m_axis_cpu_eth idle, s_axis_cpu_eth_tready 1");
 
     // ---- ARP and ping answered with the default address.
     arp_case("ARP for the default IP", cur_ip, 1'b1);
@@ -693,6 +768,17 @@ module tb_rtlnet_eth_protocol;
              leaf_frames));
     tb_check(leaf_frames == exp_frames, $sformatf("frames delivered to the leaves %0d = stored %0d", leaf_frames,
              exp_frames));
+    // Claims: every answered request, nothing else.
+    tb_check(u_arp_claim.claims == arp_replies, $sformatf("ARP claims %0d = ARP replies %0d", u_arp_claim.claims,
+             arp_replies));
+    tb_check(u_icmp_claim.claims == icmp_replies, $sformatf("ICMP claims %0d = ICMP replies %0d", u_icmp_claim.claims,
+             icmp_replies));
+    axi_expect(R_DELIVERED, 32'(leaf_frames), "DELIVERED_FRAMES = frames toward the leaves");
+    axi_rd(R_CPU_RX, v);
+    tb_check(v == 32'(u_cpu_sink.frame_count), $sformatf("CPU_RX_FRAMES %0d = frames at m_axis_cpu_eth %0d", v,
+             u_cpu_sink.frame_count));
+    if (CPU_PATH != 0) tb_check(v > 0, "unanswered frames reached the CPU");
+    else               tb_check(u_cpu_sink.frame_count == 0, "no CPU path: nothing reached the CPU");
 
     // ---- CNT_CLEAR: the four counters restart from 0 together.
     axi_wr(R_CTRL, CTRL_DEFAULT | 32'h0001_0000);
@@ -706,6 +792,24 @@ module tb_rtlnet_eth_protocol;
     ping_case("ping after CNT_CLEAR", cur_mac, cur_ip, 5, 1'b1);
     ping_case("filtered after CNT_CLEAR", 48'h02_00_00_00_00_99, cur_ip, 5, 1'b0, 1);
     check_counters("traffic after CNT_CLEAR");
+    begin
+      logic [31:0] dl;
+      logic [31:0] cr;
+      logic [31:0] cc;
+      logic [31:0] cd;
+      axi_rd(R_DELIVERED, dl);
+      axi_rd(R_CPU_RX, cr);
+      axi_rd(R_CPU_CLAIM, cc);
+      axi_rd(R_CPU_DROP, cd);
+      tb_check(dl == 32'd1, $sformatf("DELIVERED after CNT_CLEAR %0d, expected 1", dl));
+      if (CPU_PATH != 0) begin
+        tb_check(dl == cr + cc + cd, $sformatf("CPU identity: DELIVERED %0d = TO_CPU %0d + CLAIMED %0d + DROPPED %0d",
+                 dl, cr, cc, cd));
+        tb_check(cc == 32'd1, "the ping after CNT_CLEAR was claimed");
+      end else begin
+        tb_check(cr + cc + cd == 32'd0, "no CPU path: CPU counters stay 0");
+      end
+    end
 
     tb_check(u_icmp_mon.ready_errors == 0 && u_arp_mon.ready_errors == 0, "leaves held s_axis_tready at 1");
     tb_verdict("tb_rtlnet_eth_protocol");
