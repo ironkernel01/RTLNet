@@ -1,0 +1,3 @@
+# Nexys Video board regression: <bench> <filelist> [tag] [defines=A,B] [plusargs=X,Y] [expectfail]
+tb_rtlnet_nexys_video_top   boards/nexys_video/testbench/tb_rtlnet_nexys_video_top.f
+tb_rtlnet_nexys_video_top   boards/nexys_video/testbench/tb_rtlnet_nexys_video_top.f  neg  plusargs=INJECT_FAILURE  expectfail
