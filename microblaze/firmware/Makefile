@@ -13,7 +13,7 @@ CC       ?= gcc
 CFLAGS   ?= -std=c11 -Wall -Wextra -Werror -pedantic -O2
 CORES    := rtlnet_eth_mac rtlnet_mdio rtlnet_eth_protocol rtlnet_arp rtlnet_icmp rtlnet_dhcp \
             rtlnet_iperf rtlnet_udp_socket rtlnet_udp_echo rtlnet_classifier
-INCLUDES := -Isrc -Icli -Ihost -I../../cores/rtlnet_common/driver -I../driver \
+INCLUDES := -Isrc -Isrc/lwip -Icli -Ihost -I../../cores/rtlnet_common/driver -I../driver \
             $(foreach c,$(CORES),$(if $(wildcard ../../cores/$(c)/driver),-I../../cores/$(c)/driver))
 DRV_SRCS := $(wildcard ../../cores/rtlnet_eth_mac/driver/*.c ../../cores/rtlnet_mdio/driver/*.c \
             ../../cores/rtlnet_eth_protocol/driver/*.c ../../cores/rtlnet_arp/driver/*.c \
