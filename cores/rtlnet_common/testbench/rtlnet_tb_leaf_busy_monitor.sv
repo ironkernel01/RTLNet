@@ -9,11 +9,12 @@
 //   * busy never stays high for STUCK_LIMIT clocks with no input and no output
 //     activity (a stuck leaf).
 //   * busy and tvalid are never X after reset.
-//   * Optionally (CHECK_RISE = 1) busy rises within RISE_LIMIT clocks of an
-//     input frame's last beat whenever the leaf answers that frame.
+//   * The 12-clock rise bound itself is not timed here (a leaf may also be
+//     busy for frames it does not answer); a leaf bench that needs the exact
+//     bound checks it directly.
 // Language: SystemVerilog-2012 (simulation only).
 // Revision: 10-22-2026
-//   * 10-22-2026: initial version.
+//   * 10-22-2026: initial version; header no longer claims a CHECK_RISE option.
 // Clocks: clk (the leaf clock, proto_clk).
 // -----------------------------------------------------------------------------
 `timescale 1ns / 1ps

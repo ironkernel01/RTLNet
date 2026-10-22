@@ -33,7 +33,7 @@
 // Language: SystemVerilog-2012.
 // Revision: 10-22-2026
 //   * 10-22-2026: initial version (whole-frame slot FIFO; RAM through
-//     rtlnet_ram_core; size in kilobytes).
+//     rtlnet_ram_core; size in kilobytes); MAX_FRAME_BYTES <= 8 rejected.
 // Clocks: s_clk (producer), m_clk (consumer); any frequencies, any relation.
 // -----------------------------------------------------------------------------
 `include "rtlnet_technology.svh"
@@ -80,8 +80,8 @@ module rtlnet_packet_fifo #(
 
   // Slot geometry check: fails elaboration in synthesis and simulation.
   generate
-    if (SLOTS < 2 || (SLOTS & (SLOTS - 1)) != 0 || DEPTH_WORDS != SLOTS * SLOT_WORDS) begin : g_bad_config
-      $fatal(1, "rtlnet_packet_fifo: FIFO_KB=%0d with MAX_FRAME_BYTES=%0d gives SLOT_WORDS=%0d, SLOTS=%0d; need at least two power-of-two slots",
+    if (WORD_BITS < 1 || SLOTS < 2 || (SLOTS & (SLOTS - 1)) != 0 || DEPTH_WORDS != SLOTS * SLOT_WORDS) begin : g_bad_config
+      $fatal(1, "rtlnet_packet_fifo: FIFO_KB=%0d with MAX_FRAME_BYTES=%0d gives SLOT_WORDS=%0d, SLOTS=%0d; need MAX_FRAME_BYTES > 8 and at least two power-of-two slots",
              FIFO_KB, MAX_FRAME_BYTES, SLOT_WORDS, SLOTS);
     end
   endgenerate
