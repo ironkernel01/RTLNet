@@ -661,6 +661,24 @@ int cli_show_phy(const MenuCommandContext *ctx)
     fmt_printf("\n  Partner         : ");
     cli_print_adv(st.partner_adv);
     fmt_printf("\n");
+    {
+        uint16_t lcr = 0u;
+        uint16_t lacr = 0u;
+        uint16_t eee = 0u;
+        int lrc = rtlnet_phy_rtl8211e_get_leds(m, &lcr, &lacr);
+        int erc = rtlnet_phy_rtl8211e_get_eee_advert(m, &eee);
+        if (lrc == RTLNET_PHY_OK) {
+            fmt_printf("  LEDs            : LCR 0x%04X LACR 0x%04X (ext page 0x2C; default 0x0070 / 0x0010: LINK steady, "
+                       "ACT blink, USER off)\n", (unsigned)lcr, (unsigned)lacr);
+        } else {
+            fmt_printf("  LEDs            : read failed (%d)\n", lrc);
+        }
+        if (erc == RTLNET_PHY_OK) {
+            fmt_printf("  EEE advertised  : MMD 7.60 = 0x%04X (%s)\n", (unsigned)eee, (eee == 0u) ? "off" : "on");
+        } else {
+            fmt_printf("  EEE advertised  : read failed (%d)\n", erc);
+        }
+    }
     return 0;
 }
 
@@ -831,6 +849,136 @@ int cli_iperf_tcp_port(const MenuCommandContext *ctx)
     }
     netmgr_config()->tcp_iperf_port = p;
     netmgr_apply_tcp_iperf();
+    return 0;
+}
+
+/**
+ * @brief Parse DEVAD (0..31), REG (0..65535) and optionally VALUE (0..65535).
+ * @param ctx   argv[0] devad, argv[1] reg, argv[2] value (when want_val).
+ * @param devad Parsed MMD device address.
+ * @param reg   Parsed register.
+ * @param val   Parsed value (want_val only).
+ * @param want_val 1 when argv[2] is a value.
+ * @return 0, or -1 (message printed).
+ */
+static int cli_parse_mmd(const MenuCommandContext *ctx, uint8_t *devad, uint16_t *reg, uint16_t *val, int want_val)
+{
+    uint32_t d;
+    uint32_t r;
+    uint32_t v = 0u;
+    if (cli_parse_u32(ctx->argv[0], &d) != 0 || d > 31u) {
+        return cli_bad_value("device address (0..31)", ctx->argv[0]);
+    }
+    if (cli_parse_u32(ctx->argv[1], &r) != 0 || r > 0xFFFFu) {
+        return cli_bad_value("register (0..65535)", ctx->argv[1]);
+    }
+    if (want_val && (cli_parse_u32(ctx->argv[2], &v) != 0 || v > 0xFFFFu)) {
+        return cli_bad_value("value (0..0xFFFF)", ctx->argv[2]);
+    }
+    *devad = (uint8_t)d;
+    *reg = (uint16_t)r;
+    if (val != NULL) {
+        *val = (uint16_t)v;
+    }
+    return 0;
+}
+
+/**
+ * @brief PHY MMD READ [DEVAD] [REG]: MMD register through registers 13/14.
+ * @param ctx argv = devad, reg.
+ * @return 0, or -1 on a bad value or an MDIO error.
+ */
+int cli_phy_mmd_read(const MenuCommandContext *ctx)
+{
+    const rtlnet_mdio_t *m = cli_phy_bus();
+    uint8_t d;
+    uint16_t r;
+    uint16_t v = 0u;
+    int rc;
+    if (m == NULL || cli_parse_mmd(ctx, &d, &r, NULL, 0) != 0) {
+        return (m == NULL) ? 0 : -1;
+    }
+    rc = rtlnet_mdio_mmd_read(m, d, r, &v);
+    if (rc != RTLNET_MDIO_OK) {
+        return cli_rc("MMD read", rc);
+    }
+    fmt_printf("MMD %u.%u = 0x%04X\n", (unsigned)d, (unsigned)r, (unsigned)v);
+    return 0;
+}
+
+/**
+ * @brief PHY MMD WRITE [DEVAD] [REG] [VALUE]: MMD register through 13/14.
+ * @param ctx argv = devad, reg, value.
+ * @return 0, or -1 on a bad value or an MDIO error.
+ */
+int cli_phy_mmd_write(const MenuCommandContext *ctx)
+{
+    const rtlnet_mdio_t *m = cli_phy_bus();
+    uint8_t d;
+    uint16_t r;
+    uint16_t v;
+    uint16_t back = 0u;
+    int rc;
+    if (m == NULL || cli_parse_mmd(ctx, &d, &r, &v, 1) != 0) {
+        return (m == NULL) ? 0 : -1;
+    }
+    rc = rtlnet_mdio_mmd_write(m, d, r, v);
+    if (rc == RTLNET_MDIO_OK) {
+        rc = rtlnet_mdio_mmd_read(m, d, r, &back);
+    }
+    if (rc != RTLNET_MDIO_OK) {
+        return cli_rc("MMD write", rc);
+    }
+    fmt_printf("MMD %u.%u <- 0x%04X, reads back 0x%04X\n", (unsigned)d, (unsigned)r, (unsigned)v, (unsigned)back);
+    return 0;
+}
+
+/**
+ * @brief PHY C45 READ [DEVAD] [REG]: native Clause 45 address + read frames
+ *        (the RTL8211E is a Clause 22 PHY and does not answer them).
+ * @param ctx argv = devad, reg.
+ * @return 0, or -1 on a bad value or an MDIO error.
+ */
+int cli_phy_c45_read(const MenuCommandContext *ctx)
+{
+    const rtlnet_mdio_t *m = cli_phy_bus();
+    uint8_t d;
+    uint16_t r;
+    uint16_t v = 0u;
+    int rc;
+    if (m == NULL || cli_parse_mmd(ctx, &d, &r, NULL, 0) != 0) {
+        return (m == NULL) ? 0 : -1;
+    }
+    rc = rtlnet_mdio_c45_read(m, d, r, &v);
+    if (rc != RTLNET_MDIO_OK) {
+        return cli_rc("Clause 45 read", rc);
+    }
+    fmt_printf("C45 %u.%u = 0x%04X%s\n", (unsigned)d, (unsigned)r, (unsigned)v,
+               (v == 0xFFFFu) ? " (no answer: the RTL8211E answers only phy mmd)" : "");
+    return 0;
+}
+
+/**
+ * @brief PHY C45 WRITE [DEVAD] [REG] [VALUE]: native Clause 45 frames.
+ * @param ctx argv = devad, reg, value.
+ * @return 0, or -1 on a bad value or an MDIO error.
+ */
+int cli_phy_c45_write(const MenuCommandContext *ctx)
+{
+    const rtlnet_mdio_t *m = cli_phy_bus();
+    uint8_t d;
+    uint16_t r;
+    uint16_t v;
+    int rc;
+    if (m == NULL || cli_parse_mmd(ctx, &d, &r, &v, 1) != 0) {
+        return (m == NULL) ? 0 : -1;
+    }
+    rc = rtlnet_mdio_c45_write(m, d, r, v);
+    if (rc != RTLNET_MDIO_OK) {
+        return cli_rc("Clause 45 write", rc);
+    }
+    fmt_printf("C45 %u.%u <- 0x%04X (sent; the RTL8211E answers only phy mmd)\n", (unsigned)d, (unsigned)r,
+               (unsigned)v);
     return 0;
 }
 

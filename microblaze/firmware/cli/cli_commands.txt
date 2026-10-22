@@ -14,7 +14,7 @@
 REVISION:10-22-2026:Initial hierarchical command set
 REVISION:10-22-2026:Network commands on the core drivers; phy, clear, iperf, advertise, duplex, mac-address
 REVISION:10-22-2026:CPU network path: show tcp, show cpu-path, tcp echo, storm-control, classifier
-REVISION:10-22-2026:TCP iperf server (lwiperf), phy reset
+REVISION:10-22-2026:TCP iperf server (lwiperf), phy reset, phy mmd / c45, LED and EEE in show phy
 
 # ---------------------------------------------------------------------------
 # Modes
@@ -33,6 +33,8 @@ KEYWORD:exec:SHOW:Show running system information
 KEYWORD:priv:DEBUG:Raw register access
 KEYWORD:priv:LED:Set a user LED (2..7)
 KEYWORD:priv:PHY:PHY registers over MDIO
+KEYWORD:priv:PHY MMD:MMD registers, Clause 45 over Clause 22 (registers 13/14)
+KEYWORD:priv:PHY C45:Native Clause 45 frames (the RTL8211E answers only phy mmd)
 KEYWORD:config:IP:Global IP configuration
 KEYWORD:config:NO:Negate a command or set its default
 KEYWORD:config:NO ECHO:UDP echo server
@@ -80,6 +82,10 @@ cli_debug_write:priv:DEBUG WRITE [ADDR] [VALUE]:Write a 32-bit word
 cli_phy_read:priv:PHY READ [REG]:Read a PHY register (0..31) over MDIO
 cli_phy_write:priv:PHY WRITE [REG] [VALUE]:Write a PHY register (0..31) over MDIO
 cli_phy_dump:priv:PHY DUMP:Read PHY registers 0..31
+cli_phy_mmd_read:priv:PHY MMD READ [DEVAD] [REG]:Read an MMD register (Clause 45 over Clause 22)
+cli_phy_mmd_write:priv:PHY MMD WRITE [DEVAD] [REG] [VALUE]:Write an MMD register (Clause 45 over Clause 22)
+cli_phy_c45_read:priv:PHY C45 READ [DEVAD] [REG]:Native Clause 45 read (the RTL8211E answers only phy mmd)
+cli_phy_c45_write:priv:PHY C45 WRITE [DEVAD] [REG] [VALUE]:Native Clause 45 write (the RTL8211E answers only phy mmd)
 cli_phy_reset:priv:PHY RESET:Hardware PHY reset, then InitPHY (RX delay, LEDs, EEE, advertisement)
 cli_clear_counters:priv:CLEAR COUNTERS:Clear the counters of every core
 cli_led_on:priv:LED [N] ON:Turn user LED n (2..7) on

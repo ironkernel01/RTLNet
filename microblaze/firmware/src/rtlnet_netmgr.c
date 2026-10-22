@@ -299,9 +299,7 @@ void netmgr_apply_dhcp_auto(void)
  *   6. LEDs: LINK steady, ACT blinking on TX/RX, USER off
  *      (rtlnet_phy_rtl8211e_leds_default); EEE advertisement off
  *      (rtlnet_phy_rtl8211e_set_eee_advert(false)), because EEE makes the
- *      RJ45 LEDs blink. Compiled when the PHY driver provides both
- *      (RTLNET_PHY_RTL8211E_HAS_LEDS); until then the summary line reports
- *      "not in this driver".
+ *      RJ45 LEDs blink (400 ms / 2 s pattern).
  *   7. The configured advertisement (or forced speed), then the
  *      auto-negotiation restart (netmgr_apply_phy).
  *   8. One summary line on the console.
@@ -315,7 +313,7 @@ int InitPHY(void)
 {
     uint32_t id = 0u;
     int rc;
-    const char *leds = "not in this driver";
+    const char *leds;
 
     g_present.phy = 0;
     g_present.phy_id = 0u;
@@ -347,7 +345,6 @@ int InitPHY(void)
                    (unsigned)g_present.rgmii_after);
         return NETMGR_PHY_RXDLY_FAIL;
     }
-#if defined(RTLNET_PHY_RTL8211E_HAS_LEDS)
     if (rtlnet_phy_rtl8211e_leds_default(&g_mdio) != RTLNET_PHY_OK) {
         g_present.phy_rc = NETMGR_PHY_LED_FAIL;
         fmt_printf("PHY: LED configuration not read back\n");
@@ -359,7 +356,6 @@ int InitPHY(void)
         return NETMGR_PHY_EEE_FAIL;
     }
     leds = "LINK steady, ACT blink, USER off; EEE off";
-#endif
     if (netmgr_apply_phy() != RTLNET_PHY_OK) {
         g_present.phy_rc = NETMGR_PHY_AN_FAIL;
         fmt_printf("PHY: advertisement / auto-negotiation restart failed\n");

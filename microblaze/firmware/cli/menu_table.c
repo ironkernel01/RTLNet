@@ -37,7 +37,7 @@
  *  10-22-2026  MenuBuilder AI / Steve Spano    Initial hierarchical command set
  *  10-22-2026  MenuBuilder AI / Steve Spano    Network commands on the core drivers; phy, clear, iperf, advertise, duplex, mac-address
  *  10-22-2026  MenuBuilder AI / Steve Spano    CPU network path: show tcp, show cpu-path, tcp echo, storm-control, classifier
- *  10-22-2026  MenuBuilder AI / Steve Spano    TCP iperf server (lwiperf), phy reset
+ *  10-22-2026  MenuBuilder AI / Steve Spano    TCP iperf server (lwiperf), phy reset, phy mmd / c45, LED and EEE in show phy
  * ===========================================================================
  */
 #include "menu.h"
@@ -108,6 +108,14 @@ const MenuCommandDef g_menu_commands[] = {
       "Write a PHY register (0..31) over MDIO", cli_phy_write, MENU_MODE_NONE },
     { "cli_phy_dump", MENU_MODE_PRIV, "PHY DUMP",
       "Read PHY registers 0..31", cli_phy_dump, MENU_MODE_NONE },
+    { "cli_phy_mmd_read", MENU_MODE_PRIV, "PHY MMD READ [DEVAD] [REG]",
+      "Read an MMD register (Clause 45 over Clause 22)", cli_phy_mmd_read, MENU_MODE_NONE },
+    { "cli_phy_mmd_write", MENU_MODE_PRIV, "PHY MMD WRITE [DEVAD] [REG] [VALUE]",
+      "Write an MMD register (Clause 45 over Clause 22)", cli_phy_mmd_write, MENU_MODE_NONE },
+    { "cli_phy_c45_read", MENU_MODE_PRIV, "PHY C45 READ [DEVAD] [REG]",
+      "Native Clause 45 read (the RTL8211E answers only phy mmd)", cli_phy_c45_read, MENU_MODE_NONE },
+    { "cli_phy_c45_write", MENU_MODE_PRIV, "PHY C45 WRITE [DEVAD] [REG] [VALUE]",
+      "Native Clause 45 write (the RTL8211E answers only phy mmd)", cli_phy_c45_write, MENU_MODE_NONE },
     { "cli_phy_reset", MENU_MODE_PRIV, "PHY RESET",
       "Hardware PHY reset, then InitPHY (RX delay, LEDs, EEE, advertisement)", cli_phy_reset, MENU_MODE_NONE },
     { "cli_clear_counters", MENU_MODE_PRIV, "CLEAR COUNTERS",
@@ -223,6 +231,8 @@ const MenuKeywordDef g_menu_keywords[] = {
     { MENU_MODE_PRIV, "DEBUG", "Raw register access" },
     { MENU_MODE_PRIV, "LED", "Set a user LED (2..7)" },
     { MENU_MODE_PRIV, "PHY", "PHY registers over MDIO" },
+    { MENU_MODE_PRIV, "PHY MMD", "MMD registers, Clause 45 over Clause 22 (registers 13/14)" },
+    { MENU_MODE_PRIV, "PHY C45", "Native Clause 45 frames (the RTL8211E answers only phy mmd)" },
     { MENU_MODE_CONFIG, "IP", "Global IP configuration" },
     { MENU_MODE_CONFIG, "NO", "Negate a command or set its default" },
     { MENU_MODE_CONFIG, "NO ECHO", "UDP echo server" },
