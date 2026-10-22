@@ -206,8 +206,9 @@ Protocol sub-map (offset inside 0x1_0000):
 | 0x4000 | iperf |
 | 0x5000 | UDP socket layer |
 
-Other MicroBlaze peripherals sit in the block design's own map (UART Lite `0x4060_0000`, Timer
-`0x41C0_0000`, MDM `0x4140_0000`, LMB BRAM `0x0000_0000`).
+Other MicroBlaze peripherals sit in the block design's own map (LMB BRAM `0x0000_0000` 128 KiB, UART Lite
+`0x4060_0000`, interrupt controller `0x4120_0000`, MDM `0x4140_0000`, Timer `0x41C0_0000`). The single source of
+these addresses for firmware is `cores/rtlnet_cpu_microblaze/driver/rtlnet_cpu_microblaze.h`.
 
 ---
 
@@ -392,7 +393,7 @@ derives the depth from it and stops elaboration with `$fatal` on a size it canno
 |---|---|---|---|
 | `sys_clk` | 100 MHz oscillator R4 | 100 MHz | MMCM input only |
 | `clk125` | MMCM CLKOUT0 | 125 MHz | MAC TX byte engine, TX FIFO read, RGMII TX ODDRs, RXC rate detector |
-| `clk125_90` | MMCM CLKOUT1, 90 deg | 125 MHz | TXC forwarding ODDR and its retiming flops only |
+| `clk125_90` | MMCM CLKOUT1, 90 deg | 125 MHz | TXC forwarding ODDR and its retiming flops; the board clock monitor (its own `rtlnet_reset_sync`) |
 | `clk200` | MMCM CLKOUT2 | 200 MHz | IDELAYCTRL reference |
 | `axis_clk` | MMCM CLKOUT3 | 62.5 MHz | MAC client side and registers, protocol filter, queue fast sides |
 | `proto_clk` | MMCM CLKOUT4 | 50 MHz | protocol leaves, wrapper registers, socket layer, UDP echo |
@@ -421,7 +422,6 @@ vendor neutral so another soft or hard processor drops in with a wrapper of the 
 | console | `uart_rxd` (from the USB-UART bridge), `uart_txd` (to it) |
 | register master | `m_axi_*` AXI4-Lite master, 32-bit address and data, into `rtlnet_axil_decoder` |
 | interrupts | `irq[7:0]` level inputs (PHY interrupt, DHCP event, ...) |
-| status | `cpu_reset_out_n` (processor-side reset request, for debug) |
 
 `rtlnet_cpu_microblaze.sv` wraps the block design `rtlnet_cpu` (Tcl-generated from
 `cores/rtlnet_cpu_microblaze/hdl/rtlnet_cpu_bd.tcl`): MicroBlaze (little endian, 32-bit, no MMU, hardware
@@ -442,9 +442,19 @@ vendor BSP); the ELF is merged into the bitstream BRAM with `updatemem`. Layers:
 | CLI | `menu.c`, `menu.h` (MenuBuilder rules), `cli_commands.c` | command parsing and help; no register access |
 | application | `main.c`, `netmgr.c` | link monitor (MDIO poll, MAC speed follow), DHCP start on link-up |
 
-CLI command families: `HELP`/`?`, `SYS INFO`, `PHY STATUS|DUMP|READ|WRITE|RESET|AUTONEG|SPEED|ADVERTISE`,
-`MAC STATUS|COUNTERS|SPEED|CLEAR`, `NET SHOW|IP|MAC|GW|MASK`, `DHCP START|STATUS|AUTO`, `ARP STATUS`,
-`ICMP STATUS`, `IPERF STATUS|PORT`, `SOCK SHOW|OPEN|CLOSE`, `ECHO STATUS|ON|OFF`.
+CLI: a light network-switch style hierarchy built on the MenuBuilder rules
+(`firmware/nexys_video/cli/MenuBuilder_hierarchical.md`, command source `cli_commands.txt`):
+
+| Mode (prompt) | Entered by | Examples |
+|---|---|---|
+| exec `rtlnet>` | power-up | `show version`, `show system`, `show interfaces`, `show ip`, `enable` |
+| privileged `rtlnet#` | `enable` | everything in exec, `debug read/write`, `phy read/write/dump`, `reload`, `configure terminal` |
+| config `rtlnet(config)#` | `configure terminal` | `ip address`, `ip gateway`, `mac-address`, `interface eth0`, `dhcp`, `socket <n>` |
+| config-if `rtlnet(config-if)#` | `interface eth0` | `speed 10/100/1000/auto`, `duplex`, `advertise`, `shutdown` |
+| config-dhcp / config-sock | `dhcp`, `socket <n>` | `start`, `stop`, `auto`; `port`, `remote`, `connect-on-rx` |
+
+`exit` leaves one level, `end` (or Ctrl-Z) returns to privileged exec, `?` lists the commands of the current
+mode or the next keywords of a partial command, unique prefixes are accepted (`sh ver`).
 
 ---
 
@@ -596,4 +606,4 @@ DHCP control (start, stop, renew now, auto-start) lives in the DHCP leaf's own r
 
 | Revision | Change |
 |---|---|
-| 10-22-2026 | Initial architecture; all RTL in SystemVerilog; CPU as a replaceable core; one technology include file; Active-HDL simulation |
+| 10-22-2026 | Initial architecture; all RTL in SystemVerilog; CPU as a replaceable core; one technology include file; Active-HDL simulation; CPU port list, BD address map and CLI hierarchy aligned with the built cores |
