@@ -34,6 +34,8 @@
 //   * 10-22-2026: initial version.
 //   * 10-22-2026: CPU network path (CTRL.CPU_PATH_ENABLE, CAPS bit 5,
 //     CPU_CAPS, STATUS bits 20-22, DELIVERED and CPU counters).
+//   * 10-22-2026: CPU_CAPS bits 16 (classifier), 17 (checksum offload TX),
+//     18 (checksum offload RX).
 // Clocks: clk (proto_clk) only; resetn synchronous to it, active low.
 // -----------------------------------------------------------------------------
 module rtlnet_eth_protocol_regs #(
@@ -42,6 +44,8 @@ module rtlnet_eth_protocol_regs #(
   parameter int         EGRESS_FIFO_KB          = 8,
   parameter int         NUM_SOCKETS             = 4,
   parameter bit         CPU_PATH_PRESENT        = 1'b0,      // the CPU network path is built
+  parameter bit         CPU_CLASSIFIER_PRESENT  = 1'b0,      // u_cpu_classifier is built (CPU_CAPS bit 16)
+  parameter bit         CPU_OFFLOAD_PRESENT     = 1'b0,      // u_cpu_offload is built (CPU_CAPS bits 17, 18)
   parameter int         CPU_RX_FIFO_KB          = 16,
   parameter int         CPU_TX_FIFO_KB          = 8
 )(
@@ -170,7 +174,11 @@ module rtlnet_eth_protocol_regs #(
   localparam logic [7:0]  SOCKETS_REPORTED = LEAF_PRESENT[0] ? 8'(NUM_SOCKETS) : 8'd0;
   localparam logic [31:0] CAPS_VALUE       = {SOCKETS_REPORTED, 8'(EGRESS_FIFO_KB), 8'(INGRESS_FIFO_KB),
                                               2'd0, CPU_PATH_PRESENT, LEAF_PRESENT};
-  localparam logic [31:0] CPU_CAPS_VALUE   = CPU_PATH_PRESENT ? {16'd0, 8'(CPU_TX_FIFO_KB), 8'(CPU_RX_FIFO_KB)} : 32'd0;
+  // CPU_CAPS: [7:0] receive queue KB, [15:8] transmit queue KB, bit 16 classifier, bit 17 checksum offload TX
+  // (insert), bit 18 checksum offload RX (check and trailer). 0 without the CPU path.
+  localparam logic [31:0] CPU_CAPS_VALUE   = CPU_PATH_PRESENT
+      ? {13'd0, CPU_OFFLOAD_PRESENT, CPU_OFFLOAD_PRESENT, CPU_CLASSIFIER_PRESENT, 8'(CPU_TX_FIFO_KB), 8'(CPU_RX_FIFO_KB)}
+      : 32'd0;
 
   logic [15:0] mac_hi_staged;
   logic [31:0] static_ip;

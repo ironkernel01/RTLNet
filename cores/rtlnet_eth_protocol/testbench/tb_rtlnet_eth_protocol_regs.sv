@@ -135,6 +135,66 @@ module tb_rtlnet_eth_protocol_regs;
     .cnt_cpu_rx_dropped(cnt_cpu[3]), .cnt_cpu_tx_frames(cnt_cpu[4]), .cnt_cpu_tx_discard(cnt_cpu[5]),
     .cnt_cpu_tx_reject(cnt_cpu[6]), .cpu_path_enable(cpu_en_c));
 
+  // The same CPU path with each optional block present: classifier only, offload only, both.
+  logic [31:0] rd_d;
+  logic [31:0] rd_e;
+  logic [31:0] rd_f;
+  logic        cpu_en_d;
+  logic        cpu_en_e;
+  logic        cpu_en_f;
+  rtlnet_eth_protocol_regs #(.LEAF_PRESENT(5'b11111), .INGRESS_FIFO_KB(16), .EGRESS_FIFO_KB(8), .NUM_SOCKETS(4),
+                             .CPU_PATH_PRESENT(1'b1), .CPU_RX_FIFO_KB(16), .CPU_TX_FIFO_KB(8),
+                             .CPU_CLASSIFIER_PRESENT(1'b1), .CPU_OFFLOAD_PRESENT(1'b0)) u_cpu_cls (
+    .clk(clk), .resetn(resetn), .reg_wr_en(reg_wr_en), .reg_wr_addr(reg_wr_addr), .reg_wr_data(reg_wr_data),
+    .reg_rd_en(reg_rd_en), .reg_rd_addr(reg_rd_addr), .reg_rd_data(rd_d), .lease_valid(1'b0),
+    .lease_ip(lease_ip), .lease_mask(lease_mask), .lease_router(lease_router), .leaf_busy(leaf_busy),
+    .ingress_pending(ingress_pending), .egress_full(egress_full), .delivering(delivering),
+    .arbiter_active(arbiter_active), .cnt_ingress_frames(cnt_frames), .cnt_ingress_filtered(cnt_filtered),
+    .cnt_ingress_dropped(cnt_dropped), .cnt_egress_frames(cnt_egress),
+    .cpu_rx_full(cpu_rx_full), .cpu_rx_pending(cpu_rx_pending), .cpu_tx_pending(cpu_tx_pending),
+    .cnt_delivered(cnt_cpu[0]), .cnt_cpu_rx_frames(cnt_cpu[1]), .cnt_cpu_rx_claimed(cnt_cpu[2]),
+    .cnt_cpu_rx_dropped(cnt_cpu[3]), .cnt_cpu_tx_frames(cnt_cpu[4]), .cnt_cpu_tx_discard(cnt_cpu[5]),
+    .cnt_cpu_tx_reject(cnt_cpu[6]), .cpu_path_enable(cpu_en_d));
+  rtlnet_eth_protocol_regs #(.LEAF_PRESENT(5'b11111), .INGRESS_FIFO_KB(16), .EGRESS_FIFO_KB(8), .NUM_SOCKETS(4),
+                             .CPU_PATH_PRESENT(1'b1), .CPU_RX_FIFO_KB(16), .CPU_TX_FIFO_KB(8),
+                             .CPU_CLASSIFIER_PRESENT(1'b0), .CPU_OFFLOAD_PRESENT(1'b1)) u_cpu_off (
+    .clk(clk), .resetn(resetn), .reg_wr_en(reg_wr_en), .reg_wr_addr(reg_wr_addr), .reg_wr_data(reg_wr_data),
+    .reg_rd_en(reg_rd_en), .reg_rd_addr(reg_rd_addr), .reg_rd_data(rd_e), .lease_valid(1'b0),
+    .lease_ip(lease_ip), .lease_mask(lease_mask), .lease_router(lease_router), .leaf_busy(leaf_busy),
+    .ingress_pending(ingress_pending), .egress_full(egress_full), .delivering(delivering),
+    .arbiter_active(arbiter_active), .cnt_ingress_frames(cnt_frames), .cnt_ingress_filtered(cnt_filtered),
+    .cnt_ingress_dropped(cnt_dropped), .cnt_egress_frames(cnt_egress),
+    .cpu_rx_full(cpu_rx_full), .cpu_rx_pending(cpu_rx_pending), .cpu_tx_pending(cpu_tx_pending),
+    .cnt_delivered(cnt_cpu[0]), .cnt_cpu_rx_frames(cnt_cpu[1]), .cnt_cpu_rx_claimed(cnt_cpu[2]),
+    .cnt_cpu_rx_dropped(cnt_cpu[3]), .cnt_cpu_tx_frames(cnt_cpu[4]), .cnt_cpu_tx_discard(cnt_cpu[5]),
+    .cnt_cpu_tx_reject(cnt_cpu[6]), .cpu_path_enable(cpu_en_e));
+  rtlnet_eth_protocol_regs #(.LEAF_PRESENT(5'b11111), .INGRESS_FIFO_KB(16), .EGRESS_FIFO_KB(8), .NUM_SOCKETS(4),
+                             .CPU_PATH_PRESENT(1'b1), .CPU_RX_FIFO_KB(16), .CPU_TX_FIFO_KB(8),
+                             .CPU_CLASSIFIER_PRESENT(1'b1), .CPU_OFFLOAD_PRESENT(1'b1)) u_cpu_both (
+    .clk(clk), .resetn(resetn), .reg_wr_en(reg_wr_en), .reg_wr_addr(reg_wr_addr), .reg_wr_data(reg_wr_data),
+    .reg_rd_en(reg_rd_en), .reg_rd_addr(reg_rd_addr), .reg_rd_data(rd_f), .lease_valid(1'b0),
+    .lease_ip(lease_ip), .lease_mask(lease_mask), .lease_router(lease_router), .leaf_busy(leaf_busy),
+    .ingress_pending(ingress_pending), .egress_full(egress_full), .delivering(delivering),
+    .arbiter_active(arbiter_active), .cnt_ingress_frames(cnt_frames), .cnt_ingress_filtered(cnt_filtered),
+    .cnt_ingress_dropped(cnt_dropped), .cnt_egress_frames(cnt_egress),
+    .cpu_rx_full(cpu_rx_full), .cpu_rx_pending(cpu_rx_pending), .cpu_tx_pending(cpu_tx_pending),
+    .cnt_delivered(cnt_cpu[0]), .cnt_cpu_rx_frames(cnt_cpu[1]), .cnt_cpu_rx_claimed(cnt_cpu[2]),
+    .cnt_cpu_rx_dropped(cnt_cpu[3]), .cnt_cpu_tx_frames(cnt_cpu[4]), .cnt_cpu_tx_discard(cnt_cpu[5]),
+    .cnt_cpu_tx_reject(cnt_cpu[6]), .cpu_path_enable(cpu_en_f));
+
+  // Read CPU_CAPS of the three builds and compare.
+  task automatic expect_caps(input logic [31:0] e_cls, input logic [31:0] e_off, input logic [31:0] e_both);
+    @(posedge clk);
+    reg_rd_en   <= 1'b1;
+    reg_rd_addr <= 12'h034;
+    @(posedge clk);
+    reg_rd_en   <= 1'b0;
+    @(posedge clk);
+    tb_check(rd_d === e_cls, $sformatf("CPU_CAPS classifier only = 0x%08x, expected 0x%08x", rd_d, e_cls));
+    tb_check(rd_e === e_off, $sformatf("CPU_CAPS offload only = 0x%08x, expected 0x%08x", rd_e, e_off));
+    tb_check(rd_f === e_both, $sformatf("CPU_CAPS classifier + offload = 0x%08x, expected 0x%08x", rd_f, e_both));
+  endtask
+
   // Read one offset of the CPU-path instance.
   task automatic expect_c(input logic [11:0] addr, input logic [31:0] e, input string what);
     @(posedge clk);
@@ -278,7 +338,8 @@ module tb_rtlnet_eth_protocol_regs;
 
     // ---- CPU network path registers (u_cpu), and the bit masked where absent.
     expect_c(12'h008, 32'h0408_103F, "CAPS (all leaves, CPU path present)");
-    expect_c(12'h034, 32'h0000_0810, "CPU_CAPS (RX 16 KB, TX 8 KB)");
+    expect_c(12'h034, 32'h0000_0810, "CPU_CAPS (RX 16 KB, TX 8 KB, no optional block)");
+    expect_caps(32'h0001_0810, 32'h0006_0810, 32'h0007_0810);
     expect2(12'h034, 32'h0, 32'h0, "CPU_CAPS without the CPU path");
     wr(12'h00C, 32'h0000_1F01);
     tb_check(cpu_en_c === 1'b0, "CTRL bit 1 cleared: cpu_path_enable 0");

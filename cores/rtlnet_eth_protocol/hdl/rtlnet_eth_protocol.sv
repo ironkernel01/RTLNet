@@ -128,6 +128,7 @@ module rtlnet_eth_protocol #(
   parameter int    CPU_RX_FIFO_KB  = 16,           // CPU receive queue, kilobytes
   parameter int    CPU_TX_FIFO_KB  = 8,            // CPU transmit queue, kilobytes
   parameter int    CPU_CLASSIFIER_ENABLE = 1,      // build u_cpu_classifier on the CPU receive stream
+  parameter int    CPU_TCP_OFFLOAD_ENABLE = 1,     // build u_cpu_offload (checksum insert on TX, trailer on RX)
   parameter int    CPU_AXIS_CLK_HZ = 100_000_000,  // cpu_axis_clk frequency (classifier policer tick)
   parameter string RAM_STYLE       = "block"       // "block" | "distributed", every buffer
 )(
@@ -260,6 +261,10 @@ module rtlnet_eth_protocol #(
   // Classifier register window in the sub-map (decoded in s_axi_aclk).
   localparam logic [15:0] WIN_CLASSIFIER_BASE   = 16'h8000;
   localparam logic [15:0] WIN_CLASSIFIER_SIZE   = 16'h1000;
+  localparam bit         OFFLOAD_PRESENT        = CPU_PRESENT && (CPU_TCP_OFFLOAD_ENABLE != 0);
+  // Checksum offload register window in the sub-map (decoded in s_axi_aclk).
+  localparam logic [15:0] WIN_OFFLOAD_BASE      = 16'h9000;
+  localparam logic [15:0] WIN_OFFLOAD_SIZE      = 16'h1000;
   localparam logic [15:0] WIN_SUBMAP_SIZE       = 16'h0000;   // 64 KiB (wraps to 0 in 16 bits)
 
   localparam logic [1:0] DQ_GAP  = 2'd0;
@@ -377,6 +382,24 @@ module rtlnet_eth_protocol #(
   logic [1:0]             cl_rresp;
   logic                   cl_rvalid;
   logic                   cl_rready;
+  // Checksum offload register port (s_axi_aclk), from u_cpu_axil_dec.
+  logic [11:0]            of_awaddr;
+  logic                   of_awvalid;
+  logic                   of_awready;
+  logic [31:0]            of_wdata;
+  logic [3:0]             of_wstrb;
+  logic                   of_wvalid;
+  logic                   of_wready;
+  logic [1:0]             of_bresp;
+  logic                   of_bvalid;
+  logic                   of_bready;
+  logic [11:0]            of_araddr;
+  logic                   of_arvalid;
+  logic                   of_arready;
+  logic [31:0]            of_rdata;
+  logic [1:0]             of_rresp;
+  logic                   of_rvalid;
+  logic                   of_rready;
   // The wrapper's own register path (s_axi_aclk), into u_axil_cdc.
   logic [15:0]            w_awaddr;
   logic                   w_awvalid;
@@ -627,15 +650,15 @@ module rtlnet_eth_protocol #(
   // window: size 0 in 16 address bits). Without it s_axi goes straight on.
   // ===========================================================================
   generate
-    if (CLASSIFIER_PRESENT) begin : g_cl_dec
-      logic [31:0] dec_awaddr;
-      logic [31:0] dec_araddr;
+    if (CLASSIFIER_PRESENT || OFFLOAD_PRESENT) begin : g_cl_dec
+      logic [47:0] dec_awaddr;
+      logic [47:0] dec_araddr;
 
       rtlnet_axil_decoder #(
-        .N          (2),
+        .N          (3),
         .ADDR_W     (16),
-        .SLAVE_BASE ({16'h0000, WIN_CLASSIFIER_BASE}),
-        .SLAVE_SIZE ({WIN_SUBMAP_SIZE, WIN_CLASSIFIER_SIZE})
+        .SLAVE_BASE ({16'h0000, WIN_OFFLOAD_BASE, WIN_CLASSIFIER_BASE}),
+        .SLAVE_SIZE ({WIN_SUBMAP_SIZE, WIN_OFFLOAD_SIZE, WIN_CLASSIFIER_SIZE})
       ) u_cpu_axil_dec (
         .aclk          (s_axi_aclk),
         .aresetn       (s_axi_aresetn),
@@ -657,28 +680,90 @@ module rtlnet_eth_protocol #(
         .s_axi_rvalid  (s_axi_rvalid),
         .s_axi_rready  (s_axi_rready),
         .m_axi_awaddr  (dec_awaddr),
-        .m_axi_awvalid ({w_awvalid, cl_awvalid}),
-        .m_axi_awready ({w_awready, cl_awready}),
-        .m_axi_wdata   ({w_wdata, cl_wdata}),
-        .m_axi_wstrb   ({w_wstrb, cl_wstrb}),
-        .m_axi_wvalid  ({w_wvalid, cl_wvalid}),
-        .m_axi_wready  ({w_wready, cl_wready}),
-        .m_axi_bresp   ({w_bresp, cl_bresp}),
-        .m_axi_bvalid  ({w_bvalid, cl_bvalid}),
-        .m_axi_bready  ({w_bready, cl_bready}),
+        .m_axi_awvalid ({w_awvalid, of_awvalid, cl_awvalid}),
+        .m_axi_awready ({w_awready, of_awready, cl_awready}),
+        .m_axi_wdata   ({w_wdata, of_wdata, cl_wdata}),
+        .m_axi_wstrb   ({w_wstrb, of_wstrb, cl_wstrb}),
+        .m_axi_wvalid  ({w_wvalid, of_wvalid, cl_wvalid}),
+        .m_axi_wready  ({w_wready, of_wready, cl_wready}),
+        .m_axi_bresp   ({w_bresp, of_bresp, cl_bresp}),
+        .m_axi_bvalid  ({w_bvalid, of_bvalid, cl_bvalid}),
+        .m_axi_bready  ({w_bready, of_bready, cl_bready}),
         .m_axi_araddr  (dec_araddr),
-        .m_axi_arvalid ({w_arvalid, cl_arvalid}),
-        .m_axi_arready ({w_arready, cl_arready}),
-        .m_axi_rdata   ({w_rdata, cl_rdata}),
-        .m_axi_rresp   ({w_rresp, cl_rresp}),
-        .m_axi_rvalid  ({w_rvalid, cl_rvalid}),
-        .m_axi_rready  ({w_rready, cl_rready})
+        .m_axi_arvalid ({w_arvalid, of_arvalid, cl_arvalid}),
+        .m_axi_arready ({w_arready, of_arready, cl_arready}),
+        .m_axi_rdata   ({w_rdata, of_rdata, cl_rdata}),
+        .m_axi_rresp   ({w_rresp, of_rresp, cl_rresp}),
+        .m_axi_rvalid  ({w_rvalid, of_rvalid, cl_rvalid}),
+        .m_axi_rready  ({w_rready, of_rready, cl_rready})
       );
 
       assign cl_awaddr = dec_awaddr[11:0];
       assign cl_araddr = dec_araddr[11:0];
-      assign w_awaddr  = dec_awaddr[31:16];
-      assign w_araddr  = dec_araddr[31:16];
+      assign of_awaddr = dec_awaddr[27:16];
+      assign of_araddr = dec_araddr[27:16];
+      assign w_awaddr  = dec_awaddr[47:32];
+      assign w_araddr  = dec_araddr[47:32];
+
+      // A window without its block answers like any unused window: zero, OKAY, writes ignored.
+      if (!CLASSIFIER_PRESENT) begin : g_cl_null
+        rtlnet_axil_slave #(.ADDR_W(12)) u_cl_null (
+          .s_axi_aclk    (s_axi_aclk),
+          .s_axi_aresetn (s_axi_aresetn),
+          .s_axi_awaddr  (cl_awaddr),
+          .s_axi_awvalid (cl_awvalid),
+          .s_axi_awready (cl_awready),
+          .s_axi_wdata   (cl_wdata),
+          .s_axi_wstrb   (cl_wstrb),
+          .s_axi_wvalid  (cl_wvalid),
+          .s_axi_wready  (cl_wready),
+          .s_axi_bresp   (cl_bresp),
+          .s_axi_bvalid  (cl_bvalid),
+          .s_axi_bready  (cl_bready),
+          .s_axi_araddr  (cl_araddr),
+          .s_axi_arvalid (cl_arvalid),
+          .s_axi_arready (cl_arready),
+          .s_axi_rdata   (cl_rdata),
+          .s_axi_rresp   (cl_rresp),
+          .s_axi_rvalid  (cl_rvalid),
+          .s_axi_rready  (cl_rready),
+          .reg_wr_en     (),
+          .reg_wr_addr   (),
+          .reg_wr_data   (),
+          .reg_rd_en     (),
+          .reg_rd_addr   (),
+          .reg_rd_data   (32'd0)
+        );
+      end
+      if (!OFFLOAD_PRESENT) begin : g_of_null
+        rtlnet_axil_slave #(.ADDR_W(12)) u_of_null (
+          .s_axi_aclk    (s_axi_aclk),
+          .s_axi_aresetn (s_axi_aresetn),
+          .s_axi_awaddr  (of_awaddr),
+          .s_axi_awvalid (of_awvalid),
+          .s_axi_awready (of_awready),
+          .s_axi_wdata   (of_wdata),
+          .s_axi_wstrb   (of_wstrb),
+          .s_axi_wvalid  (of_wvalid),
+          .s_axi_wready  (of_wready),
+          .s_axi_bresp   (of_bresp),
+          .s_axi_bvalid  (of_bvalid),
+          .s_axi_bready  (of_bready),
+          .s_axi_araddr  (of_araddr),
+          .s_axi_arvalid (of_arvalid),
+          .s_axi_arready (of_arready),
+          .s_axi_rdata   (of_rdata),
+          .s_axi_rresp   (of_rresp),
+          .s_axi_rvalid  (of_rvalid),
+          .s_axi_rready  (of_rready),
+          .reg_wr_en     (),
+          .reg_wr_addr   (),
+          .reg_wr_data   (),
+          .reg_rd_en     (),
+          .reg_rd_addr   (),
+          .reg_rd_data   (32'd0)
+        );
+      end
     end else begin : g_no_cl_dec
       assign w_awaddr      = s_axi_awaddr;
       assign w_awvalid     = s_axi_awvalid;
@@ -714,6 +799,23 @@ module rtlnet_eth_protocol #(
       assign cl_rresp      = '0;
       assign cl_rvalid     = 1'b0;
       assign cl_rready     = 1'b0;
+      assign of_awaddr     = '0;
+      assign of_awvalid    = 1'b0;
+      assign of_awready    = 1'b0;
+      assign of_wdata      = '0;
+      assign of_wstrb      = '0;
+      assign of_wvalid     = 1'b0;
+      assign of_wready     = 1'b0;
+      assign of_bresp      = '0;
+      assign of_bvalid     = 1'b0;
+      assign of_bready     = 1'b0;
+      assign of_araddr     = '0;
+      assign of_arvalid    = 1'b0;
+      assign of_arready    = 1'b0;
+      assign of_rdata      = '0;
+      assign of_rresp      = '0;
+      assign of_rvalid     = 1'b0;
+      assign of_rready     = 1'b0;
     end
   endgenerate
 
@@ -872,6 +974,18 @@ module rtlnet_eth_protocol #(
       logic        crx_m_valid;
       logic        crx_m_ready;
       logic        crx_m_last;
+      // Classifier (or registered queue) output toward the receive offload, and the offload's
+      // transmit output toward the legality guard and u_cpu_tx_fifo.
+      logic [63:0] cls_m_data;
+      logic [7:0]  cls_m_keep;
+      logic        cls_m_valid;
+      logic        cls_m_last;
+      logic        cls_m_ready;
+      logic [63:0] tin_data;
+      logic [7:0]  tin_keep;
+      logic        tin_valid;
+      logic        tin_last;
+      logic        tin_ready;
       // u_cpu_tx_fifo write side (cpu_axis_clk) and read side (proto_clk).
       logic        ctx_s_bad;
       logic [31:0] cx_cnt_reject;
@@ -976,11 +1090,11 @@ module rtlnet_eth_protocol #(
           .s_axis_tvalid (crx_m_valid),
           .s_axis_tlast  (crx_m_last),
           .s_axis_tready (crx_m_ready),
-          .m_axis_tdata  (m_axis_cpu_eth_tdata),
-          .m_axis_tkeep  (m_axis_cpu_eth_tkeep),
-          .m_axis_tvalid (m_axis_cpu_eth_tvalid),
-          .m_axis_tlast  (m_axis_cpu_eth_tlast),
-          .m_axis_tready (m_axis_cpu_eth_tready),
+          .m_axis_tdata  (cls_m_data),
+          .m_axis_tkeep  (cls_m_keep),
+          .m_axis_tvalid (cls_m_valid),
+          .m_axis_tlast  (cls_m_last),
+          .m_axis_tready (cls_m_ready),
           .s_axi_awaddr  (cl_awaddr),
           .s_axi_awvalid (cl_awvalid),
           .s_axi_awready (cl_awready),
@@ -1014,12 +1128,73 @@ module rtlnet_eth_protocol #(
           .s_tlast  (crx_m_last),
           .s_tvalid (crx_m_valid),
           .s_tready (crx_m_ready),
-          .m_tdata  (m_axis_cpu_eth_tdata),
-          .m_tkeep  (m_axis_cpu_eth_tkeep),
-          .m_tlast  (m_axis_cpu_eth_tlast),
-          .m_tvalid (m_axis_cpu_eth_tvalid),
-          .m_tready (m_axis_cpu_eth_tready)
+          .m_tdata  (cls_m_data),
+          .m_tkeep  (cls_m_keep),
+          .m_tlast  (cls_m_last),
+          .m_tvalid (cls_m_valid),
+          .m_tready (cls_m_ready)
         );
+      end
+
+      if (OFFLOAD_PRESENT) begin : g_offload
+        // Checksum offload on the CPU DMA streams (cores/rtlnet_tcp_offload): receive frames get a
+        // checksum trailer, transmit frames get their checksum fields inserted; registers at 0x9000.
+        rtlnet_tcp_offload #(
+          .RAM_STYLE (RAM_STYLE)
+        ) u_cpu_offload (
+          .clk              (cpu_axis_clk),
+          .resetn           (cpu_axis_resetn),
+          .s_axi_aclk       (s_axi_aclk),
+          .s_axi_aresetn    (s_axi_aresetn),
+          .s_axis_tx_tdata  (s_axis_cpu_eth_tdata),
+          .s_axis_tx_tkeep  (s_axis_cpu_eth_tkeep),
+          .s_axis_tx_tvalid (s_axis_cpu_eth_tvalid),
+          .s_axis_tx_tlast  (s_axis_cpu_eth_tlast),
+          .s_axis_tx_tready (s_axis_cpu_eth_tready),
+          .m_axis_tx_tdata  (tin_data),
+          .m_axis_tx_tkeep  (tin_keep),
+          .m_axis_tx_tvalid (tin_valid),
+          .m_axis_tx_tlast  (tin_last),
+          .m_axis_tx_tready (tin_ready),
+          .s_axis_rx_tdata  (cls_m_data),
+          .s_axis_rx_tkeep  (cls_m_keep),
+          .s_axis_rx_tvalid (cls_m_valid),
+          .s_axis_rx_tlast  (cls_m_last),
+          .s_axis_rx_tready (cls_m_ready),
+          .m_axis_rx_tdata  (m_axis_cpu_eth_tdata),
+          .m_axis_rx_tkeep  (m_axis_cpu_eth_tkeep),
+          .m_axis_rx_tvalid (m_axis_cpu_eth_tvalid),
+          .m_axis_rx_tlast  (m_axis_cpu_eth_tlast),
+          .m_axis_rx_tready (m_axis_cpu_eth_tready),
+          .s_axi_awaddr     (of_awaddr),
+          .s_axi_awvalid    (of_awvalid),
+          .s_axi_awready    (of_awready),
+          .s_axi_wdata      (of_wdata),
+          .s_axi_wstrb      (of_wstrb),
+          .s_axi_wvalid     (of_wvalid),
+          .s_axi_wready     (of_wready),
+          .s_axi_bresp      (of_bresp),
+          .s_axi_bvalid     (of_bvalid),
+          .s_axi_bready     (of_bready),
+          .s_axi_araddr     (of_araddr),
+          .s_axi_arvalid    (of_arvalid),
+          .s_axi_arready    (of_arready),
+          .s_axi_rdata      (of_rdata),
+          .s_axi_rresp      (of_rresp),
+          .s_axi_rvalid     (of_rvalid),
+          .s_axi_rready     (of_rready)
+        );
+      end else begin : g_no_offload
+        assign m_axis_cpu_eth_tdata  = cls_m_data;
+        assign m_axis_cpu_eth_tkeep  = cls_m_keep;
+        assign m_axis_cpu_eth_tvalid = cls_m_valid;
+        assign m_axis_cpu_eth_tlast  = cls_m_last;
+        assign cls_m_ready           = m_axis_cpu_eth_tready;
+        assign tin_data              = s_axis_cpu_eth_tdata;
+        assign tin_keep              = s_axis_cpu_eth_tkeep;
+        assign tin_valid             = s_axis_cpu_eth_tvalid;
+        assign tin_last              = s_axis_cpu_eth_tlast;
+        assign s_axis_cpu_eth_tready = tin_ready;
       end
 
       // CPU transmit legality: 14..ETH_MAX_FRAME_BYTES bytes, legal tkeep.
@@ -1029,10 +1204,10 @@ module rtlnet_eth_protocol #(
       ) u_cpu_tx_guard (
         .clk     (cpu_axis_clk),
         .resetn  (cpu_axis_resetn),
-        .keep    (s_axis_cpu_eth_tkeep),
-        .valid   (s_axis_cpu_eth_tvalid),
-        .ready   (s_axis_cpu_eth_tready),
-        .last    (s_axis_cpu_eth_tlast),
+        .keep    (tin_keep),
+        .valid   (tin_valid),
+        .ready   (tin_ready),
+        .last    (tin_last),
         .bad_in  (1'b0),
         .bad_out (ctx_s_bad)
       );
@@ -1041,7 +1216,7 @@ module rtlnet_eth_protocol #(
       // (cpu_axis_clk), crossed to proto_clk below.
       always_ff @(posedge cpu_axis_clk) begin
         if (!cpu_axis_resetn) cx_cnt_reject <= '0;
-        else if (s_axis_cpu_eth_tvalid && s_axis_cpu_eth_tready && s_axis_cpu_eth_tlast && ctx_s_bad)
+        else if (tin_valid && tin_ready && tin_last && ctx_s_bad)
           cx_cnt_reject <= cx_cnt_reject + 32'd1;
       end
 
@@ -1059,11 +1234,11 @@ module rtlnet_eth_protocol #(
       ) u_cpu_tx_fifo (
         .s_clk     (cpu_axis_clk),
         .s_resetn  (cpu_axis_resetn),
-        .s_data    (s_axis_cpu_eth_tdata),
-        .s_keep    (s_axis_cpu_eth_tkeep),
-        .s_valid   (s_axis_cpu_eth_tvalid),
-        .s_ready   (s_axis_cpu_eth_tready),
-        .s_last    (s_axis_cpu_eth_tlast),
+        .s_data    (tin_data),
+        .s_keep    (tin_keep),
+        .s_valid   (tin_valid),
+        .s_ready   (tin_ready),
+        .s_last    (tin_last),
         .s_bad     (ctx_s_bad),
         .m_clk     (proto_clk),
         .m_resetn  (proto_resetn),
@@ -1168,6 +1343,8 @@ module rtlnet_eth_protocol #(
     .EGRESS_FIFO_KB  (EGRESS_FIFO_KB),
     .NUM_SOCKETS     (NUM_SOCKETS),
     .CPU_PATH_PRESENT        (CPU_PRESENT),
+    .CPU_CLASSIFIER_PRESENT  (CLASSIFIER_PRESENT),
+    .CPU_OFFLOAD_PRESENT     (OFFLOAD_PRESENT),
     .CPU_RX_FIFO_KB          (CPU_RX_FIFO_KB),
     .CPU_TX_FIFO_KB          (CPU_TX_FIFO_KB)
   ) u_regs (

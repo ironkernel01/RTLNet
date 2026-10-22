@@ -214,6 +214,16 @@ int main(void)
               cc.cpu_rx_dropped == 104u && cc.cpu_tx_frames == 105u && cc.cpu_tx_discarded == 106u &&
               cc.cpu_tx_rejected == 107u, "read_cpu_counters reads the seven offsets");
         check(RTLNET_PROTO_WIN_CLASSIFIER == 0x8000u, "classifier window at 0x8000");
+        check(RTLNET_PROTO_WIN_OFFLOAD == 0x9000u, "checksum offload window at 0x9000");
+        check(rtlnet_eth_protocol_get_cpu_features(TEST_BASE) == 0u, "no optional block: features 0");
+        g_regs[RTLNET_PROTO_REG_CPU_CAPS / 4u] = 0x00070810u;
+        check(rtlnet_eth_protocol_get_cpu_features(TEST_BASE) == (RTLNET_PROTO_CPU_CAPS_CLASSIFIER |
+              RTLNET_PROTO_CPU_CAPS_OFFLOAD_TX | RTLNET_PROTO_CPU_CAPS_OFFLOAD_RX), "classifier + offload features");
+        check(rtlnet_eth_protocol_get_cpu_rx_fifo_kb(TEST_BASE) == 16u && rtlnet_eth_protocol_get_cpu_tx_fifo_kb(TEST_BASE) == 8u,
+              "feature bits leave the queue sizes alone");
+        g_regs[RTLNET_PROTO_REG_CPU_CAPS / 4u] = 0x00020810u;
+        check(rtlnet_eth_protocol_get_cpu_features(TEST_BASE) == RTLNET_PROTO_CPU_CAPS_OFFLOAD_TX, "TX offload only");
+        g_regs[RTLNET_PROTO_REG_CPU_CAPS / 4u] = 0x00000810u;
     }
 
     check(!g_bad_access, "every access inside the window, 32-bit aligned");

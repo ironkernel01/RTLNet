@@ -381,6 +381,18 @@ uint32_t rtlnet_eth_protocol_get_cpu_tx_fifo_kb(uintptr_t base)
 }
 
 /*
+ * rtlnet_eth_protocol_get_cpu_features -- which optional CPU path blocks are built
+ * Steps:
+ *   1. Read CPU_CAPS and keep the feature bits.
+ * Returns: a mask of RTLNET_PROTO_CPU_CAPS_CLASSIFIER, _OFFLOAD_TX, _OFFLOAD_RX; 0 without the CPU path.
+ */
+uint32_t rtlnet_eth_protocol_get_cpu_features(uintptr_t base)
+{
+    return rtlnet_reg_read32(base, RTLNET_PROTO_REG_CPU_CAPS) &
+           (RTLNET_PROTO_CPU_CAPS_CLASSIFIER | RTLNET_PROTO_CPU_CAPS_OFFLOAD_TX | RTLNET_PROTO_CPU_CAPS_OFFLOAD_RX);
+}
+
+/*
  * rtlnet_eth_protocol_read_cpu_counters -- read the CPU network path counters
  * Steps:
  *   1. Read DELIVERED_FRAMES, CPU_RX_FRAMES, CPU_RX_CLAIMED, CPU_RX_DROPPED,

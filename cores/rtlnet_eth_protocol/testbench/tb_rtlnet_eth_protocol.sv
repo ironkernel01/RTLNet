@@ -35,6 +35,8 @@
 //     CPU_RX_CLAIMED + CPU_RX_FRAMES + CPU_RX_DROPPED. rtlnet_tb_leaf_claim_
 //     monitor on the ARP and ICMP leaves; every answered ARP request and ping
 //     is claimed (claims = REPLIES_SENT + ECHO_REPLIES).
+//   * +define+TB_NO_OFFLOAD builds CPU_TCP_OFFLOAD_ENABLE = 0: CPU_CAPS bits 17/18 read 0 and
+//     the 0x9000 window reads 0 (default build: bits 17/18 set, window answers ID "TCPO").
 //   * +define+TB_NO_CPU_PATH builds CPU_PATH_ENABLE = 0: CAPS bit 5 and
 //     CPU_CAPS read 0, CTRL bit 1 reads 0, m_axis_cpu_eth_tvalid stays 0 and
 //     s_axis_cpu_eth_tready 1.
@@ -81,6 +83,11 @@ module tb_rtlnet_eth_protocol;
   localparam int          CPU_PATH     = 0;
 `else
   localparam int          CPU_PATH     = 1;
+`endif
+`ifdef TB_NO_OFFLOAD
+  localparam int          OFFLOAD      = 0;
+`else
+  localparam int          OFFLOAD      = 1;
 `endif
   localparam logic [15:0] R_CPU_CAPS   = 16'h0034;
   localparam logic [15:0] R_DELIVERED  = 16'h0050;
@@ -212,7 +219,8 @@ module tb_rtlnet_eth_protocol;
     .IPERF_ENABLE    (0),
     .UDP_ENABLE      (0),
     .CPU_PATH_ENABLE       (CPU_PATH),
-    .CPU_CLASSIFIER_ENABLE (0)
+    .CPU_CLASSIFIER_ENABLE (0),
+    .CPU_TCP_OFFLOAD_ENABLE (OFFLOAD)
   ) dut (
     .axis_clk          (axis_clk),
     .proto_clk         (proto_clk),
@@ -524,8 +532,11 @@ module tb_rtlnet_eth_protocol;
     axi_expect(R_ID, 32'h50524F54, "ID");
     axi_expect(R_VERSION, 32'h10222026, "VERSION");
     axi_expect(R_CAPS, CAPS_VALUE, "CAPS (ICMP, ARP present, CPU path per build; 16/8 KB; 0 sockets)");
-    axi_expect(R_CPU_CAPS, (CPU_PATH != 0) ? 32'h0000_0810 : 32'h0, "CPU_CAPS (CPU RX 16 KB, TX 8 KB)");
+    axi_expect(R_CPU_CAPS, (CPU_PATH == 0) ? 32'h0 : ((OFFLOAD != 0) ? 32'h0006_0810 : 32'h0000_0810),
+               "CPU_CAPS (CPU RX 16 KB, TX 8 KB, offload TX+RX bits 17/18 when built, classifier bit 16 clear)");
     axi_expect(16'h8000, 32'h0, "classifier window (not built) reads 0");
+    axi_expect(16'h9000, (CPU_PATH != 0 && OFFLOAD != 0) ? 32'h5443_504F : 32'h0, "offload window ID (0 when not built)");
+    axi_expect(16'h9004, (CPU_PATH != 0 && OFFLOAD != 0) ? 32'h1022_2026 : 32'h0, "offload window VERSION (0 when not built)");
     axi_expect(R_CTRL, CTRL_DEFAULT, "CTRL");
     axi_expect(R_STATUS, 32'h0000_0002, "STATUS (IP valid, static)");
     axi_expect(R_MAC_HI, 32'h0000_0249, "LOCAL_MAC_HI");

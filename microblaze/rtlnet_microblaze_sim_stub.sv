@@ -39,6 +39,8 @@
 //     tables, MAC table classify-only with entry 0 destination
 //     FF:FF:FF:FF:FF:FF policed by policer 0, policer 0 = limit/window, MODE
 //     PASS_ALL; resp 2'b11 when the ID does not read "CLSF").
+//   * txo_config(base, ctrl, resp): the register sequence of rtlnet_tcp_offload_init +
+//     rtlnet_tcp_offload_set_ctrl (ID/VERSION check, CTRL write and read-back).
 //   * Simulation only; never synthesized.
 // Language: SystemVerilog-2012 (simulation only).
 // Revision: 10-22-2026
@@ -46,6 +48,7 @@
 //   * 10-22-2026: m_axis_eth_* / s_axis_eth_* frame streams, eth_send/eth_get.
 //   * 10-22-2026: renamed from rtlnet_cpu_bfm; register-sequence tasks.
 //   * 10-22-2026: cls_config_bcast_storm follows the driver's register map and write order exactly.
+//   * 10-22-2026: txo_config (checksum offload CTRL sequence).
 // Clocks: clk (cpu_clk); resetn synchronous to clk, active low.
 // -----------------------------------------------------------------------------
 `timescale 1ns / 1ps
@@ -320,6 +323,35 @@ module rtlnet_microblaze_sim_stub #(
     axil_write(base + CLS_REG_POLICER0 + CLS_POL_WINDOW, window_ms, 4'hF, resp);
     axil_write(base + CLS_REG_POLICER0 + CLS_POL_CTRL, CLS_POL_ENABLE, 4'hF, resp);
     axil_write(base + CLS_REG_CTRL, CLS_MODE_PASS_ALL, 4'hF, resp);
+  endtask
+
+  // Checksum offload configuration, register level: the sequence of
+  // rtlnet_tcp_offload_init + rtlnet_tcp_offload_set_ctrl
+  // (cores/rtlnet_tcp_offload/driver). base = the offload window (0x44A1_9000).
+  //   init: ID "TCPO" 0x5443504F and VERSION 0x10222026 read (resp 2'b11 when they do not), CAPS and LATENCY read.
+  //   set_ctrl: CTRL written and read back (resp 2'b10 when the read-back differs).
+  task automatic txo_config(input logic [31:0] base, input logic [31:0] ctrl, output logic [1:0] resp);
+    localparam logic [31:0] TXO_REG_ID      = 32'h000;
+    localparam logic [31:0] TXO_REG_VERSION = 32'h004;
+    localparam logic [31:0] TXO_REG_CAPS    = 32'h008;
+    localparam logic [31:0] TXO_REG_CTRL    = 32'h00C;
+    localparam logic [31:0] TXO_REG_LATENCY = 32'h014;
+    localparam logic [31:0] TXO_ID_VALUE      = 32'h5443_504F;
+    localparam logic [31:0] TXO_VERSION_VALUE = 32'h1022_2026;
+    logic [31:0] id;
+    logic [31:0] ver;
+    logic [31:0] x;
+    axil_read(base + TXO_REG_ID, id, resp);
+    axil_read(base + TXO_REG_VERSION, ver, resp);
+    axil_read(base + TXO_REG_CAPS, x, resp);
+    axil_read(base + TXO_REG_LATENCY, x, resp);
+    if (id !== TXO_ID_VALUE || ver !== TXO_VERSION_VALUE) begin
+      resp = 2'b11;
+      return;
+    end
+    axil_write(base + TXO_REG_CTRL, ctrl, 4'hF, resp);
+    axil_read(base + TXO_REG_CTRL, x, resp);
+    if (resp == 2'b00 && x !== ctrl) resp = 2'b10;
   endtask
 
   // Send one Ethernet frame on m_axis_eth_*: eight bytes per beat, tkeep
