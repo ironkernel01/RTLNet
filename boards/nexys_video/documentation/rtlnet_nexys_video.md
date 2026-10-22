@@ -367,6 +367,8 @@ time; counters cleared (`clear counters`) before, read after:
 
 Per policer window the board passes 10 broadcasts; unicast TCP and ICMP frames pass unchanged.
 
+After the rebase onto the lwiperf merge (firmware rebuilt `-Werror` clean, merged into the same bitstream, text 159.6 KB) the console test passed 27/27, `tcp_test.ps1` 5/5 (iperf `-R` now returns 29.3 Mbit/s board -> PC) and a second flood gave seen 4002, passed 1013, dropped 2989, ping 14/14, TCP echo PASS.
+
 ## 7. Network integration (done 10-22-2026) and what remains
 
 Integrated: `u_mac`, `u_mdio`, `u_protocol` (every leaf, the CPU network path and its classifier), `u_echo` under
