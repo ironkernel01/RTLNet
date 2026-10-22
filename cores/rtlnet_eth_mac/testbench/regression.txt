@@ -1,0 +1,15 @@
+# rtlnet_eth_mac regression: <bench> <filelist> [tag] [defines=A,B] [plusargs=X,Y] [expectfail]
+# GMII-level unit bench (byte engines + guard/FIFO chain, three byte clock-enable patterns).
+tb_rtlnet_eth_mac_gmii  cores/rtlnet_eth_mac/testbench/tb_rtlnet_eth_mac_gmii.f
+tb_rtlnet_eth_mac_gmii  cores/rtlnet_eth_mac/testbench/tb_rtlnet_eth_mac_gmii.f  generic  defines=RTLNET_TECH_GENERIC
+tb_rtlnet_eth_mac_gmii  cores/rtlnet_eth_mac/testbench/tb_rtlnet_eth_mac_gmii.f  neg      plusargs=INJECT_FAILURE  expectfail
+# Full MAC with the AMD pin layer (unisim primitives) against the RTL8211E model.
+tb_rtlnet_eth_mac       cores/rtlnet_eth_mac/testbench/tb_rtlnet_eth_mac.f       g1000    defines=RTLNET_SIM_RXC_INSERTION_NS=1.536  plusargs=SPEED=1000
+tb_rtlnet_eth_mac       cores/rtlnet_eth_mac/testbench/tb_rtlnet_eth_mac.f       g100     defines=RTLNET_SIM_RXC_INSERTION_NS=1.536  plusargs=SPEED=100
+tb_rtlnet_eth_mac       cores/rtlnet_eth_mac/testbench/tb_rtlnet_eth_mac.f       g10      defines=RTLNET_SIM_RXC_INSERTION_NS=1.536  plusargs=SPEED=10
+tb_rtlnet_eth_mac       cores/rtlnet_eth_mac/testbench/tb_rtlnet_eth_mac.f       walk1000 defines=RTLNET_SIM_RXC_INSERTION_NS=1.536  plusargs=SPEED=1000,WALK
+tb_rtlnet_eth_mac       cores/rtlnet_eth_mac/testbench/tb_rtlnet_eth_mac.f       walk10   defines=RTLNET_SIM_RXC_INSERTION_NS=1.536  plusargs=SPEED=10,WALK
+tb_rtlnet_eth_mac       cores/rtlnet_eth_mac/testbench/tb_rtlnet_eth_mac.f       neg      defines=RTLNET_SIM_RXC_INSERTION_NS=1.536  plusargs=INJECT_FAILURE  expectfail
+# Full MAC with the behavioural pin layer (GENERIC technology).
+tb_rtlnet_eth_mac       cores/rtlnet_eth_mac/testbench/tb_rtlnet_eth_mac.f       gen1000  defines=RTLNET_TECH_GENERIC  plusargs=SPEED=1000
+tb_rtlnet_eth_mac       cores/rtlnet_eth_mac/testbench/tb_rtlnet_eth_mac.f       gen100   defines=RTLNET_TECH_GENERIC  plusargs=SPEED=100,WALK
