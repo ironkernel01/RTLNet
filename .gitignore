@@ -89,3 +89,6 @@ desktop.ini
 
 # RTLNet simulation work directories (Active-HDL libraries, logs, waves)
 .sim/
+
+# Agent tooling (worktrees, local settings)
+.claude/
