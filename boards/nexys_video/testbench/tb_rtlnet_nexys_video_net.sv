@@ -16,6 +16,12 @@
 //   * ARP request for the static address -> 42-byte reply (RFC 826 swap).
 //   * ICMP echo request (56-byte payload) -> echo reply, checksums recomputed.
 //   * UDP datagram to port 7 -> echoed to the sender with the same payload.
+//   * CPU-path classifier (protocol sub-map 0x8000): drop-all after reset (an
+//     unclaimed datagram never reaches the CPU, counted as MODE_DROPPED); the
+//     stand-in's cls_config_bcast_storm (the driver's register sequence)
+//     configures a limit of 3 broadcasts per 2 ms; a unicast datagram still
+//     reaches the CPU; a burst of 8 broadcasts passes exactly 3 byte-exact and
+//     drops 5 (policer 0 SEEN/PASSED/DROPPED, classifier counters).
 //   * CPU network path (cpu_axis_ethernet_stream) through the simulation
 //     stand-in's DMA tasks: the frames the leaves claimed (ARP, ICMP, UDP
 //     echo) never reach the CPU; a UDP datagram to a port no socket owns is
@@ -36,6 +42,7 @@
 // Revision: 10-22-2026
 //   * 10-22-2026: initial version.
 //   * 10-22-2026: CPU network path checks.
+//   * 10-22-2026: CPU-path classifier enabled: drop-all, configuration, broadcast limiting, unicast unaffected.
 // -----------------------------------------------------------------------------
 `timescale 1ns / 1ps
 
@@ -55,6 +62,10 @@ module tb_rtlnet_nexys_video_net;
   localparam logic [31:0] DHCP       = WIN + 32'h1_3000;
   localparam logic [31:0] IPRF       = WIN + 32'h1_4000;
   localparam logic [31:0] UDPS       = WIN + 32'h1_5000;
+  localparam logic [31:0] CLS        = WIN + 32'h1_8000;               // CPU-path classifier (protocol sub-map 0x8000)
+  localparam int          STORM_LIMIT  = 3;                            // broadcasts passed per window
+  localparam int          STORM_WINDOW = 2;                            // window in ms (policer tick from 100 MHz)
+  localparam int          STORM_BURST  = 8;                            // broadcasts sent in one burst
   localparam logic [47:0] BOARD_MAC  = 48'h02_49_4B_52_4E_01;   // rtlnet_pkg default
   localparam logic [31:0] BOARD_IP   = 32'hC0A9_01DC;          // 192.169.1.220
   localparam logic [47:0] HOST_MAC   = 48'h02_00_00_00_00_32;
@@ -299,6 +310,7 @@ module tb_rtlnet_nexys_video_net;
     bytes_t      payload;
     bytes_t      opt;
     bytes_t      empty;
+    bytes_t      bcast;
     bit [31:0]   xid;
     int          seed;
     int          polls;
@@ -326,6 +338,8 @@ module tb_rtlnet_nexys_video_net;
     check_reg(IPRF, 32'h4950_5246, "IPRF ID");
     check_reg(UDPS, 32'h5544_5053, "UDPS ID");
     check_reg(WIN + 32'h2_0000, 32'h0, "classifier window stub");
+    check_reg(CLS, 32'h434C_5346, "CPU-path classifier ID");
+    check_reg(CLS + 32'h00C, 32'h0, "classifier CTRL: MODE drop-all after reset");
 
     // PHY power-on reset done (MDIO STATUS.POR_DONE), then the settle time.
     polls = 0;
@@ -410,8 +424,9 @@ module tb_rtlnet_nexys_video_net;
     end
     check_reg(ECHO + 32'h014, 32'd1, "echo ECHOED_DATAGRAMS");
 
-    // CPU network path: claimed frames stay out of the CPU queue; an
-    // unclaimed datagram (no socket on port 9999) reaches the CPU byte-exact.
+    // CPU network path: claimed frames stay out of the CPU queue. The CPU-path
+    // classifier powers up drop-all: an unclaimed datagram (no socket on port
+    // 9999) is judged and dropped before the firmware configures it.
     tb_check(dut.u_cpu.eth_rx_frames == 0, $sformatf("claimed frames reached the CPU: %0d", dut.u_cpu.eth_rx_frames));
     payload = rand_bytes(seed, 77);
     req = udp_frame(BOARD_MAC, HOST_MAC, HOST_IP, BOARD_IP, 16'd40001, 16'd9999, payload);
@@ -420,15 +435,63 @@ module tb_rtlnet_nexys_video_net;
       bytes_t cpu_f;
       bit     cpu_ok;
       string  why;
+      dut.u_cpu.eth_get(cpu_f, 40_000, cpu_ok);
+      tb_check(!cpu_ok, "classifier drop-all: unclaimed datagram dropped before configuration");
+      rd(PROT + 32'h054, d);
+      tb_check(d == 1, $sformatf("CPU_RX_FRAMES %0d, expected 1 (committed, then dropped by the classifier)", d));
+      check_reg(CLS + 32'h080, 32'd1, "classifier FRAMES before configuration");
+      check_reg(CLS + 32'h084, 32'd0, "classifier PASSED before configuration");
+      check_reg(CLS + 32'h088, 32'd1, "classifier DROPPED before configuration");
+      check_reg(CLS + 32'h08C, 32'd1, "classifier MODE_DROPPED before configuration");
+
+      // The firmware's configuration (rtlnet_classifier_config_bcast_storm register sequence).
+      begin
+        logic [1:0] r;
+        dut.u_cpu.cls_config_bcast_storm(CLS, STORM_LIMIT, STORM_WINDOW, r);
+        tb_check(r == 2'b00, $sformatf("classifier configuration resp %b", r));
+      end
+      rd(CLS + 32'h010, d);
+      tb_check((d & 32'h0000_0301) == 32'h0000_0100, $sformatf("classifier STATUS 0x%08x: MODE pass-all, not clearing", d));
+
+      // Unicast to the CPU is unaffected by the limiter.
+      u_phy.inject(req);
       dut.u_cpu.eth_get(cpu_f, 200_000, cpu_ok);
-      tb_check(cpu_ok, "CPU path: unclaimed UDP datagram reached the CPU");
+      tb_check(cpu_ok, "CPU path: unclaimed UDP datagram reached the CPU after configuration");
       if (cpu_ok) begin
         tb_check(bytes_equal(cpu_f, req, why), $sformatf("CPU path receive: %s", why));
       end
       tb_check(dut.u_cpu.eth_rx_keep_errors == 0, "CPU path receive: tkeep legal on every beat");
+
+      // Broadcast burst: STORM_LIMIT pass, the rest are dropped (one policer window).
+      for (int i = 0; i < STORM_BURST; i++) begin
+        payload = rand_bytes(seed, 60);
+        bcast = udp_frame(48'hFFFF_FFFF_FFFF, HOST_MAC, HOST_IP, 32'hFFFF_FFFF, 16'd40002, 16'd9999, payload);
+        u_phy.inject(bcast);
+        if (i < STORM_LIMIT) begin
+          dut.u_cpu.eth_get(cpu_f, 200_000, cpu_ok);
+          tb_check(cpu_ok && bytes_equal(cpu_f, bcast, why), $sformatf("broadcast %0d passed to the CPU byte-exact", i));
+        end
+      end
+      // Wait until the wrapper has committed every frame of the burst (the line is slow at 10 Mb/s).
+      polls = 0;
+      do begin
+        #(20_000);
+        rd(PROT + 32'h054, d);
+        polls++;
+      end while (d < 2 + STORM_BURST && polls < 200);
+      dut.u_cpu.eth_get(cpu_f, 40_000, cpu_ok);
+      tb_check(!cpu_ok, "broadcast beyond the limit never reaches the CPU");
+      check_reg(CLS + 32'h100 + 32'h0C, STORM_BURST, "policer 0 SEEN (broadcasts only)");
+      check_reg(CLS + 32'h100 + 32'h10, STORM_LIMIT, "policer 0 PASSED");
+      check_reg(CLS + 32'h100 + 32'h14, STORM_BURST - STORM_LIMIT, "policer 0 DROPPED");
+      check_reg(CLS + 32'h080, 32'd2 + STORM_BURST, "classifier FRAMES after the burst");
+      check_reg(CLS + 32'h084, 32'd1 + STORM_LIMIT, "classifier PASSED after the burst");
+      check_reg(CLS + 32'h088, 32'd1 + STORM_BURST - STORM_LIMIT, "classifier DROPPED after the burst");
+      check_reg(CLS + 32'h090, STORM_BURST - STORM_LIMIT, "classifier POLICE_DROPPED");
+      check_reg(CLS + 32'h094, STORM_BURST, "classifier MAC table hits: the broadcasts only");
     end
     rd(PROT + 32'h054, d);
-    tb_check(d == 1, $sformatf("CPU_RX_FRAMES %0d, expected 1", d));
+    tb_check(d == 2 + STORM_BURST, $sformatf("CPU_RX_FRAMES %0d, expected %0d", d, 2 + STORM_BURST));
     rd(PROT + 32'h058, d);
     tb_check(d >= 3, $sformatf("CPU_RX_CLAIMED %0d, expected at least 3 (ARP, ICMP, UDP echo)", d));
     // CPU transmit: a 50-byte frame leaves on the wire, padded to 60.
@@ -490,7 +553,7 @@ module tb_rtlnet_nexys_video_net;
 
     // Counters and PHY-side timing.
     rd(MAC + 32'h020, d);
-    tb_check(d - rx_good0 == 7, $sformatf("MAC RX_GOOD advanced %0d, expected 7", d - rx_good0));
+    tb_check(d - rx_good0 == 7 + 1 + STORM_BURST, $sformatf("MAC RX_GOOD advanced %0d, expected %0d", d - rx_good0, 7 + 1 + STORM_BURST));
     rd(MAC + 32'h024, d);
     tb_check(d == 0, $sformatf("MAC RX_BAD %0d", d));
     rd(MAC + 32'h02C, d);

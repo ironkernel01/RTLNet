@@ -33,16 +33,19 @@
 //   * Firmware-equivalent register sequences: axil_set_bits(addr, mask) and
 //     axil_clear_bits(addr, mask) (read-modify-write, e.g. the protocol
 //     wrapper's CPU path enable), cls_config_bcast_storm(base, limit, window)
-//     (the classifier register sequence of rtlnet_classifier_config_bcast_storm:
-//     clear tables, MAC table classify-only with entry 0 destination
+//     (the register sequence of rtlnet_classifier_init and
+//     rtlnet_classifier_config_bcast_storm with the offsets and bits of
+//     cores/rtlnet_classifier/driver/rtlnet_classifier.h: ID/VERSION check, clear
+//     tables, MAC table classify-only with entry 0 destination
 //     FF:FF:FF:FF:FF:FF policed by policer 0, policer 0 = limit/window, MODE
-//     PASS_ALL; offsets from cores/rtlnet_classifier/documentation section 7).
+//     PASS_ALL; resp 2'b11 when the ID does not read "CLSF").
 //   * Simulation only; never synthesized.
 // Language: SystemVerilog-2012 (simulation only).
 // Revision: 10-22-2026
 //   * 10-22-2026: initial version.
 //   * 10-22-2026: m_axis_eth_* / s_axis_eth_* frame streams, eth_send/eth_get.
 //   * 10-22-2026: renamed from rtlnet_cpu_bfm; register-sequence tasks.
+//   * 10-22-2026: cls_config_bcast_storm follows the driver's register map and write order exactly.
 // Clocks: clk (cpu_clk); resetn synchronous to clk, active low.
 // -----------------------------------------------------------------------------
 `timescale 1ns / 1ps
@@ -244,41 +247,79 @@ module rtlnet_microblaze_sim_stub #(
     if (resp == 2'b00) axil_write(addr, v & ~mask, 4'hF, resp);
   endtask
 
-  // Classifier broadcast storm configuration, register level (the sequence
-  // of rtlnet_classifier_config_bcast_storm). base = the classifier window
-  // (0x44A1_8000 for the CPU-path instance). Register offsets: classifier
-  // documentation section 7 (CTRL 0x00C, STATUS 0x010, TABLE_MODE[0] 0x020,
-  // POLICER[0] 0x100, MAC table entry 0 at 0x400).
+  // Classifier broadcast storm configuration, register level: the register
+  // sequence of rtlnet_classifier_init + rtlnet_classifier_config_bcast_storm
+  // (cores/rtlnet_classifier/driver). base = the classifier window
+  // (0x44A1_8000 for the CPU-path instance). Offsets and bits are those of
+  // rtlnet_classifier.h (RTLNET_CLS_REG_*, RTLNET_CLS_ENT_*, RTLNET_CLS_TM_*,
+  // RTLNET_CLS_POL_*):
+  //   init:   ID "CLSF" 0x434C5346 and VERSION 0x10222026 read back (resp 2'b11
+  //           when they do not), CAPS and LATENCY read, wait for STATUS.CLEARING.
+  //   clear:  CTRL.CLEAR_TABLES, wait for STATUS.CLEARING to end.
+  //   MAC entry 0 (table 0, entry words at 0x400): SRC_LO/DST_LO/DST_HI = FF:FF:FF:FF:FF:FF,
+  //           control word {VALID, DST_EN, POLICE_EN, POLICER 0, SRC_VALUE[47:32] = FFFF};
+  //           TABLE_MODE[0] = ENABLE | CLASSIFY (single compare).
+  //   policer 0: LIMIT_PKTS, WINDOW_MS, then CTRL = ENABLE.
+  //   MODE = PASS_ALL.
   task automatic cls_config_bcast_storm(input logic [31:0] base, input int limit_pkts, input int window_ms,
                                         output logic [1:0] resp);
-    localparam logic [31:0] CLS_CTRL         = 32'h00C;
-    localparam logic [31:0] CLS_STATUS       = 32'h010;
-    localparam logic [31:0] CLS_TABLE_MODE0  = 32'h020;
-    localparam logic [31:0] CLS_POL0         = 32'h100;
-    localparam logic [31:0] CLS_MAC_E0       = 32'h400;
-    localparam logic [31:0] CTRL_CLEAR       = 32'h0000_0100;
-    localparam logic [31:0] MODE_PASS_ALL    = 32'h0000_0001;
-    localparam logic [31:0] TMODE_EN_CLASSIFY = 32'h0000_0011;   // ENABLE | CLASSIFY, single-value compare
-    // Entry word 1: VALID[31] DST_EN[29] POLICE_EN[26] POLICER[25:24]=0; SRC_VALUE[47:32] 0.
-    localparam logic [31:0] E0_FLAGS         = 32'hA400_0000;
+    localparam logic [31:0] CLS_REG_ID         = 32'h000;
+    localparam logic [31:0] CLS_REG_VERSION    = 32'h004;
+    localparam logic [31:0] CLS_REG_CAPS       = 32'h008;
+    localparam logic [31:0] CLS_REG_CTRL       = 32'h00C;
+    localparam logic [31:0] CLS_REG_STATUS     = 32'h010;
+    localparam logic [31:0] CLS_REG_LATENCY    = 32'h014;
+    localparam logic [31:0] CLS_REG_TABLE_MODE0 = 32'h020;                 // RTLNET_CLS_REG_TABLE_MODE(0)
+    localparam logic [31:0] CLS_REG_POLICER0   = 32'h100;                  // RTLNET_CLS_REG_POLICER(0)
+    localparam logic [31:0] CLS_POL_CTRL       = 32'h00;
+    localparam logic [31:0] CLS_POL_LIMIT      = 32'h04;
+    localparam logic [31:0] CLS_POL_WINDOW     = 32'h08;
+    localparam logic [31:0] CLS_REG_ENTRY00    = 32'h400;                  // RTLNET_CLS_REG_ENTRY(0, 0)
+    localparam logic [31:0] CLS_ENT_SRC_LO     = 32'h0;
+    localparam logic [31:0] CLS_ENT_CTRL       = 32'h4;
+    localparam logic [31:0] CLS_ENT_DST_LO     = 32'h8;
+    localparam logic [31:0] CLS_ENT_DST_HI     = 32'hC;
+    localparam logic [31:0] CLS_ID_VALUE       = 32'h434C_5346;
+    localparam logic [31:0] CLS_VERSION_VALUE  = 32'h1022_2026;
+    localparam logic [31:0] CLS_CTRL_CLEAR     = 32'h0000_0100;            // RTLNET_CLS_CTRL_CLEAR_TABLES
+    localparam logic [31:0] CLS_MODE_PASS_ALL  = 32'h0000_0001;
+    localparam logic [31:0] CLS_TM_ENABLE_CLASSIFY = 32'h0000_0011;        // TM_ENABLE | TM_CLASSIFY, compare single
+    // ENT_VALID | ENT_DST_EN | ENT_POLICE_EN | policer 0 | SRC_VALUE[47:32].
+    localparam logic [31:0] CLS_ENT_CTRL_WORD  = 32'h8000_0000 | 32'h2000_0000 | 32'h0400_0000 | 32'h0000_FFFF;
+    localparam logic [31:0] CLS_POL_ENABLE     = 32'h0000_0001;
     logic [31:0] st;
+    logic [31:0] id;
+    logic [31:0] ver;
     int          n;
-    axil_write(base + CLS_CTRL, CTRL_CLEAR, 4'hF, resp);
+    axil_read(base + CLS_REG_ID, id, resp);
+    axil_read(base + CLS_REG_VERSION, ver, resp);
+    axil_read(base + CLS_REG_CAPS, st, resp);
+    axil_read(base + CLS_REG_LATENCY, st, resp);
+    if (id !== CLS_ID_VALUE || ver !== CLS_VERSION_VALUE) begin
+      resp = 2'b11;
+      return;
+    end
     n = 0;
     do begin
-      axil_read(base + CLS_STATUS, st, resp);
+      axil_read(base + CLS_REG_STATUS, st, resp);
       n++;
     end while (st[0] && n < 1000);
-    axil_write(base + CLS_TABLE_MODE0, 32'h0, 4'hF, resp);
-    axil_write(base + CLS_MAC_E0 + 32'h0, 32'h0, 4'hF, resp);
-    axil_write(base + CLS_MAC_E0 + 32'h4, E0_FLAGS, 4'hF, resp);
-    axil_write(base + CLS_MAC_E0 + 32'h8, 32'hFFFF_FFFF, 4'hF, resp);
-    axil_write(base + CLS_MAC_E0 + 32'hC, 32'h0000_FFFF, 4'hF, resp);
-    axil_write(base + CLS_TABLE_MODE0, TMODE_EN_CLASSIFY, 4'hF, resp);
-    axil_write(base + CLS_POL0 + 32'h4, limit_pkts, 4'hF, resp);
-    axil_write(base + CLS_POL0 + 32'h8, window_ms, 4'hF, resp);
-    axil_write(base + CLS_POL0 + 32'h0, 32'h1, 4'hF, resp);
-    axil_write(base + CLS_CTRL, MODE_PASS_ALL, 4'hF, resp);
+    axil_write(base + CLS_REG_CTRL, CLS_CTRL_CLEAR, 4'hF, resp);
+    n = 0;
+    do begin
+      axil_read(base + CLS_REG_STATUS, st, resp);
+      n++;
+    end while (st[0] && n < 1000);
+    axil_read(base + CLS_REG_TABLE_MODE0, st, resp);
+    axil_write(base + CLS_REG_ENTRY00 + CLS_ENT_SRC_LO, 32'hFFFF_FFFF, 4'hF, resp);
+    axil_write(base + CLS_REG_ENTRY00 + CLS_ENT_DST_LO, 32'hFFFF_FFFF, 4'hF, resp);
+    axil_write(base + CLS_REG_ENTRY00 + CLS_ENT_DST_HI, 32'h0000_FFFF, 4'hF, resp);
+    axil_write(base + CLS_REG_ENTRY00 + CLS_ENT_CTRL, CLS_ENT_CTRL_WORD, 4'hF, resp);
+    axil_write(base + CLS_REG_TABLE_MODE0, CLS_TM_ENABLE_CLASSIFY, 4'hF, resp);
+    axil_write(base + CLS_REG_POLICER0 + CLS_POL_LIMIT, limit_pkts, 4'hF, resp);
+    axil_write(base + CLS_REG_POLICER0 + CLS_POL_WINDOW, window_ms, 4'hF, resp);
+    axil_write(base + CLS_REG_POLICER0 + CLS_POL_CTRL, CLS_POL_ENABLE, 4'hF, resp);
+    axil_write(base + CLS_REG_CTRL, CLS_MODE_PASS_ALL, 4'hF, resp);
   endtask
 
   // Send one Ethernet frame on m_axis_eth_*: eight bytes per beat, tkeep

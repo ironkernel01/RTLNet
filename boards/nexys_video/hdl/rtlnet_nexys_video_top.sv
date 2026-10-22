@@ -696,9 +696,9 @@ module rtlnet_nexys_video_top #(
     .CPU_PATH_ENABLE (1),
     .CPU_RX_FIFO_KB  (32),            // holds the open TCP windows of several lwIP connections
     .CPU_TX_FIFO_KB  (8),
-    // The CPU-path classifier joins the build when its core lands
-    // (cores/rtlnet_classifier); until then the CPU receive stream is unfiltered.
-    .CPU_CLASSIFIER_ENABLE (0),
+    // CPU-path classifier (cores/rtlnet_classifier, registers at protocol sub-map 0x8000): drop-all
+    // until the firmware configures it (broadcast storm limiter at boot).
+    .CPU_CLASSIFIER_ENABLE (1),
     .CPU_AXIS_CLK_HZ (CPU_CLK_HZ),
     .RAM_STYLE       ("block")
   ) u_protocol (
