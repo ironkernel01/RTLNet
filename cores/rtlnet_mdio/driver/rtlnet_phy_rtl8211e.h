@@ -7,8 +7,8 @@
  * rtlnet_mdio.h; this layer owns the PHY's register numbers and bit meanings
  * (RTL8211E-VB/VL datasheet Rev. 1.6, section 8) and never touches the GPIO
  * core's registers. Callers: the firmware CLI (PHY STATUS/DUMP/READ/WRITE/
- * RESET/AUTONEG/SPEED/ADVERTISE) and the link monitor that copies the PHYSR
- * speed into the MAC.
+ * RESET/AUTONEG/SPEED/ADVERTISE/LED/EEE) and the link monitor that copies the
+ * PHYSR speed into the MAC.
  *
  * Speed codes (RTLNET_PHY_SPEED_*) are the PHYSR 17.15:14 encoding, which is
  * also the rtlnet_eth_mac speed encoding (00 10M, 01 100M, 10 1000M,
@@ -110,6 +110,31 @@
 #define RTLNET_PHY_RGMII_TX_DELAY   0x1000u
 #define RTLNET_PHY_RGMII_RX_DELAY   0x0800u
 
+/* LED extension page 0x2C (section 7.13, Tables 17-19; same page mechanism as
+ * above). Register 28 is the LED control register (LCR), register 26 the LED
+ * activity control register (LACR). The Nexys Video wires LED0 to the activity
+ * LED (LD10), LED1 to the link LED (LD9) and LED2 to the user LED (LD8, unused).
+ * LCR 6:4 select the link speeds that light LED1 (10, 100, 1000); the LED0 and
+ * LED2 link selects, bits 2:0 and 10:8, stay 0, so LED0 has no link function and
+ * LED2 is off. LACR bit 4 makes LED0 blink on TX/RX activity; bits 5 and 6 stay
+ * 0, so LED1 is steady and LED2 is off. */
+#define RTLNET_PHY_EXTPAGE_LED      0x002Cu
+#define RTLNET_PHY_REG_LED_LCR      28u
+#define RTLNET_PHY_REG_LED_LACR     26u
+#define RTLNET_PHY_LCR_LED1_LINK_ALL 0x0070u   /* LED1 on at link 10, 100 and 1000 */
+#define RTLNET_PHY_LACR_LED0_ACT    0x0010u    /* LED0 blinks on TX/RX activity */
+#define RTLNET_PHY_LCR_BOARD        RTLNET_PHY_LCR_LED1_LINK_ALL   /* 0x0070 */
+#define RTLNET_PHY_LACR_BOARD       RTLNET_PHY_LACR_LED0_ACT       /* 0x0010 */
+
+/* Energy-Efficient Ethernet advertisement: MMD 7 (auto-negotiation), register
+ * 60 EEEAR (IEEE 802.3 clause 45 register 7.60; datasheet Table 21), reached through Clause 22 registers 13/14 by
+ * rtlnet_mdio_mmd_read/write. Bit 1 is 100BASE-TX EEE, bit 2 is 1000BASE-T EEE. */
+#define RTLNET_PHY_MMD_AN           7u
+#define RTLNET_PHY_MMD_EEE_ADV      60u
+#define RTLNET_PHY_EEE_ADV_100TX    0x0002u
+#define RTLNET_PHY_EEE_ADV_1000T    0x0004u
+#define RTLNET_PHY_EEE_ADV_MASK     (RTLNET_PHY_EEE_ADV_100TX | RTLNET_PHY_EEE_ADV_1000T)   /* 0x0006 */
+
 /* Advertisement / ability mask used by the API (not a register layout). */
 #define RTLNET_PHY_ADV_10H          (1u << 0)
 #define RTLNET_PHY_ADV_10F          (1u << 1)
@@ -133,7 +158,7 @@
  * (0 OK, -1 .. -6); this layer adds -16 and below. */
 #define RTLNET_PHY_OK               0
 #define RTLNET_PHY_ERR_ID           (-16)   /* PHYID1/PHYID2 not 0x001C/0xC915 */
-#define RTLNET_PHY_ERR_VERIFY       (-17)   /* register 28 readback missing the delay bits */
+#define RTLNET_PHY_ERR_VERIFY       (-17)   /* readback differs from the value written (RX delay, LED, EEE) */
 #define RTLNET_PHY_ERR_TIMEOUT      (-18)   /* BMCR reset bit did not self-clear */
 #define RTLNET_PHY_ERR_ARG          (-19)   /* NULL pointer, bad mask or speed */
 
@@ -168,6 +193,11 @@ int rtlnet_phy_rtl8211e_loopback(const rtlnet_mdio_t *mdio, int enable);
 int rtlnet_phy_rtl8211e_dump(const rtlnet_mdio_t *mdio, uint16_t regs[RTLNET_PHY_NUM_REGS]);
 int rtlnet_phy_rtl8211e_irq_config(const rtlnet_mdio_t *mdio, uint16_t iner_mask);
 int rtlnet_phy_rtl8211e_irq_ack(const rtlnet_mdio_t *mdio, uint16_t *insr);
+int rtlnet_phy_rtl8211e_set_leds(const rtlnet_mdio_t *mdio, uint16_t lcr, uint16_t lacr);
+int rtlnet_phy_rtl8211e_get_leds(const rtlnet_mdio_t *mdio, uint16_t *lcr, uint16_t *lacr);
+int rtlnet_phy_rtl8211e_leds_default(const rtlnet_mdio_t *mdio);
+int rtlnet_phy_rtl8211e_set_eee_advert(const rtlnet_mdio_t *mdio, int enable);
+int rtlnet_phy_rtl8211e_get_eee_advert(const rtlnet_mdio_t *mdio, uint16_t *value);
 uint32_t rtlnet_phy_speed_mbps(uint8_t speed);
 
 #endif /* RTLNET_PHY_RTL8211E_H */

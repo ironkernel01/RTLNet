@@ -1,4 +1,4 @@
-# rtlnet_mdio — PHY management by bit-banged Clause 22 MDIO
+# rtlnet_mdio — PHY management by bit-banged Clause 22 and Clause 45 MDIO
 
 | Item | Value |
 |---|---|
@@ -11,10 +11,10 @@
 | Verification | Active-HDL 11.1 `tb_rtlnet_mdio` (AMD, GENERIC, 50 MHz); host unit test `rtlnet_mdio_host`; mb-gcc target build |
 
 The RTL is a small GPIO register core: MDC, MDIO output data and output enable, the MDIO input through a 3-stage
-synchronizer, the PHY reset output and the PHY interrupt input. The C driver is the IEEE 802.3 Clause 22 MDIO
-master: it builds every management frame bit by bit through the core's registers. A second C layer knows the
-RTL8211E: identity, the RGMII RX-delay setting, auto-negotiation, forced modes and the status decode that the
-link monitor copies into the MAC.
+synchronizer, the PHY reset output and the PHY interrupt input. The C driver is the IEEE 802.3 Clause 22 and
+Clause 45 MDIO master: it builds every management frame bit by bit through the core's registers. A second C layer
+knows the RTL8211E: identity, the RGMII RX-delay setting, auto-negotiation, forced modes, the LED setting, the EEE
+advertisement and the status decode that the link monitor copies into the MAC.
 
 ## 1. Files
 
@@ -22,7 +22,7 @@ link monitor copies into the MAC.
 |---|---|
 | `hdl/rtlnet_mdio.sv` | the register core |
 | `hdl/rtlnet_mdio.f` | compile order (nests `rtlnet_common.f`) |
-| `driver/rtlnet_mdio.h`, `.c` | register map (the single definition) and the Clause 22 master |
+| `driver/rtlnet_mdio.h`, `.c` | register map (the single definition), the Clause 22 master and Clause 45 access |
 | `driver/rtlnet_phy_rtl8211e.h`, `.c` | RTL8211E PHY layer on top of the master |
 | `driver/test/test_rtlnet_mdio_host.c` | host unit test: register-block model and timed RTL8211E slave model |
 | `driver/test/build_test.ps1`, `driver/test/Makefile` | host build and run, negative control, mb-gcc target build |
@@ -145,6 +145,38 @@ the platform timer: it times 64 idle stores (MDC stays low, so the PHY sees no c
 loops, fits store overhead and cost per loop, and picks the smallest loop count that gives 250 ns. The measured
 half period includes the AXI store time, so the result is the real pin timing.
 
+### 5.1 Clause 45 frame and MMD access (driver)
+
+Clause 45 (IEEE 802.3 clause 45.3) reaches a 16-bit register address in a device (MMD) of a port. The frame keeps
+the Clause 22 length and bit positions, with ST `00`, PRTAD (the port address, the context's PHY address) in place
+of PHYAD and DEVAD (the MMD, 0..31) in place of REGAD. One register access is two frames: an address frame that
+loads the register address, then a data frame. The same bit engine and timing as section 5 are used.
+
+| Slots | Field | Address | Write | Read | Read, post-increment address |
+|---|---|---|---|---|---|
+| 0–31 | preamble, 32 ones | master | master | master | master |
+| 32–33 | ST `00` | master | master | master | master |
+| 34–35 | OP | `00` | `01` | `11` | `10` |
+| 36–40 | PRTAD | master | master | master | master |
+| 41–45 | DEVAD | master | master | master | master |
+| 46–47 | TA | master `10` | master `10` | released; the device drives slot 47 to 0 | same as read |
+| 48–63 | 16 bits | register address | data | device, master samples | device, master samples |
+| 64 | idle | MDC low, line released | same | same | same |
+
+An absent device leaves TA slot 47 high (pull-up): `RTLNET_MDIO_ERR_NO_PHY`, value 0xFFFF, the frame still
+completes. An address or write frame cannot detect a missing device.
+
+Which form a PHY needs:
+
+| Form | Frames | Used by |
+|---|---|---|
+| native Clause 45 (`rtlnet_mdio_c45_*`) | address frame + data frame, ST `00` | PHYs that implement Clause 45 management: 10G and 25G PHYs. The RTL8211E ignores these frames (no TA) |
+| Clause 45 through Clause 22 (`rtlnet_mdio_mmd_*`, IEEE 802.3 annex 22D) | four Clause 22 frames per write, three writes and one read per read | the RTL8211E, via MACR (register 13) and MAADR (register 14): the only form it supports. The EEE functions use it |
+
+MMD access through registers 13/14: write MACR = `0x0000 | devad` (address function), write MAADR = register
+address, write MACR = `0x4000 | devad` (data function, no post increment), then read or write MAADR. MACR 15:14 =
+`10` and `11` select the post-increment functions. MACR stays in the data function afterwards.
+
 ## 6. Driver API
 
 ### 6.1 `rtlnet_mdio.h` — bus layer
@@ -160,6 +192,9 @@ All functions return `RTLNET_MDIO_OK` (0) or a negative named code: `RTLNET_MDIO
 | `rtlnet_mdio_set_half_loops`, `rtlnet_mdio_set_half_delay` | fixed spin count, or a platform hook that waits one half period |
 | `rtlnet_mdio_read(ctx, reg, &val)`, `rtlnet_mdio_write(ctx, reg, val)` | Clause 22 frame to the context's PHY |
 | `rtlnet_mdio_read_addr`, `rtlnet_mdio_write_addr` | the same to any PHYAD (bus scan, CLI `PHY READ`) |
+| `rtlnet_mdio_c45_write(ctx, devad, reg, val)`, `rtlnet_mdio_c45_read(ctx, devad, reg, &val)` | native Clause 45: address frame + data frame, PRTAD = the context's PHY address, devad 0..31, 16-bit reg; a missing device on a read gives `_NO_PHY` and 0xFFFF |
+| `rtlnet_mdio_c45_addr(ctx, devad, reg)`, `rtlnet_mdio_c45_read_inc(ctx, devad, &val)` | block read: one address frame, then one post-read-increment frame (OP `10`) per word |
+| `rtlnet_mdio_mmd_write(ctx, devad, reg, val)`, `rtlnet_mdio_mmd_read(ctx, devad, reg, &val)` | Clause 45 registers through Clause 22 registers 13/14 (annex 22D); the form the RTL8211E needs |
 | `rtlnet_mdio_wait_por(ctx)` | wait `STATUS.POR_DONE` (bounded, 300 x 1 ms), then the 50 ms settle |
 | `rtlnet_mdio_phy_reset(ctx)` | `CTRL.PHY_RESET` 20 ms low, then 50 ms settle (datasheet: >= 10 ms, >= 30 ms) |
 | `rtlnet_mdio_irq_enable(ctx, on)`, `rtlnet_mdio_phy_int_asserted(ctx)`, `rtlnet_mdio_status(ctx)` | interrupt gate and raw status |
@@ -187,6 +222,9 @@ Bus errors pass through unchanged; the layer adds `RTLNET_PHY_ERR_ID` (-16), `_V
 | `rtlnet_phy_rtl8211e_loopback(mdio, on)` | BMCR bit 14 (PCS loopback) |
 | `rtlnet_phy_rtl8211e_dump(mdio, regs[32])` | registers 0..31 of the current page into an array (no printing); read-clear registers are cleared by it |
 | `rtlnet_phy_rtl8211e_irq_config(mdio, iner)`, `_irq_ack(mdio, &insr)` | INER select; INSR read (releases INTB) |
+| `rtlnet_phy_rtl8211e_set_leds(mdio, lcr, lacr)`, `_get_leds(mdio, &lcr, &lacr)` | extension page 0x2C: register 28 LCR and register 26 LACR, both read back (`ERR_VERIFY` if they differ), page 0 restored on every path |
+| `rtlnet_phy_rtl8211e_leds_default(mdio)` | the board setting: LCR `RTLNET_PHY_LCR_BOARD` 0x0070, LACR `RTLNET_PHY_LACR_BOARD` 0x0010 |
+| `rtlnet_phy_rtl8211e_set_eee_advert(mdio, enable)`, `_get_eee_advert(mdio, &value)` | MMD 7 register 60 (EEEAR) through `rtlnet_mdio_mmd_*`: enable writes 0x0006, disable 0x0000, bits 2:1 read back; an autonegotiation restart (the caller) applies it |
 | `rtlnet_phy_speed_mbps(code)` | 10 / 100 / 1000, 0 for the reserved code |
 
 `rtlnet_phy_status_t`: `link_up` (PHYSR 17.10, real time), `resolved` (17.11), `speed` (17.15:14,
@@ -211,6 +249,28 @@ Tables 28 and 33) and the raw BMCR, BMSR, PHYSR, ANLPAR and GBSR words.
 A PHY hardware reset clears every register, including register 28: run `rtlnet_phy_rtl8211e_init` again after
 `rtlnet_mdio_phy_reset`. A BMCR soft reset returns BMCR and BMSR to defaults (Table 23); whether it clears register 28
 is not documented, so firmware runs `enable_rx_delay` again after a soft reset as well (it is idempotent).
+
+### 7.1 LEDs and EEE on the Nexys Video
+
+The three PHY LED outputs drive board LEDs: LED0 to the activity LED LD10 (ACT), LED1 to the link LED LD9 (LINK),
+LED2 to the user LED LD8 (USER, unused). `rtlnet_phy_rtl8211e_leds_default` writes, on extension page 0x2C
+(datasheet section 7.13, Tables 17-19; PAGSEL = 7, EPAGSR = 0x2C, PAGSEL = 0 as for the RX delay):
+
+| Register | Value | Meaning |
+|---|---|---|
+| 28 LCR | 0x0070 | LED1 = link at 10, 100 and 1000 Mb/s; LED0 has no link function; LED2 off |
+| 26 LACR | 0x0010 | bit 4: LED0 blinks on TX/RX activity; bits 5/6 = 0: LED1 steady, LED2 off |
+
+Both registers are read back; a difference returns `RTLNET_PHY_ERR_VERIFY`. A PHY hardware reset returns them to
+their defaults: apply the setting again after `rtlnet_mdio_phy_reset`, with the RX delay.
+
+EEE (Energy-Efficient Ethernet) is advertised in MMD 7 register 60 (EEEAR, Tables 51 and 52): bit 1 100BASE-TX,
+bit 2 1000BASE-T. The RTL8211E supports MMD access only through registers 13/14, so
+`rtlnet_phy_rtl8211e_set_eee_advert` uses `rtlnet_mdio_mmd_write` / `_read` (0x0007, 0x003C, 0x4007, then the
+data). Disabling EEE (0x0000) takes effect only at the next autonegotiation: the caller runs
+`rtlnet_phy_rtl8211e_autoneg_restart` afterwards. Disabling matters here because in EEE mode the PHY blinks its
+LEDs 400 ms on and 2 s off, so the activity indication above is lost, and the RGMII receive side carries
+low-power-idle codes between frames.
 
 ## 8. Keeping the MAC speed in step with PHYSR
 
@@ -288,13 +348,16 @@ or in its 30 ms settle window, reset low >= 10 ms.
 | model controls | half period 0 is flagged (period, high, low, early sample); 5 ms reset pulse and an access in the settle window are flagged |
 | faults | no PHY (read, probe, status, init all report `ERR_NO_PHY`); wrong ID (`ERR_ID`, register 28 untouched); register 28 not sticking (`ERR_VERIFY`, page 0 restored); BMCR reset stuck (`ERR_TIMEOUT` after exactly 500 polls) |
 | RX delay | 0x8575 to 0xAD75, bit 12 cleared and bits 10:0 kept from 0x1234 (0x2A34), PAGSEL back to 0 |
+| LEDs | page 0x2C registers 28/26 written and read back, board value 0x0070/0x0010, RGMII register 28 untouched, page 0 afterwards; negative: LED registers not sticking (`ERR_VERIFY`, page 0 restored), no PHY (`ERR_NO_PHY`) |
+| EEE | power-up 0x0006, disable and enable with readback, the register 13/14 write sequence (0x0007, 0x003C, 0x4007, data), frame counts, EEEAR not sticking (`ERR_VERIFY`), no PHY |
+| Clause 45 | MMD access through registers 13/14 (sequence, absent MMD, argument errors); native frames: address/write/read, block read with post-increment, shared register file; negative: the RTL8211E model ignores native frames (TA error), absent MMD and wrong port address (TA error), bus still in step afterwards |
 | hardware reset | 20 ms low, 50 ms settle, register 28 back to default, init again |
 | auto-negotiation | default advertisement, 10/100 router (100 full), 10-only advertisement, gigabit partner (1000 full, GBSR partner bit), no common mode (no link), ANAR pause/selector bits kept |
 | forced, loopback, dump | forced 100 full and 10 half, 1000 rejected, back to AN, loopback bit, dump contents, dump without PHY |
 | link and interrupt | unplug: link down, INTB asserted, INSR link-change bit, INTB released after the read; plug back: 1000 full; IRQ_EN set and cleared |
 
 Recorded 10-22-2026: `build_test.ps1` and `mingw32-make run neg target` (host gcc 16.2.0, `-std=c11 -Wall -Wextra
--Werror -pedantic`): **PASS, 210 checks**; `--inject-failure` reports TEST FAIL. Nine driver mutations, each built
+-Werror -pedantic`): **PASS, 324 checks**; `--inject-failure` reports TEST FAIL. Nine driver mutations, each built
 against the unchanged test, all fail: idle slot removed, sample after the rising edge, 31-bit preamble, data
 changed on the rising edge, wrong RX-delay bit, PAGSEL not restored, 5 ms reset, TA bit ignored, 10 ms settle.
 
@@ -337,3 +400,4 @@ Out of context, Vivado 2025.2, xc7a200tsbg484-1, defaults (`scripts/rtlnet_vivad
 | Revision | Change |
 |---|---|
 | 10-22-2026 | Initial version: GPIO register core, Clause 22 master, RTL8211E layer, bench, host test |
+| 10-22-2026 | Clause 45 native frames and MMD access through registers 13/14; RTL8211E LED setting (page 0x2C) and EEE advertisement; host test model extended |
