@@ -1,11 +1,11 @@
 /*
- * rtlnet_mdio.c -- Clause 22 MDIO master over the rtlnet_mdio GPIO core
+ * rtlnet_mdio.c -- Clause 22 and Clause 45 MDIO master over the rtlnet_mdio GPIO core
  *
  * Copyright (C) 2026 IronKernel. All rights reserved.
  *
  * Role: owns the rtlnet_mdio core's registers (see rtlnet_mdio.h). Builds
- * IEEE 802.3 Clause 22 management frames bit by bit through the BITBANG
- * register, drives the PHY hardware reset through CTRL.PHY_RESET and gates
+ * IEEE 802.3 Clause 22 and Clause 45 management frames bit by bit through the
+ * BITBANG register, drives the PHY hardware reset through CTRL.PHY_RESET and gates
  * the PHY interrupt through CTRL.IRQ_EN.
  *
  * Bit timing (one slot = one MDC period, MDC low for the first half):
@@ -27,8 +27,9 @@
 
 #include <stddef.h>   /* NULL */
 
-/* Clause 22 header bit positions inside the 32-bit word that follows the
- * preamble: ST[31:30] OP[29:28] PHYAD[27:23] REGAD[22:18] TA[17:16] DATA[15:0]. */
+/* Header bit positions inside the 32-bit word that follows the preamble:
+ * ST[31:30] OP[29:28] PHYAD[27:23] REGAD[22:18] TA[17:16] DATA[15:0]. Clause 45
+ * uses the same positions with PRTAD in PHYAD and DEVAD in REGAD. */
 #define MDIO_FRAME_ST_SHIFT     30u
 #define MDIO_FRAME_OP_SHIFT     28u
 #define MDIO_FRAME_PHYAD_SHIFT  23u
@@ -158,14 +159,61 @@ static void out_bits(const rtlnet_mdio_t *ctx, uint32_t word, uint32_t count)
 /*
  * frame_word -- build the 32-bit post-preamble word of a frame
  * Steps:
- *   1. Pack ST, OP, PHYAD, REGAD, TA and DATA at their positions.
+ *   1. Pack ST, OP, PHYAD (PRTAD), REGAD (DEVAD), TA and DATA at their
+ *      positions.
  * Returns: the word, ST in bits 31:30.
  */
-static uint32_t frame_word(uint32_t op, uint8_t phy_addr, uint8_t reg, uint32_t ta, uint16_t data)
+static uint32_t frame_word(uint32_t st, uint32_t op, uint8_t phy_addr, uint8_t reg, uint32_t ta, uint16_t data)
 {
-    return (RTLNET_MDIO_ST << MDIO_FRAME_ST_SHIFT) | (op << MDIO_FRAME_OP_SHIFT) |
+    return (st << MDIO_FRAME_ST_SHIFT) | (op << MDIO_FRAME_OP_SHIFT) |
            ((uint32_t)phy_addr << MDIO_FRAME_PHYAD_SHIFT) | ((uint32_t)reg << MDIO_FRAME_REGAD_SHIFT) |
            (ta << MDIO_FRAME_TA_SHIFT) | (uint32_t)data;
+}
+
+/*
+ * read_frame -- one read-type frame, Clause 22 or Clause 45
+ * Steps:
+ *   1. 32 preamble ones, then the 14 header bits of word (master drives).
+ *   2. TA: release the line; slot 1 is ignored, slot 2 must read 0 (the PHY
+ *      drives it); a 1 means nobody answered.
+ *   3. 16 data bits, most significant first; then the idle slot.
+ * Returns: RTLNET_MDIO_OK with *val set; RTLNET_MDIO_ERR_NO_PHY with *val =
+ *   0xFFFF (the frame still completes).
+ */
+static int read_frame(const rtlnet_mdio_t *ctx, uint32_t word, uint16_t *val)
+{
+    uint32_t ta2;
+    uint32_t data = 0u;
+
+    out_bits(ctx, UINT32_MAX, RTLNET_MDIO_PREAMBLE_BITS);
+    out_bits(ctx, word, MDIO_FRAME_HDR_BITS);
+    (void)in_bit(ctx);
+    ta2 = in_bit(ctx);
+    for (uint32_t i = 0u; i < MDIO_DATA_BITS; i++) {
+        data = (data << 1) | in_bit(ctx);
+    }
+    idle_slot(ctx);
+
+    if (ta2 != 0u) {
+        *val = RTLNET_MDIO_NO_PHY_DATA;
+        return RTLNET_MDIO_ERR_NO_PHY;
+    }
+    *val = (uint16_t)data;
+    return RTLNET_MDIO_OK;
+}
+
+/*
+ * write_frame -- one write-type frame, Clause 22 or Clause 45
+ * Steps:
+ *   1. 32 preamble ones, then all 32 bits of word (header, TA 10, data), all
+ *      driven by the master; then the idle slot.
+ * Returns: nothing.
+ */
+static void write_frame(const rtlnet_mdio_t *ctx, uint32_t word)
+{
+    out_bits(ctx, UINT32_MAX, RTLNET_MDIO_PREAMBLE_BITS);
+    out_bits(ctx, word, MDIO_FRAME_WRITE_BITS);
+    idle_slot(ctx);
 }
 
 /*
@@ -350,27 +398,10 @@ uint32_t rtlnet_mdio_caps_por_ms(const rtlnet_mdio_t *ctx)
  */
 int rtlnet_mdio_read_addr(const rtlnet_mdio_t *ctx, uint8_t phy_addr, uint8_t reg, uint16_t *val)
 {
-    uint32_t ta2;
-    uint32_t data = 0u;
-
     if (ctx == NULL || val == NULL || phy_addr > RTLNET_MDIO_ADDR_MAX || reg > RTLNET_MDIO_ADDR_MAX) {
         return RTLNET_MDIO_ERR_ARG;
     }
-    out_bits(ctx, UINT32_MAX, RTLNET_MDIO_PREAMBLE_BITS);
-    out_bits(ctx, frame_word(RTLNET_MDIO_OP_READ, phy_addr, reg, 0u, 0u), MDIO_FRAME_HDR_BITS);
-    (void)in_bit(ctx);
-    ta2 = in_bit(ctx);
-    for (uint32_t i = 0u; i < MDIO_DATA_BITS; i++) {
-        data = (data << 1) | in_bit(ctx);
-    }
-    idle_slot(ctx);
-
-    if (ta2 != 0u) {
-        *val = RTLNET_MDIO_NO_PHY_DATA;
-        return RTLNET_MDIO_ERR_NO_PHY;
-    }
-    *val = (uint16_t)data;
-    return RTLNET_MDIO_OK;
+    return read_frame(ctx, frame_word(RTLNET_MDIO_ST, RTLNET_MDIO_OP_READ, phy_addr, reg, 0u, 0u), val);
 }
 
 /*
@@ -386,10 +417,7 @@ int rtlnet_mdio_write_addr(const rtlnet_mdio_t *ctx, uint8_t phy_addr, uint8_t r
     if (ctx == NULL || phy_addr > RTLNET_MDIO_ADDR_MAX || reg > RTLNET_MDIO_ADDR_MAX) {
         return RTLNET_MDIO_ERR_ARG;
     }
-    out_bits(ctx, UINT32_MAX, RTLNET_MDIO_PREAMBLE_BITS);
-    out_bits(ctx, frame_word(RTLNET_MDIO_OP_WRITE, phy_addr, reg, RTLNET_MDIO_TA_WRITE, val),
-             MDIO_FRAME_WRITE_BITS);
-    idle_slot(ctx);
+    write_frame(ctx, frame_word(RTLNET_MDIO_ST, RTLNET_MDIO_OP_WRITE, phy_addr, reg, RTLNET_MDIO_TA_WRITE, val));
     return RTLNET_MDIO_OK;
 }
 
@@ -415,6 +443,145 @@ int rtlnet_mdio_write(const rtlnet_mdio_t *ctx, uint8_t reg, uint16_t val)
         return RTLNET_MDIO_ERR_ARG;
     }
     return rtlnet_mdio_write_addr(ctx, ctx->phy_addr, reg, val);
+}
+
+/*
+ * rtlnet_mdio_c45_addr -- Clause 45 address frame
+ * Steps:
+ *   1. 32 preamble ones, ST 00, OP 00, PRTAD (the context's PHY address),
+ *      DEVAD, TA 10 and the 16-bit register address; then the idle slot.
+ * Returns: RTLNET_MDIO_OK; RTLNET_MDIO_ERR_ARG for a NULL context or a devad
+ *   above 31. A missing device cannot be detected by an address frame.
+ */
+int rtlnet_mdio_c45_addr(const rtlnet_mdio_t *ctx, uint8_t devad, uint16_t reg)
+{
+    if (ctx == NULL || devad > RTLNET_MDIO_ADDR_MAX) {
+        return RTLNET_MDIO_ERR_ARG;
+    }
+    write_frame(ctx, frame_word(RTLNET_MDIO_C45_ST, RTLNET_MDIO_C45_OP_ADDR, ctx->phy_addr, devad,
+                                RTLNET_MDIO_TA_WRITE, reg));
+    return RTLNET_MDIO_OK;
+}
+
+/*
+ * rtlnet_mdio_c45_write -- Clause 45 write
+ * Steps:
+ *   1. Address frame with reg.
+ *   2. Write frame (OP 01, TA 10) with val.
+ * Returns: as rtlnet_mdio_c45_addr.
+ */
+int rtlnet_mdio_c45_write(const rtlnet_mdio_t *ctx, uint8_t devad, uint16_t reg, uint16_t val)
+{
+    int rc = rtlnet_mdio_c45_addr(ctx, devad, reg);
+
+    if (rc != RTLNET_MDIO_OK) {
+        return rc;
+    }
+    write_frame(ctx, frame_word(RTLNET_MDIO_C45_ST, RTLNET_MDIO_C45_OP_WRITE, ctx->phy_addr, devad,
+                                RTLNET_MDIO_TA_WRITE, val));
+    return RTLNET_MDIO_OK;
+}
+
+/*
+ * rtlnet_mdio_c45_read -- Clause 45 read
+ * Steps:
+ *   1. Address frame with reg.
+ *   2. Read frame (OP 11): TA released, the device drives TA bit 2 to 0, then
+ *      16 data bits.
+ * Returns: RTLNET_MDIO_OK with *val set; RTLNET_MDIO_ERR_NO_PHY with *val =
+ *   0xFFFF when the device does not answer (both frames still complete);
+ *   RTLNET_MDIO_ERR_ARG for a NULL pointer or a devad above 31.
+ */
+int rtlnet_mdio_c45_read(const rtlnet_mdio_t *ctx, uint8_t devad, uint16_t reg, uint16_t *val)
+{
+    int rc;
+
+    if (val == NULL) {
+        return RTLNET_MDIO_ERR_ARG;
+    }
+    rc = rtlnet_mdio_c45_addr(ctx, devad, reg);
+    if (rc != RTLNET_MDIO_OK) {
+        return rc;
+    }
+    return read_frame(ctx, frame_word(RTLNET_MDIO_C45_ST, RTLNET_MDIO_C45_OP_READ, ctx->phy_addr, devad, 0u, 0u),
+                      val);
+}
+
+/*
+ * rtlnet_mdio_c45_read_inc -- Clause 45 post-read-increment-address read
+ * Steps:
+ *   1. One read frame with OP 10: the device returns the register at its
+ *      current address for this DEVAD, then increments that address. The
+ *      address comes from the preceding rtlnet_mdio_c45_addr (or c45_read).
+ * Returns: as rtlnet_mdio_c45_read, without the address frame.
+ */
+int rtlnet_mdio_c45_read_inc(const rtlnet_mdio_t *ctx, uint8_t devad, uint16_t *val)
+{
+    if (ctx == NULL || val == NULL || devad > RTLNET_MDIO_ADDR_MAX) {
+        return RTLNET_MDIO_ERR_ARG;
+    }
+    return read_frame(ctx, frame_word(RTLNET_MDIO_C45_ST, RTLNET_MDIO_C45_OP_READ_INC, ctx->phy_addr, devad, 0u, 0u),
+                      val);
+}
+
+/*
+ * mmd_select -- point the MMD access registers at a register
+ * Steps:
+ *   1. MACR (reg 13) = address function | devad.
+ *   2. MAADR (reg 14) = register address.
+ *   3. MACR = data function (no post increment) | devad.
+ * Returns: RTLNET_MDIO_OK; RTLNET_MDIO_ERR_ARG for a NULL context or a devad
+ *   above 31. The next MAADR access reaches the register.
+ */
+static int mmd_select(const rtlnet_mdio_t *ctx, uint8_t devad, uint16_t reg)
+{
+    if (ctx == NULL || devad > RTLNET_MDIO_ADDR_MAX) {
+        return RTLNET_MDIO_ERR_ARG;
+    }
+    (void)rtlnet_mdio_write(ctx, RTLNET_MDIO_REG_MACR, (uint16_t)(RTLNET_MDIO_MACR_FUNC_ADDR | devad));
+    (void)rtlnet_mdio_write(ctx, RTLNET_MDIO_REG_MAADR, reg);
+    return rtlnet_mdio_write(ctx, RTLNET_MDIO_REG_MACR, (uint16_t)(RTLNET_MDIO_MACR_FUNC_DATA | devad));
+}
+
+/*
+ * rtlnet_mdio_mmd_write -- Clause 45 register write through Clause 22 registers 13/14
+ * Steps:
+ *   1. mmd_select; then write MAADR with val.
+ * MACR is left in the data function for devad. Annex 22D access; the RTL8211E
+ * supports this form only.
+ * Returns: RTLNET_MDIO_OK; RTLNET_MDIO_ERR_ARG. A write cannot detect a
+ *   missing PHY.
+ */
+int rtlnet_mdio_mmd_write(const rtlnet_mdio_t *ctx, uint8_t devad, uint16_t reg, uint16_t val)
+{
+    int rc = mmd_select(ctx, devad, reg);
+
+    if (rc != RTLNET_MDIO_OK) {
+        return rc;
+    }
+    return rtlnet_mdio_write(ctx, RTLNET_MDIO_REG_MAADR, val);
+}
+
+/*
+ * rtlnet_mdio_mmd_read -- Clause 45 register read through Clause 22 registers 13/14
+ * Steps:
+ *   1. mmd_select; then read MAADR.
+ * Returns: RTLNET_MDIO_OK with *val set; RTLNET_MDIO_ERR_NO_PHY with *val =
+ *   0xFFFF when no PHY answers the read; RTLNET_MDIO_ERR_ARG for a NULL
+ *   pointer or a devad above 31.
+ */
+int rtlnet_mdio_mmd_read(const rtlnet_mdio_t *ctx, uint8_t devad, uint16_t reg, uint16_t *val)
+{
+    int rc;
+
+    if (val == NULL) {
+        return RTLNET_MDIO_ERR_ARG;
+    }
+    rc = mmd_select(ctx, devad, reg);
+    if (rc != RTLNET_MDIO_OK) {
+        return rc;
+    }
+    return rtlnet_mdio_read(ctx, RTLNET_MDIO_REG_MAADR, val);
 }
 
 /*

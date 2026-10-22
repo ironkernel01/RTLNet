@@ -1,12 +1,12 @@
 /*
- * rtlnet_mdio.h -- RTLNet MDIO GPIO core register map and Clause 22 master
+ * rtlnet_mdio.h -- RTLNet MDIO GPIO core register map, Clause 22 and Clause 45 master
  *
  * Copyright (C) 2026 IronKernel. All rights reserved.
  *
  * Role: the single owner of the rtlnet_mdio core's registers. The RTL is a
  * GPIO register block (MDC, MDIO output/enable, synchronized MDIO input, PHY
- * reset, PHY interrupt); this driver is the IEEE 802.3 Clause 22 management
- * master that bit-bangs frames through it. Higher layers (the RTL8211E PHY
+ * reset, PHY interrupt); this driver is the IEEE 802.3 Clause 22 and Clause 45
+ * management master that bit-bangs frames through it. Higher layers (the RTL8211E PHY
  * layer rtlnet_phy_rtl8211e.h, the CLI, the link monitor) call the functions
  * below and never touch the core's registers.
  *
@@ -74,6 +74,33 @@
 #define RTLNET_MDIO_TA_WRITE        0x2u    /* 10 */
 #define RTLNET_MDIO_ADDR_MAX        31u     /* 5-bit PHYAD and REGAD */
 #define RTLNET_MDIO_NO_PHY_DATA     0xFFFFu /* value returned when no PHY answers */
+
+/* -------------------------------------------------------------------------
+ * Clause 45 constants (IEEE 802.3 clause 45.3). The frame has the Clause 22
+ * layout with ST = 00, PRTAD in place of PHYAD and DEVAD (the MMD) in place of
+ * REGAD; a 16-bit register address travels in an address frame, the data in a
+ * second frame. Native frames are for PHYs that implement Clause 45 (10G, 25G);
+ * the RTL8211E does not: it reaches the same registers through the Clause 22
+ * MMD access registers below.
+ * ------------------------------------------------------------------------- */
+#define RTLNET_MDIO_C45_ST          0x0u    /* 00 */
+#define RTLNET_MDIO_C45_OP_ADDR     0x0u    /* 00 address frame */
+#define RTLNET_MDIO_C45_OP_WRITE    0x1u    /* 01 */
+#define RTLNET_MDIO_C45_OP_READ_INC 0x2u    /* 10 read, then address + 1 */
+#define RTLNET_MDIO_C45_OP_READ     0x3u    /* 11 */
+
+/* MMD access through Clause 22 registers 13 and 14 (IEEE 802.3 annex 22D;
+ * RTL8211E MACR / MAADR). MACR 15:14 = function, 4:0 = DEVAD. Function 00:
+ * MAADR write sets the register address; 01: MAADR reads/writes the register
+ * (no post increment); 10: read and write with post increment; 11: write with
+ * post increment. */
+#define RTLNET_MDIO_REG_MACR        13u
+#define RTLNET_MDIO_REG_MAADR       14u
+#define RTLNET_MDIO_MACR_FUNC_ADDR  0x0000u
+#define RTLNET_MDIO_MACR_FUNC_DATA  0x4000u
+#define RTLNET_MDIO_MACR_FUNC_INC_RW 0x8000u
+#define RTLNET_MDIO_MACR_FUNC_INC_W 0xC000u
+#define RTLNET_MDIO_MACR_DEVAD_MASK 0x001Fu
 
 /* MDC timing. Datasheet Table 61: period t3 >= 400 ns, high t1 and low t2
  * >= 160 ns. The driver aims at a 500 ns period (2 MHz, 250 ns per half);
@@ -144,6 +171,23 @@ int rtlnet_mdio_read(const rtlnet_mdio_t *ctx, uint8_t reg, uint16_t *val);
 int rtlnet_mdio_write(const rtlnet_mdio_t *ctx, uint8_t reg, uint16_t val);
 int rtlnet_mdio_read_addr(const rtlnet_mdio_t *ctx, uint8_t phy_addr, uint8_t reg, uint16_t *val);
 int rtlnet_mdio_write_addr(const rtlnet_mdio_t *ctx, uint8_t phy_addr, uint8_t reg, uint16_t val);
+
+/* Clause 45 native frames to the context's port address (PRTAD = phy_addr).
+ * devad 0..31. c45_write and c45_read each send an address frame, then the
+ * data frame. c45_addr sends only the address frame; c45_read_inc then reads
+ * the register at that address and the PHY increments it, so a block read is
+ * one c45_addr plus one c45_read_inc per word. On RTLNET_MDIO_ERR_NO_PHY *val is
+ * 0xFFFF. A write cannot detect a missing device. */
+int rtlnet_mdio_c45_addr(const rtlnet_mdio_t *ctx, uint8_t devad, uint16_t reg);
+int rtlnet_mdio_c45_write(const rtlnet_mdio_t *ctx, uint8_t devad, uint16_t reg, uint16_t val);
+int rtlnet_mdio_c45_read(const rtlnet_mdio_t *ctx, uint8_t devad, uint16_t reg, uint16_t *val);
+int rtlnet_mdio_c45_read_inc(const rtlnet_mdio_t *ctx, uint8_t devad, uint16_t *val);
+
+/* Clause 45 registers through Clause 22 registers 13/14 (annex 22D): four
+ * Clause 22 frames per write, three writes and one read per read. The form the
+ * RTL8211E supports. A missing PHY reports RTLNET_MDIO_ERR_NO_PHY on the read. */
+int rtlnet_mdio_mmd_write(const rtlnet_mdio_t *ctx, uint8_t devad, uint16_t reg, uint16_t val);
+int rtlnet_mdio_mmd_read(const rtlnet_mdio_t *ctx, uint8_t devad, uint16_t reg, uint16_t *val);
 
 /* PHY reset and interrupt line. */
 int rtlnet_mdio_wait_por(const rtlnet_mdio_t *ctx);

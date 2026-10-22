@@ -17,6 +17,9 @@
  *      stays off. A PHY hardware reset clears the setting: run init again.
  *   3. Status polling: link, speed and duplex come from PHYSR (resolved and
  *      real-time), not from BMSR (latch-low link) or RGMII in-band status.
+ *   4. Optional: rtlnet_phy_rtl8211e_leds_default (LED0 activity, LED1 link)
+ *      and rtlnet_phy_rtl8211e_set_eee_advert. Like the RX delay, the LED
+ *      registers return to their defaults after a PHY hardware reset.
  */
 #include "rtlnet_phy_rtl8211e.h"
 
@@ -42,6 +45,23 @@ static int modify(const rtlnet_mdio_t *mdio, uint8_t reg, uint16_t clear, uint16
     }
     v = (uint16_t)((v & (uint16_t)~clear) | set);
     return rtlnet_mdio_write(mdio, reg, v);
+}
+
+/*
+ * ext_select -- select an extension page
+ * Steps:
+ *   1. PAGSEL (reg 31) = 7, EPAGSR (reg 30) = page.
+ * The caller returns to page 0 on every path.
+ * Returns: RTLNET_MDIO_OK or the first bus error.
+ */
+static int ext_select(const rtlnet_mdio_t *mdio, uint16_t page)
+{
+    int rc = rtlnet_mdio_write(mdio, RTLNET_PHY_REG_PAGSEL, RTLNET_PHY_PAGSEL_EXT);
+
+    if (rc == RTLNET_MDIO_OK) {
+        rc = rtlnet_mdio_write(mdio, RTLNET_PHY_REG_EPAGSR, page);
+    }
+    return rc;
 }
 
 /*
@@ -429,6 +449,166 @@ int rtlnet_phy_rtl8211e_irq_ack(const rtlnet_mdio_t *mdio, uint16_t *insr)
         return RTLNET_PHY_ERR_ARG;
     }
     return rtlnet_mdio_read(mdio, RTLNET_PHY_REG_INSR, insr);
+}
+
+/*
+ * rtlnet_phy_rtl8211e_set_leds -- program the LED control registers
+ * Steps:
+ *   1. PAGSEL = 7, EPAGSR = 0x2C: extension page 0x2C.
+ *   2. Write register 28 (LCR) with lcr, then register 26 (LACR) with lacr.
+ *   3. Read both back.
+ *   4. PAGSEL = 0, also when a step above failed, so later accesses see
+ *      page 0.
+ *   5. Pass when both readbacks equal the values written (reserved bits in
+ *      lcr and lacr must be 0 for that to hold).
+ * Returns: RTLNET_PHY_OK; RTLNET_PHY_ERR_VERIFY when a readback differs; a
+ *   bus error (RTLNET_MDIO_ERR_*) from any access; RTLNET_PHY_ERR_ARG for a
+ *   NULL context.
+ */
+int rtlnet_phy_rtl8211e_set_leds(const rtlnet_mdio_t *mdio, uint16_t lcr, uint16_t lacr)
+{
+    uint16_t rb_lcr = RTLNET_MDIO_NO_PHY_DATA;
+    uint16_t rb_lacr = RTLNET_MDIO_NO_PHY_DATA;
+    int rc;
+    int rc_page0;
+
+    if (mdio == NULL) {
+        return RTLNET_PHY_ERR_ARG;
+    }
+    rc = ext_select(mdio, RTLNET_PHY_EXTPAGE_LED);
+    if (rc == RTLNET_MDIO_OK) {
+        rc = rtlnet_mdio_write(mdio, RTLNET_PHY_REG_LED_LCR, lcr);
+    }
+    if (rc == RTLNET_MDIO_OK) {
+        rc = rtlnet_mdio_write(mdio, RTLNET_PHY_REG_LED_LACR, lacr);
+    }
+    if (rc == RTLNET_MDIO_OK) {
+        rc = rtlnet_mdio_read(mdio, RTLNET_PHY_REG_LED_LCR, &rb_lcr);
+    }
+    if (rc == RTLNET_MDIO_OK) {
+        rc = rtlnet_mdio_read(mdio, RTLNET_PHY_REG_LED_LACR, &rb_lacr);
+    }
+    rc_page0 = rtlnet_mdio_write(mdio, RTLNET_PHY_REG_PAGSEL, RTLNET_PHY_PAGSEL_PAGE0);
+
+    if (rc != RTLNET_MDIO_OK) {
+        return rc;
+    }
+    if (rc_page0 != RTLNET_MDIO_OK) {
+        return rc_page0;
+    }
+    if (rb_lcr != lcr || rb_lacr != lacr) {
+        return RTLNET_PHY_ERR_VERIFY;
+    }
+    return RTLNET_PHY_OK;
+}
+
+/*
+ * rtlnet_phy_rtl8211e_get_leds -- read the LED control registers
+ * Steps:
+ *   1. PAGSEL = 7, EPAGSR = 0x2C.
+ *   2. Read register 28 (LCR) and register 26 (LACR).
+ *   3. PAGSEL = 0, also when a step above failed.
+ * Returns: RTLNET_PHY_OK with *lcr and *lacr set; a bus error (the outputs
+ *   are not updated); RTLNET_PHY_ERR_ARG for a NULL pointer.
+ */
+int rtlnet_phy_rtl8211e_get_leds(const rtlnet_mdio_t *mdio, uint16_t *lcr, uint16_t *lacr)
+{
+    uint16_t r_lcr;
+    uint16_t r_lacr;
+    int rc;
+    int rc_page0;
+
+    if (mdio == NULL || lcr == NULL || lacr == NULL) {
+        return RTLNET_PHY_ERR_ARG;
+    }
+    rc = ext_select(mdio, RTLNET_PHY_EXTPAGE_LED);
+    if (rc == RTLNET_MDIO_OK) {
+        rc = rtlnet_mdio_read(mdio, RTLNET_PHY_REG_LED_LCR, &r_lcr);
+    }
+    if (rc == RTLNET_MDIO_OK) {
+        rc = rtlnet_mdio_read(mdio, RTLNET_PHY_REG_LED_LACR, &r_lacr);
+    }
+    rc_page0 = rtlnet_mdio_write(mdio, RTLNET_PHY_REG_PAGSEL, RTLNET_PHY_PAGSEL_PAGE0);
+
+    if (rc != RTLNET_MDIO_OK) {
+        return rc;
+    }
+    if (rc_page0 != RTLNET_MDIO_OK) {
+        return rc_page0;
+    }
+    *lcr = r_lcr;
+    *lacr = r_lacr;
+    return RTLNET_PHY_OK;
+}
+
+/*
+ * rtlnet_phy_rtl8211e_leds_default -- apply the RTLNet board LED setting
+ * Steps:
+ *   1. set_leds with LCR 0x0070 and LACR 0x0010: LED0 (LD10) blinks on TX/RX
+ *      activity, LED1 (LD9) is steady while the link is up at 10, 100 or
+ *      1000 Mb/s, LED2 (LD8, unused) is off.
+ * Run after every PHY hardware reset (the registers return to their defaults).
+ * Returns: as rtlnet_phy_rtl8211e_set_leds.
+ */
+int rtlnet_phy_rtl8211e_leds_default(const rtlnet_mdio_t *mdio)
+{
+    return rtlnet_phy_rtl8211e_set_leds(mdio, RTLNET_PHY_LCR_BOARD, RTLNET_PHY_LACR_BOARD);
+}
+
+/*
+ * rtlnet_phy_rtl8211e_set_eee_advert -- advertise Energy-Efficient Ethernet or not
+ * Steps:
+ *   1. Write MMD 7 register 60 (EEEAR) through Clause 22 registers 13/14
+ *      (rtlnet_mdio_mmd_write): 0x0006 (100BASE-TX and 1000BASE-T EEE) for
+ *      enable, 0x0000 for disable.
+ *   2. Read it back (rtlnet_mdio_mmd_read).
+ *   3. Pass when bits 2:1 equal the value written.
+ * The register is the auto-negotiation advertisement: a change takes effect
+ * at the next auto-negotiation, so the caller runs
+ * rtlnet_phy_rtl8211e_autoneg_restart afterwards (disabling EEE needs it to
+ * leave EEE mode; the link partner is told only by a new negotiation).
+ * Why EEE is off for the RTLNet board: in EEE mode the PHY blinks its LEDs
+ * 400 ms on and 2 s off (the activity pattern of the LED setting is lost),
+ * and the RGMII receive side carries low-power-idle codes between frames,
+ * which a MAC without LPI support does not expect.
+ * Returns: RTLNET_PHY_OK; RTLNET_PHY_ERR_VERIFY when the readback differs; a
+ *   bus error (RTLNET_MDIO_ERR_*); RTLNET_PHY_ERR_ARG for a NULL context.
+ */
+int rtlnet_phy_rtl8211e_set_eee_advert(const rtlnet_mdio_t *mdio, int enable)
+{
+    uint16_t want = (enable != 0) ? RTLNET_PHY_EEE_ADV_MASK : 0u;
+    uint16_t rb = RTLNET_MDIO_NO_PHY_DATA;
+    int rc;
+
+    if (mdio == NULL) {
+        return RTLNET_PHY_ERR_ARG;
+    }
+    rc = rtlnet_mdio_mmd_write(mdio, RTLNET_PHY_MMD_AN, RTLNET_PHY_MMD_EEE_ADV, want);
+    if (rc == RTLNET_MDIO_OK) {
+        rc = rtlnet_mdio_mmd_read(mdio, RTLNET_PHY_MMD_AN, RTLNET_PHY_MMD_EEE_ADV, &rb);
+    }
+    if (rc != RTLNET_MDIO_OK) {
+        return rc;
+    }
+    if ((rb & RTLNET_PHY_EEE_ADV_MASK) != want) {
+        return RTLNET_PHY_ERR_VERIFY;
+    }
+    return RTLNET_PHY_OK;
+}
+
+/*
+ * rtlnet_phy_rtl8211e_get_eee_advert -- read the EEE advertisement
+ * Steps:
+ *   1. Read MMD 7 register 60 (EEEAR) through Clause 22 registers 13/14.
+ * Returns: RTLNET_PHY_OK with *value = the register (RTLNET_PHY_EEE_ADV_*
+ *   bits); a bus error; RTLNET_PHY_ERR_ARG for a NULL pointer.
+ */
+int rtlnet_phy_rtl8211e_get_eee_advert(const rtlnet_mdio_t *mdio, uint16_t *value)
+{
+    if (mdio == NULL || value == NULL) {
+        return RTLNET_PHY_ERR_ARG;
+    }
+    return rtlnet_mdio_mmd_read(mdio, RTLNET_PHY_MMD_AN, RTLNET_PHY_MMD_EEE_ADV, value);
 }
 
 /*
