@@ -9,10 +9,13 @@
  *     BITBANG, POR timer), mirroring cores/rtlnet_mdio/hdl/rtlnet_mdio.sv;
  *   - an RTL8211E management slave clocked by the MDC edges the driver
  *     produces: Clause 22 frame decode, TA and data driven t6 after the
- *     rising edge, page 0 registers, PAGSEL/EPAGSR and extension page 0xA4
- *     register 28, BMCR self-clearing reset and restart, a link partner with
- *     auto-negotiation and forced modes, INSR/INER and INTB, hardware reset
- *     with the datasheet low and settle times.
+ *     rising edge (Clause 22 and, with c45_native, Clause 45 frames), page 0
+ *     registers, PAGSEL/EPAGSR, extension page 0xA4 register 28 and page 0x2C
+ *     registers 26/28 (LEDs), the Clause 22 MMD access registers 13/14 over a
+ *     small register file per MMD (EEEAR is MMD 7 register 60), BMCR
+ *     self-clearing reset and restart, a link partner with auto-negotiation and
+ *     forced modes, INSR/INER and INTB, hardware reset with the datasheet low
+ *     and settle times.
  * The models check every bus rule the driver must keep: MDC period, high and
  * low times (Table 61), MDIO setup/hold against the rising edge, read
  * samples not earlier than t6 after the PHY's launching edge, no line
@@ -88,6 +91,9 @@ typedef struct {
     int phy_absent;
     int wrong_id;
     int r28_stuck;
+    int led_stuck;
+    int eee_stuck;
+    int c45_native;     /* the model answers native Clause 45 frames (the RTL8211E does not) */
     int reset_stuck;
     int por_stuck;
     int core_id_bad;
@@ -159,7 +165,10 @@ typedef struct {
     uint16_t shreg;
     uint16_t wdata;
     int is_read;
-    uint8_t reg;
+    uint8_t reg;        /* Clause 22 REGAD or Clause 45 DEVAD */
+    uint32_t op;
+    int is_c45;
+    int respond;        /* the model drives TA/data and applies writes for this frame */
     uint32_t ta;
 
     /* PHY registers and link */
@@ -171,6 +180,14 @@ typedef struct {
     uint16_t pagsel;
     uint16_t epagsr;
     uint16_t r28;
+    uint16_t led_lcr;           /* extension page 0x2C register 28 */
+    uint16_t led_lacr;          /* extension page 0x2C register 26 */
+    uint16_t macr;              /* register 13 */
+    uint32_t mmd_present;       /* bit n set: MMD n exists */
+    uint16_t mmd_reg[32][64];   /* register file per MMD, registers 0..63 */
+    uint16_t mmd_addr[32];      /* address register per MMD (Clause 45 and MAADR share it) */
+    uint32_t trace[16];         /* page 0 writes to registers 13/14: reg << 16 | value */
+    unsigned ntrace;
     int bmsr_latch;
     int soft_reset_pend;
     unsigned long long soft_reset_until;
@@ -201,6 +218,12 @@ static void phy_defaults(void)
     g_m.pagsel = 0u;
     g_m.epagsr = 0u;
     g_m.r28 = 0x8575u;
+    g_m.led_lcr = 0x0000u;
+    g_m.led_lacr = 0x0000u;
+    g_m.macr = 0u;
+    memset(g_m.mmd_reg, 0, sizeof g_m.mmd_reg);
+    memset(g_m.mmd_addr, 0, sizeof g_m.mmd_addr);
+    g_m.mmd_reg[RTLNET_PHY_MMD_AN][RTLNET_PHY_MMD_EEE_ADV] = RTLNET_PHY_EEE_ADV_MASK;   /* EEE advertised */
     g_m.bmsr_latch = 0;
     g_m.soft_reset_pend = 0;
     g_m.link = 0;
@@ -278,6 +301,25 @@ static void link_restart(void)
     g_m.bmsr_latch = 0;
 }
 
+static uint16_t mmd_read(uint32_t dev, uint16_t reg)
+{
+    if (((g_m.mmd_present >> dev) & 1u) == 0u || reg >= 64u) {
+        return 0u;
+    }
+    return g_m.mmd_reg[dev][reg];
+}
+
+static void mmd_write(uint32_t dev, uint16_t reg, uint16_t v)
+{
+    if (((g_m.mmd_present >> dev) & 1u) == 0u || reg >= 64u) {
+        return;
+    }
+    if (dev == RTLNET_PHY_MMD_AN && reg == RTLNET_PHY_MMD_EEE_ADV && g_m.eee_stuck) {
+        return;
+    }
+    g_m.mmd_reg[dev][reg] = v;
+}
+
 static uint16_t reg_read(uint8_t reg)
 {
     uint16_t v = 0u;
@@ -293,6 +335,14 @@ static uint16_t reg_read(uint8_t reg)
         if ((g_m.pagsel & 0x7u) == RTLNET_PHY_PAGSEL_EXT && g_m.epagsr == RTLNET_PHY_EXTPAGE_RGMII &&
             reg == RTLNET_PHY_REG_RGMII_DELAY) {
             return g_m.r28;
+        }
+        if ((g_m.pagsel & 0x7u) == RTLNET_PHY_PAGSEL_EXT && g_m.epagsr == RTLNET_PHY_EXTPAGE_LED) {
+            if (reg == RTLNET_PHY_REG_LED_LCR) {
+                return g_m.led_lcr;
+            }
+            if (reg == RTLNET_PHY_REG_LED_LACR) {
+                return g_m.led_lacr;
+            }
         }
         return 0u;
     }
@@ -332,6 +382,23 @@ static uint16_t reg_read(uint8_t reg)
     case RTLNET_PHY_REG_GBCR:
         v = g_m.gbcr;
         break;
+    case RTLNET_MDIO_REG_MACR:
+        v = g_m.macr;
+        break;
+    case RTLNET_MDIO_REG_MAADR: {
+        uint32_t dev = g_m.macr & RTLNET_MDIO_MACR_DEVAD_MASK;
+        uint32_t func = g_m.macr & 0xC000u;
+
+        if (func == RTLNET_MDIO_MACR_FUNC_ADDR) {
+            v = g_m.mmd_addr[dev];
+        } else {
+            v = mmd_read(dev, g_m.mmd_addr[dev]);
+            if (func == RTLNET_MDIO_MACR_FUNC_INC_RW) {
+                g_m.mmd_addr[dev]++;
+            }
+        }
+        break;
+    }
     case RTLNET_PHY_REG_GBSR:
         if (g_m.an_complete) {
             v |= (g_m.partner_adv & RTLNET_PHY_ADV_1000F) ? RTLNET_PHY_GBSR_LP_1000F : 0u;
@@ -377,6 +444,13 @@ static void reg_write(uint8_t reg, uint16_t v)
             reg == RTLNET_PHY_REG_RGMII_DELAY && !g_m.r28_stuck) {
             g_m.r28 = v;
         }
+        if ((g_m.pagsel & 0x7u) == RTLNET_PHY_PAGSEL_EXT && g_m.epagsr == RTLNET_PHY_EXTPAGE_LED && !g_m.led_stuck) {
+            if (reg == RTLNET_PHY_REG_LED_LCR) {
+                g_m.led_lcr = v;
+            } else if (reg == RTLNET_PHY_REG_LED_LACR) {
+                g_m.led_lacr = v;
+            }
+        }
         return;
     }
     switch (reg) {
@@ -399,6 +473,29 @@ static void reg_write(uint8_t reg, uint16_t v)
     case RTLNET_PHY_REG_ANAR:
         g_m.anar = (uint16_t)((v & 0xFDE0u) | 0x0001u);
         break;
+    case RTLNET_MDIO_REG_MACR:
+        g_m.macr = v;
+        if (g_m.ntrace < sizeof g_m.trace / sizeof g_m.trace[0]) {
+            g_m.trace[g_m.ntrace++] = ((uint32_t)reg << 16) | v;
+        }
+        break;
+    case RTLNET_MDIO_REG_MAADR: {
+        uint32_t dev = g_m.macr & RTLNET_MDIO_MACR_DEVAD_MASK;
+        uint32_t func = g_m.macr & 0xC000u;
+
+        if (g_m.ntrace < sizeof g_m.trace / sizeof g_m.trace[0]) {
+            g_m.trace[g_m.ntrace++] = ((uint32_t)reg << 16) | v;
+        }
+        if (func == RTLNET_MDIO_MACR_FUNC_ADDR) {
+            g_m.mmd_addr[dev] = v;
+        } else {
+            mmd_write(dev, g_m.mmd_addr[dev], v);
+            if (func >= RTLNET_MDIO_MACR_FUNC_INC_RW) {
+                g_m.mmd_addr[dev]++;
+            }
+        }
+        break;
+    }
     case RTLNET_PHY_REG_GBCR:
         g_m.gbcr = v;
         break;
@@ -507,14 +604,12 @@ static void slave_rise(int line)
         }
         break;
     case SL_ST1:
-        if (line) {
-            g_m.st = SL_HDR;
-            g_m.nbits = 0u;
-            g_m.hdr = 0u;
-        } else {
-            g_m.v_bad_frame++;
-            g_m.st = SL_SKIP;
-        }
+        /* The preamble's terminating 0 was ST bit 1; this is ST bit 0: 01 is
+         * Clause 22, 00 is Clause 45. */
+        g_m.is_c45 = !line;
+        g_m.st = SL_HDR;
+        g_m.nbits = 0u;
+        g_m.hdr = 0u;
         break;
     case SL_HDR:
         g_m.hdr = (g_m.hdr << 1) | (uint32_t)line;
@@ -522,22 +617,36 @@ static void slave_rise(int line)
             op = (g_m.hdr >> 10) & 3u;
             pa = (g_m.hdr >> 5) & 31u;
             g_m.reg = (uint8_t)(g_m.hdr & 31u);
-            g_m.is_read = (op == RTLNET_MDIO_OP_READ);
-            if (op != RTLNET_MDIO_OP_READ && op != RTLNET_MDIO_OP_WRITE) {
-                g_m.v_bad_frame++;
-                g_m.st = SL_SKIP;
-            } else if (pa != g_m.phy_addr || !phy_responsive()) {
-                g_m.frames_ignored++;
-                g_m.st = SL_SKIP;
-            } else {
+            g_m.op = op;
+            if (g_m.is_c45) {
+                /* Every Clause 45 frame is decoded to its end, so the
+                 * decoder stays in step; only a device that exists answers. */
+                g_m.is_read = (op == RTLNET_MDIO_C45_OP_READ || op == RTLNET_MDIO_C45_OP_READ_INC);
+                g_m.respond = g_m.c45_native && pa == g_m.phy_addr && phy_responsive() &&
+                              ((g_m.mmd_present >> g_m.reg) & 1u) != 0u;
+                if (!g_m.respond) {
+                    g_m.frames_ignored++;
+                }
                 g_m.st = SL_TA1;
+            } else {
+                g_m.is_read = (op == RTLNET_MDIO_OP_READ);
+                g_m.respond = 1;
+                if (op != RTLNET_MDIO_OP_READ && op != RTLNET_MDIO_OP_WRITE) {
+                    g_m.v_bad_frame++;
+                    g_m.st = SL_SKIP;
+                } else if (pa != g_m.phy_addr || !phy_responsive()) {
+                    g_m.frames_ignored++;
+                    g_m.st = SL_SKIP;
+                } else {
+                    g_m.st = SL_TA1;
+                }
             }
         }
         break;
     case SL_TA1:
         g_m.ta = (uint32_t)line << 1;
-        if (g_m.is_read) {
-            g_m.shreg = reg_read(g_m.reg);
+        if (g_m.is_read && g_m.respond) {
+            g_m.shreg = g_m.is_c45 ? mmd_read(g_m.reg, g_m.mmd_addr[g_m.reg]) : reg_read(g_m.reg);
             schedule(1, 0);
         }
         g_m.st = SL_TA2;
@@ -546,8 +655,10 @@ static void slave_rise(int line)
         g_m.ta |= (uint32_t)line;
         g_m.nbits = 0u;
         if (g_m.is_read) {
-            schedule(1, (g_m.shreg >> 15) & 1u);
-            g_m.shreg = (uint16_t)(g_m.shreg << 1);
+            if (g_m.respond) {
+                schedule(1, (g_m.shreg >> 15) & 1u);
+                g_m.shreg = (uint16_t)(g_m.shreg << 1);
+            }
             g_m.st = SL_DATA;
         } else if (g_m.ta != RTLNET_MDIO_TA_WRITE) {
             g_m.v_bad_frame++;
@@ -561,20 +672,33 @@ static void slave_rise(int line)
         g_m.nbits++;
         if (g_m.is_read) {
             if (g_m.nbits == 16u) {
-                schedule(0, 1);
-                g_m.frames_read++;
+                if (g_m.respond) {
+                    schedule(0, 1);
+                    g_m.frames_read++;
+                    if (g_m.is_c45 && g_m.op == RTLNET_MDIO_C45_OP_READ_INC) {
+                        g_m.mmd_addr[g_m.reg]++;
+                    }
+                }
                 g_m.st = SL_PRE;
                 g_m.ones = 0u;
                 g_m.need_idle = 1;
-            } else {
+            } else if (g_m.respond) {
                 schedule(1, (g_m.shreg >> 15) & 1u);
                 g_m.shreg = (uint16_t)(g_m.shreg << 1);
             }
         } else {
             g_m.wdata = (uint16_t)((g_m.wdata << 1) | (uint32_t)line);
             if (g_m.nbits == 16u) {
-                reg_write(g_m.reg, g_m.wdata);
-                g_m.frames_write++;
+                if (g_m.respond) {
+                    if (!g_m.is_c45) {
+                        reg_write(g_m.reg, g_m.wdata);
+                    } else if (g_m.op == RTLNET_MDIO_C45_OP_ADDR) {
+                        g_m.mmd_addr[g_m.reg] = g_m.wdata;
+                    } else {
+                        mmd_write(g_m.reg, g_m.mmd_addr[g_m.reg], g_m.wdata);
+                    }
+                    g_m.frames_write++;
+                }
                 g_m.st = SL_PRE;
                 g_m.ones = 0u;
                 g_m.need_idle = 1;
@@ -777,6 +901,7 @@ static void model_reset(void)
     g_m.cable = 1;
     g_m.partner_adv = RTLNET_PHY_ADV_ALL;
     g_m.phy_addr = RTLNET_PHY_RTL8211E_ADDR_DEFAULT;
+    g_m.mmd_present = (1u << 1) | (1u << 3) | (1u << RTLNET_PHY_MMD_AN);
     g_m.in_reset = 1;                       /* power-on: PHYRSTB low from time 0 */
     g_m.min_reset_low = ~0ull;
     g_m.idle_valid = 1;
@@ -1208,6 +1333,215 @@ static void test_link_and_irq(void)
     check_clean("link change and interrupt");
 }
 
+static void test_leds(void)
+{
+    uint16_t lcr = 0xFFFFu;
+    uint16_t lacr = 0xFFFFu;
+    uint16_t v = 0u;
+
+    checkf(RTLNET_PHY_LCR_BOARD == 0x0070u && RTLNET_PHY_LACR_BOARD == 0x0010u,
+           "board LED constants LCR 0x%04x LACR 0x%04x", RTLNET_PHY_LCR_BOARD, RTLNET_PHY_LACR_BOARD);
+    fresh();
+    check(rtlnet_phy_rtl8211e_get_leds(&g_ctx, &lcr, &lacr) == RTLNET_PHY_OK, "get_leds default");
+    checkf(lcr == 0u && lacr == 0u, "model LED defaults LCR 0x%04x LACR 0x%04x", lcr, lacr);
+    checkf(g_m.pagsel == 0u, "get_leds returns to page 0 (0x%04x, %u)", g_m.pagsel, 0u);
+
+    check(rtlnet_phy_rtl8211e_set_leds(&g_ctx, 0x0123u, 0x0456u) == RTLNET_PHY_OK, "set_leds arbitrary values");
+    checkf(g_m.led_lcr == 0x0123u && g_m.led_lacr == 0x0456u, "model LCR 0x%04x LACR 0x%04x", g_m.led_lcr,
+           g_m.led_lacr);
+
+    check(rtlnet_phy_rtl8211e_leds_default(&g_ctx) == RTLNET_PHY_OK, "leds_default");
+    checkf(g_m.led_lcr == 0x0070u, "LCR 0x%04x, expected 0x%04x", g_m.led_lcr, 0x0070u);
+    checkf(g_m.led_lacr == 0x0010u, "LACR 0x%04x, expected 0x%04x", g_m.led_lacr, 0x0010u);
+    checkf(g_m.pagsel == 0u, "PAGSEL back to 0 after set_leds (0x%04x, %u)", g_m.pagsel, 0u);
+    checkf(g_m.r28 == 0x8575u, "LED page write leaves RGMII register 28 (0x%04x, 0x%04x)", g_m.r28, 0x8575u);
+    check(rtlnet_phy_rtl8211e_get_leds(&g_ctx, &lcr, &lacr) == RTLNET_PHY_OK && lcr == 0x0070u && lacr == 0x0010u,
+          "get_leds reads the board setting");
+    check(rtlnet_mdio_read(&g_ctx, RTLNET_PHY_REG_PHYID1, &v) == RTLNET_MDIO_OK && v == 0x001Cu,
+          "page 0 access after the LED pages");
+
+    check(rtlnet_phy_rtl8211e_set_leds(NULL, 0u, 0u) == RTLNET_PHY_ERR_ARG, "set_leds NULL");
+    check(rtlnet_phy_rtl8211e_get_leds(&g_ctx, NULL, &lacr) == RTLNET_PHY_ERR_ARG, "get_leds NULL lcr");
+    check(rtlnet_phy_rtl8211e_get_leds(&g_ctx, &lcr, NULL) == RTLNET_PHY_ERR_ARG, "get_leds NULL lacr");
+    check(rtlnet_phy_rtl8211e_leds_default(NULL) == RTLNET_PHY_ERR_ARG, "leds_default NULL");
+    check_clean("LEDs");
+
+    /* Negative: the LED registers do not stick. */
+    fresh();
+    g_m.led_stuck = 1;
+    check(rtlnet_phy_rtl8211e_set_leds(&g_ctx, 0x0070u, 0x0010u) == RTLNET_PHY_ERR_VERIFY,
+          "LED registers not sticking reported");
+    checkf(g_m.pagsel == 0u, "PAGSEL back to 0 after a failed LED verify (0x%04x, %u)", g_m.pagsel, 0u);
+    check(rtlnet_phy_rtl8211e_leds_default(&g_ctx) == RTLNET_PHY_ERR_VERIFY, "leds_default reports the verify failure");
+    check(rtlnet_phy_rtl8211e_get_leds(&g_ctx, &lcr, &lacr) == RTLNET_PHY_OK && lcr == 0u && lacr == 0u,
+          "get_leds shows the unchanged registers");
+    check(rtlnet_mdio_read(&g_ctx, RTLNET_PHY_REG_PHYID1, &v) == RTLNET_MDIO_OK && v == 0x001Cu,
+          "page 0 access after a failed LED verify");
+    check_clean("LED verify failure");
+
+    /* Negative: no PHY answers. */
+    fresh();
+    g_m.phy_absent = 1;
+    check(rtlnet_phy_rtl8211e_set_leds(&g_ctx, 0x0070u, 0x0010u) == RTLNET_MDIO_ERR_NO_PHY, "set_leds without PHY");
+    check(rtlnet_phy_rtl8211e_get_leds(&g_ctx, &lcr, &lacr) == RTLNET_MDIO_ERR_NO_PHY, "get_leds without PHY");
+    g_m.phy_absent = 0;
+    check_clean("LEDs without PHY");
+}
+
+static void test_eee(void)
+{
+    uint16_t v = 0xFFFFu;
+    unsigned w0;
+    unsigned r0;
+
+    fresh();
+    check(rtlnet_phy_rtl8211e_get_eee_advert(&g_ctx, &v) == RTLNET_PHY_OK, "get_eee_advert");
+    checkf(v == 0x0006u, "EEE advertisement at power-up 0x%04x, expected 0x%04x", v, 0x0006u);
+
+    /* Wire sequence of a disable: write 13 = 7, 14 = 60, 13 = 0x4007, 14 = data; the readback
+     * repeats the first three writes and reads 14. */
+    g_m.ntrace = 0u;
+    w0 = g_m.frames_write;
+    r0 = g_m.frames_read;
+    check(rtlnet_phy_rtl8211e_set_eee_advert(&g_ctx, 0) == RTLNET_PHY_OK, "EEE disable");
+    checkf(g_m.mmd_reg[7][60] == 0u, "EEEAR after disable 0x%04x (%u)", g_m.mmd_reg[7][60], 0u);
+    checkf(g_m.frames_write - w0 == 7u && g_m.frames_read - r0 == 1u, "EEE disable frames: writes %u reads %u",
+           g_m.frames_write - w0, g_m.frames_read - r0);
+    check(g_m.ntrace == 7u && g_m.trace[0] == ((13u << 16) | 0x0007u) && g_m.trace[1] == ((14u << 16) | 0x003Cu) &&
+              g_m.trace[2] == ((13u << 16) | 0x4007u) && g_m.trace[3] == ((14u << 16) | 0x0000u) &&
+              g_m.trace[4] == ((13u << 16) | 0x0007u) && g_m.trace[5] == ((14u << 16) | 0x003Cu) &&
+              g_m.trace[6] == ((13u << 16) | 0x4007u),
+          "MMD 7.60 access sequence on registers 13/14");
+    check(rtlnet_phy_rtl8211e_get_eee_advert(&g_ctx, &v) == RTLNET_PHY_OK && v == 0u, "get_eee_advert after disable");
+
+    g_m.ntrace = 0u;
+    check(rtlnet_phy_rtl8211e_set_eee_advert(&g_ctx, 1) == RTLNET_PHY_OK, "EEE enable");
+    checkf(g_m.mmd_reg[7][60] == 0x0006u, "EEEAR after enable 0x%04x, expected 0x%04x", g_m.mmd_reg[7][60], 0x0006u);
+    check(g_m.trace[3] == ((14u << 16) | 0x0006u), "enable writes 0x0006 as the data");
+    check(rtlnet_phy_rtl8211e_get_eee_advert(&g_ctx, &v) == RTLNET_PHY_OK && v == (RTLNET_PHY_EEE_ADV_100TX | RTLNET_PHY_EEE_ADV_1000T),
+          "get_eee_advert after enable");
+
+    check(rtlnet_phy_rtl8211e_set_eee_advert(NULL, 0) == RTLNET_PHY_ERR_ARG, "set_eee_advert NULL");
+    check(rtlnet_phy_rtl8211e_get_eee_advert(&g_ctx, NULL) == RTLNET_PHY_ERR_ARG, "get_eee_advert NULL value");
+    check(rtlnet_phy_rtl8211e_get_eee_advert(NULL, &v) == RTLNET_PHY_ERR_ARG, "get_eee_advert NULL ctx");
+    check_clean("EEE");
+
+    /* Negative: EEEAR does not stick. */
+    g_m.eee_stuck = 1;
+    check(rtlnet_phy_rtl8211e_set_eee_advert(&g_ctx, 0) == RTLNET_PHY_ERR_VERIFY, "EEE disable not sticking reported");
+    checkf(g_m.mmd_reg[7][60] == 0x0006u, "stuck EEEAR unchanged 0x%04x (0x%04x)", g_m.mmd_reg[7][60], 0x0006u);
+    g_m.eee_stuck = 0;
+
+    /* Negative: no PHY. */
+    g_m.phy_absent = 1;
+    check(rtlnet_phy_rtl8211e_set_eee_advert(&g_ctx, 0) == RTLNET_MDIO_ERR_NO_PHY, "set_eee_advert without PHY");
+    check(rtlnet_phy_rtl8211e_get_eee_advert(&g_ctx, &v) == RTLNET_MDIO_ERR_NO_PHY, "get_eee_advert without PHY");
+    g_m.phy_absent = 0;
+    check_clean("EEE faults");
+}
+
+static void test_clause45(void)
+{
+    rtlnet_mdio_t other;
+    uint16_t v = 0u;
+    unsigned w0;
+    unsigned r0;
+
+    fresh();
+
+    /* Clause 45 registers through Clause 22 registers 13/14. */
+    g_m.ntrace = 0u;
+    check(rtlnet_mdio_mmd_write(&g_ctx, 3u, 0x0010u, 0xCAFEu) == RTLNET_MDIO_OK, "mmd_write");
+    checkf(g_m.mmd_reg[3][0x10] == 0xCAFEu, "MMD 3 register 16 0x%04x, expected 0x%04x", g_m.mmd_reg[3][0x10], 0xCAFEu);
+    checkf(g_m.macr == 0x4003u, "MACR left in data function 0x%04x, expected 0x%04x", g_m.macr, 0x4003u);
+    check(g_m.ntrace == 4u && g_m.trace[0] == ((13u << 16) | 0x0003u) && g_m.trace[1] == ((14u << 16) | 0x0010u) &&
+              g_m.trace[2] == ((13u << 16) | 0x4003u) && g_m.trace[3] == ((14u << 16) | 0xCAFEu),
+          "mmd_write register sequence");
+    w0 = g_m.frames_write;
+    r0 = g_m.frames_read;
+    check(rtlnet_mdio_mmd_read(&g_ctx, 3u, 0x0010u, &v) == RTLNET_MDIO_OK && v == 0xCAFEu, "mmd_read");
+    checkf(g_m.frames_write - w0 == 3u && g_m.frames_read - r0 == 1u, "mmd_read frames: writes %u reads %u",
+           g_m.frames_write - w0, g_m.frames_read - r0);
+    check(rtlnet_mdio_mmd_read(&g_ctx, 5u, 0x0000u, &v) == RTLNET_MDIO_OK && v == 0u, "mmd_read of an absent MMD (model reads 0)");
+    check(rtlnet_mdio_mmd_read(&g_ctx, 32u, 0u, &v) == RTLNET_MDIO_ERR_ARG, "mmd_read devad 32 rejected");
+    check(rtlnet_mdio_mmd_write(&g_ctx, 32u, 0u, 0u) == RTLNET_MDIO_ERR_ARG, "mmd_write devad 32 rejected");
+    check(rtlnet_mdio_mmd_read(&g_ctx, 3u, 0u, NULL) == RTLNET_MDIO_ERR_ARG, "mmd_read NULL value rejected");
+    check(rtlnet_mdio_mmd_read(NULL, 3u, 0u, &v) == RTLNET_MDIO_ERR_ARG, "mmd_read NULL ctx rejected");
+    check(rtlnet_mdio_mmd_write(NULL, 3u, 0u, 0u) == RTLNET_MDIO_ERR_ARG, "mmd_write NULL ctx rejected");
+    check_clean("MMD indirect access");
+
+    /* The RTL8211E does not answer native Clause 45: no TA, 0xFFFF; the bus stays in step. */
+    check(rtlnet_mdio_c45_read(&g_ctx, RTLNET_PHY_MMD_AN, RTLNET_PHY_MMD_EEE_ADV, &v) == RTLNET_MDIO_ERR_NO_PHY,
+          "native Clause 45 read of the RTL8211E reports no PHY");
+    checkf(v == 0xFFFFu, "no-answer value 0x%04x, expected 0x%04x", v, 0xFFFFu);
+    check(rtlnet_mdio_c45_write(&g_ctx, RTLNET_PHY_MMD_AN, RTLNET_PHY_MMD_EEE_ADV, 0u) == RTLNET_MDIO_OK,
+          "native Clause 45 write returns OK (cannot detect)");
+    checkf(g_m.mmd_reg[7][60] == 0x0006u, "RTL8211E ignored the native write (0x%04x, 0x%04x)", g_m.mmd_reg[7][60],
+           0x0006u);
+    check(rtlnet_mdio_read(&g_ctx, RTLNET_PHY_REG_PHYID1, &v) == RTLNET_MDIO_OK && v == 0x001Cu,
+          "Clause 22 read after ignored Clause 45 frames");
+    check_clean("native Clause 45 on the RTL8211E");
+
+    /* A Clause 45 PHY. */
+    g_m.c45_native = 1;
+    w0 = g_m.frames_write;
+    check(rtlnet_mdio_c45_write(&g_ctx, 3u, 0x0020u, 0xBEEFu) == RTLNET_MDIO_OK, "c45_write");
+    checkf(g_m.mmd_reg[3][0x20] == 0xBEEFu, "MMD 3 register 32 0x%04x, expected 0x%04x", g_m.mmd_reg[3][0x20], 0xBEEFu);
+    checkf(g_m.frames_write - w0 == 2u, "c45_write frames %u, expected %u", g_m.frames_write - w0, 2u);
+    w0 = g_m.frames_write;
+    r0 = g_m.frames_read;
+    v = 0u;
+    check(rtlnet_mdio_c45_read(&g_ctx, 3u, 0x0020u, &v) == RTLNET_MDIO_OK, "c45_read");
+    checkf(v == 0xBEEFu, "c45_read value 0x%04x, expected 0x%04x", v, 0xBEEFu);
+    checkf(g_m.frames_write - w0 == 1u && g_m.frames_read - r0 == 1u, "c45_read frames: address %u read %u",
+           g_m.frames_write - w0, g_m.frames_read - r0);
+    checkf(g_m.last_pre == 32u, "Clause 45 preamble %u ones, expected %u", g_m.last_pre, 32u);
+    checkf(g_m.mmd_addr[3] == 0x0020u, "address register 0x%04x, expected 0x%04x", g_m.mmd_addr[3], 0x0020u);
+
+    /* Block read with post-increment. */
+    g_m.mmd_reg[3][8] = 0x1111u;
+    g_m.mmd_reg[3][9] = 0x2222u;
+    g_m.mmd_reg[3][10] = 0x3333u;
+    check(rtlnet_mdio_c45_addr(&g_ctx, 3u, 8u) == RTLNET_MDIO_OK, "c45_addr");
+    check(rtlnet_mdio_c45_read_inc(&g_ctx, 3u, &v) == RTLNET_MDIO_OK && v == 0x1111u, "read_inc word 0");
+    check(rtlnet_mdio_c45_read_inc(&g_ctx, 3u, &v) == RTLNET_MDIO_OK && v == 0x2222u, "read_inc word 1");
+    check(rtlnet_mdio_c45_read_inc(&g_ctx, 3u, &v) == RTLNET_MDIO_OK && v == 0x3333u, "read_inc word 2");
+    checkf(g_m.mmd_addr[3] == 0x000Bu, "address after three read_inc 0x%04x, expected 0x%04x", g_m.mmd_addr[3], 0x000Bu);
+
+    /* The MMD file is shared with the indirect path. */
+    check(rtlnet_mdio_mmd_read(&g_ctx, 3u, 0x0020u, &v) == RTLNET_MDIO_OK && v == 0xBEEFu,
+          "indirect read of a natively written register");
+    check(rtlnet_mdio_read(&g_ctx, RTLNET_PHY_REG_PHYID2, &v) == RTLNET_MDIO_OK && v == 0xC915u,
+          "Clause 22 read between Clause 45 frames");
+    check_clean("native Clause 45");
+
+    /* Negative: a device that does not exist, and another port address. */
+    v = 0u;
+    check(rtlnet_mdio_c45_read(&g_ctx, 5u, 0x0001u, &v) == RTLNET_MDIO_ERR_NO_PHY, "c45_read of an absent MMD: TA error");
+    checkf(v == 0xFFFFu, "absent MMD value 0x%04x, expected 0x%04x", v, 0xFFFFu);
+    check(rtlnet_mdio_c45_read_inc(&g_ctx, 5u, &v) == RTLNET_MDIO_ERR_NO_PHY, "c45_read_inc of an absent MMD: TA error");
+    check(rtlnet_mdio_c45_write(&g_ctx, 5u, 0x0001u, 0x1234u) == RTLNET_MDIO_OK, "c45_write to an absent MMD returns OK");
+    checkf(g_m.mmd_reg[5][1] == 0u && g_m.mmd_addr[5] == 0u, "absent MMD untouched (0x%04x, 0x%04x)", g_m.mmd_reg[5][1],
+           g_m.mmd_addr[5]);
+    other = g_ctx;
+    other.phy_addr = 2u;
+    check(rtlnet_mdio_c45_read(&other, 3u, 0x0020u, &v) == RTLNET_MDIO_ERR_NO_PHY, "c45_read at another port address: TA error");
+    check(rtlnet_mdio_c45_read(&g_ctx, 3u, 0x0020u, &v) == RTLNET_MDIO_OK && v == 0xBEEFu,
+          "c45_read still works after the failed frames");
+    check_clean("Clause 45 faults");
+
+    /* Argument checks. */
+    check(rtlnet_mdio_c45_addr(&g_ctx, 32u, 0u) == RTLNET_MDIO_ERR_ARG, "c45_addr devad 32 rejected");
+    check(rtlnet_mdio_c45_write(&g_ctx, 32u, 0u, 0u) == RTLNET_MDIO_ERR_ARG, "c45_write devad 32 rejected");
+    check(rtlnet_mdio_c45_read(&g_ctx, 32u, 0u, &v) == RTLNET_MDIO_ERR_ARG, "c45_read devad 32 rejected");
+    check(rtlnet_mdio_c45_read_inc(&g_ctx, 32u, &v) == RTLNET_MDIO_ERR_ARG, "c45_read_inc devad 32 rejected");
+    check(rtlnet_mdio_c45_read(&g_ctx, 3u, 0u, NULL) == RTLNET_MDIO_ERR_ARG, "c45_read NULL value rejected");
+    check(rtlnet_mdio_c45_read_inc(&g_ctx, 3u, NULL) == RTLNET_MDIO_ERR_ARG, "c45_read_inc NULL value rejected");
+    check(rtlnet_mdio_c45_write(NULL, 3u, 0u, 0u) == RTLNET_MDIO_ERR_ARG, "c45_write NULL ctx rejected");
+    check(rtlnet_mdio_c45_read(NULL, 3u, 0u, &v) == RTLNET_MDIO_ERR_ARG, "c45_read NULL ctx rejected");
+    check_clean("Clause 45 arguments");
+}
+
 int main(int argc, char **argv)
 {
     int inject = (argc > 1 && strcmp(argv[1], "--inject-failure") == 0);
@@ -1223,6 +1557,9 @@ int main(int argc, char **argv)
     test_autoneg();
     test_forced_and_loopback();
     test_link_and_irq();
+    test_leds();
+    test_eee();
+    test_clause45();
     if (inject) {
         check(0, "INJECT_FAILURE negative control");
     }
