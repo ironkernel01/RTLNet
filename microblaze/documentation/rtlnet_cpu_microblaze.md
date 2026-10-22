@@ -139,7 +139,7 @@ is never simulated. Tasks (called hierarchically, `dut.u_cpu.<task>`): `wait_res
 `axil_write(addr, data, strb, resp)`, `axil_read(addr, data, resp)` (timeouts return resp 2'b10 and count
 `axil_timeouts`), `axil_set_bits` / `axil_clear_bits` (read-modify-write), `cls_config_bcast_storm(base,
 limit, window, resp)` (the classifier register sequence of the driver's broadcast storm configuration,
-offsets from the classifier specification), `uart_send(byte)` on `uart_txd`, a receiver on `uart_rxd` into
+the register sequence of `rtlnet_classifier_init` and `rtlnet_classifier_config_bcast_storm`, offsets and bits of `cores/rtlnet_classifier/driver/rtlnet_classifier.h`; it returns resp 2'b11 when ID/VERSION do not read back), `uart_send(byte)` on `uart_txd`, a receiver on `uart_rxd` into
 `uart_rx_q` (`uart_get`, `uart_rx_errors`), `wait_irq(mask, timeout, ok)`, and the DMA stand-in:
 `eth_send(frame)` on `m_axis_eth_*`, a sink on `s_axis_eth_*` into `eth_rx_q` (`eth_get`, `eth_rx_ready`
 back-pressure control, `eth_tx_frames`, `eth_rx_frames`, `eth_rx_keep_errors`).
@@ -256,11 +256,32 @@ stalls of about 0.4 s); the board top now builds the FIFO with 32 KiB (`CPU_RX_F
 ### 9.7 CPU path control and the CLI
 
 `rtlnet_cpupath.c` keeps the classifier configuration (the running configuration) and writes it through the
-classifier driver: default MODE pass-all, MAC entry 0 destination FF:FF:FF:FF:FF:FF policed by policer 0,
-policer 0 = 10 frames per 100 ms. The classifier powers up drop-all; `netmgr_init` configures it before the
-first InitLWIP. The classifier driver and the wrapper's CPU-path register functions are written in parallel
-with this firmware: until they are in the tree the configuration is kept, `show` commands report "driver
-not in this firmware build", and a bitstream without the classifier reports it absent.
+classifier driver (`cores/rtlnet_classifier/driver`, compiled in place; one `rtlnet_classifier_t` context for the
+CPU-path instance at 0x44A1_8000, every driver call takes it first): default MODE pass-all, MAC entry 0
+destination FF:FF:FF:FF:FF:FF policed by policer 0, policer 0 = 10 frames per 100 ms. The classifier powers up
+drop-all. `netmgr_init` calls `cpupath_init()` after `InitPHY()` and the protocol probe and before
+`InitLWIP()` and before the MAC receive path is enabled: `rtlnet_classifier_init(&ctx, 0x44A18000)` then, for
+the default configuration, `rtlnet_classifier_config_bcast_storm(&ctx, 10, 100)`; it also sets the wrapper's
+CPU-path enable. A bitstream without the classifier reads 0 at 0x44A1_8000 and the firmware reports it absent
+("classifier not present in this build"; the settings stay in the running configuration).
+
+Mapping of the CLI entries onto the driver (`hw_sync`, run by every setter: `clear_all`, entries, policers,
+MODE last):
+
+| CLI | Driver call | Notes |
+|---|---|---|
+| `classifier mac <0..15> dst\|src <mac> gate\|classify\|police <p>` | `rtlnet_classifier_mac_filter(ctx, i, mac, SIDE_DST/SRC, action)` | MAC table, single-value compare; no mask (the compare mode is per table and entry 0 is the storm entry) |
+| `classifier ethertype <0..7> <t> [to <t>] ...` | `rtlnet_classifier_ethertype_filter(ctx, pair, lo, hi, action)` | range pair (entries 2i, 2i+1), hence 8 entries |
+| `classifier acl <0..15> tcp\|udp\|any src <ip>/<n> dst <ip>/<n> [sport] [dport] ...` | `rtlnet_classifier_acl_add(ctx, i, proto, src, mask, dst, mask, ports, action)` | tuple table |
+| actions | `RTLNET_CLS_ACT_GATE`; `RTLNET_CLS_ACT_CLASSIFY`; `RTLNET_CLS_ACT_CLASSIFY \| RTLNET_CLS_ACT_POLICE(p)` | the table-level CLASSIFY flag is set after the entries are written: classify-only unless one of the table's entries gates |
+| `classifier policer <p> <pkts> <ms> [disable]`, `no classifier policer` | `rtlnet_classifier_policer_set` | |
+| `classifier mode ...` | `rtlnet_classifier_set_mode` | |
+| `storm-control broadcast <pkts> <ms>` | policer 0 + MAC entry 0, whole configuration rewritten | |
+| `storm-control broadcast enable\|disable` | `rtlnet_classifier_bcast_storm_enable` | limit and window kept |
+| `show classifier`, `show storm-control`, `show counters`, `clear counters` | `get_mode`, `get_status`, `counters`, `policer_get`, `clear_counters` | `show classifier` also prints the hardware MODE/STATUS, CAPS and the delay-line latency |
+
+A configuration rewrite leaves the filter in drop-all for about 100 us (`clear_all`); frames in that window are
+lost (TCP retransmits).
 
 CLI additions (83 commands in all, MenuBuilder hierarchical rules, `cli/MenuDocumentation.md`):
 `show tcp`, `show cpu-path`, `show storm-control`, `show classifier`, `show iperf` in two sections ("UDP (RTL
@@ -392,6 +413,7 @@ closed port (FAIL, connection refused).
 | XSA -> BSP (Vitis Python API) | `RTLNET_BSP: PASS` |
 | Hardware: CLI over the USB-UART on the BSP-based firmware | `cli_test.ps1` PASS 27/27; `reload` works; 1 ms interrupt tick equals the hardware uptime |
 | Desktop harness | TEST PASS 248 checks; negative control TEST FAIL |
+| Desktop harness with the classifier register model (`host_platform.c`) | TEST PASS 292 checks: boot call and generic rewrite leave identical registers, every classifier command written through the driver, counters read back |
 | Board bench `tb_rtlnet_nexys_video_top` with the simulation stand-in | TEST PASS 74 checks |
 
 | Network build (commit a9e043e6) with the CPU path to the protocol wrapper | WNS +0.221 ns, WHS +0.018 ns; CDC fifo 9 / gray 6 as expected |
@@ -408,8 +430,10 @@ Details: `boards/nexys_video/documentation/rtlnet_nexys_video.md` sections 6.3 a
 
 - The DMA interrupts are wired to the INTC but unused; the netif polls (no interrupt latency or nesting
   questions, and the main loop runs continuously).
-- The classifier driver and the wrapper CPU-path register functions are bound by their specified names;
-  the integration adapts the calls if the final signatures differ.
+- A MAC-table entry cannot carry a mask (the table's compare mode is single-value, shared with the storm
+  entry), so the CLI has no `mask` option; the table-level CLASSIFY flag follows the entries of the table
+  (a table with one `gate` entry gates, its `police` entries then also take part in the match).
+- Reconfiguring the classifier from the CLI drops the CPU-bound frames for about 100 us.
 - A soft restart (`reload`) jumps to the reset vector: the BSP start-up clears `.bss` but does not reload
   `.data`, so no firmware state relies on a `.data` initial value.
 - The MDM's BSCAN clocks are constrained by the vendor IP itself; the build waives TIMING-9 only while
@@ -422,3 +446,4 @@ Details: `boards/nexys_video/documentation/rtlnet_nexys_video.md` sections 6.3 a
 | 10-22-2026 | Initial version: block design script, wrapper, driver header, bus-functional model |
 | 10-22-2026 | Moved to `microblaze/`; LMB 512 KiB; AXI DMA and 128 KiB AXI BRAM with the frame streams; simulation stand-in renamed `rtlnet_microblaze_sim_stub`; BSP generated from the XSA; firmware on the BSP with lwIP, InitLWIP, DMA netif, TCP echo, CPU path CLI |
 | 10-22-2026 | lwIP glue and applications moved to `src/lwip/`; iperf server forked as `rtlnet_lwiperf` with -R, -r and -d; captured iperf 2.2.2 test header; desktop loopback test |
+| 10-22-2026 | Classifier driver integrated: `rtlnet_cpupath.c` on the real driver API (context, `RTLNET_CLS_ACT_*`), boot call `rtlnet_classifier_config_bcast_storm(10, 100)`, MAC mask removed and EtherType entries 0..7 (range pairs) in the CLI, harness register model of the classifier; the sim stub classifier task follows the driver register map |

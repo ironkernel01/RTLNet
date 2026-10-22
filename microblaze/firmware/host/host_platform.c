@@ -48,6 +48,7 @@
 #include <time.h>     /* clock */
 
 #include "cli_commands.h"
+#include "rtlnet_classifier.h"
 #include "rtlnet_mmio.h"
 #include "rtlnet_nexys_video_sysregs.h"
 #include "rtlnet_platform.h"
@@ -55,6 +56,10 @@
 #define HOST_CAPTURE_MAX   65536u
 #define HOST_MAX_CORES     16u
 #define HOST_MAX_WORDS     64u
+#define HOST_CLS_WORDS     (RTLNET_CLS_WINDOW_BYTES / 4u)
+/* Classifier model build parameters (CAPS): 16 + 16 entries, 2 rules, 4 policers, 2 lanes, 64 bytes. */
+#define HOST_CLS_CAPS      (16u | (16u << 5) | (2u << 10) | (4u << 13) | (2u << 16) | (8u << 21))
+#define HOST_CLS_LATENCY   (31u | (23u << 8))
 
 static char      g_capture[HOST_CAPTURE_MAX];
 static size_t    g_capture_len;
@@ -67,6 +72,9 @@ static uintptr_t g_word_addr[HOST_MAX_WORDS];
 static uint32_t  g_word_val[HOST_MAX_WORDS];
 static int       g_reloads;
 static clock_t   g_t0;
+static int       g_cls_on;                    /* the classifier model answers at RTLNET_PLAT_CLS_BASE */
+static uint32_t  g_cls_mode;                  /* CTRL.MODE */
+static uint32_t  g_cls_mem[HOST_CLS_WORDS];   /* every other register word as written */
 
 /**
  * @brief Clear the console capture buffer.
@@ -105,6 +113,12 @@ void host_console_echo(int on)
  */
 void host_model_set_core(uintptr_t base, uint32_t id)
 {
+    if (base == RTLNET_PLAT_CLS_BASE) {
+        g_cls_on = (id != 0u) ? 1 : 0;
+        g_cls_mode = 0u;
+        memset(g_cls_mem, 0, sizeof(g_cls_mem));
+        return;
+    }
     for (unsigned i = 0; i < HOST_MAX_CORES; i++) {
         if (g_core_base[i] == base || (id != 0u && g_core_base[i] == 0u)) {
             g_core_base[i] = (id != 0u) ? base : 0u;
@@ -130,6 +144,67 @@ uint32_t host_model_leds(void)
 int host_reload_count(void)
 {
     return g_reloads;
+}
+
+/**
+ * @brief Classifier model read: header, CTRL/STATUS from MODE, other words as
+ *        written (counters and policer statistics are set by the harness).
+ * @param off Offset in the 4 KiB window.
+ * @return Register value.
+ */
+static uint32_t host_cls_read(uint32_t off)
+{
+    switch (off) {
+    case RTLNET_CLS_REG_ID:      return RTLNET_CLS_ID_VALUE;
+    case RTLNET_CLS_REG_VERSION: return RTLNET_CLS_VERSION_VALUE;
+    case RTLNET_CLS_REG_CAPS:    return HOST_CLS_CAPS;
+    case RTLNET_CLS_REG_CTRL:    return g_cls_mode;
+    case RTLNET_CLS_REG_STATUS:  return g_cls_mode << RTLNET_CLS_STATUS_MODE_SHIFT;
+    case RTLNET_CLS_REG_LATENCY: return HOST_CLS_LATENCY;
+    default:                     return g_cls_mem[(off / 4u) % HOST_CLS_WORDS];
+    }
+}
+
+/**
+ * @brief Classifier model write: MODE, CLEAR_TABLES (everything back to the
+ *        power-up state) and plain storage for the other words.
+ * @param off   Offset in the 4 KiB window.
+ * @param value Value.
+ * @return None.
+ */
+static void host_cls_write(uint32_t off, uint32_t value)
+{
+    if (off == RTLNET_CLS_REG_CTRL) {
+        if ((value & RTLNET_CLS_CTRL_CLEAR_TABLES) != 0u) {
+            memset(g_cls_mem, 0, sizeof(g_cls_mem));
+            g_cls_mode = 0u;
+        } else {
+            g_cls_mode = value & RTLNET_CLS_CTRL_MODE_MASK;
+        }
+    } else if (off >= RTLNET_CLS_REG_TABLE_MODE(0u)) {
+        g_cls_mem[(off / 4u) % HOST_CLS_WORDS] = value;
+    }
+}
+
+/**
+ * @brief Classifier model word as the harness sees it (also CTRL and STATUS).
+ * @param offset Offset in the 4 KiB window.
+ * @return Register value.
+ */
+uint32_t host_model_cls_peek(uint32_t offset)
+{
+    return host_cls_read(offset);
+}
+
+/**
+ * @brief Set a classifier model word directly (counters, policer statistics).
+ * @param offset Offset in the 4 KiB window.
+ * @param value  Value.
+ * @return None.
+ */
+void host_model_cls_poke(uint32_t offset, uint32_t value)
+{
+    g_cls_mem[(offset / 4u) % HOST_CLS_WORDS] = value;
 }
 
 /**
@@ -172,6 +247,9 @@ static uint32_t host_sysreg_read(uint32_t off)
  */
 uint32_t rtlnet_host_reg_read32(uintptr_t addr)
 {
+    if (g_cls_on && addr >= RTLNET_PLAT_CLS_BASE && addr < RTLNET_PLAT_CLS_BASE + RTLNET_CLS_WINDOW_BYTES) {
+        return host_cls_read((uint32_t)(addr - RTLNET_PLAT_CLS_BASE));
+    }
     if (addr >= RTLNET_PLAT_SYS_BASE && addr < RTLNET_PLAT_SYS_BASE + 0x1000u) {
         return host_sysreg_read((uint32_t)(addr - RTLNET_PLAT_SYS_BASE));
     }
@@ -201,6 +279,10 @@ uint32_t rtlnet_host_reg_read32(uintptr_t addr)
  */
 void rtlnet_host_reg_write32(uintptr_t addr, uint32_t value)
 {
+    if (g_cls_on && addr >= RTLNET_PLAT_CLS_BASE && addr < RTLNET_PLAT_CLS_BASE + RTLNET_CLS_WINDOW_BYTES) {
+        host_cls_write((uint32_t)(addr - RTLNET_PLAT_CLS_BASE), value);
+        return;
+    }
     if (addr >= RTLNET_PLAT_SYS_BASE && addr < RTLNET_PLAT_SYS_BASE + 0x1000u) {
         uint32_t off = (uint32_t)(addr - RTLNET_PLAT_SYS_BASE);
         if (off == NXV_SYS_LEDS) {

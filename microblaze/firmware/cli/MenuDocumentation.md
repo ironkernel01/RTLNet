@@ -270,8 +270,8 @@ token counts; exec commands are also accepted in priv.
 | 47 | cli_tcp_echo_port | config | `TCP ECHO PORT [PORT]` | PORT | — | 4 | 4 | — | TCP echo server port (default 7) |
 | 48 | cli_cls_mode | config | `CLASSIFIER MODE [MODE]` | MODE | — | 3 | 3 | — | Mode: drop-all, pass-all, pass-on-match or drop-on-match |
 | 49 | cli_cls_policer | config | `CLASSIFIER POLICER [INDEX] [PKTS] [MS] {DISABLE}` | INDEX, PKTS, MS | DISABLE | 5 | 6 | — | Policer 0..3: frames per window in ms (or disable) |
-| 50 | cli_cls_mac | config | `CLASSIFIER MAC [ENTRY] [WHICH] [MAC] {W1} {W2} {W3} {W4}` | ENTRY, WHICH, MAC | W1, W2, W3, W4 | 5 | 9 | — | MAC entry: dst\|src <mac> [mask <mac>] gate\|classify\|police <p> |
-| 51 | cli_cls_ethertype | config | `CLASSIFIER ETHERTYPE [ENTRY] [TYPE] {W1} {W2} {W3} {W4}` | ENTRY, TYPE | W1, W2, W3, W4 | 4 | 8 | — | EtherType entry: <type> [to <type>] gate\|classify\|police <p> |
+| 50 | cli_cls_mac | config | `CLASSIFIER MAC [ENTRY] [WHICH] [MAC] {W1} {W2} {W3} {W4}` | ENTRY, WHICH, MAC | W1, W2, W3, W4 | 5 | 9 | — | MAC entry (0..15): dst\|src <mac> gate\|classify\|police <p> |
+| 51 | cli_cls_ethertype | config | `CLASSIFIER ETHERTYPE [ENTRY] [TYPE] {W1} {W2} {W3} {W4}` | ENTRY, TYPE | W1, W2, W3, W4 | 4 | 8 | — | EtherType entry (0..7): <type> [to <type>] gate\|classify\|police <p> |
 | 52 | cli_cls_acl | config | `CLASSIFIER ACL [ENTRY] [PROTO] {W1} {W2} {W3} {W4} {W5} {W6} {W7} {W8} {W9} {W10}` | ENTRY, PROTO | W1, W2, W3, W4, W5, W6, W7, W8, W9, W10 | 4 | 14 | — | ACL entry: tcp\|udp\|any src <ip>/<len> dst <ip>/<len> [sport <lo>[-<hi>]] [dport <lo>[-<hi>]] gate\|classify\|police <p> |
 | 53 | cli_cls_defaults | config | `CLASSIFIER DEFAULTS` | — | — | 2 | 2 | — | Broadcast storm default (pass-all, broadcast 10 per 100 ms) |
 | 54 | cli_no_cls_mac | config | `NO CLASSIFIER MAC [ENTRY]` | ENTRY | — | 4 | 4 | — | Clear a MAC entry |
