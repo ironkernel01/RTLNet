@@ -115,7 +115,7 @@ defines `RTLNET_CPU_BFM`; the board top then instances it as `u_cpu`. Tasks (cal
 |---|---|
 | Block design creation, validation, output products, wrapper (Vivado 2025.2) | no errors, 0 critical warnings |
 | Board bench `tb_rtlnet_nexys_video_top` (BFM AXI4-Lite and UART tasks against the real top) | TEST PASS, 74 checks; `+INJECT_FAILURE` gives TEST FAIL; a perturbed clock expectation gives TEST FAIL |
-| CPU-only board build, post-route | cpu_clk WNS +1.037 ns, WHS +0.048 ns, no failing endpoints (whole design) |
+| CPU-only board build, post-route | WNS +1.698 ns, WHS +0.081 ns, no failing endpoints (commit f34a8bac) |
 | Hardware: firmware merged with updatemem, JTAG programmed, CLI over the USB-UART | `cli_test.ps1` 15/15 (board report: `boards/nexys_video/documentation/rtlnet_nexys_video.md`) |
 
 Utilization (post-route, `u_cpu`, xc7a200t): 2450 LUTs (64 LUTRAM, 92 SRL), 2097 FFs, 32 RAMB36,
