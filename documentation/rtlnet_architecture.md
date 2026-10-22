@@ -475,7 +475,7 @@ repository; the generated BSP lives in the ignored build folder. Layers:
 | BSP (generated) | start-up, vectors, Xilinx drivers, `xil_printf`, lwIP core |
 | platform (`microblaze/firmware/src`) | UART console on XUartLite, millisecond tick on XTmrCtr, interrupt setup on XIntc |
 | RTLNet drivers | `cores/<core>/driver/*.c`, compiled in place, the only code that touches each core's registers |
-| network | `rtlnet_netmgr.c` (PHY/MAC/DHCP management), `rtlnet_lwip_netif.c` (lwIP netif on the AXI DMA and the `cpu_axis_ethernet_stream`), `rtlnet_tcp_echo.c` (lwIP raw-API TCP echo server, port 7), TCP iperf server on port 5001 (lwIP's `lwiperf`, compiled in place from the install; the UDP iperf server on port 5001 is the RTL iperf leaf) |
+| network | `rtlnet_netmgr.c` (PHY/MAC/DHCP management), `src/lwip/rtlnet_lwip_netif.c` (lwIP netif on the AXI DMA and the `cpu_axis_ethernet_stream`), `src/lwip/rtlnet_tcp_echo.c` (lwIP raw-API TCP echo server, port 7), TCP iperf server on port 5001 (lwIP's `lwiperf`, compiled in place from the install; the UDP iperf server on port 5001 is the RTL iperf leaf) |
 | CLI | `menu.c`, `cli_commands.c` (MenuBuilder hierarchical rules) |
 
 CLI: a light network-switch style hierarchy built on the MenuBuilder rules

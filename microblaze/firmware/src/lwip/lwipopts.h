@@ -11,9 +11,9 @@
  * protocol wrapper and its DHCP leaf, and InitLWIP() (rtlnet_lwip.c) copies it
  * into the netif.
  *
- * Applications: the TCP echo server (rtlnet_tcp_echo.c, port 7) and, in the
- * integration phase, the TCP iperf server (lwiperf, port 5001); both run at
- * the same time and the sizes below hold both.
+ * Applications: the TCP echo server (rtlnet_tcp_echo.c, port 7) and the TCP
+ * iperf server (rtlnet_lwiperf.c, port 5001); both run at the same time and
+ * the sizes below hold both.
  *
  * Memory (all in the LMB block RAM, .bss; only the DMA buffers live in the
  * AXI BRAM, rtlnet_lwip_netif.c):
@@ -71,6 +71,9 @@
 #define PBUF_POOL_BUFSIZE               1536
 #define PBUF_LINK_HLEN                  14
 #define ETH_PAD_SIZE                    0
+
+/* Sockets options of the raw API: SOF_REUSEADDR lets the iperf server rebind past TIME_WAIT. */
+#define SO_REUSE                        1
 
 /* Protocols. */
 #define LWIP_IPV4                       1
@@ -139,8 +142,8 @@
 #define IPFRAG_STATS                    0
 #define SYS_STATS                       0
 
-/* lwiperf (TCP iperf 2 server): idle timeout of a test connection. */
-#define LWIPERF_TCP_MAX_IDLE_SEC        10U
+/* rtlnet_lwiperf (TCP iperf 2 server): idle timeout of a test connection. */
+#define RTLNET_LWIPERF_TCP_MAX_IDLE_SEC 10U
 
 /* LWIP_DEBUG stays undefined (lwIP tests it with #ifdef). */
 

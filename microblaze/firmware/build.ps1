@@ -23,24 +23,32 @@ Overview:
      (cores/<core>/driver, in place) with -std=c11 -Wall -Wextra -Werror
      -pedantic; lwIP 2.2.0 core, IPv4 and Ethernet sources from the install
      (Vitis/data/embeddedsw/ThirdParty/sw_services/lwip220_v1_3/src/lwip-2.2.0),
-     and its iperf application src/apps/lwiperf/lwiperf.c, in place with
-     src/lwip/lwipopts.h. Nothing is copied from the install.
+     in place with src/lwip/lwipopts.h. The iperf server is the project copy
+     src/lwip/rtlnet_lwiperf.c (a modified copy of the install's lwiperf.c, the
+     one exception to "nothing is copied from the install"); the install's
+     apps/lwiperf/lwiperf.c is not compiled.
   5. Link with the BSP start-up (crt0/crtinit through Xilinx.spec) and
      libraries; print the section sizes.
   * -HostHarness: also build build/menu.exe (stdin/stdout harness, register
     model, host/host_lwip_stub.c in place of lwIP). -Demo: build the harness
     and run its scripted --demo session; the exit code follows the anchored
-    TEST PASS / TEST FAIL line. -NoFirmware: harness only. -Bsp: regenerate
+    TEST PASS / TEST FAIL line. -LwipTest: build and run the desktop loopback
+    test of the iperf server (test/lwiperf_loopback: lwIP core from the install,
+    src/lwip/rtlnet_lwiperf.c and a scripted iperf 2 client in one host process
+    over lwIP's 127.0.0.1 interface); the exit code follows the anchored
+    LWIPERF_LOOPBACK: PASS / FAIL line. -NoFirmware: harness only. -Bsp: regenerate
     the BSP even when it is up to date. -Xsa: another hardware export.
   * Exit code 0 only when every requested step succeeded; prints
     RTLNET_FW: PASS <elf>.
 Usage:
   powershell -NoProfile -ExecutionPolicy Bypass -File microblaze/firmware/build.ps1 `
-    [-Xsa <xsa>] [-Bsp] [-HostHarness] [-Demo] [-NoFirmware]
+    [-Xsa <xsa>] [-Bsp] [-HostHarness] [-Demo] [-LwipTest] [-NoFirmware]
 Revision: 10-22-2026
   * 10-22-2026: initial version.
   * 10-22-2026: generated standalone BSP, lwIP, BSP linker conventions;
     hand-written start-up, UART, timer and string files removed.
+  * 10-22-2026: lwIP glue and applications in src/lwip; iperf server from the
+    project copy src/lwip/rtlnet_lwiperf.c instead of the install's lwiperf.c.
 -------------------------------------------------------------------------------
 #>
 param(
@@ -48,6 +56,7 @@ param(
     [switch]$Bsp,
     [switch]$HostHarness,
     [switch]$Demo,
+    [switch]$LwipTest,
     [switch]$NoFirmware
 )
 $ErrorActionPreference = 'Stop'
@@ -85,12 +94,19 @@ $drvSrcs = @(
     'cores/rtlnet_classifier/driver/rtlnet_classifier.c'
 ) | Where-Object { Test-Path -LiteralPath (Join-Path $Repo $_) }
 $inc = @(
-    "-I$Fw/src", "-I$Fw/cli",
+    "-I$Fw/src", "-I$Fw/src/lwip", "-I$Fw/cli",
     "-I$Repo/cores/rtlnet_common/driver",
     "-I$Repo/microblaze/driver"
 ) + ($drvCores | Where-Object { Test-Path -LiteralPath (Join-Path $Repo "cores/$_/driver") } |
      ForEach-Object { "-I$Repo/cores/$_/driver" })
 $common = @('-std=c11', '-Wall', '-Wextra', '-Werror', '-pedantic')
+
+# lwIP core, IPv4 and Ethernet sources compiled from the install (firmware and loopback test).
+$lwipSrcs = @('core/init.c', 'core/def.c', 'core/inet_chksum.c', 'core/ip.c', 'core/mem.c', 'core/memp.c',
+              'core/netif.c', 'core/pbuf.c', 'core/stats.c', 'core/sys.c', 'core/tcp.c', 'core/tcp_in.c',
+              'core/tcp_out.c', 'core/timeouts.c', 'core/udp.c', 'core/raw.c',
+              'core/ipv4/etharp.c', 'core/ipv4/icmp.c', 'core/ipv4/ip4.c', 'core/ipv4/ip4_addr.c',
+              'core/ipv4/ip4_frag.c', 'netif/ethernet.c')
 
 # 1. The generated CLI tables must match the command file.
 Invoke-Step 'python' @("$Fw/cli/check_menu.py")
@@ -171,12 +187,12 @@ _end = .;
     $sysInc  = @('-isystem', $bspInc, "-specs=$bspSpec")
     # -O2 on the frame path (netif, lwIP glue, TCP echo, lwIP), -Os elsewhere (CLI, drivers).
     $cflags  = $common + @('-g', '-ffunction-sections', '-fdata-sections')
-    $fastSrc = @('rtlnet_lwip_netif', 'rtlnet_lwip', 'rtlnet_tcp_echo', 'rtlnet_tcp_iperf')
+    $fastSrc = @('rtlnet_lwip_netif', 'rtlnet_lwip', 'rtlnet_tcp_echo', 'rtlnet_tcp_iperf', 'rtlnet_lwiperf')
     $objs = @()
     $fwSrcs = @(
         'src/main.c', 'src/rtlnet_platform.c', 'src/rtlnet_board.c', 'src/rtlnet_fmt.c', 'src/rtlnet_netmgr.c',
-        'src/rtlnet_cpupath.c', 'src/rtlnet_lwip.c', 'src/rtlnet_lwip_netif.c', 'src/rtlnet_tcp_echo.c',
-        'src/rtlnet_tcp_iperf.c',
+        'src/rtlnet_cpupath.c', 'src/lwip/rtlnet_lwip.c', 'src/lwip/rtlnet_lwip_netif.c', 'src/lwip/rtlnet_tcp_echo.c',
+        'src/lwip/rtlnet_tcp_iperf.c', 'src/lwip/rtlnet_lwiperf.c',
         'cli/menu.c', 'cli/menu_table.c', 'cli/cli_commands.c'
     ) | ForEach-Object { "$Fw/$_" }
     foreach ($s in ($fwSrcs + ($drvSrcs | ForEach-Object { "$Repo/$_" }))) {
@@ -186,11 +202,6 @@ _end = .;
         $objs += $o
     }
     # lwIP core: third-party sources, compiled in place with their own warning level.
-    $lwipSrcs = @('core/init.c', 'core/def.c', 'core/inet_chksum.c', 'core/ip.c', 'core/mem.c', 'core/memp.c',
-                  'core/netif.c', 'core/pbuf.c', 'core/stats.c', 'core/sys.c', 'core/tcp.c', 'core/tcp_in.c',
-                  'core/tcp_out.c', 'core/timeouts.c', 'core/udp.c', 'core/raw.c',
-                  'core/ipv4/etharp.c', 'core/ipv4/icmp.c', 'core/ipv4/ip4.c', 'core/ipv4/ip4_addr.c',
-                  'core/ipv4/ip4_frag.c', 'netif/ethernet.c', 'apps/lwiperf/lwiperf.c')
     $lwipFlags = @('-std=gnu11', '-O2', '-g', '-ffunction-sections', '-fdata-sections', '-w')
     foreach ($s in $lwipSrcs) {
         $o = Join-Path $objDir ('lwip_' + ($s -replace '[/\\]', '_') -replace '\.c$', '.o')
@@ -232,6 +243,35 @@ if ($HostHarness -or $Demo) {
         if ($rc -ne 0 -or -not $verdict -or $verdict -notmatch '^TEST PASS: ') {
             throw "host demo did not pass"
         }
+    }
+}
+
+# Desktop loopback test of rtlnet_lwiperf (host gcc): one lwIP instance holds the
+# iperf server and a scripted client that sends the captured iperf 2.2.2 headers.
+if ($LwipTest) {
+    $lt   = Join-Path $Out 'lwtest'
+    if (Test-Path -LiteralPath $lt) { Remove-Item -Recurse -Force -LiteralPath $lt }
+    New-Item -ItemType Directory -Force -Path $lt | Out-Null
+    $ltInc = @("-I$Fw/test/lwiperf_loopback", "-I$Fw/src/lwip", '-isystem', "$LwipDir/src/include", '-isystem', "$LwipDir/contrib/ports/xilinx/include")
+    $ltObjs = @()
+    foreach ($s in $lwipSrcs) {
+        $o = Join-Path $lt (($s -replace '[/\\]', '_') -replace '\.c$', '.o')
+        Invoke-Step 'gcc' (@('-std=gnu11', '-O1', '-g', '-w') + $ltInc + @('-c', "$LwipDir/src/$s", '-o', $o))
+        $ltObjs += $o
+    }
+    foreach ($s in @("$Fw/src/lwip/rtlnet_lwiperf.c", "$Fw/test/lwiperf_loopback/lwiperf_loopback_test.c")) {
+        $o = Join-Path $lt (([System.IO.Path]::GetFileNameWithoutExtension($s)) + '.o')
+        Invoke-Step 'gcc' (@('-std=gnu11', '-O1', '-g', '-Wall', '-Wextra', '-Werror') + $ltInc + @('-c', $s, '-o', $o))
+        $ltObjs += $o
+    }
+    $ltExe = Join-Path $Out 'lwiperf_loopback.exe'
+    Invoke-Step 'gcc' (@('-o', $ltExe) + $ltObjs)
+    $ltLog = & $ltExe
+    $ltRc = $LASTEXITCODE
+    $ltLog | ForEach-Object { Write-Output $_ }
+    $ltVerdict = $ltLog | Where-Object { $_ -match '^LWIPERF_LOOPBACK: (PASS|FAIL)' } | Select-Object -Last 1
+    if ($ltRc -ne 0 -or -not $ltVerdict -or $ltVerdict -notmatch '^LWIPERF_LOOPBACK: PASS') {
+        throw "lwiperf loopback test did not pass"
     }
 }
 exit 0
