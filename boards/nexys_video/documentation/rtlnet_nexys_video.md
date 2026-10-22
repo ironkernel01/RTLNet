@@ -211,8 +211,18 @@ PC on the bench network over Wi-Fi (`IronKernel`, PC 192.169.1.130, router 192.1
 | `ping -l 0 / 64 / 1472 -n 20` | 0 lost each | 0 lost each |
 | board ARP entry on the PC | pass | pass |
 | `udp_echo_client.py`, 200 datagrams to port 7, byte-exact | PASS | PASS |
-| iperf 2 UDP | BLOCKED: no iperf 2 binary on the PC | BLOCKED |
-| summary | `NET_TEST: PASS 23/23` (incl. the board-side 10 Mb/s round) | `NET_TEST: PASS 14/14` |
+| iperf 2.2.2 UDP, PC to board (`-u -b 90M` / `9M`, 1470 B, 5 s) | 93.7 Mbit/s, 57/40050 lost (0.14 %) | 9.4 Mbit/s, 0/3999 lost |
+| iperf 2.2.2 UDP, board to PC (`-u -R`) | 92.0 Mbit/s, 269/40126 lost (0.67 %) | 9.4 Mbit/s, 0/4014 lost |
+| summary | `NET_TEST: PASS 25/25` | `NET_TEST: PASS 16/16` |
+
+The 100 Mb/s iperf losses are outside the board: after a run the board reads MAC `rx bad 0`, `rx overflow 0`,
+protocol ingress `dropped 0`, and the iperf leaf's own loss count equals the client's (64 of 40111 in the
+characterization run), i.e. datagrams lost on the PC's Wi-Fi leg or in the router before they reached the board.
+At 10 Mb/s, where the Wi-Fi leg has ample headroom, nothing is lost in either direction. The client offers about
+94 Mbit/s whatever `-b` asks (the 1470-byte ceiling on 100 Mb/s Ethernet is 95.6 Mbit/s).
+
+iperf binary: iperf 2.2.2 (pthreads, community build) at `C:\IronKernel	ools\iperf\iperf.exe`, outside the
+repository; `net_test.ps1` finds it there (or via `-Iperf <path>` or PATH).
 
 1000 Mb/s on hardware still needs a gigabit link partner (the router is 10/100).
 | Cold start | after JTAG configuration: link up 100 Mb/s and a DHCP lease acquired from scratch (discover/offer/request/ack 1 each), MAC rx 2 / tx 2 |

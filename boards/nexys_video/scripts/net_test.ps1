@@ -14,7 +14,8 @@ Overview:
   * Host side (only when the NIC -Nic is Up): ARP entry of the board after a
     ping (arp -a), ping sweep 0 / 64 / 1472 bytes with -n 20 each, the UDP
     echo client (cores/rtlnet_udp_echo/testbench/udp_echo_client.py) to port
-    7, and iperf 2 (-u) when an iperf binary is on PATH. A host check that
+    7, and iperf 2 at 90 % of the link rate in both directions (-u, -u -R; at most 1 %
+    loss) with the binary from -Iperf, PATH, or C:\IronKernel\tools\iperf. A host check that
     cannot run is reported BLOCKED with the reason, never as passed.
   * Prints the transcript to boards/nexys_video/build/net_test_transcript.txt
     and one line per check; the last line is "NET_TEST: PASS n/n" (blocked
@@ -23,13 +24,14 @@ Usage:
   powershell -NoProfile -ExecutionPolicy Bypass -File boards/nexys_video/scripts/net_test.ps1 `
     [-Port COM4] [-Nic Ethernet] [-Speed 100]
 Revision: 10-22-2026
-  * 10-22-2026: initial version.
+  * 10-22-2026: initial version; iperf at 90 % line rate both ways, -Iperf.
 -------------------------------------------------------------------------------
 #>
 param(
     [string]$Port = 'COM4',
     [string]$Nic = 'Ethernet',
-    [int]$Speed = 100
+    [int]$Speed = 100,
+    [string]$Iperf = ''
 )
 $ErrorActionPreference = 'Stop'
 $Board = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
@@ -139,14 +141,31 @@ try {
         $e = & python -I $py $boardIp -p 7 -n 200 --timeout 1.0 2>&1
         [void]$script:log.Append(($e -join "`n") + "`n")
         Note 'UDP echo client 200 datagrams' ($LASTEXITCODE -eq 0) ($e | Select-Object -Last 1)
-        $ip2 = Get-Command iperf -ErrorAction SilentlyContinue
-        if (-not $ip2) { $ip2 = Get-Command iperf2 -ErrorAction SilentlyContinue }
-        if ($ip2) {
-            $r = & $ip2.Source -c $boardIp -u -b 20M -t 5 2>&1
-            [void]$script:log.Append(($r -join "`n") + "`n")
-            Note 'iperf -u 20 Mb/s 5 s' ([bool]($r | Select-String -Pattern 'Server Report')) ''
+        # iperf 2: -Iperf, else iperf/iperf2 on PATH, else the IronKernel tools folder.
+        $ipexe = $null
+        if ($Iperf -and (Test-Path -LiteralPath $Iperf)) { $ipexe = $Iperf }
+        if (-not $ipexe) { $c = Get-Command iperf -ErrorAction SilentlyContinue; if ($c) { $ipexe = $c.Source } }
+        if (-not $ipexe) { $c = Get-Command iperf2 -ErrorAction SilentlyContinue; if ($c) { $ipexe = $c.Source } }
+        if (-not $ipexe -and (Test-Path -LiteralPath 'C:\IronKernel\tools\iperf\iperf.exe')) { $ipexe = 'C:\IronKernel\tools\iperf\iperf.exe' }
+        if ($ipexe) {
+            # Offered load 90 % of the link rate, 1470-byte datagrams, 5 s, both directions;
+            # pass = a loss figure was reported and it is at most 1 %.
+            $rate = "$([int]($Speed * 0.9))M"
+            foreach ($dir in @(@{ name = 'iperf -u (PC to board)'; args = @() }, @{ name = 'iperf -u -R (board to PC)'; args = @('-R') })) {
+                $r = & $ipexe -c $boardIp -u -b $rate -t 5 -l 1470 @($dir.args) 2>&1
+                [void]$script:log.Append(($r -join "`n") + "`n")
+                $line = $r | Select-String -Pattern '(\d+(\.\d+)?) Mbits/sec.*?(\d+)/\s*(\d+)\s*\(([\d.e+-]+)%\)' | Select-Object -Last 1
+                if ($line) {
+                    $m = $line.Matches[0]
+                    $mbps = [double]$m.Groups[1].Value; $lost = [double]$m.Groups[3].Value; $tot = [double]$m.Groups[4].Value
+                    $lossPct = if ($tot -gt 0) { [math]::Round(100.0 * $lost / $tot, 3) } else { 100.0 }   # iperf rounds its own figure
+                    Note ("{0} at {1}b/s" -f $dir.name, $rate) ($lossPct -le 1.0) ("{0:N1} Mbit/s, {1}/{2} lost ({3}%)" -f $mbps, $m.Groups[3].Value, $m.Groups[4].Value, $lossPct)
+                } else {
+                    Note ("{0} at {1}b/s" -f $dir.name, $rate) $false 'no loss report from iperf'
+                }
+            }
         } else {
-            $script:blocked += 'iperf -u (no iperf 2 binary on PATH)'
+            $script:blocked += 'iperf -u (no iperf 2 binary: use -Iperf, PATH, or C:\IronKernel\tools\iperf)'
         }
     }
 
