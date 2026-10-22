@@ -175,6 +175,47 @@ int main(void)
           "clear_counters pulses CNT_CLEAR and keeps CTRL");
     check(rtlnet_eth_protocol_get_status(TEST_BASE) == RTLNET_PROTO_STATUS_IP_VALID, "get_status");
 
+    /* CPU network path: absent, then present. */
+    {
+        rtlnet_eth_protocol_cpu_counters_t cc;
+
+        g_regs[RTLNET_PROTO_REG_CAPS / 4u] = 0x00081006u;
+        g_regs[RTLNET_PROTO_REG_CTRL / 4u] = 0x00000601u;
+        check(rtlnet_eth_protocol_cpu_path_present(TEST_BASE) == 0, "cpu_path_present 0 without CAPS bit 5");
+        g_log_n = 0u;
+        check(rtlnet_eth_protocol_set_cpu_path_enable(TEST_BASE, 1) == RTLNET_PROTO_ERROR,
+              "enabling an absent CPU path rejected");
+        check(g_log_n == 0u, "a rejected CPU path enable writes nothing");
+        g_regs[RTLNET_PROTO_REG_CAPS / 4u] = 0x0408103Fu;
+        g_regs[RTLNET_PROTO_REG_CPU_CAPS / 4u] = 0x00000810u;
+        g_regs[RTLNET_PROTO_REG_CTRL / 4u] = 0x00001F03u;
+        check(rtlnet_eth_protocol_cpu_path_present(TEST_BASE) == 1, "cpu_path_present 1 with CAPS bit 5");
+        check(rtlnet_eth_protocol_get_cpu_path_enable(TEST_BASE) == 1, "get_cpu_path_enable 1");
+        check(rtlnet_eth_protocol_get_cpu_rx_fifo_kb(TEST_BASE) == 16u, "CPU RX queue 16 KB");
+        check(rtlnet_eth_protocol_get_cpu_tx_fifo_kb(TEST_BASE) == 8u, "CPU TX queue 8 KB");
+        check(rtlnet_eth_protocol_set_cpu_path_enable(TEST_BASE, 0) == RTLNET_PROTO_OK, "disable CPU path");
+        check(g_regs[RTLNET_PROTO_REG_CTRL / 4u] == 0x00001F01u, "CPU path off keeps filter and leaves");
+        check(rtlnet_eth_protocol_get_cpu_path_enable(TEST_BASE) == 0, "get_cpu_path_enable 0");
+        rtlnet_eth_protocol_set_filter_enable(TEST_BASE, 0);
+        check(g_regs[RTLNET_PROTO_REG_CTRL / 4u] == 0x00001F00u, "filter change keeps the CPU path bit (off)");
+        check(rtlnet_eth_protocol_set_cpu_path_enable(TEST_BASE, 1) == RTLNET_PROTO_OK, "enable CPU path");
+        check(g_regs[RTLNET_PROTO_REG_CTRL / 4u] == 0x00001F02u, "CPU path on keeps the filter bit");
+        check(rtlnet_eth_protocol_set_leaf_enables(TEST_BASE, 0x1Fu) == RTLNET_PROTO_OK &&
+              g_regs[RTLNET_PROTO_REG_CTRL / 4u] == 0x00001F02u, "leaf enables keep the CPU path bit");
+        g_regs[RTLNET_PROTO_REG_DELIVERED_FRAMES / 4u]  = 101u;
+        g_regs[RTLNET_PROTO_REG_CPU_RX_FRAMES / 4u]     = 102u;
+        g_regs[RTLNET_PROTO_REG_CPU_RX_CLAIMED / 4u]    = 103u;
+        g_regs[RTLNET_PROTO_REG_CPU_RX_DROPPED / 4u]    = 104u;
+        g_regs[RTLNET_PROTO_REG_CPU_TX_FRAMES / 4u]     = 105u;
+        g_regs[RTLNET_PROTO_REG_CPU_TX_DISCARDED / 4u]  = 106u;
+        g_regs[RTLNET_PROTO_REG_CPU_TX_REJECTED / 4u]   = 107u;
+        rtlnet_eth_protocol_read_cpu_counters(TEST_BASE, &cc);
+        check(cc.delivered_frames == 101u && cc.cpu_rx_frames == 102u && cc.cpu_rx_claimed == 103u &&
+              cc.cpu_rx_dropped == 104u && cc.cpu_tx_frames == 105u && cc.cpu_tx_discarded == 106u &&
+              cc.cpu_tx_rejected == 107u, "read_cpu_counters reads the seven offsets");
+        check(RTLNET_PROTO_WIN_CLASSIFIER == 0x8000u, "classifier window at 0x8000");
+    }
+
     check(!g_bad_access, "every access inside the window, 32-bit aligned");
 
     if (g_fails == 0u) {

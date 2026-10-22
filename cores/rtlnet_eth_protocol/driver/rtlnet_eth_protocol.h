@@ -35,6 +35,7 @@
 #define RTLNET_PROTO_WIN_DHCP          0x3000u
 #define RTLNET_PROTO_WIN_IPERF         0x4000u
 #define RTLNET_PROTO_WIN_UDP           0x5000u
+#define RTLNET_PROTO_WIN_CLASSIFIER    0x8000u  /* u_cpu_classifier (driver cores/rtlnet_classifier); reads 0 when not built */
 
 /* Leaf indices: bit positions in CAPS.LEAF_PRESENT, CTRL.LEAF_ENABLE and
  * STATUS.LEAF_BUSY, and the arbiter priority (0 highest). Fixed whatever is
@@ -61,10 +62,18 @@
 #define RTLNET_PROTO_REG_EFFECTIVE_IP  0x028u   /* RO lease IP while DHCP is in use, else STATIC_IP */
 #define RTLNET_PROTO_REG_EFFECTIVE_MASK 0x02Cu  /* RO lease mask or NETMASK */
 #define RTLNET_PROTO_REG_EFFECTIVE_GW  0x030u   /* RO lease router or GATEWAY */
+#define RTLNET_PROTO_REG_CPU_CAPS      0x034u   /* RO CPU queue sizes; 0 without the CPU path */
 #define RTLNET_PROTO_REG_INGRESS_FRAMES   0x040u   /* RO frames stored in the ingress queue */
 #define RTLNET_PROTO_REG_INGRESS_FILTERED 0x044u   /* RO frames discarded by the destination filter */
 #define RTLNET_PROTO_REG_INGRESS_DROPPED  0x048u   /* RO frames dropped: queue full or over one slot */
 #define RTLNET_PROTO_REG_EGRESS_FRAMES    0x04Cu   /* RO frames handed to the MAC */
+#define RTLNET_PROTO_REG_DELIVERED_FRAMES 0x050u   /* RO frames dequeued to the leaves */
+#define RTLNET_PROTO_REG_CPU_RX_FRAMES    0x054u   /* RO unclaimed frames committed to the CPU */
+#define RTLNET_PROTO_REG_CPU_RX_CLAIMED   0x058u   /* RO copies dropped because a leaf claimed the frame */
+#define RTLNET_PROTO_REG_CPU_RX_DROPPED   0x05Cu   /* RO unclaimed frames lost: CPU RX queue full */
+#define RTLNET_PROTO_REG_CPU_TX_FRAMES    0x060u   /* RO CPU frames sent to the MAC */
+#define RTLNET_PROTO_REG_CPU_TX_DISCARDED 0x064u   /* RO CPU frames discarded while CPU_PATH_ENABLE is 0 */
+#define RTLNET_PROTO_REG_CPU_TX_REJECTED  0x068u   /* RO CPU frames rejected: length not 14..1518 or bad tkeep */
 
 /* Register values. */
 #define RTLNET_PROTO_ID_VALUE          0x50524F54u   /* "PROT" */
@@ -72,13 +81,20 @@
 
 /* CAPS fields. */
 #define RTLNET_PROTO_CAPS_LEAF_PRESENT_MASK  0x0000001Fu   /* bit i: leaf index i is built */
+#define RTLNET_PROTO_CAPS_CPU_PATH_PRESENT   0x00000020u   /* the CPU network path is built */
 #define RTLNET_PROTO_CAPS_INGRESS_KB_SHIFT   8u
 #define RTLNET_PROTO_CAPS_EGRESS_KB_SHIFT    16u
 #define RTLNET_PROTO_CAPS_SOCKETS_SHIFT      24u
 #define RTLNET_PROTO_CAPS_BYTE_MASK          0xFFu
 
-/* CTRL fields. Reset: FILTER_ENABLE 1, LEAF_ENABLE = the present leaves. */
+/* CPU_CAPS fields (kilobytes). */
+#define RTLNET_PROTO_CPU_CAPS_RX_KB_SHIFT    0u
+#define RTLNET_PROTO_CPU_CAPS_TX_KB_SHIFT    8u
+
+/* CTRL fields. Reset: FILTER_ENABLE 1, CPU_PATH_ENABLE 1 (when built), LEAF_ENABLE = the present leaves.
+ * Write CTRL by read-modify-write: a write without CPU_PATH_ENABLE turns the CPU path off. */
 #define RTLNET_PROTO_CTRL_FILTER_ENABLE      0x00000001u   /* 0 = promiscuous */
+#define RTLNET_PROTO_CTRL_CPU_PATH_ENABLE    0x00000002u   /* 1 = copy unclaimed frames to the CPU, send CPU frames */
 #define RTLNET_PROTO_CTRL_LEAF_ENABLE_SHIFT  8u            /* bits 12..8, bit 8 + i = leaf index i */
 #define RTLNET_PROTO_CTRL_LEAF_ENABLE_MASK   0x00001F00u
 #define RTLNET_PROTO_CTRL_CNT_CLEAR          0x00010000u   /* self-clearing pulse, reads 0 */
@@ -92,7 +108,10 @@
 #define RTLNET_PROTO_STATUS_INGRESS_PENDING  0x00010000u   /* a frame waits in the ingress queue */
 #define RTLNET_PROTO_STATUS_EGRESS_FULL      0x00020000u   /* the egress queue has no free slot */
 #define RTLNET_PROTO_STATUS_DELIVERING       0x00040000u   /* a frame is being delivered to the leaves */
-#define RTLNET_PROTO_STATUS_ARBITER_ACTIVE   0x00080000u   /* a leaf holds the transmit grant */
+#define RTLNET_PROTO_STATUS_ARBITER_ACTIVE   0x00080000u   /* a leaf or the CPU holds the transmit grant */
+#define RTLNET_PROTO_STATUS_CPU_RX_FULL      0x00100000u   /* the CPU RX queue has no free slot */
+#define RTLNET_PROTO_STATUS_CPU_RX_PENDING   0x00200000u   /* a CPU copy waits for its claim verdict */
+#define RTLNET_PROTO_STATUS_CPU_TX_PENDING   0x00400000u   /* a CPU frame waits at the CPU TX queue output */
 
 /* MAC register packing. */
 #define RTLNET_PROTO_MAC_BYTES               6u
@@ -111,6 +130,19 @@ typedef struct {
     uint32_t ingress_dropped;
     uint32_t egress_frames;
 } rtlnet_eth_protocol_counters_t;
+
+/* The CPU network path counters, read in one call. Identity, once traffic
+ * has stopped, for frames dequeued while CPU_PATH_ENABLE was set:
+ * delivered_frames = cpu_rx_claimed + cpu_rx_frames + cpu_rx_dropped. */
+typedef struct {
+    uint32_t delivered_frames;
+    uint32_t cpu_rx_frames;
+    uint32_t cpu_rx_claimed;
+    uint32_t cpu_rx_dropped;
+    uint32_t cpu_tx_frames;
+    uint32_t cpu_tx_discarded;
+    uint32_t cpu_tx_rejected;
+} rtlnet_eth_protocol_cpu_counters_t;
 
 int rtlnet_eth_protocol_probe(uintptr_t base);
 uint32_t rtlnet_eth_protocol_get_caps(uintptr_t base);
@@ -137,5 +169,12 @@ uint32_t rtlnet_eth_protocol_get_leaf_enables(uintptr_t base);
 
 void rtlnet_eth_protocol_read_counters(uintptr_t base, rtlnet_eth_protocol_counters_t *counters);
 void rtlnet_eth_protocol_clear_counters(uintptr_t base);
+
+int rtlnet_eth_protocol_cpu_path_present(uintptr_t base);
+int rtlnet_eth_protocol_set_cpu_path_enable(uintptr_t base, int enable);
+int rtlnet_eth_protocol_get_cpu_path_enable(uintptr_t base);
+uint32_t rtlnet_eth_protocol_get_cpu_rx_fifo_kb(uintptr_t base);
+uint32_t rtlnet_eth_protocol_get_cpu_tx_fifo_kb(uintptr_t base);
+void rtlnet_eth_protocol_read_cpu_counters(uintptr_t base, rtlnet_eth_protocol_cpu_counters_t *counters);
 
 #endif /* RTLNET_ETH_PROTOCOL_H */

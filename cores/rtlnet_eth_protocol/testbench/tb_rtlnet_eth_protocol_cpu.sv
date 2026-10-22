@@ -702,8 +702,12 @@ module tb_rtlnet_eth_protocol_cpu;
              $sformatf("interleaved: %0d/%0d CPU frames, %0d/%0d ping replies", n_cpu, $size(cpu_q), n_ping, $size(ping_q)));
     u_sink.ready_pct = 100;
     expect_mac_none("after the interleaved traffic", 2000);
-    // Priority: egress held; six CPU frames queue, then a ping; the reply leaves
-    // before the last CPU frame (the CPU is the lowest-priority source).
+    // Priority: egress held; six CPU frames queue (four in the egress queue,
+    // the fifth granted), then a ping and an application datagram from socket
+    // 0. After the release the arbiter decides twice with the sixth CPU frame
+    // waiting: first between the socket (0) and ICMP (1), then between ICMP
+    // and the CPU (5). Both hardware frames leave before the sixth CPU frame
+    // (the CPU is the lowest-priority source).
     u_sink.ready_pct = 0;
     cpu_q.delete();
     for (int n = 0; n < 6; n++) begin
@@ -714,27 +718,48 @@ module tb_rtlnet_eth_protocol_cpu;
     f = pad60(echo_request(DEF_MAC, PEER_MAC, PEER_IP, DEF_IP, 16'h7A04, 16'd1, rand_bytes(seed, 40)));
     offer(f);
     exp_claims[1]++;
+    g = rand_bytes(seed, 24);
+    begin
+      bytes_t a;
+      push32(a, PEER_IP); push16(a, 16'd41000); push16(a, 16'd24);          // meta 0
+      a.push_back(8'd0); a.push_back(8'd0); push48(a, PEER_MAC);             // meta 1
+      for (int i = 0; i < $size(g); i++) a.push_back(g[i]);
+      // meta words are little-endian lanes of the 64-bit beat: reverse each 8-byte word.
+      for (int w = 0; w < 2; w++)
+        for (int i = 0; i < 4; i++) begin
+          byte unsigned t;
+          t = a[8 * w + i]; a[8 * w + i] = a[8 * w + 7 - i]; a[8 * w + 7 - i] = t;
+        end
+      u_app_src.send(a);
+    end
     wait_proto(500);
-    tb_check(dut.leaf_tvalid[1] === 1'b1 && dut.cpu_src_tvalid === 1'b1,
-             "priority: the ping reply and a CPU frame both wait at the arbiter");
+    tb_check(dut.leaf_tvalid[1] === 1'b1 && dut.leaf_tvalid[0] === 1'b1 && dut.cpu_src_tvalid === 1'b1,
+             "priority: the ping reply, the socket datagram and a CPU frame all wait at the arbiter");
     u_sink.ready_pct = 100;
     ping_pos = -1;
     last_pos = -1;
-    for (int n = 0; n < 7; n++) begin
+    n_ping   = -1;                                                              // socket datagram position
+    for (int n = 0; n < 8; n++) begin
       u_sink.get(got, 40000, ok);
       tb_check(ok, $sformatf("priority: frame %0d after the release", n));
       if (ok) begin
         received++;
         if (get16(got, 12) == CPU_ETYPE) begin
           if (bytes_equal(got, cpu_q[5], why)) last_pos = n;
+        end else if (got.size() > 23 && got[23] == 8'd17) begin
+          n_ping = n;
+          tb_check(get16(got, 36) == 16'd41000 && got.size() == 42 + 24, "priority: socket datagram to the peer");
         end else begin
           ping_pos = n;
           tb_check(bytes_equal(got, echo_reply(f, DEF_MAC, DEF_IP), why), $sformatf("priority: ping reply (%s)", why));
         end
       end
     end
-    tb_check(ping_pos >= 0 && last_pos >= 0 && ping_pos < last_pos,
-             $sformatf("priority: ping reply at %0d before the last queued CPU frame at %0d", ping_pos, last_pos));
+    $display("tb_rtlnet_eth_protocol_cpu: priority order: socket %0d, ping reply %0d, last CPU frame %0d", n_ping,
+             ping_pos, last_pos);
+    tb_check(ping_pos >= 0 && n_ping >= 0 && last_pos >= 0 && ping_pos < last_pos && n_ping < last_pos,
+             $sformatf("priority: socket datagram at %0d and ping reply at %0d before the last CPU frame at %0d", n_ping,
+                       ping_pos, last_pos));
     // Guard: 10-byte and 1600-byte CPU frames are rejected and counted.
     axi_rd(R_CPU_TXREJ, v0);
     u_cpu_src.send(cpu_frame(10, cpu_seq++));
