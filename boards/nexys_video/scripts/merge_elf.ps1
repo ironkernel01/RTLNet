@@ -6,10 +6,11 @@ Purpose: put the MicroBlaze firmware ELF into the LMB block RAM of the
 Overview:
   * Inputs (defaults): build/rtlnet_nexys_video_hw.bit and
     build/rtlnet_nexys_video.mmi from build_bitstream.tcl, and
-    firmware/nexys_video/build/firmware.elf.
+    microblaze/firmware/build/firmware.elf.
   * Verifies the MMI before use: one processor, InstPath
-    u_cpu/u_bd/rtlnet_cpu_i/microblaze_0, little endian, an address space of
-    0..131071 (128 KiB) and 32 RAMB36 bit lanes; and that the ELF exists and
+    u_cpu/u_bd/rtlnet_cpu_i/microblaze_0, little endian, an LMB address space
+    of 0..524287 (512 KiB) with 128 RAMB36 bit lanes (other address spaces,
+    the AXI BRAM, may follow); and that the ELF exists and
     is newer than nothing stale (prints size, time and SHA-256 of each file).
   * Runs updatemem -force -meminfo <mmi> -data <elf> -bit <bit>
     -proc <InstPath> -out build/rtlnet_nexys_video.bit; exit code 0 only when
@@ -19,6 +20,7 @@ Usage:
     [-Elf <elf>] [-Mmi <mmi>] [-Bit <bit>] [-Out <bit>]
 Revision: 10-22-2026
   * 10-22-2026: initial version.
+  * 10-22-2026: 512 KiB LMB (128 RAMB36); further address spaces allowed.
 -------------------------------------------------------------------------------
 #>
 param(
@@ -31,7 +33,7 @@ $ErrorActionPreference = 'Stop'
 $Board = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $Repo  = (Resolve-Path (Join-Path $Board '..\..')).Path
 $Build = Join-Path $Board 'build'
-if (-not $Elf) { $Elf = Join-Path $Repo 'firmware\nexys_video\build\firmware.elf' }
+if (-not $Elf) { $Elf = Join-Path $Repo 'microblaze\firmware\build\firmware.elf' }
 if (-not $Mmi) { $Mmi = Join-Path $Build 'rtlnet_nexys_video.mmi' }
 if (-not $Bit) { $Bit = Join-Path $Build 'rtlnet_nexys_video_hw.bit' }
 if (-not $Out) { $Out = Join-Path $Build 'rtlnet_nexys_video.bit' }
@@ -55,12 +57,14 @@ if ($procs.Count -ne 1) { Fail "MMI lists $($procs.Count) processors, expected 1
 $proc = $procs[0].InstPath
 if ($proc -ne $ExpectProc) { Fail "MMI processor '$proc', expected '$ExpectProc'" }
 if ($procs[0].Endianness -ne 'Little') { Fail "MMI endianness '$($procs[0].Endianness)', expected Little" }
-$space = @($procs[0].AddressSpace)[0]
-if ([int]$space.Begin -ne 0 -or [int]$space.End -ne 131071) { Fail "MMI address space $($space.Begin)..$($space.End), expected 0..131071" }
+$spaces = @($procs[0].AddressSpace)
+$space = @($spaces | Where-Object { [int64]$_.Begin -eq 0 })[0]
+if (-not $space -or [int64]$space.End -ne 524287) { Fail "MMI has no LMB address space 0..524287" }
+foreach ($s in $spaces) { Write-Output ("RTLNET_MERGE: MMI address space {0} {1}..{2}" -f $s.Name, $s.Begin, $s.End) }
 $lanes = @($space.SelectNodes('.//BitLane'))
 $ramb  = @($lanes | Where-Object { $_.MemType -eq 'RAMB36' })
-if ($lanes.Count -ne 32 -or $ramb.Count -ne 32) { Fail "MMI has $($lanes.Count) bit lanes ($($ramb.Count) RAMB36), expected 32 RAMB36" }
-Write-Output "RTLNET_MERGE: MMI processor $proc, address space 0..131071, $($ramb.Count) RAMB36 lanes"
+if ($lanes.Count -ne 128 -or $ramb.Count -ne 128) { Fail "MMI LMB space has $($lanes.Count) bit lanes ($($ramb.Count) RAMB36), expected 128 RAMB36" }
+Write-Output "RTLNET_MERGE: MMI processor $proc, LMB 0..524287, $($ramb.Count) RAMB36 lanes"
 Describe 'elf' $Elf
 Describe 'mmi' $Mmi
 Describe 'bit (hw)' $Bit

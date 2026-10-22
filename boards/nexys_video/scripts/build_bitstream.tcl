@@ -8,13 +8,15 @@
 #   * Paths derive from this script's location (boards/nexys_video/scripts), so
 #     the build survives tree moves and does not depend on the working
 #     directory. Outputs go to boards/nexys_video/build/.
-#   * Steps: create the block design rtlnet_cpu (cores/rtlnet_cpu_microblaze/
+#   * Steps: create the block design rtlnet_cpu (microblaze/
 #     hdl/rtlnet_cpu_bd.tcl) under build/bd, generate output products with
 #     global synthesis, read the RTL through filelists, read the XDC,
 #     synth_design (top rtlnet_nexys_video_top, xc7a200tsbg484-1, generics
 #     BUILD_ID and BUILD_DIRTY, define RTLNET_WITH_NETWORK only for the
 #     network build), scripts/rtlnet_constrain_cdc.tcl, opt/place/phys_opt/
-#     route, reports, gates, write_bitstream, write_mem_info, build_info.txt.
+#     route, reports, gates, write_bitstream, write_mem_info, the fixed
+#     hardware platform (XSA, write_hw_platform -fixed, the input of the
+#     firmware BSP flow microblaze/firmware/build.ps1), build_info.txt.
 #   * Gates (each its own exit code; nothing is written past a failed gate):
 #       99 bad arguments            11 missing source, filelist or XDC
 #       12 block design failure     10 synthesis error or critical warning
@@ -29,6 +31,7 @@
 #       27 report_cdc Critical/Warning finding, or a methodology finding
 #          (Warning or worse) without a waiver in this script
 #       40 write_bitstream          41 write_mem_info
+#       42 write_hw_platform
 #   * Reports saved in build/reports: utilization post-synth and post-route,
 #     timing summary, CDC (report_cdc -details), methodology, DRC,
 #     check_timing, clock networks, clock interaction, failing paths.
@@ -37,6 +40,7 @@
 #   Normally run through boards/nexys_video/scripts/build.ps1.
 # Revision: 10-22-2026
 #   * 10-22-2026: initial version.
+#   * 10-22-2026: XSA export (write_hw_platform -fixed).
 # -----------------------------------------------------------------------------
 
 # Script-relative roots (survive tree moves; no dependence on the caller's cwd).
@@ -129,7 +133,7 @@ create_project -in_memory -part $PART
 set_property target_language Verilog [current_project]
 set_property default_lib xil_defaultlib [current_project]
 if {[catch {
-  source [file join $REPO cores rtlnet_cpu_microblaze hdl rtlnet_cpu_bd.tcl]
+  source [file join $REPO microblaze hdl rtlnet_cpu_bd.tcl]
   set bd_file [rtlnet_cpu_bd_create [file join $BUILD_DIR bd]]
   set_property synth_checkpoint_mode None [get_files $bd_file]
   generate_target all [get_files $bd_file]
@@ -169,16 +173,18 @@ write_checkpoint -force [file join $BUILD_DIR post_synth.dcp]
 # (it names pin-layer cells), then the expected crossing instances: packet
 # FIFOs u_mac/u_rx_fifo, u_mac/u_tx_fifo, u_protocol/u_ingress_fifo,
 # u_protocol/u_egress_fifo and the socket layer's u_rx_fifo, u_tx_fifo and
-# u_tx_desc_fifo (fifo 7); register crossings of the MAC, the protocol wrapper
+# u_tx_desc_fifo, and the CPU network path queues u_protocol/u_cpu_rx_fifo and
+# u_protocol/u_cpu_tx_fifo (fifo 9); register crossings of the MAC, the protocol wrapper
 # and the UDP echo (axil_cdc 3); Gray counters u_mac/u_tx_count_sync and the
-# wrapper's four ingress/egress counter crossings (gray 5). A change of these
+# wrapper's four ingress/egress counter crossings and its CPU transmit reject
+# counter u_cnt_cpu_reject_sync (gray 6). A change of these
 # counts fails the build until the expectation is reviewed and updated here.
 if {$NETWORK} {
   set rgmii_xdc [file join $BOARD_DIR constraints rtlnet_nexys_video_rgmii.xdc]
   if {![file exists $rgmii_xdc]} { nv_exit 11 "XDC not found: $rgmii_xdc" }
   if {[catch {read_xdc $rgmii_xdc} err]} { nv_exit 13 "RGMII constraints: $err" }
   set ::rtlnet_cdc_required {sync reset gray fifo axil_cdc}
-  set ::rtlnet_cdc_expect   {fifo 7 axil_cdc 3 gray 5}
+  set ::rtlnet_cdc_expect   {fifo 9 axil_cdc 3 gray 6}
 } else {
   set ::rtlnet_cdc_required {sync reset}
   set ::rtlnet_cdc_expect   {fifo 0 axil_cdc 0 gray 0}
@@ -384,6 +390,10 @@ set mmi    [file join $BUILD_DIR rtlnet_nexys_video.mmi]
 if {[catch {write_bitstream -force $bit_hw} err]} { nv_exit 40 "write_bitstream: $err" }
 if {[catch {write_mem_info -force $mmi} err]} { nv_exit 41 "write_mem_info: $err" }
 
+# Fixed hardware platform for the firmware BSP (Vitis platform component).
+set xsa [file join $BUILD_DIR rtlnet_nexys_video.xsa]
+if {[catch {write_hw_platform -fixed -force -include_bit -file $xsa} err]} { nv_exit 42 "write_hw_platform: $err" }
+
 # ---------------------------------------------------------------------------
 # Build record.
 # ---------------------------------------------------------------------------
@@ -402,6 +412,7 @@ puts $fh "utilization   [join $util_summary {, }]"
 puts $fh "cdc_classes   $::rtlnet_cdc_result"
 puts $fh "bitstream_hw  [file tail $bit_hw]"
 puts $fh "mmi           [file tail $mmi]"
+puts $fh "xsa           [file tail $xsa]"
 close $fh
 puts "rtlnet_build: PASS $bit_hw"
 exit 0

@@ -16,7 +16,13 @@ Overview:
     the prompt that ends it.
   * Sequence: show version, show system, ?, enable, configure terminal, ?,
     exit, end, debug read 0x44a00000, sh ver, then show interfaces (core
-    absent message), led 2 on + LEDS register read-back, led 2 off, disable.
+    absent message), the CPU network path (show cpu-path: AXI DMA found by
+    the BSP driver; show tcp: lwIP state and TCP echo server; show
+    storm-control; show classifier), tcp echo port change and restore in
+    configuration mode, show running-config (TCP echo, storm control,
+    classifier lines), led 2 on + LEDS register read-back, led 2 off, disable.
+  * Either bitstream: CPU-only (network cores and classifier absent, lwIP
+    not started) or network (lwIP running on the wrapper's address).
   * Writes the transcript to boards/nexys_video/build/cli_test_transcript.txt
     and prints it; the last line is "CLI_TEST: PASS <n>/<n>" or
     "CLI_TEST: FAIL <failed>/<n>"; exit code 0 only on PASS.
@@ -24,6 +30,7 @@ Usage:
   powershell -NoProfile -ExecutionPolicy Bypass -File boards/nexys_video/scripts/cli_test.ps1 [-Port COM4] [-Baud 115200]
 Revision: 10-22-2026
   * 10-22-2026: initial version.
+  * 10-22-2026: CPU network path steps (BSP-based firmware).
 -------------------------------------------------------------------------------
 #>
 param(
@@ -124,6 +131,23 @@ try {
     Send-Step $sp 'debug read 0x44a00000' "debug read 0x44a00000`r" @('0x44A00000 = 0x4E585644') 'rtlnet#'
     Send-Step $sp 'sh ver' "sh ver`r" @('Board ID\s+: NXVD', 'Register map\s+: 10-22-2026') 'rtlnet#'
     Send-Step $sp 'show interfaces' "show interfaces`r" @('(% MAC not present in this build|eth0 is (up|down))') 'rtlnet#'
+    Send-Step $sp 'show cpu-path' "show cpu-path`r" @(
+        'AXI DMA\s+: 0x40400000, S2MM status 0x[0-9A-F]{8}, MM2S status 0x[0-9A-F]{8}', 'DMA receive\s+: frames \d+',
+        'DMA transmit\s+: frames \d+', 'Classifier\s+: (present|not present in this build)') 'rtlnet#'
+    Send-Step $sp 'show tcp' "show tcp`r" @(
+        'lwIP\s+: (running|not started)', 'TCP echo\s+: enabled, port 7', 'Connections\s+: active \d+') 'rtlnet#'
+    Send-Step $sp 'show storm-control' "show storm-control`r" @(
+        'Storm control \(broadcast to the CPU\): enabled, 10 frames per 100 ms') 'rtlnet#'
+    Send-Step $sp 'show classifier' "show classifier`r" @('mode pass-all', 'MAC 0\s+: dst ff:ff:ff:ff:ff:ff -> police 0') 'rtlnet#'
+    Send-Step $sp 'conf t (tcp)' "configure terminal`r" @() 'rtlnet(config)#'
+    Send-Step $sp 'tcp echo port 2007' "tcp echo port 2007`r" @() 'rtlnet(config)#'
+    Send-Step $sp 'end (tcp)' "end`r" @() 'rtlnet#'
+    Send-Step $sp 'show tcp (port)' "show tcp`r" @('TCP echo\s+: enabled, port 2007') 'rtlnet#'
+    Send-Step $sp 'conf t (restore)' "configure terminal`r" @() 'rtlnet(config)#'
+    Send-Step $sp 'tcp echo port 7' "tcp echo port 7`r" @() 'rtlnet(config)#'
+    Send-Step $sp 'end (restore)' "end`r" @() 'rtlnet#'
+    Send-Step $sp 'show running-config' "show running-config`r" @(
+        ' storm-control broadcast 10 100', 'tcp echo port 7', 'tcp echo enable', 'classifier mode pass-all', 'end') 'rtlnet#'
     Send-Step $sp 'led 2 on' "led 2 on`r" @('LED 2 on') 'rtlnet#'
     Send-Step $sp 'LEDS readback' "debug read 0x44a00014`r" @('0x44A00014 = 0x000000[0-9A-F][4567CDEF]') 'rtlnet#'
     Send-Step $sp 'led 2 off' "led 2 off`r" @('LED 2 off') 'rtlnet#'

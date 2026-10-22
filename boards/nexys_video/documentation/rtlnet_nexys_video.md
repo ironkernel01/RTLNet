@@ -7,7 +7,7 @@
 | Top | `boards/nexys_video/hdl/rtlnet_nexys_video_top.sv` (`rtlnet_nexys_video_top`) |
 | Builds | network (`build.ps1 -Network`, `RTLNET_WITH_NETWORK`: MAC, MDIO, protocol wrapper with ARP/ICMP/DHCP/iperf/UDP socket leaves, UDP echo) and CPU-only (default); both built, timing met, on hardware |
 | Tools | Vivado 2025.2, MicroBlaze GCC 13.3, Active-HDL 11.1 |
-| Firmware | one image for both builds (`firmware/nexys_video`); absent cores are probed and reported "not present in this build" |
+| Firmware | one image for both builds (`microblaze/firmware`, standalone BSP generated from the build's XSA, lwIP TCP echo on the CPU network path); absent cores are probed and reported "not present in this build" |
 
 ## 1. Files
 
@@ -21,13 +21,14 @@
 | `constraints/rtlnet_nexys_video_cpu_only.xdc` | CPU-only build: RGMII receive pins as asynchronous levels |
 | `constraints/rtlnet_nexys_video_rgmii.xdc` | network build: RGMII timing (read after synthesis, section 5.1) |
 | `scripts/build_bitstream.tcl` | non-project build with gates (section 5) |
-| `scripts/build.ps1` | firmware + bitstream + merge (+ `-Network`, `-Program`, `-Test`) |
+| `scripts/build.ps1` | bitstream + XSA, firmware (BSP from the XSA) + merge (+ `-Network`, `-Program`, `-Test`) |
 | `scripts/merge_elf.ps1` | updatemem: firmware ELF into the LMB BRAM |
 | `scripts/program.ps1`, `scripts/program.tcl` | JTAG programming (hw_server, `program_hw_devices`) |
 | `scripts/cli_test.ps1` | console test over the USB-UART (COM4), either build |
 | `scripts/net_test.ps1` | hardware network test: board side over the CLI, host side from the PC NIC when it is up |
-| `testbench/tb_rtlnet_nexys_video_top.sv` (+ `.f`) | CPU-only board bench with the CPU BFM |
-| `testbench/tb_rtlnet_nexys_video_net.sv` (+ `.f`) | network board bench: BFM + RTL8211E model, ARP / ICMP / UDP echo / DHCP at 10/100/1000 |
+| `scripts/tcp_test.ps1` | hardware test of the CPU network path: lwIP TCP echo, TCP iperf (lwiperf), both together with the RTL UDP iperf |
+| `testbench/tb_rtlnet_nexys_video_top.sv` (+ `.f`) | CPU-only board bench with the MicroBlaze simulation stub |
+| `testbench/tb_rtlnet_nexys_video_net.sv` (+ `.f`) | network board bench: sim stub + RTL8211E model, ARP / ICMP / UDP echo / DHCP at 10/100/1000 |
 | `testbench/regression.txt` | board regression lines (both benches, negative controls) |
 | `../../scripts/rtlnet_constrain_cdc.tcl` | crossing constraints and report_cdc waivers by cell name |
 
@@ -59,7 +60,7 @@ MAC 0x44A0_1000, MDIO 0x44A0_2000, ECHO 0x44A0_3000, PROTOCOL 0x44A1_0000 (64 Ki
 CLASSIFIER 0x44A2_0000 (reserved). Windows without a core are `rtlnet_axil_slave` stubs: OKAY,
 read data 0. Other addresses in the 1 MiB window: DECERR.
 
-System registers (single definition `firmware/nexys_video/src/rtlnet_nexys_video_sysregs.h`):
+System registers (single definition `microblaze/firmware/src/rtlnet_nexys_video_sysregs.h`):
 
 | Offset | Name | Access | Content |
 |---:|---|---|---|
@@ -92,8 +93,10 @@ hardware.
 
 ## 5. Build flow and gates
 
-`powershell -File boards/nexys_video/scripts/build.ps1 [-Network] [-Program] [-Test]` runs the
-firmware build (with the CLI table check and the harness demo), `build_bitstream.tcl` through
+`powershell -File boards/nexys_video/scripts/build.ps1 [-Network] [-Program] [-Test]` runs
+`build_bitstream.tcl` (which also writes the hardware export `rtlnet_nexys_video.xsa`), then the firmware
+build on a BSP generated from that XSA (with the CLI table check and the harness demo,
+`microblaze/documentation/rtlnet_cpu_microblaze.md` section 5), through
 `scripts/rtlnet_vivado.ps1`, and `merge_elf.ps1`. Outputs in `boards/nexys_video/build/`:
 `rtlnet_nexys_video.bit` (to program), `rtlnet_nexys_video_hw.bit` (no firmware),
 `rtlnet_nexys_video.mmi`, `build_info.txt`, `post_synth.dcp`, `post_route.dcp`, `reports/`.
@@ -104,7 +107,7 @@ hold WHS, pulse width, any failing endpoint; threshold 0), 21 utilization above 
 (no_clock, unconstrained endpoints, loops, multiple clocks), 23 latches or user asynchronous
 clear/preset endpoints outside `rtlnet_reset_sync` and the vendor block design, 27 report_cdc
 Critical/Warning or an unwaived methodology finding, 24 critical warnings during implementation,
-40 write_bitstream, 41 write_mem_info.
+40 write_bitstream, 41 write_mem_info, 42 write_hw_platform.
 
 Methodology waivers (printed on every run, each an explicit rule with its reason):
 
@@ -143,7 +146,7 @@ paths (`rtlnet_nexys_video.xdc`). No clock groups.
 
 ### 5.2 Firmware network manager
 
-`firmware/nexys_video/src/rtlnet_netmgr.c` (called from `main.c`): probes every core; MDIO core
+`microblaze/firmware/src/rtlnet_netmgr.c` (called from `main.c`): probes every core; MDIO core
 init, MDC calibration against the AXI timer, wait for the core's PHY power-on reset plus 30 ms,
 RTL8211E ID check, RX delay on (page 0xA4 register 28, read back), advertisement (full duplex
 10/100/1000 by default) and AN restart; MAC init; protocol addresses (MAC kept from the wrapper's
@@ -258,6 +261,55 @@ Also exercised by hand on the board: `show ?`, `sh?`, the ambiguous `show i`, `n
 Ctrl-C, Ctrl-Z, up-arrow recall, `!!`, backspace, `reload` (banner again, firmware uptime restarted,
 hardware UPTIME_MS continuing). The PHY leaves reset (rst_n 1) and its receive clock toggles.
 
+### 6.3 CPU-only build with the CPU network path hardware
+
+CPU-only build of commit 874f3966 (tree clean), 10-22-2026, Vivado 2025.2: the block design with the
+512 KiB LMB, the AXI DMA and the 128 KiB AXI BRAM; firmware on the BSP generated from this build's XSA.
+
+| Item | Result |
+|---|---|
+| Synthesis / implementation | 0 critical warnings; `rtlnet_build: PASS` |
+| Timing (post-route) | WNS +0.701 ns, WHS +0.014 ns, WPWS +2.000 ns; 0 failing setup, hold and pulse-width endpoints (with the 256 KiB LMB: WNS +1.142 ns, WHS +0.020 ns) |
+| Utilization (post-route) | 5294 LUTs (3.96 %), 5564 FFs (2.08 %), 162 BRAM tiles (44.38 %: LMB 128 + AXI BRAM 32 RAMB36 + 2), 3 DSP48 |
+| CDC | sync 7 / 34, reset 6 / 24, gray/fifo/axil_cdc 0 as expected; report_cdc Info only |
+| Methodology | LUTAR-1 x3, TIMING-9, all waived by rule; no other finding |
+| XSA | `rtlnet_nexys_video.xsa` written; BSP generated with the Vitis 2025.2 Python API (`RTLNET_BSP: PASS`) |
+| Firmware | `firmware.elf` text 139304 B, data 2104 B, bss 127732 B (lwIP heap and pools in the LMB), + 2 KiB heap, 8 KiB stack: 271 KiB of the 512 KiB LMB; 12 KiB of DMA buffers in the AXI BRAM |
+| Merge | updatemem 0 warnings; the MMI lists the LMB (0..524287, 128 RAMB36) and the AXI BRAM address spaces |
+| JTAG | `program.ps1`: programmed in 3.0 s, DONE high |
+| Console | `cli_test.ps1` on COM4: PASS 27/27 (the 15 earlier steps plus show cpu-path, show tcp, show storm-control, show classifier, tcp echo port change and restore, show running-config) |
+| Start-up line | `Network cores not in this build. CPU path: DMA ok.`; `show cpu-path`: AXI DMA found by XAxiDma at 0x4040_0000, S2MM armed (status 0x00000000), MM2S halted (0x00000001) |
+| Time base | XTmrCtr 1 ms interrupt through XIntc: firmware uptime equals the hardware UPTIME_MS register (10200 ms both) |
+| Soft restart | `reload`: banner again, firmware uptime restarted (2487 ms against 35309 ms hardware), interrupts running again |
+| Host harness | `menu.exe --demo` TEST PASS 248 checks; `--inject-failure` TEST FAIL |
+| Board bench | `tb_rtlnet_nexys_video_top` TEST PASS 74 checks with `rtlnet_microblaze_sim_stub` |
+
+### 6.4 Network build with the CPU network path
+
+Network build of commit a9e043e6 (tree clean), 10-22-2026: protocol wrapper with the CPU path
+(`CPU_PATH_ENABLE` 1, `CPU_RX_FIFO_KB` 32, `CPU_TX_FIFO_KB` 8, `CPU_CLASSIFIER_ENABLE` 0 until the classifier
+core lands), u_cpu's DMA streams on `s_axis_cpu_eth_*` / `m_axis_cpu_eth_*` in cpu_clk.
+
+| Item | Result |
+|---|---|
+| Timing (post-route) | WNS +0.221 ns, WHS +0.018 ns, WPWS +0.264 ns; 0 failing endpoints |
+| Utilization | 16169 LUTs (12.08 %), 21183 FFs (7.92 %), 196.5 BRAM tiles (53.84 %), 5 DSP48 |
+| CDC | fifo 9, gray 6, axil_cdc 3 instances, as expected (`build_bitstream.tcl`) |
+| Firmware | text 153724 B, data 2104 B, bss 151624 B (lwIP with the echo and iperf servers): 307 KiB of 512 KiB |
+| Console | `cli_test.ps1` PASS 27/27; start-up: `PHY: RTL8211E ID 0x001CC915, RX delay 0xAD77 -> 0xAD77, MDC half period 266 ns, LEDs LINK steady, ACT blink, USER off; EEE off, auto-negotiation restarted`, `CPU path: DMA ok, classifier absent, lwIP up (TCP echo, TCP iperf)` |
+| PHY LEDs / EEE | `show phy`: LCR 0x0070, LACR 0x0010 (read back), MMD 7.60 = 0x0000 (EEE not advertised); the LED behaviour itself was not observed (no view of the board) |
+| lwIP identity | `show tcp`: netif MAC 02:49:4b:52:4e:01, IPv4 192.169.1.199 / 24, gateway 192.169.1.1 (the DHCP lease), "RTL identity: matches" |
+| TCP echo alone | `tcp_echo_client.py`, 4 connections x 76 messages (1 B .. 64 KiB, 2.36 MB each way), byte-exact: PASS, 14.0 Mbit/s each way over Wi-Fi with the 16 KiB FIFO; 15.7 Mbit/s (4 x 38 messages) over the wired PC NIC with the 32 KiB FIFO |
+| TCP iperf alone | iperf 2.2.2 `-c 192.169.1.199 -t 10` (PC wired NIC 192.169.1.178): 68.4 Mbit/s PC -> board |
+| iperf reverse modes | `-r` (tradeoff): "expected reverse connect did not occur" (lwiperf did not connect back to the PC); `-R` (reverse on the same connection): 0 bytes, "recvn failed: Connection timed out" (lwiperf has no reverse mode); only PC -> board works |
+| Together | TCP echo (2 connections x 76 messages) PASS, TCP iperf 51.6 Mbit/s, RTL UDP iperf `-u -b 20M` 20.9 Mbit/s, 0/17828 lost; `tcp_test.ps1`: TCP_TEST PASS 5/5 |
+| Board counters after the runs | DMA receive 165436 frames, no pbuf 0, errors 0; transmit 164660, timeouts 0; wrapper: CPU FIFO drops 4 of 165439 frames to the CPU; lwIP heap max 21668 of 32768, pbuf pool max 2 of 32 |
+| CPU RX FIFO | 16 KiB: four echo connections overflowed it (24 drops, 0.4 s retransmission stalls); 32 KiB: 4 drops over the whole test, no stall in the echo latencies |
+
+The TCP numbers are CPU bound: every received frame is copied from the AXI BRAM into a pool pbuf
+(uncached 32-bit reads over AXI), lwIP checksums it in software, and every ACK or echo segment is copied back
+into a DMA buffer; the 100 MHz MicroBlaze has no caches. CPU load was not instrumented.
+
 ## 7. Network integration (done 10-22-2026) and what remains
 
 Integrated: `u_mac`, `u_mdio`, `u_protocol` (every leaf), `u_echo` under `RTLNET_WITH_NETWORK`, the
@@ -281,3 +333,4 @@ Open:
 |---|---|
 | 10-22-2026 | Initial version: CPU-only board top, build flow, bring-up |
 | 10-22-2026 | Network integration: RGMII XDC, CDC counts and waivers, network board bench, firmware network manager and driver-backed CLI, hardware results at 100 and 10 Mb/s |
+| 10-22-2026 | `microblaze/` folder; CPU core with AXI DMA, AXI BRAM, 512 KiB LMB; XSA export; BSP-based firmware with lwIP; CPU-only hardware checkpoint (section 6.3) |
