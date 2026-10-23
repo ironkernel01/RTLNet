@@ -232,11 +232,11 @@ the values agree). `show tcp` prints the netif identity, the RTL identity it fol
 
 Receive (polled): four 2 KiB buffers in the AXI BRAM form a ring; one S2MM simple transfer is armed at a
 time. On completion the next buffer is armed at once, the length is read from the S2MM length register, the
-frame is copied into a pool pbuf and given to `netif->input`. Up to 8 frames per poll. No pbuf: dropped and
+frame is copied into a pool pbuf with 32-bit reads (`axi_get_words`) and given to `netif->input`. Up to 8 frames per poll. No pbuf: dropped and
 counted (`rx_no_pbuf`); an S2MM error status resets the DMA and re-arms (`rx_errors`, `dma_resets`). While
 no transfer is armed the wrapper's 16 KiB CPU receive FIFO holds the frames. Transmit: `linkoutput` copies
-the pbuf chain into one of two 2 KiB TX buffers, waits at most 2 ms for the previous MM2S transfer and
-starts the next one (`tx_timeouts`, `tx_too_long`, `tx_errors`). No caches exist, so the buffers need no
+the pbuf chain into one of two 2 KiB TX buffers with 32-bit writes only (`axi_put_chain`, section 9.10), waits
+at most 2 ms for the previous MM2S transfer and starts the next one (`tx_timeouts`, `tx_too_long`, `tx_errors`). No caches exist, so the buffers need no
 flush or invalidate. A channel counts as busy only while it runs and is not idle: `XAxiDma_Busy` reports a
 halted channel (never started, or after a reset) as busy, which kept the first transmit waiting forever.
 
@@ -244,14 +244,19 @@ halted channel (never started, or after a reset) as busy, which kept the first t
 
 NO_SYS 1, raw API, IPv4, ARP, ICMP, UDP, TCP; no DHCP, AutoIP, IGMP, DNS, IPv6 in lwIP (the RTL DHCP
 leaf owns the address). Sizes for the TCP echo server and the TCP iperf server running together:
-`MEM_SIZE` 32 KiB, `PBUF_POOL_SIZE` 32 x 1536 B, `MEMP_NUM_TCP_PCB` 12, `MEMP_NUM_TCP_PCB_LISTEN` 4,
-`MEMP_NUM_TCP_SEG` 64, `TCP_MSS` 1460, `TCP_WND` and `TCP_SND_BUF` 4 x MSS (5840 B). Everything lwIP
-allocates is in the LMB (`.bss`); the AXI BRAM holds only the 12 KiB of DMA buffers.
+`TCP_MSS` 1460, `TCP_SND_BUF` 24 x MSS (35040 B), `TCP_SND_QUEUELEN` 96, `TCP_WND` 8 x MSS (11680 B),
+`MEM_SIZE` 64 KiB, `PBUF_POOL_SIZE` 64 x 1536 B, `MEMP_NUM_TCP_SEG` 256, `MEMP_NUM_PBUF` 96,
+`MEMP_NUM_TCP_PCB` 12, `MEMP_NUM_TCP_PCB_LISTEN` 4, `LWIP_CHKSUM_ALGORITHM` 3. Everything lwIP allocates
+is in the LMB (`.bss`); the AXI BRAM holds only the 12 KiB of DMA buffers. The reasons for each value and the
+measurements are in section 9.10; the header comment of `lwipopts.h` carries the memory budget and the drift
+rule (the pool must hold `TCP_WND` for every connection that can be open at once, plus margin).
 
-The window is bounded by the protocol wrapper's CPU receive FIFO, not by lwIP memory: a PC sends a whole
-window per connection at line rate while the CPU drains slower, so the sum of the open windows must fit the
-FIFO. With the 16 KiB FIFO four echo connections of 4 MSS overflowed it (24 CPU FIFO drops, retransmission
-stalls of about 0.4 s); the board top now builds the FIFO with 32 KiB (`CPU_RX_FIFO_KB` 32).
+The window is bounded by the protocol wrapper's CPU receive FIFO (`CPU_RX_FIFO_KB` 32 in the board top), not
+by lwIP memory: a PC sends a whole window per connection at line rate while the CPU drains slower, so the
+sum of the open windows should fit the FIFO. With the 16 KiB FIFO four echo connections of 4 x MSS overflowed
+it (24 CPU FIFO drops, retransmission stalls of about 0.4 s). With 8 x MSS two connections fit; the echo test
+with four connections plus iperf opens 58 KB and shows a few "CPU FIFO drops" (11 in the four-connection echo
+test), which TCP recovers.
 
 ### 9.7 CPU path control and the CLI
 
@@ -296,10 +301,12 @@ The engine limits grew for the ACL syntax (14 tokens, 14 parameters, 160-charact
 
 ### 9.8 Size
 
-Build of record (rtlnet_lwiperf with -R, -r, -d): text 155788 B, data 2100 B, bss 151684 B, heap 2 KiB,
-stack 8 KiB, 308 KiB of the 512 KiB LMB (install lwiperf, commit a9e043e6: text 153724 B; without lwiperf, commit 874f3966: 271 KiB). The CLI and drivers are compiled `-Os`, the frame path (netif, lwIP glue,
-TCP echo, lwIP) `-O2`. With the 256 KiB LMB the image did not link (`.bss` overflow), which is why the LMB
-is 512 KiB.
+Build of record (section 9.10 tuning): text 162356 B, data 2104 B, bss 238280 B, heap 2 KiB, stack 8 KiB;
+the image ends at 381 KiB of the 512 KiB LMB (131 KiB free). Before the tuning: text 161412 B, bss 151412 B
+(rtlnet_lwiperf with -R, -r, -d and the classifier driver; install lwiperf without the classifier driver,
+commit a9e043e6: text 153724 B, 308 KiB; without lwiperf, commit 874f3966: 271 KiB). The CLI and drivers are
+compiled `-Os`, the frame path (netif, lwIP glue, TCP echo, lwIP) `-O2`. With the 256 KiB LMB the image did
+not link (`.bss` overflow), which is why the LMB is 512 KiB.
 
 ### 9.9 TCP iperf server (rtlnet_lwiperf)
 
@@ -374,7 +381,7 @@ in "refused". An idle test ends after 10 s. A `-P` greater than 1 therefore runs
 (5001 by default, or `-L`): the first run of `iperf.exe` raises the Windows prompt; a blocked connect-back
 shows as "aborted" or no second report.
 
-**Hardware results** (image with the CPU-path classifier, firmware at the commit of this section, PC wired NIC
+**Hardware results before the tuning** (image with the CPU-path classifier, firmware at the commit of this section, PC wired NIC
 192.169.1.178 to the board at 192.169.1.199, `iperf.exe` 2.2.2, `-t 10`, two runs each; the PC line is the
 client summary, the board line is `show iperf` after the run):
 
@@ -386,9 +393,9 @@ client summary, the board line is `show iperf` after the run):
 | `-d` | forward 31.4, 31.5 Mbit/s; connect-back 15.6, 15.6 Mbit/s (sum 46.8) | pc->board 39452672 B, 31436 kbit/s; board->pc dual 19685180 B in 10099 ms, 15593 kbit/s (second run 19647220 B, 15565 kbit/s) |
 
 The connect-back to the PC's port 5001 was not blocked by Windows Firewall; nothing was changed. `-R` is
-reported as measured, 29.3 Mbit/s against 68.5 Mbit/s PC -> board (not tuned in this change). Both runs
-carry exactly the same byte count (36584680), which points to a send rate set by the 4 x MSS window and the
-round trip through the CPU path rather than by the PC; this is not yet analysed. A second test of the same
+reported as measured, 29.3 Mbit/s against 68.5 Mbit/s PC -> board. Both runs carry exactly the same byte
+count (36584680): a CPU-bound rate, not a window limit (section 9.10 analyses and removes it; the table above
+is the state before the tuning). A second test of the same
 mode is refused (the "refused" counter); after the whole run `show iperf` reads tests 35, refused 0.
 
 **Tests without the board.**
@@ -401,6 +408,137 @@ and the lwIP heap back at its start value; ends with `LWIPERF_LOOPBACK: PASS che
 same behavior in Python and the stock client runs against it: all four modes print the client summaries
 (`-R` 891 Mbit/s, `-r` and `-d` both directions) on the PC loopback, which confirms the connect-back header
 and the close the client accepts.
+
+### 9.10 TCP throughput tuning (10-22-2026)
+
+**Starting point** (section 9.9 table): PC -> board 68.5 Mbit/s, `-R` 29.3 Mbit/s with an identical byte
+count in every run, `-d` 31.4 + 15.6 Mbit/s, against about 94 Mbit/s of TCP goodput on 100 Mb/s Ethernet.
+
+**Finding.** The limit was the CPU, not the window. Raising `TCP_SND_BUF` from 4 to 8 and to 24 x MSS left `-R`
+at 29.3 and 28.8 Mbit/s, although lwIP then had 8 and 24 segments queued. A timer profile of the netif
+(`RTLNET_NETIF_PROFILE 1`, below) showed the CPU 100 % busy during every test and the cost of one 1514-byte
+frame:
+
+| Step | Before | After |
+|---|---|---|
+| TX: pbuf chain copied into the AXI BRAM TX buffer | 306.8 us (byte writes) | 73.7 us (word writes; 60 us is the cost of the 379 AXI writes alone) |
+| RX: frame copied from the AXI BRAM into a pool pbuf | 70.7 us | 67.8 us (17 cycles per 32-bit read) |
+| RX: lwIP input of one data frame (checksum, TCP, one ACK per two frames) | 101.3 us (`LWIP_CHKSUM_ALGORITHM` 2) | 68.3 us (algorithm 3) |
+
+The CPU reaches the AXI BRAM over M_AXI_DP; one access takes about 16 cycles whatever its width. The pieces of a
+TX pbuf chain start at odd offsets (a 54-byte header, then a payload at any alignment), and the library
+`memcpy` wrote them byte by byte: 20 cycles per byte, 307 us per frame, 77 % of the time per `-R` segment. The
+board therefore sent 2500 segments per second whatever the send buffer, always the same byte count.
+`axi_put_chain` packs bytes into words in registers and writes aligned words only. The windows then mattered
+(next table), and the 32-bit checksum took 33 us out of every received frame.
+
+**Method.** Firmware built with `build.ps1` (`-Werror` clean, host `--demo` PASS, `-LwipTest` PASS), merged
+and programmed into the reused classifier image (`boards/nexys_video/build`, XSA, `merge_elf.ps1`,
+`program.ps1`); `iperf.exe -c 192.169.1.199 -t 10 -f k`, PC wired NIC 192.169.1.178, two runs per mode, one
+setting changed per row; `clear counters` before each run and `show cpu-path` / `show tcp` after. Mbit/s as the
+PC client reports them; `-d` is PC -> board + board -> PC and the iperf sum.
+
+| # | Configuration (changes from the row above unless noted) | plain, PC -> board | `-R`, board -> PC | `-d` (sum) | Notes |
+|---|---|---|---|---|---|
+| 0 | `TCP_SND_BUF` 4 x MSS, `TCP_WND` 4 x MSS, `MEM_SIZE` 32 KiB, pool 32, `MEMP_NUM_TCP_SEG` 64, `MEMP_NUM_PBUF` 16, byte-copy netif, `LWIP_CHKSUM_ALGORITHM` 2 | 68.0, 68.3 | 29.3, 29.3 | 31.5 + 15.6 (47.1), 31.2 + 15.7 (46.9) | starting point; `-R` 36584680 B both runs |
+| 1 | `TCP_SND_BUF` 8 x MSS, `MEMP_NUM_PBUF` 64, `MEMP_NUM_TCP_SEG` 128 | 68.4, 68.3 | 29.3, 29.3 | 15.2 + 22.3 (37.5), 15.2 + 22.4 (37.6) | send buffer does not matter |
+| 2 | `TCP_SND_BUF` 24 x MSS, `MEMP_NUM_PBUF` 96, `MEMP_NUM_TCP_SEG` 256 | 66.0, 66.0 | 28.8, 28.8 | not measured | build with the profile timers (about 3 % of RX throughput); the queue reached 24 segments |
+| 3 | netif TX copy by 32-bit writes; send buffer, window, memory as row 0; profile timers off | 71.8, 71.8 | 61.2, 59.6 | 45.5 + 22.5 (67.7), 45.3 + 22.6 (67.7) | `-R` doubles; PC -> board gains from the cheaper ACK frames |
+| 4 | `TCP_SND_BUF` 8 x MSS (memory as row 1) | 71.5, 71.5 | 63.0, 63.0 | 26.2 + 38.8 (65.0), 26.2 + 38.8 (65.0) | |
+| 5 | `TCP_SND_BUF` 16 x MSS, `MEMP_NUM_TCP_SEG` 192 | 71.5, 71.7 | 62.8, 62.8 | 14.3 + 48.8 (63.0), 13.7 + 50.5 (63.9) | |
+| 6 | `TCP_SND_BUF` 8 x MSS, `TCP_WND` 8 x MSS, pool 64 | 77.2, 77.2 | 63.0, 63.0 | 39.8 + 29.5 (69.1), 39.8 + 29.5 (69.1) | the window helps PC -> board |
+| 7 | `TCP_WND` 16 x MSS, pool 112 (LMB image 441 KiB) | 77.2, 77.3 | 63.0, 62.9 | 53.0 + 19.7 (72.3), 53.0 + 19.7 (72.3) | 2714 / 2666 CPU FIFO drops in `-d`; rejected |
+| 8 | `TCP_SND_BUF` 24 x MSS, `TCP_WND` 8 x MSS, pool 64, `MEMP_NUM_PBUF` 96, `MEMP_NUM_TCP_SEG` 256 | 77.1, 77.2 | 62.6, 62.6 | 17.6 + 47.5 (65.0), 17.6 + 47.3 (64.8) | 1821 / 1828 FIFO drops in `-d`; CPU-bound |
+| 9 | row 6 with `LWIP_CHKSUM_ALGORITHM` 3 | 85.5, 85.5 | 68.3, 68.2 | 43.6 + 32.3 (75.6), 43.6 + 32.3 (75.6) | the checksum is the largest software cost |
+| 10 | row 9 with `MEM_SIZE` 64 KiB, unrolled TX and RX copies, `TCP_WND` 4 x MSS | 80.6, 80.6 | 56.0, 55.3 | 29.2 + 50.9 (80.1), 29.3 + 51.1 (80.4) | the PC acknowledges every eighth segment |
+| 11 | `TCP_WND` 6 x MSS, pool 48 | 87.7, 87.5 | 55.5, 55.8 | 38.7 + 44.8 (83.4), 38.8 + 45.1 (83.8) | same ACK pattern as row 10 |
+| 12 | `TCP_WND` 8 x MSS, `TCP_SND_BUF` 16 x MSS, `MEMP_NUM_TCP_SEG` 192, pool 64 | 87.5, 87.8 | 74.8, 74.5 | 29.6 + 53.8 (83.2), 29.6 + 54.0 (83.5) | |
+| **13** | **`TCP_SND_BUF` 24 x MSS, `MEMP_NUM_TCP_SEG` 256, `MEMP_NUM_PBUF` 96 (chosen)** | **87.6, 87.8** | **82.7, 82.7** | **21.3 + 60.4 (81.7), 21.3 + 60.4 (81.7)** | segments max 24, pool max 1 of 64, FIFO drops 0 |
+| 14 | `TCP_SND_BUF` 32 x MSS, `MEMP_NUM_TCP_SEG` 320 | 87.8, 87.8 | 82.7, 82.7 | 16.9 + 64.8 (81.6), 16.9 + 64.8 (81.6) | no gain over row 13: CPU-bound |
+| - | row 9 (profile build, one run) with `ETH_PAD_SIZE` 2 (IP header word aligned), `PBUF_LINK_HLEN` 14 + 2 | 76.2 | 73.8 | 74.6 | against 83.7 / 74.3 / 78.6 for the same build without the pad: the lwIP input does not get cheaper (68.2 us), the RX copy gets dearer (81.6 us); reverted |
+
+Rows 3 to 9 use the TX word copy without unrolling; rows 10 to 14 the unrolled copies. Rows 0 to 2 are the
+state before the netif change; rows 3 and later keep it. Rows 1 and 2 are the measurements that disproved the
+window hypothesis. The other rows are two consecutive runs; the pad row is one run.
+
+*Not changed, and why.* Netif buffer counts (`RTLNET_NETIF_RX_BUFS` 4, `RTLNET_NETIF_TX_BUFS` 2): the counters show
+no RX overrun (`rx_no_pbuf` 0, DMA errors 0, CPU FIFO drops 0 in single-flow runs) and no TX stall (the wait
+for the previous MM2S transfer averages 1.3 to 3.1 us per frame, no `tx_timeouts`). Only one S2MM simple
+transfer is armed at a time, so a deeper RX ring buffers nothing. `TCP_OVERSIZE`, `TCP_QUEUE_OOSEQ`,
+`LWIP_TCP_SACK_OUT`: the reverse test writes from a static buffer (nothing to oversize), the single-flow runs show
+no retransmission (`show tcp`: TCP drop 0, err 0), so there is nothing for them to improve.
+
+**Why 24 x MSS and an 8 x MSS window.** Once the copy cost fell, the PC's acknowledgement rate decided `-R`: it
+acknowledges between every second and every eighth segment (the board receives about 27000 to 29000 ACKs per
+test in rows 6 and 9, 6000 in rows 10 and 11, 8000 in row 12, 11800 in row 13), apparently following the window
+the board advertises and the pacing of the frames. With sparse ACKs the send buffer has to cover several
+acknowledgement intervals: 8, 16, 24, 32 x MSS give 68, 75, 83, 83 Mbit/s (window 8 x MSS, 32-bit checksum).
+24 is the smallest value at the CPU limit. An 8 x MSS window gives both directions (87.6 and 82.7 Mbit/s);
+4 and 6 x MSS lose 27 Mbit/s of `-R` with an 8 x MSS send buffer; 16 x MSS gains nothing and overflows the
+32 KiB wrapper FIFO. `TCP_SND_QUEUELEN` keeps lwIP's formula (4 x send buffer / MSS = 96): the iperf reverse
+test queues two pbufs per segment (a ROM pbuf for the static pattern, a RAM pbuf for the headers), so
+`MEMP_NUM_TCP_SEG` 256 covers the queue of one reverse connection (96) with the echo and a second iperf
+connection, and `MEMP_NUM_PBUF` 96 covers the 24 ROM pbufs plus ARP and fragments. `MEM_SIZE` 64 KiB: the echo
+server copies the data it echoes (`TCP_WRITE_FLAG_COPY`); four connections of 8 x MSS used 37 KB of the heap
+(max 37272 B), which would not fit the old 32 KiB.
+
+**Memory (final build).**
+
+| Memory | Use |
+|---|---|
+| LMB, 512 KiB | text and read-only data 158.5 KiB, data 2.1 KiB, bss 232.7 KiB (lwIP heap 64 KiB, pool 97 KiB, MEMP 9 KiB, CLI and firmware 62 KiB), heap 2 KiB, stack 8 KiB: ends at 381 KiB, 131 KiB free |
+| lwIP heap | 64 KiB; maximum used 37272 B (four echo connections), 3276 B in the iperf runs |
+| pbuf pool | 64 x 1552 B = 97 KiB; maximum used 3 (echo) |
+| AXI BRAM, 128 KiB | 12 KiB: 4 RX + 2 TX buffers of 2 KiB; 116 KiB free |
+
+**Profile.** `RTLNET_NETIF_PROFILE` (`rtlnet_lwip_netif.h`, default 0) adds timers around the copies, the lwIP
+input and the DMA wait; they cost about 3 % of the RX throughput, so the speed rows above use the build without
+them. With it set to 1, `clear counters`, a test and `show cpu-path` print the wall and busy time, the poll
+budget hits and the per-frame costs. Row 9 plus the unrolled copies, profile build, 1514-byte frames:
+
+| Test | CPU busy | RX frame: copy / lwIP input | TX frame: copy / DMA wait / DMA start |
+|---|---|---|---|
+| plain (PC -> board, 83.7 Mbit/s with the timers) | 9.97 s of a 10 s test | 67.8 / 68.3 us | ACK frame: 5.3 / 3.1 / 3.7 us |
+| `-R` (74.3 Mbit/s with the timers, 8 x MSS send buffer) | 9.97 s | ACK frame: 6.2 / 304.5 us (two data segments sent inside) | 73.7 / 3.1 / 3.7 us |
+
+**What limits the rate now** (input for checksum offload and zero-copy):
+
+- CPU saturation, not window, DMA or link. A received data frame costs 136 us (68 us of AXI reads, 68 us of
+  lwIP) = 7.3k frames/s = 87 Mbit/s: the PC -> board rate. A sent segment costs about 140 us (74 us of AXI
+  writes, about 65 us of lwIP and the share of the ACKs) = 83 Mbit/s: the `-R` rate. Line rate needs 123 us per frame.
+- The AXI BRAM copies are half of each frame. The CPU gets one 32-bit access per 16 cycles over M_AXI_DP; there
+  is no burst and no overlap, so the copy has no further software gain (60 us per frame is the write floor,
+  about 60 to 65 us the read floor). Only not touching the payload helps: zero-copy RX (a pbuf that references
+  the AXI buffer, with the RX checksum verified in hardware, would leave the CPU the 54 header bytes = 14 reads)
+  and zero-copy TX (a header in the AXI BRAM plus a scatter-gather descriptor to a payload that already sits in
+  the AXI BRAM; the present simple-mode DMA cannot gather).
+- The software checksum is the largest part of the lwIP time: moving from 16-bit to 32-bit reads saved 33 us per
+  received frame; the remainder is estimated at 25 to 30 us per 1460 bytes in each direction. Checksum offload
+  removes that in both directions, but only pays fully together with zero-copy, because the CPU still reads or
+  writes every payload byte while it copies.
+- The rest of lwIP (TCP input and output, ACK generation, header handling) is about 35 to 40 us per frame;
+  header alignment (`ETH_PAD_SIZE` 2) did not reduce it.
+- DMA and FIFO: no stall. The MM2S wait is 1.3 to 3.1 us per frame; there are no CPU FIFO drops in the single-flow
+  runs. Drops appear only when several connections together open more than the 32 KiB FIFO (rows 7 and 8; four
+  echo connections plus iperf), which costs a TCP retransmission, never a failure of a test.
+- `-d` shares one CPU between the two directions: the sum stays at 82 Mbit/s whatever the split, and the TX
+  stream, which sends without waiting, takes most of the CPU and leaves the receive side 21 Mbit/s.
+- Sensitivity to the PC: the PC's ACK rate (every second to every eighth segment) moves `-R` by more than 25 Mbit/s
+  between rows 9 and 10 without any change in the board's CPU cost; a PC with another stack or NIC setting may
+  need a different send buffer.
+
+**Tests with the final configuration** (board 192.169.1.199, classifier image): `tcp_echo_client.py`, 4 connections,
+PASS; `tcp_test.ps1` `TCP_TEST: PASS 8/8` (echo 7.2 Mbit/s, PC -> board 87.8, `-R` 82.7, `-r` 79.6, `-d` 60.7 Mbit/s
+board -> PC; together: echo PASS, TCP 68.6 Mbit/s, UDP 20.9 Mbit/s 0/17820 lost); plain TCP iperf together with RTL
+UDP iperf `-u -b 20M`, two runs: TCP 70.8 and 70.8 Mbit/s, UDP 20.9 Mbit/s 0/17833 and 0/17834 lost (51.6 Mbit/s TCP
+before the tuning); `cli_test.ps1` `CLI_TEST: PASS 27/27`; `net_test.ps1 -Nic Ethernet -Speed 100`
+`NET_TEST: PASS 25/25` (UDP 94.0 and 94.4 Mbit/s, 0 lost). Broadcast flood (`bcast_flood.py --rate 400 --seconds 10`,
+ping once a second, `tcp_echo_client.py --conns 2` in a loop): storm limiter seen 3999, passed 1010, dropped 2989
+(the limit of 10 per 100 ms holds), ping 14/14, 20 of 20 echo runs PASS (17 at 26.7 to 27.1 Mbit/s, three at 5.6 to
+10.0 Mbit/s after a CPU FIFO drop), CPU FIFO drops 2. A harder flood (`--rate 2000 --seconds 12`) with a
+four-connection echo test, a ping and an iperf stream at the same time: passed 1210 of 23752 (limit holds), ping
+12/12, echo PASS, iperf 78.7 Mbit/s, CPU FIFO drops 374. `tcp_test.ps1` gates only on a throughput above zero for
+each mode, so its thresholds need no change.
 
 ## 10. Build and test commands
 
@@ -440,7 +578,8 @@ closed port (FAIL, connection refused).
 | `rtlnet_lwiperf` desktop loopback test | `LWIPERF_LOOPBACK: PASS checks=69` (plain, -R, -r, -d, busy, abort, restart, heap) |
 | Stock iperf 2.2.2 client against the Python board emulator | plain, -R, -r, -d complete with both directions in the summary |
 | Hardware iperf with `rtlnet_lwiperf` (classifier image, wired NIC to the DHCP address 192.169.1.199, `-t 10`, two runs each) | PC -> board 68.5 / 68.4 Mbit/s; `-R` 29.3 / 29.3 Mbit/s; `-r` 68.6 then 27.3 / 27.1 Mbit/s; `-d` 31.4 / 31.5 Mbit/s with 15.6 / 15.6 Mbit/s; the board's `show iperf` agrees with the client (section 9.9) |
-| Hardware `tcp_test.ps1` / `tcp_echo_client.py` / `cli_test.ps1` | `TCP_TEST: PASS 8/8`; `TCP_ECHO_TEST: PASS conns=4 messages=152`; `CLI_TEST: PASS 27/27`; lwIP heap used 124 B after 35 tests (no leak) |
+| Hardware iperf after the throughput tuning (section 9.10; send buffer 24 x MSS, window 8 x MSS, word-wise netif copies, 32-bit checksum) | PC -> board 87.6 / 87.8 Mbit/s; `-R` 82.7 / 82.7 Mbit/s; `-d` 21.3 + 60.4 Mbit/s (sum 81.7); TCP with RTL UDP iperf together 70.8 Mbit/s; `TCP_TEST: PASS 8/8`, `CLI_TEST: PASS 27/27`, `NET_TEST: PASS 25/25`, storm limiter holds under the flood |
+| Hardware `tcp_test.ps1` / `tcp_echo_client.py` / `cli_test.ps1` (before the tuning) | `TCP_TEST: PASS 8/8`; `TCP_ECHO_TEST: PASS conns=4 messages=152`; `CLI_TEST: PASS 27/27`; lwIP heap used 124 B after 35 tests (no leak) |
 
 Details: `boards/nexys_video/documentation/rtlnet_nexys_video.md` sections 6.3 and 6.4.
 
@@ -465,3 +604,4 @@ Details: `boards/nexys_video/documentation/rtlnet_nexys_video.md` sections 6.3 a
 | 10-22-2026 | Moved to `microblaze/`; LMB 512 KiB; AXI DMA and 128 KiB AXI BRAM with the frame streams; simulation stand-in renamed `rtlnet_microblaze_sim_stub`; BSP generated from the XSA; firmware on the BSP with lwIP, InitLWIP, DMA netif, TCP echo, CPU path CLI |
 | 10-22-2026 | lwIP glue and applications moved to `src/lwip/`; iperf server forked as `rtlnet_lwiperf` with -R, -r and -d; captured iperf 2.2.2 test header; desktop loopback test |
 | 10-22-2026 | Classifier driver integrated: `rtlnet_cpupath.c` on the real driver API (context, `RTLNET_CLS_ACT_*`), boot call `rtlnet_classifier_config_bcast_storm(10, 100)`, MAC mask removed and EtherType entries 0..7 (range pairs) in the CLI, harness register model of the classifier; the sim stub classifier task follows the driver register map |
+| 10-22-2026 | TCP throughput tuning: netif TX/RX copies as 32-bit AXI accesses, optional CPU profile (`RTLNET_NETIF_PROFILE`), `TCP_SND_BUF` 24 x MSS, `TCP_WND` 8 x MSS, 32-bit lwIP checksum, memory resized (section 9.10) |
