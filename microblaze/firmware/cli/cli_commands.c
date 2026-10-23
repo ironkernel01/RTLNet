@@ -66,6 +66,7 @@
 #include "rtlnet_lwip.h"
 #include "rtlnet_lwip_netif.h"
 #include "rtlnet_netmgr.h"
+#include "rtlnet_offload.h"
 #include "rtlnet_phy_rtl8211e.h"
 #include "rtlnet_platform.h"
 #include "rtlnet_tcp_echo.h"
@@ -510,6 +511,11 @@ int cli_show_version(const MenuCommandContext *ctx)
     fmt_printf(" (0x%08X)\n", (unsigned)ver);
     fmt_printf("  Build ID        : 0x%08x (git %08x), tree %s\n", (unsigned)bid, (unsigned)bid, dty ? "dirty" : "clean");
     fmt_printf("  Network cores   : %s\n", (cap & NXV_CAPS_NETWORK) ? "in this build" : "not in this build (CPU-only)");
+    rtlnet_features_discover();
+    fmt_printf("  CPU path blocks : classifier %s, checksum offload TX %s, RX %s%s\n",
+               rtlnet_features()->cls_present ? "yes" : "no", rtlnet_features()->tx_present ? "yes" : "no",
+               rtlnet_features()->rx_present ? "yes" : "no",
+               rtlnet_features()->errors ? "  % discovery mismatch, see show offload" : "");
     fmt_printf("  Firmware        : %s %s, built %s %s\n", RTLNET_FW_NAME, RTLNET_FW_VERSION, __DATE__, __TIME__);
     return (id == NXV_SYS_ID_VALUE) ? 0 : -1;
 }
@@ -1422,6 +1428,7 @@ int cli_clear_counters(const MenuCommandContext *ctx)
         rtlnet_udp_echo_clear_counters(RTLNET_PLAT_ECHO_BASE);
     }
     (void)cpupath_cls_clear_counters();
+    rtlnet_offload_reset_stats();
     rtlnet_lwip_clear_counters();
     rtlnet_tcp_echo_clear_counters();
     fmt_printf("Counters cleared\n");
@@ -2226,6 +2233,15 @@ static void cli_print_classifier_config(void)
     char a[16];
     char b[16];
     char mt[18];
+    if ((rtlnet_offload_request() & RTLNET_OFFLOAD_TX_IP) == 0u) {
+        fmt_printf("offload tx-ip off\n");
+    }
+    if ((rtlnet_offload_request() & RTLNET_OFFLOAD_TX_L4) == 0u) {
+        fmt_printf("offload tx-l4 off\n");
+    }
+    if ((rtlnet_offload_request() & RTLNET_OFFLOAD_RX) == 0u) {
+        fmt_printf("offload rx off\n");
+    }
     fmt_printf("classifier mode %s\n", cpupath_mode_name(c->mode));
     for (unsigned p = 1; p < CPUPATH_CLS_POLICERS; p++) {
         if (c->pol[p].limit_pkts != 0u || c->pol[p].window_ms != 0u || c->pol[p].enabled) {
@@ -2856,4 +2872,150 @@ int cli_if_no_storm(const MenuCommandContext *ctx)
 {
     (void)ctx;
     return cli_cpupath_rc(cpupath_storm_enable(0));
+}
+
+/**
+ * @brief Print an on/off word.
+ * @param on Nonzero for "on".
+ * @return None.
+ */
+static void cli_print_onoff(int on)
+{
+    fmt_printf("%s", on ? "on" : "off");
+}
+
+/**
+ * @brief The lwIP checksum flags as hardware (flag clear) or software (flag set) per protocol.
+ * @param f Flags word.
+ * @return None.
+ */
+static void cli_print_cs_flags(uint32_t f)
+{
+    fmt_printf("0x%04X  GEN ip %s udp %s tcp %s icmp %s | CHECK ip %s udp %s tcp %s icmp %s\n", (unsigned)f,
+               (f & RTLNET_CS_GEN_IP) ? "sw" : "hw", (f & RTLNET_CS_GEN_UDP) ? "sw" : "hw",
+               (f & RTLNET_CS_GEN_TCP) ? "sw" : "hw", (f & RTLNET_CS_GEN_ICMP) ? "sw" : "hw",
+               (f & RTLNET_CS_CHECK_IP) ? "sw" : "hw", (f & RTLNET_CS_CHECK_UDP) ? "sw" : "hw",
+               (f & RTLNET_CS_CHECK_TCP) ? "sw" : "hw", (f & RTLNET_CS_CHECK_ICMP) ? "sw" : "hw");
+}
+
+/**
+ * @brief SHOW OFFLOAD: feature discovery, CTRL, the lwIP checksum flags (and
+ *        a MISMATCH line when they disagree), counters, receive policy and
+ *        the zero-copy build options.
+ * @param ctx Unused.
+ * @return 0.
+ */
+int cli_show_offload(const MenuCommandContext *ctx)
+{
+    static const char *const rx_state_name[] = { "off", "arming (no trailer seen yet)", "on", "draining (rx turned off)" };
+    const rtlnet_features_t *f;
+    const rtlnet_offload_state_t *st;
+    rtlnet_txo_counters_t k;
+    const rtlnet_netif_stats_t *ns = rtlnet_netif_stats();
+    uint32_t ctrl = 0u;
+    uint32_t status = 0u;
+    uint32_t flags;
+    uint32_t expect;
+    (void)ctx;
+    rtlnet_features_discover();
+    f = rtlnet_features();
+    st = rtlnet_offload_state();
+    fmt_printf("Checksum offload (CPU path)\n");
+    fmt_printf("  Discovery       : wrapper %s, CPU path %s, CPU_CAPS 0x%08X", f->wrapper_ok ? "ok" : "NOT FOUND",
+               f->cpu_path ? "present" : "absent", (unsigned)f->cpu_caps);
+    fmt_printf(" (classifier %s, offload TX %s, RX %s)\n", f->cls_advertised ? "advertised" : "no",
+               f->tx_advertised ? "advertised" : "no", f->rx_advertised ? "advertised" : "no");
+    fmt_printf("  Confirmed       : classifier %s, offload TX %s, offload RX %s%s\n", f->cls_present ? "yes" : "no",
+               f->tx_present ? "yes" : "no", f->rx_present ? "yes" : "no",
+               f->errors ? "  % MISMATCH found at boot, see the log" : "");
+    if (!f->tx_present && !f->rx_present) {
+        fmt_printf("  Offload         : not present in this build (lwIP computes and checks every checksum)\n");
+        return 0;
+    }
+    (void)rtlnet_offload_ctrl_now(&ctrl);
+    (void)rtlnet_offload_status(&status);
+    fmt_printf("  Core            : CAPS 0x%08X at 0x%08X, TX buffer %u KB, STATUS 0x%08X (tx %s, rx %s)\n",
+               (unsigned)f->block_caps, (unsigned)RTLNET_PLAT_TXO_BASE, (unsigned)rtlnet_offload_buffer_kb(), (unsigned)status,
+               (status & RTLNET_TXO_STATUS_TX_IDLE) ? "idle" : "busy", (status & RTLNET_TXO_STATUS_RX_IDLE) ? "idle" : "busy");
+    fmt_printf("  CTRL            : 0x%08X  tx-ip ", (unsigned)ctrl);
+    cli_print_onoff((ctrl & RTLNET_OFFLOAD_TX_IP) != 0u);
+    fmt_printf(", tx-l4 ");
+    cli_print_onoff((ctrl & RTLNET_OFFLOAD_TX_L4) != 0u);
+    fmt_printf(", rx ");
+    cli_print_onoff((ctrl & RTLNET_OFFLOAD_RX) != 0u);
+    fmt_printf("  (requested 0x%X, supported 0x%X)\n", (unsigned)rtlnet_offload_request(),
+               (unsigned)rtlnet_offload_supported());
+    fmt_printf("  RX trailers     : %s\n", rx_state_name[(unsigned)st->rx_state]);
+    flags = rtlnet_lwip_get_checksum_ctrl();
+    fmt_printf("  lwIP flags      : ");
+    cli_print_cs_flags(flags);
+    expect = rtlnet_offload_flags_for(ctrl, st->rx_state == RTLNET_RX_TRAILER_ON);
+    if (flags != expect) {
+        fmt_printf("  %% MISMATCH: lwIP flags 0x%04X, the CTRL read-back implies 0x%04X\n", (unsigned)flags,
+                   (unsigned)expect);
+    }
+    if (rtlnet_offload_counters(&k) == RTLNET_TXO_OK) {
+        fmt_printf("  TX counters     : frames %u, ip patched %u, l4 patched %u, skipped %u, malformed %u, dropped %u\n",
+                   (unsigned)k.tx_frames, (unsigned)k.tx_ip_patched, (unsigned)k.tx_l4_patched, (unsigned)k.tx_skipped,
+                   (unsigned)k.tx_malformed, (unsigned)k.tx_dropped);
+        fmt_printf("  RX counters     : frames %u, verified %u, ip bad %u, l4 bad %u, unverified %u\n",
+                   (unsigned)k.rx_frames, (unsigned)k.rx_verified, (unsigned)k.rx_ip_bad, (unsigned)k.rx_l4_bad,
+                   (unsigned)k.rx_unverified);
+    }
+    fmt_printf("  RX policy       : trailers %u, passed verified %u, passed unverified %u, dropped bad ip %u, bad l4 %u, "
+               "no trailer %u, raw %u\n", (unsigned)st->rx_trailer_frames, (unsigned)st->rx_verified,
+               (unsigned)st->rx_unverified, (unsigned)st->rx_drop_ip, (unsigned)st->rx_drop_l4,
+               (unsigned)st->rx_no_trailer, (unsigned)st->rx_raw);
+    fmt_printf("  Build options   : zero-copy RX %s (%u buffers of %u bytes), zero-copy TX %s; frames sent in place %u, "
+               "copied %u, rx no buffer %u\n", RTLNET_NETIF_ZERO_COPY_RX ? "on" : "off", (unsigned)RTLNET_NETIF_RX_BUFS,
+               (unsigned)RTLNET_NETIF_BUF_BYTES, RTLNET_NETIF_ZERO_COPY_TX ? "on" : "off", (unsigned)ns->tx_zero_copy,
+               (unsigned)ns->tx_copied, (unsigned)ns->rx_no_buf);
+    return 0;
+}
+
+/**
+ * @brief OFFLOAD [WHAT] [STATE] (config): request an offload on or off. WHAT
+ *        is tx-ip, tx-l4, rx or all; the request is masked by what the
+ *        bitstream has and applied through rtlnet_offload_apply (CTRL first
+ *        or lwIP flags first, in the order that never loses a checksum).
+ * @param ctx argv[0] = what, argv[1] = on or off.
+ * @return 0, or -1 for a bad word or a failed change.
+ */
+int cli_offload(const MenuCommandContext *ctx)
+{
+    uint32_t bits;
+    uint32_t want = rtlnet_offload_request();
+    int on;
+    int rc;
+    if (cli_word_is(ctx->argv[0], "tx-ip")) {
+        bits = RTLNET_OFFLOAD_TX_IP;
+    } else if (cli_word_is(ctx->argv[0], "tx-l4")) {
+        bits = RTLNET_OFFLOAD_TX_L4;
+    } else if (cli_word_is(ctx->argv[0], "rx")) {
+        bits = RTLNET_OFFLOAD_RX;
+    } else if (cli_word_is(ctx->argv[0], "all")) {
+        bits = RTLNET_OFFLOAD_ALL;
+    } else {
+        return cli_bad_value("offload (tx-ip, tx-l4, rx, all)", ctx->argv[0]);
+    }
+    if (cli_word_is(ctx->argv[1], "on")) {
+        on = 1;
+    } else if (cli_word_is(ctx->argv[1], "off")) {
+        on = 0;
+    } else {
+        return cli_bad_value("state (on, off)", ctx->argv[1]);
+    }
+    rtlnet_features_discover();
+    if ((bits & rtlnet_offload_supported()) == 0u) {
+        fmt_printf("%% This build has no such offload (see show offload)\n");
+        return -1;
+    }
+    want = on ? (want | bits) : (want & ~bits);
+    rc = rtlnet_offload_apply(want);
+    if (rc == RTLNET_OFFLOAD_ERR_TIMEOUT) {
+        fmt_printf("%% The transmit offload did not go idle: left on, lwIP checksums restored\n");
+    } else if (rc == RTLNET_OFFLOAD_ERR_IO) {
+        fmt_printf("%% CTRL did not read back as written\n");
+    }
+    return (rc == RTLNET_OFFLOAD_OK) ? 0 : -1;
 }

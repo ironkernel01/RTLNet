@@ -699,6 +699,10 @@ module rtlnet_nexys_video_top #(
     // CPU-path classifier (cores/rtlnet_classifier, registers at protocol sub-map 0x8000): drop-all
     // until the firmware configures it (broadcast storm limiter at boot).
     .CPU_CLASSIFIER_ENABLE (1),
+    // CPU-path checksum offload (cores/rtlnet_tcp_offload, registers at protocol sub-map 0x9000): inserts the
+    // IPv4/TCP/UDP checksums of CPU transmit frames, appends a checksum trailer to CPU receive frames; power-up
+    // CTRL 0 is a pass-through.
+    .CPU_TCP_OFFLOAD_ENABLE (1),
     .CPU_AXIS_CLK_HZ (CPU_CLK_HZ),
     .RAM_STYLE       ("block")
   ) u_protocol (

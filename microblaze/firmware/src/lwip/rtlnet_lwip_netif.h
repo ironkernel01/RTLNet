@@ -21,6 +21,25 @@
  * the AXI BRAM, waits (bounded, RTLNET_NETIF_TX_WAIT_US) until the previous
  * MM2S transfer is done and starts the next one.
  *
+ * Checksum offload (rtlnet_offload.c, hardware cores/rtlnet_tcp_offload): with
+ * rx_csum on, every received DMA transfer is roundup8(frame) + 8 bytes and ends
+ * in a trailer beat (frame length, flags); rtlnet_offload_rx_frame() decodes it
+ * and applies the policy (bad IPv4 header or verified bad TCP/UDP checksum: drop
+ * and count). The buffers hold roundup8(1522) + 8 bytes.
+ *
+ * Zero-copy options (lwipopts.h, RX default on, TX default off, -D to change):
+ *   RTLNET_NETIF_ZERO_COPY_RX: a received buffer is handed to lwIP as a custom
+ *     pbuf (PBUF_REF); lwIP's free callback returns the buffer to the free
+ *     list from which the next S2MM transfer is armed. 16 buffers bound the
+ *     frames lwIP can hold; with none free the S2MM channel stays idle (the
+ *     wrapper's CPU receive FIFO absorbs, then counts drops) and rx_no_buf
+ *     counts the polls that found none.
+ *   RTLNET_NETIF_ZERO_COPY_TX: lwIP's heap lives in the AXI BRAM, so a frame
+ *     built in one pbuf is sent from where it is (the DMA has a realignment
+ *     engine on MM2S: any byte address); the pbuf stays referenced until the
+ *     transfer is done. Chained pbufs and pbufs outside the AXI BRAM are
+ *     copied into one of the two transmit buffers.
+ *
  * Memory rule: the MicroBlaze has no caches, so the DMA buffers need no flush
  * or invalidate; the CPU reads and writes them uncached over M_AXI_DP. The
  * buffers are 64-byte aligned (DMA without realignment engine needs 8).
@@ -33,11 +52,18 @@
 
 #include <stdint.h>   /* int8_t, uint32_t */
 
+#include "lwipopts.h"           /* RTLNET_NETIF_ZERO_COPY_RX / _TX */
+#include "rtlnet_tcp_offload.h" /* RTLNET_TXO_RX_BUFFER_BYTES */
+
 /* lwIP types appear only as pointers, so the desktop harness (no lwIP)
  * compiles against this header; int8_t is lwIP's err_t (s8_t). */
 struct netif;
 
-#define RTLNET_NETIF_RX_BUFS      4u        /* receive ring entries */
+#if RTLNET_NETIF_ZERO_COPY_RX
+#define RTLNET_NETIF_RX_BUFS      16u       /* receive buffers: lwIP holds some, one is armed */
+#else
+#define RTLNET_NETIF_RX_BUFS      4u        /* receive buffers: one armed, the rest free */
+#endif
 #define RTLNET_NETIF_TX_BUFS      2u        /* transmit buffers (copy overlaps the DMA) */
 #define RTLNET_NETIF_BUF_BYTES    2048u     /* per buffer; holds the 1518-byte frame */
 #define RTLNET_NETIF_BUF_ALIGN    64u
@@ -55,6 +81,9 @@ struct netif;
 #if RTLNET_NETIF_BUF_BYTES < 1518u
 #error "RTLNET_NETIF_BUF_BYTES is smaller than a maximum Ethernet frame"
 #endif
+#if RTLNET_NETIF_BUF_BYTES < RTLNET_TXO_RX_BUFFER_BYTES(1522u)
+#error "RTLNET_NETIF_BUF_BYTES cannot hold roundup8(1522) + 8 bytes (frame, padding and receive trailer)"
+#endif
 
 typedef struct {
     uint32_t rx_frames;       /* frames delivered to lwIP */
@@ -69,11 +98,17 @@ typedef struct {
     uint32_t tx_too_long;
     uint32_t tx_errors;       /* MM2S error status or refused transfer */
     uint32_t dma_resets;
+    uint32_t rx_drop_ip;      /* dropped by the trailer policy: bad IPv4 header */
+    uint32_t rx_drop_l4;      /* dropped by the trailer policy: bad TCP/UDP checksum */
+    uint32_t rx_no_trailer;   /* dropped: rx_csum on but no trailer */
+    uint32_t rx_no_buf;       /* polls that found no free receive buffer to arm (zero-copy receive) */
+    uint32_t tx_zero_copy;    /* frames sent from the pbuf in place */
+    uint32_t tx_copied;       /* frames copied into a transmit buffer */
     uint32_t rx_budget_hits;  /* polls that used the whole frame budget (more frames were waiting) */
     /* Profile, in cpu_clk ticks (RTLNET_PLAT_TICKS_PER_US per microsecond), since the last clear. */
     uint32_t prof_clear;      /* plat_ticks() at the clear: wall time = now - prof_clear */
     uint32_t prof_busy;       /* polls that delivered frames: all work done from them, lwIP and applications included */
-    uint32_t prof_rx_copy;    /* pbuf_alloc + pbuf_take of received frames (AXI BRAM read) */
+    uint32_t prof_rx_copy;    /* pbuf_alloc + copy of received frames (AXI BRAM read), trailer decode */
     uint32_t prof_rx_input;   /* netif->input: lwIP receive path, TCP, applications, and the frames they send */
     uint32_t prof_tx_copy;    /* pbuf chain written to the TX buffer (AXI BRAM word writes) */
     uint32_t prof_tx_wait;    /* wait for the previous MM2S transfer */

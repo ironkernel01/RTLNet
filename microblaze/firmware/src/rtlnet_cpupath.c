@@ -20,6 +20,7 @@
 #include "rtlnet_board.h"
 #include "rtlnet_classifier.h"
 #include "rtlnet_eth_protocol.h"
+#include "rtlnet_offload.h"
 #include "rtlnet_platform.h"
 
 static cpupath_cls_config_t g_cfg;
@@ -194,9 +195,10 @@ static int hw_sync(void)
 /*
  * cpupath_init -- probe the classifier and the wrapper CPU path, configure.
  * Steps:
- *   1. Classifier present when its ID reads "CLSF" at the protocol sub-map
- *      0x8000 (a CPU-only or older bitstream reads 0), then
- *      rtlnet_classifier_init.
+ *   1. Classifier present when the feature discovery (rtlnet_features_discover:
+ *      wrapper CPU_CAPS bit 16 and the block's own ID "CLSF" and VERSION at the
+ *      protocol sub-map 0x8000) found it; a CPU-only or older bitstream does
+ *      not advertise it. Then rtlnet_classifier_init.
  *   2. The broadcast storm default through
  *      rtlnet_classifier_config_bcast_storm (the classifier leaves
  *      DROP-ALL); when the running configuration differs from the default
@@ -207,9 +209,9 @@ static int hw_sync(void)
  */
 int cpupath_init(void)
 {
-    board_probe_t p;
     int rc = CPUPATH_ABSENT;
-    g_present = board_probe(RTLNET_PLAT_CLS_BASE, RTLNET_ID_CLS, &p);
+    rtlnet_features_discover();
+    g_present = rtlnet_features()->cls_present;
     if (g_present && rtlnet_classifier_init(&g_cls, RTLNET_PLAT_CLS_BASE) != RTLNET_CLS_OK) {
         g_present = 0;
     }

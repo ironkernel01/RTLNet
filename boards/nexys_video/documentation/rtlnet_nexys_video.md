@@ -58,7 +58,8 @@ glitch argument). The PHY reset `eth_rst_b` is a register: low after reset relea
 Decoder `u_decoder` (`rtlnet_axil_decoder`, N = 6), windows of architecture 6.1: SYS 0x44A0_0000,
 MAC 0x44A0_1000, MDIO 0x44A0_2000, ECHO 0x44A0_3000, PROTOCOL 0x44A1_0000 (64 KiB),
 CLASSIFIER 0x44A2_0000 (reserved for a main-ingress classifier; the CPU-path classifier is inside the protocol
-wrapper at PROTOCOL + 0x8000 = 0x44A1_8000). Windows without a core are `rtlnet_axil_slave` stubs: OKAY,
+wrapper at PROTOCOL + 0x8000 = 0x44A1_8000; the checksum offload `rtlnet_tcp_offload` at PROTOCOL + 0x9000 =
+0x44A1_9000). Windows without a core are `rtlnet_axil_slave` stubs: OKAY,
 read data 0. Other addresses in the 1 MiB window: DECERR.
 
 System registers (single definition `microblaze/firmware/src/rtlnet_nexys_video_sysregs.h`):
@@ -126,9 +127,9 @@ CDC constraints (`scripts/rtlnet_constrain_cdc.tcl`, sourced after synthesis): c
 gray, fifo, axil_cdc by cell name; per-class counts and a per-instance list
 (`build/reports/cdc_instances.txt`) are written; `::rtlnet_cdc_required` is `{sync reset}` for the
 CPU-only build and all five for the network build (zero matches of a required class is an error);
-`::rtlnet_cdc_expect` pins the instance counts (network: fifo 9, axil_cdc 4, gray 6; CPU-only: 0, 0,
-0; the fourth `rtlnet_axil_cdc` is the CPU-path classifier's register crossing, its two synchronizers are counted in
-the sync class), so a crossing added or lost by a core change fails the build until reviewed. For the findings
+`::rtlnet_cdc_expect` pins the instance counts (network: fifo 10, axil_cdc 5, gray 6; CPU-only: 0, 0,
+0; the fourth `rtlnet_axil_cdc` is the CPU-path classifier's register crossing, the fifth the checksum offload's, the
+tenth fifo the offload's TX buffer; the synchronizers of the crossings are counted in the sync class), so a crossing added or lost by a core change fails the build until reviewed. For the findings
 report_cdc cannot recognize the script creates native waivers (`create_waiver -type CDC`), scoped to
 one instance's source and destination registers with the protocol as the reason: CDC-6 on every Gray
 bus (`gray_src` -> `gray_dst_ff[0]`, FIFO `s_gray`/`m_gray` -> `*_m1`/`*_s1`) and on the FIFO event
@@ -371,6 +372,52 @@ After the TCP throughput tuning (firmware rebuilt `-Werror` clean, same bitstrea
 
 After the rebase onto the lwiperf merge (firmware rebuilt `-Werror` clean, merged into the same bitstream, text 159.6 KB) the console test passed 27/27, `tcp_test.ps1` 5/5 (iperf `-R` now returns 29.3 Mbit/s board -> PC) and a second flood gave seen 4002, passed 1013, dropped 2989, ping 14/14, TCP echo PASS.
 
+### 6.6 Network build with the checksum offload
+
+Network build of commit eb6754b6 (tree clean), 10-22-2026, Vivado 2025.2, `build.ps1 -Network`:
+`CPU_TCP_OFFLOAD_ENABLE` 1 (`u_protocol/g_cpu.g_offload.u_cpu_offload`, defaults of the core: `TX_BUF_KB` 8), window
+0x44A1_9000, the AXI DMA with the MM2S data realignment engine (transmit buffers at any byte address).
+
+| Item | Result |
+|---|---|
+| Timing (post-route) | WNS +0.221 ns, WHS +0.020 ns, WPWS +0.264 ns; 0 failing endpoints |
+| Utilization (post-route) | 21771 LUTs (16.27 %), 31209 FFs (11.66 %), 229 BRAM tiles (62.74 %), 5 DSP48 (2256 LUTs, 3870 FFs and 2.5 BRAM tiles more than the build of section 6.5: the offload and the DMA realignment engine) |
+| CDC constraints | fifo 10 (96 cells), axil_cdc 5 (331), gray 6 (192), sync 30 (122), reset 8 (32); `::rtlnet_cdc_expect` `fifo 10 axil_cdc 5 gray 6` |
+| Firmware | default image (zero-copy receive on, transmit off; rebased onto the throughput tuning of microblaze documentation 9.10): text 167408 B, data 2108 B, bss 263336 B (36864 B of it the AXI BRAM section), 387 KiB of the 512 KiB LMB; images for the four zero-copy combinations (`rtlnet_nexys_video_rx<0|1>_tx<0|1>.bit`, `-Define RTLNET_NETIF_ZERO_COPY_RX/_TX`; AXI BRAM sections 12288 / 36864 / 77952 / 102528 B) |
+| Host tests | `build.ps1 -Demo`: TEST PASS 364 checks (discovery of none / TX only / RX only / both builds, mismatch cases, the order of CTRL / STATUS / lwIP-flag writes, receive policy, CLI); `-LwipTest` LWIPERF_LOOPBACK PASS 69; `-NetifTest` NETIF_HOST PASS for the four zero-copy combinations (64 / 78 / 62 / 80 checks) |
+
+Board simulation: `tb_rtlnet_nexys_video_net` TEST PASS, 141 checks at 10, 100 and 1000 Mb/s, including the offload
+section through the CPU path: TCP and UDP frames from the DMA stand-in leave with correct IPv4 and L4 checksums
+(CTRL tx bits), received frames carry a verified trailer (good, and a corrupted L4 checksum flagged), and with CTRL 0
+both directions are bit-exact pass-through. Full regression `scripts/rtlnet_regression.ps1`: 76 passed, 0 failed.
+
+Hardware (board 192.169.1.199 by DHCP, PC wired NIC 192.169.1.178, `iperf.exe -t 10`, mean of two runs, Mbit/s;
+`offload_bench.ps1` once per firmware image, the CLI switches the offload at run time; the images differ in the
+zero-copy options RX / TX; the measurements, the CPU profile and the analysis are in
+`microblaze/documentation/rtlnet_cpu_microblaze.md` section 9.11):
+
+| Zero-copy RX / TX | Offload | plain | `-R` | `-d` (PC -> board + board -> PC) | plain + UDP 20M (TCP / UDP) |
+|---|---|---|---|---|---|
+| off / off | off | 86.8 | 81.9 | 21.1 + 60.0 | 70.2 / 20.9 |
+| off / off | on | 94.9 | 94.8 | 30.2 + 86.0 | 74.3 / 20.9 |
+| **on / off (default)** | off | 89.6 | 81.4 | 21.2 + 60.0 | 72.0 / 20.9 |
+| **on / off (default)** | **on** | **94.8** | **94.9** | **26.4 + 93.7** | **74.3 / 20.9** |
+| off / on | off | 82.0 | 58.8 | 17.6 + 47.3 | 66.8 / 20.9 |
+| off / on | on | 94.8 | 90.4 | 23.9 + 68.5 | 74.3 / 20.9 |
+| on / on | off | 84.4 | 61.8 | 17.6 + 47.0 | 68.6 / 20.9 |
+| on / on | on | 94.9 | 90.2 | 27.2 + 77.1 | 74.3 / 20.9 |
+
+Default image (zero-copy receive on, transmit off, offload on at boot; AXI BRAM section 36864 of 131072 B):
+`cli_test.ps1` `CLI_TEST: PASS 28/28`; `net_test.ps1 -Nic Ethernet -Speed 100` `NET_TEST: PASS 25/25`; `tcp_test.ps1`
+`TCP_TEST: PASS 8/8` (PC -> board 94.8, `-R` 94.8, `-r` 94.8, `-d` 93.8 + 27.0 Mbit/s board -> PC + PC -> board,
+together: TCP 72.2 Mbit/s, RTL UDP 20.9 Mbit/s 0/17825 lost); `offload_bench.ps1` `OFFLOAD_BENCH: PASS 19/19`
+(hardware counters: tx ip and l4 patched 492467, rx verified 361494, no bad checksum, no policy drop, no `MISMATCH`
+line); broadcast flood (400 per second, 10 s) with ping and a two-connection echo loop: storm limiter passed 1003
+and dropped 2995 of 3998 (limit holds), ping 14/14, 8/8 echo runs PASS at 22.5 to 23.2 Mbit/s, CPU FIFO drops 35 of
+9022 frames, `show offload` clean (verified 6027, bad 0). The offload turns the 100 Mb/s link into the limit
+(94.9 Mbit/s TCP goodput in one direction, 120 Mbit/s sum with `-d`) and the receive zero-copy leaves the CPU 65 %
+idle at that rate (35 % busy, against 81 % copying). Zero-copy transmit costs throughput (`-R` 90.4 Mbit/s) and is off.
+
 ## 7. Network integration (done 10-22-2026) and what remains
 
 Integrated: `u_mac`, `u_mdio`, `u_protocol` (every leaf, the CPU network path and its classifier), `u_echo` under
@@ -397,4 +444,5 @@ Open:
 | 10-22-2026 | Initial version: CPU-only board top, build flow, bring-up |
 | 10-22-2026 | Network integration: RGMII XDC, CDC counts and waivers, network board bench, firmware network manager and driver-backed CLI, hardware results at 100 and 10 Mb/s |
 | 10-22-2026 | `microblaze/` folder; CPU core with AXI DMA, AXI BRAM, 512 KiB LMB; XSA export; BSP-based firmware with lwIP; CPU-only hardware checkpoint (section 6.3) |
+| 10-22-2026 | Checksum offload (`rtlnet_tcp_offload`) enabled in the network build (`CPU_TCP_OFFLOAD_ENABLE` 1, window 0x44A1_9000), CDC expectation `fifo 10 axil_cdc 5 gray 6`, MM2S data realignment engine in the block design, firmware zero-copy options, `show offload` step in `cli_test.ps1`, `offload_bench.ps1`; build and hardware results of section 6.6 (default: zero-copy receive on, transmit off) |
 | 10-22-2026 | CPU-path classifier enabled in the network build (`CPU_CLASSIFIER_ENABLE` 1), CDC expectation `axil_cdc 4`, firmware on the classifier driver, bench checks for drop-all and broadcast limiting, hardware results of section 6.5; open items refreshed |

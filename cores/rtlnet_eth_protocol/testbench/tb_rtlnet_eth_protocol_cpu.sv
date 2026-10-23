@@ -60,6 +60,11 @@ module tb_rtlnet_eth_protocol_cpu;
   localparam logic [15:0] R_CAPS       = 16'h0008;
   localparam logic [15:0] R_CTRL       = 16'h000C;
   localparam logic [15:0] R_STATUS     = 16'h0010;
+`ifdef TB_NO_OFFLOAD
+  localparam int          OFFLOAD      = 0;
+`else
+  localparam int          OFFLOAD      = 1;
+`endif
   localparam logic [15:0] R_CPU_CAPS   = 16'h0034;
   localparam logic [15:0] R_IN_FRAMES  = 16'h0040;
   localparam logic [15:0] R_IN_FILT    = 16'h0044;
@@ -91,6 +96,9 @@ module tb_rtlnet_eth_protocol_cpu;
   localparam int          ARP_WAIT     = 4000;
   localparam int          CPU_WAIT     = 20000;             // cpu_axis_clk clocks
   localparam int          CPU_SLOTS    = 8;                 // CPU_RX_FIFO_KB 16, 1518-byte frames
+  // The checksum offload holds up to 21 beats of a stalled stream (input slice, 17-beat delay line, output
+  // slice): with the stall frames of 11 and 15 beats the queue frees the slot of one more frame.
+  localparam int          OFFLOAD_EXTRA = (OFFLOAD != 0) ? 1 : 0;
 
   // ---------------------------------------------------------------------------
   // Clocks and resets.
@@ -162,7 +170,8 @@ module tb_rtlnet_eth_protocol_cpu;
     .CPU_PATH_ENABLE       (1),
     .CPU_RX_FIFO_KB        (16),
     .CPU_TX_FIFO_KB        (8),
-    .CPU_CLASSIFIER_ENABLE (0)
+    .CPU_CLASSIFIER_ENABLE (0),
+    .CPU_TCP_OFFLOAD_ENABLE (OFFLOAD)
   ) dut (
     .axis_clk              (axis_clk),
     .proto_clk             (proto_clk),
@@ -531,7 +540,8 @@ module tb_rtlnet_eth_protocol_cpu;
 
     // ---- 1. Register map.
     axi_expect(R_CAPS, 32'h0408_103F, "CAPS (all leaves, CPU path, 16/8 KB, 4 sockets)");
-    axi_expect(R_CPU_CAPS, 32'h0000_0810, "CPU_CAPS (RX 16 KB, TX 8 KB)");
+    axi_expect(R_CPU_CAPS, (OFFLOAD != 0) ? 32'h0006_0810 : 32'h0000_0810, "CPU_CAPS (RX 16 KB, TX 8 KB, offload bits 17/18)");
+    axi_expect(16'h9000, (OFFLOAD != 0) ? 32'h5443_504F : 32'h0, "offload window ID");
     axi_expect(R_CTRL, CTRL_DEFAULT, "CTRL at reset");
     axi_expect(R_STATUS, 32'h0000_0002, "STATUS at reset (no CPU flags)");
     for (int a = 16'h0050; a <= 16'h0068; a += 4) axi_expect(16'(a), 32'h0, "CPU counter at reset");
@@ -629,7 +639,7 @@ module tb_rtlnet_eth_protocol_cpu;
     axi_rd(R_STATUS, v);
     tb_check(v[20] === 1'b1, $sformatf("STATUS.CPU_RX_FULL while the CPU is stalled (0x%08x)", v));
     axi_rd(R_CPU_DROP, v);
-    tb_check(v - v0 == 32'd4, $sformatf("CPU stalled: CPU_RX_DROPPED +%0d, expected 4", v - v0));
+    tb_check(v - v0 == 32'(4 - OFFLOAD_EXTRA), $sformatf("CPU stalled: CPU_RX_DROPPED +%0d, expected %0d", v - v0, 4 - OFFLOAD_EXTRA));
     f = pad60(echo_request(DEF_MAC, PEER_MAC, PEER_IP, DEF_IP, 16'h7A02, 16'd9, rand_bytes(seed, 200)));
     offer(f);
     exp_claims[1]++;
@@ -638,7 +648,7 @@ module tb_rtlnet_eth_protocol_cpu;
     offer(f);                                                                  // dropped too
     tb_check(u_cpu_sink.frames.size() == 0, "CPU stalled: nothing completed at m_axis_cpu_eth");
     u_cpu_sink.ready_pct = 100;
-    for (int n = 0; n < CPU_SLOTS; n++) expect_cpu($sformatf("kept frame %0d after the stall", n), q[n]);
+    for (int n = 0; n < CPU_SLOTS + OFFLOAD_EXTRA; n++) expect_cpu($sformatf("kept frame %0d after the stall", n), q[n]);
     expect_cpu_none("dropped frames after the stall");
     axi_rd(R_STATUS, v);
     tb_check(v[20] === 1'b0, "STATUS.CPU_RX_FULL clear after the drain");

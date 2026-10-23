@@ -11,6 +11,7 @@
 
 #include "rtlnet_eth_protocol.h"
 #include "rtlnet_lwip_netif.h"
+#include "rtlnet_offload.h"
 #include "rtlnet_platform.h"
 #include "rtlnet_tcp_echo.h"
 #include "rtlnet_tcp_iperf.h"
@@ -24,7 +25,19 @@
 #include "lwip/timeouts.h"
 #include "netif/ethernet.h"
 
+/* The offload module mirrors the lwIP checksum flag values to stay free of lwIP headers. */
+_Static_assert(RTLNET_CS_GEN_IP == NETIF_CHECKSUM_GEN_IP, "GEN_IP value");
+_Static_assert(RTLNET_CS_GEN_UDP == NETIF_CHECKSUM_GEN_UDP, "GEN_UDP value");
+_Static_assert(RTLNET_CS_GEN_TCP == NETIF_CHECKSUM_GEN_TCP, "GEN_TCP value");
+_Static_assert(RTLNET_CS_GEN_ICMP == NETIF_CHECKSUM_GEN_ICMP, "GEN_ICMP value");
+_Static_assert(RTLNET_CS_CHECK_IP == NETIF_CHECKSUM_CHECK_IP, "CHECK_IP value");
+_Static_assert(RTLNET_CS_CHECK_UDP == NETIF_CHECKSUM_CHECK_UDP, "CHECK_UDP value");
+_Static_assert(RTLNET_CS_CHECK_TCP == NETIF_CHECKSUM_CHECK_TCP, "CHECK_TCP value");
+_Static_assert(RTLNET_CS_CHECK_ICMP == NETIF_CHECKSUM_CHECK_ICMP, "CHECK_ICMP value");
+
 static struct netif g_netif;
+static uint32_t     g_cs_flags = RTLNET_CS_ENABLE_ALL;   /* checksum flags requested before the netif exists */
+static int          g_netif_added;                      /* netif_add succeeded (flags can be set on it) */
 static int          g_running;
 static int          g_link_down;      /* 0 = up (.bss, so a soft restart starts with link up) */
 static rtlnet_lwip_status_t g_stat;
@@ -36,6 +49,28 @@ static rtlnet_lwip_status_t g_stat;
 u32_t sys_now(void)
 {
     return plat_uptime_ms();
+}
+
+/*
+ * rtlnet_lwip_set_checksum_ctrl -- set the netif's checksum flags
+ * (NETIF_CHECKSUM_GEN_* / _CHECK_*). Called by rtlnet_offload_apply only.
+ * Returns: nothing; remembered for the netif added later when lwIP is not running.
+ */
+void rtlnet_lwip_set_checksum_ctrl(uint32_t flags)
+{
+    g_cs_flags = flags;
+    if (g_netif_added) {
+        NETIF_SET_CHECKSUM_CTRL(&g_netif, flags);
+    }
+}
+
+/*
+ * rtlnet_lwip_get_checksum_ctrl -- the netif's checksum flags as lwIP holds them.
+ * Returns: the flags (the requested ones while lwIP is not running).
+ */
+uint32_t rtlnet_lwip_get_checksum_ctrl(void)
+{
+    return g_netif_added ? (uint32_t)g_netif.chksum_flags : g_cs_flags;
 }
 
 /*
@@ -66,7 +101,9 @@ static uint32_t ip4_to_host(const ip4_addr_t *a)
  *   2. Read the MAC and the effective IP / mask / gateway through the
  *      rtlnet_eth_protocol driver.
  *   3. First call: lwip_init(), netif_add with those values and
- *      ethernet_input, default, up, link as last reported; start the TCP
+ *      ethernet_input, discovery of the CPU-path blocks and
+ *      rtlnet_offload_apply (checksum offloads on as far as present), default,
+ *      up, link as last reported; start the TCP
  *      applications (echo on port 7, iperf on port 5001). Returns RTLNET_LWIP_STARTED.
  *   4. Later calls: a different MAC replaces netif->hwaddr and flushes the
  *      ARP table; a different IP, mask or gateway goes in with
@@ -104,6 +141,11 @@ int InitLWIP(void)
             g_stat.last_result = RTLNET_LWIP_NETIF_FAIL;
             return RTLNET_LWIP_NETIF_FAIL;
         }
+        /* Checksum offload: discover what the bitstream has and bring CTRL and the netif flags to "everything
+         * present" before the first frame (rtlnet_offload_apply; the flags follow the CTRL read-back). */
+        g_netif_added = 1;
+        rtlnet_features_discover();
+        (void)rtlnet_offload_apply(rtlnet_offload_request());
         netif_set_default(&g_netif);
         netif_set_up(&g_netif);
         if (!g_link_down) {

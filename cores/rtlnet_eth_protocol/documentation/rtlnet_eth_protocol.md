@@ -26,8 +26,8 @@ never see the MAC or each other. Every frame no enabled leaf claims is copied to
  s_axi (s_axi_aclk) -> [u_cpu_axil_dec] -> u_axil_cdc ---->  |   u_axil_slave -> window decode (addr[15:12])
                           | 0x8000 window                   |
  cpu_axis_clk             v                                  |
- m_axis_cpu_eth <- u_cpu_classifier (or u_cpu_rx_slice) <- u_cpu_rx_fifo <- copy + claim verdict (dequeue)
- s_axis_cpu_eth -> u_cpu_tx_guard -> u_cpu_tx_fifo ---------+--> discard gate -> u_cpu_tx_slice -> arbiter source 5
+ m_axis_cpu_eth <- u_cpu_offload (RX trailer) <- u_cpu_classifier (or u_cpu_rx_slice) <- u_cpu_rx_fifo <- copy + claim verdict
+ s_axis_cpu_eth -> u_cpu_offload (TX checksum insert) -> u_cpu_tx_guard -> u_cpu_tx_fifo --+--> discard gate -> u_cpu_tx_slice -> arbiter source 5
 ```
 
 ## 1. Interface (architecture 15.3)
@@ -65,6 +65,7 @@ The application streams belong to the UDP socket leaf; with `UDP_ENABLE = 0` the
 | `CPU_RX_FIFO_KB` | 16 | `u_cpu_rx_fifo` (8 slots of one 1518-byte frame) |
 | `CPU_TX_FIFO_KB` | 8 | `u_cpu_tx_fifo` (4 slots) |
 | `CPU_CLASSIFIER_ENABLE` | 1 | build `u_cpu_classifier` (`rtlnet_classifier`) between `u_cpu_rx_fifo` and `m_axis_cpu_eth` and its register window 0x8000; 0: the queue drives `m_axis_cpu_eth` through `u_cpu_rx_slice` and 0x8000 reads 0 |
+| `CPU_TCP_OFFLOAD_ENABLE` | 1 | build `u_cpu_offload` (`rtlnet_tcp_offload`): IPv4/TCP/UDP checksum insert on the CPU transmit stream (between `s_axis_cpu_eth` and `u_cpu_tx_guard`) and checksum check plus an 8-byte trailer beat on the CPU receive stream (between the classifier and `m_axis_cpu_eth`); registers at window 0x9000; 0: both streams pass as before and 0x9000 reads 0 |
 | `CPU_AXIS_CLK_HZ` | 100 000 000 | `cpu_axis_clk` frequency, passed to the classifier as `AXIS_CLK_HZ` (policer millisecond tick) |
 | `RAM_STYLE` | `"block"` | every buffer (queues and leaf buffers) |
 
@@ -86,6 +87,7 @@ configures it (`cores/rtlnet_classifier/driver`).
 | 4 | 0x4000 | `rtlnet_iperf` | 4 |
 | 5 | 0x5000 | `rtlnet_udp_socket` | 0 |
 | 8 | 0x8000 | `u_cpu_classifier` (`rtlnet_classifier`), decoded in `s_axi_aclk` by `u_cpu_axil_dec` ahead of the wrapper's crossing; reads 0 when not built | — |
+| 9 | 0x9000 | `u_cpu_offload` (`rtlnet_tcp_offload`, `cores/rtlnet_tcp_offload/documentation`), decoded the same way; reads 0 when not built | — |
 | 6, 7, 9-15 | | unused: read 0, writes ignored | |
 
 An absent leaf's window reads 0. Every access is answered OKAY; a write with `wstrb != 4'hF` is ignored
@@ -110,7 +112,7 @@ Defined in `driver/rtlnet_eth_protocol.h`, mirrored by localparams in `hdl/rtlne
 | 0x028 | `EFFECTIVE_IP` | RO | `STATIC_IP` | the address the leaves use |
 | 0x02C | `EFFECTIVE_MASK` | RO | `NETMASK` | the mask the UDP socket leaf uses |
 | 0x030 | `EFFECTIVE_GATEWAY` | RO | `GATEWAY` | the gateway the UDP socket leaf uses |
-| 0x034 | `CPU_CAPS` | RO | build | `[7:0]` `CPU_RX_FIFO_KB`, `[15:8]` `CPU_TX_FIFO_KB`; 0 without the CPU path |
+| 0x034 | `CPU_CAPS` | RO | build | `[7:0]` `CPU_RX_FIFO_KB`, `[15:8]` `CPU_TX_FIFO_KB`, bit 16 `CPU_CLASSIFIER_PRESENT`, bit 17 `CPU_TCP_OFFLOAD_TX_PRESENT` (checksum insert), bit 18 `CPU_TCP_OFFLOAD_RX_PRESENT` (checksum check and trailer); 0 without the CPU path. Firmware reads these bits first and then confirms the block's own ID and CAPS at its window (the offload core's `CAPS.TX_PRESENT` / `CAPS.RX_PRESENT` must equal bits 17 / 18, else the block is treated as absent) |
 | 0x040 | `INGRESS_FRAMES` | RO | 0 | frames that passed the filter and were stored whole |
 | 0x044 | `INGRESS_FILTERED` | RO | 0 | frames discarded by the destination filter |
 | 0x048 | `INGRESS_DROPPED` | RO | 0 | frames that passed the filter but found no free slot, or were longer than one slot |
@@ -262,6 +264,18 @@ instead. The classifier's registers are reached at 0x8000-0x8FFF: `u_cpu_axil_de
 64 KiB sub-map (slave 1, size 0 = 64 KiB in 16 address bits; the lower index wins) to `u_axil_cdc`. Without the
 classifier there is no decoder and the window reads 0 like any unused window.
 
+**Checksum offload.** `u_cpu_offload` (`rtlnet_tcp_offload`, `cpu_axis_clk`) sits on the two CPU streams. Receive:
+classifier (or `u_cpu_rx_slice`) -> `s_axis_rx` ... `m_axis_rx` -> `m_axis_cpu_eth`; with `CTRL.rx_csum` set every frame
+leaves padded to 8 bytes with one trailer beat (length, folded L4 sum, flags, L4 offset, marker `0xA5`); the CPU DMA buffer
+holds `roundup8(1522) + 8` bytes. Transmit: `s_axis_cpu_eth` -> `s_axis_tx` ... `m_axis_tx` -> `u_cpu_tx_guard` and
+`u_cpu_tx_fifo` (store and forward in the offload's own 8 KB buffer; the checksum fields of IPv4/TCP/UDP frames are
+inserted when `CTRL.tx_ip_csum` / `tx_l4_csum` are set, otherwise the frame is bit-exact). Power-up CTRL is 0: both
+streams are pass-through. Its registers are reached at 0x9000-0x9FFF through `u_cpu_axil_dec` (`N` 3: classifier at
+0x8000, offload at 0x9000, the rest of the sub-map to `u_axil_cdc`); a window whose block is not built is answered by a
+null `rtlnet_axil_slave` (reads 0, OKAY, writes ignored). The offload adds buffering to a stalled CPU stream
+(input slice, the 17-beat delay line, output slice: about 21 beats), so a stalled CPU holds one more small frame in the
+path before `CPU_RX_DROPPED` counts. `CPU_TX_FRAMES` and the guard see the offload's output.
+
 **Transmit.** `s_axis_cpu_eth` -> `u_cpu_tx_guard` (`rtlnet_frame_guard`, 14..1518 bytes, legal `tkeep`) ->
 `u_cpu_tx_fifo` (`CPU_TX_FIFO_KB`, `cpu_axis_clk` to `proto_clk`, `DROP_WHEN_FULL = 0`, so `s_axis_cpu_eth_tready`
 falls only between frames and the CPU's DMA is simply held) -> discard gate -> `u_cpu_tx_slice` -> arbiter source 5.
@@ -292,6 +306,7 @@ samples it). Every register file is a single-clock block in `proto_clk`.
 | CPU frames cpu_axis_clk -> proto_clk | `g_cpu.u_cpu_tx_fifo` | `rtlnet_packet_fifo` | `*u_cpu_tx_fifo`, Gray pointers as above |
 | `CPU_TX_REJECTED` cpu_axis_clk -> proto_clk | `g_cpu.u_cnt_cpu_reject_sync` | `rtlnet_gray_sync` | `gray_src_reg -> gray_dst_ff_reg[0]`, one cpu_axis_clk period |
 | classifier registers s_axi_aclk -> cpu_axis_clk | inside `g_cpu.g_classifier.u_cpu_classifier` | its own `rtlnet_axil_cdc` | per the classifier guide |
+| offload registers s_axi_aclk -> cpu_axis_clk | inside `g_cpu.g_offload.u_cpu_offload` (`u_regs/u_axil_cdc`) | its own `rtlnet_axil_cdc` | per the offload guide; its TX buffer `u_tx/u_tx_fifo` is a single-clock `rtlnet_packet_fifo` (class `fifo`) |
 
 No other signal crosses: leaves, arbiter, dequeue controller, the copy and verdict logic and the register file
 are all `proto_clk`; the UDP socket leaf owns its `app_clk` crossings. `cpu_path_enable` is a `proto_clk`
@@ -502,4 +517,5 @@ classifier window is `RTLNET_PROTO_WIN_CLASSIFIER` (0x8000); its registers belon
 | Revision | Change |
 |---|---|
 | 10-22-2026 | Initial version |
+| 10-22-2026 | Checksum offload on the CPU path: `u_cpu_offload` (`CPU_TCP_OFFLOAD_ENABLE`) on both CPU streams, window 0x9000 (decoder `N` 3 with null slaves for absent windows), `CPU_CAPS` bits 16..18, driver `rtlnet_eth_protocol_get_cpu_features`, benches check CPU_CAPS and the window for builds with and without each block |
 | 10-22-2026 | Leaf `claim` inputs; CPU network path (`u_cpu_rx_fifo` with the claim verdict, `u_cpu_tx_fifo` as arbiter source 5, CTRL bit 1, CAPS bit 5, CPU_CAPS, STATUS bits 20-22, DELIVERED and six CPU counters); `u_cpu_classifier` hook with its 0x8000 window (`CPU_CLASSIFIER_ENABLE`, `CPU_AXIS_CLK_HZ`); `tb_rtlnet_eth_protocol_cpu`; claim monitor; driver CPU-path functions |

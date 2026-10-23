@@ -16,7 +16,8 @@
  * the sizes below hold both.
  *
  * Memory (all in the LMB block RAM, .bss; only the DMA buffers live in the
- * AXI BRAM, rtlnet_lwip_netif.c):
+ * AXI BRAM, rtlnet_lwip_netif.c: 16 x 2 KiB receive + 2 x 2 KiB transmit = 36 KiB of the 128 KiB by default;
+ * with RTLNET_NETIF_ZERO_COPY_TX the 64 KiB heap moves there too: 100 KiB):
  *   MEM_SIZE                      64 KiB heap: tcp_write copies of echoed
  *                                 data (TCP_WRITE_FLAG_COPY: up to TCP_WND
  *                                 of 8 x 1460 B per echo connection, 37 KB
@@ -118,7 +119,7 @@
 #define LWIP_TCP                        1
 #define IP_FORWARD                      0
 #define IP_OPTIONS_ALLOWED              0
-#define IP_REASSEMBLY                   1
+#define IP_REASSEMBLY                   0
 #define IP_FRAG                         1
 #define IP_DEFAULT_TTL                  64
 
@@ -169,6 +170,30 @@
 
 /* rtlnet_lwiperf (TCP iperf 2 server): idle timeout of a test connection. */
 #define RTLNET_LWIPERF_TCP_MAX_IDLE_SEC 10U
+
+/* ---- Checksum offload and zero copy (rtlnet_offload.c, rtlnet_lwip_netif.c) --------------------------------
+ * The checksum flags are per netif: rtlnet_offload_apply() clears NETIF_CHECKSUM_GEN_IP / _TCP / _UDP when the
+ * hardware inserts those checksums (CTRL.tx_ip_csum / tx_l4_csum) and NETIF_CHECKSUM_CHECK_IP / _TCP / _UDP
+ * when it verifies them and appends a trailer (CTRL.rx_csum). ICMP stays in software. Fragments are not
+ * reassembled (IP_REASSEMBLY 0 above): the hardware verifies whole datagrams only.
+ * Zero copy (override with -DRTLNET_NETIF_ZERO_COPY_RX=0/1 and _TX=0/1): receive buffers go to lwIP as custom
+ * pbufs (default on: with the receive offload it halves the CPU load of bulk receive, 81% -> 35% busy at
+ * 94.8 Mbit/s); lwIP's heap sits in the AXI BRAM so a single-pbuf frame is sent in place (default OFF: every lwIP
+ * heap access then costs about 16 cycles, iperf -R falls back to the copy anyway, and the measured throughput
+ * is lower: -R 94.8 -> 90.4 Mbit/s with the offload, 81.9 -> 58.8 without; microblaze documentation 9.10). */
+#define LWIP_CHECKSUM_CTRL_PER_NETIF    1
+#define LWIP_SUPPORT_CUSTOM_PBUF        1
+#ifndef RTLNET_NETIF_ZERO_COPY_RX
+#define RTLNET_NETIF_ZERO_COPY_RX       1
+#endif
+#ifndef RTLNET_NETIF_ZERO_COPY_TX
+#define RTLNET_NETIF_ZERO_COPY_TX       0
+#endif
+#if RTLNET_NETIF_ZERO_COPY_TX
+#define RTLNET_LWIP_HEAP_BYTES          (MEM_SIZE + 128)
+extern unsigned char rtlnet_lwip_heap[];
+#define LWIP_RAM_HEAP_POINTER           (rtlnet_lwip_heap)
+#endif
 
 /* LWIP_DEBUG stays undefined (lwIP tests it with #ifdef). */
 

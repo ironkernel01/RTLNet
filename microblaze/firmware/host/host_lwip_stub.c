@@ -13,12 +13,15 @@
  */
 #include <string.h>   /* memset */
 
+#include "host_platform.h"
 #include "rtlnet_lwip.h"
+#include "rtlnet_offload.h"
 #include "rtlnet_lwip_netif.h"
 #include "rtlnet_tcp_echo.h"
 #include "rtlnet_tcp_iperf.h"
 
 static rtlnet_netif_stats_t g_st;
+static uint32_t             g_cs_flags = 0xFFFFu;
 static int                  g_echo_enable;
 static uint16_t             g_echo_port;
 static uint32_t             g_init_calls;
@@ -33,6 +36,25 @@ int InitLWIP(void)
 {
     g_init_calls++;
     return RTLNET_LWIP_NO_DMA;
+}
+
+/*
+ * rtlnet_lwip_set_checksum_ctrl -- harness: remember the flags and log the change.
+ * Returns: nothing.
+ */
+void rtlnet_lwip_set_checksum_ctrl(uint32_t flags)
+{
+    g_cs_flags = flags;
+    host_event_flags(flags);
+}
+
+/*
+ * rtlnet_lwip_get_checksum_ctrl -- harness: the flags last set.
+ * Returns: the flags.
+ */
+uint32_t rtlnet_lwip_get_checksum_ctrl(void)
+{
+    return g_cs_flags;
 }
 
 /*

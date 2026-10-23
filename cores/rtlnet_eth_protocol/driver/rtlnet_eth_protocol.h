@@ -36,6 +36,7 @@
 #define RTLNET_PROTO_WIN_IPERF         0x4000u
 #define RTLNET_PROTO_WIN_UDP           0x5000u
 #define RTLNET_PROTO_WIN_CLASSIFIER    0x8000u  /* u_cpu_classifier (driver cores/rtlnet_classifier); reads 0 when not built */
+#define RTLNET_PROTO_WIN_OFFLOAD       0x9000u  /* u_cpu_offload (driver cores/rtlnet_tcp_offload); reads 0 when not built */
 
 /* Leaf indices: bit positions in CAPS.LEAF_PRESENT, CTRL.LEAF_ENABLE and
  * STATUS.LEAF_BUSY, and the arbiter priority (0 highest). Fixed whatever is
@@ -90,6 +91,9 @@
 /* CPU_CAPS fields (kilobytes). */
 #define RTLNET_PROTO_CPU_CAPS_RX_KB_SHIFT    0u
 #define RTLNET_PROTO_CPU_CAPS_TX_KB_SHIFT    8u
+#define RTLNET_PROTO_CPU_CAPS_CLASSIFIER     0x00010000u   /* bit 16: u_cpu_classifier built (window 0x8000) */
+#define RTLNET_PROTO_CPU_CAPS_OFFLOAD_TX     0x00020000u   /* bit 17: checksum insert on CPU transmit built (window 0x9000) */
+#define RTLNET_PROTO_CPU_CAPS_OFFLOAD_RX     0x00040000u   /* bit 18: checksum check + trailer on CPU receive built (0x9000) */
 
 /* CTRL fields. Reset: FILTER_ENABLE 1, CPU_PATH_ENABLE 1 (when built), LEAF_ENABLE = the present leaves.
  * Write CTRL by read-modify-write: a write without CPU_PATH_ENABLE turns the CPU path off. */
@@ -175,6 +179,7 @@ int rtlnet_eth_protocol_set_cpu_path_enable(uintptr_t base, int enable);
 int rtlnet_eth_protocol_get_cpu_path_enable(uintptr_t base);
 uint32_t rtlnet_eth_protocol_get_cpu_rx_fifo_kb(uintptr_t base);
 uint32_t rtlnet_eth_protocol_get_cpu_tx_fifo_kb(uintptr_t base);
+uint32_t rtlnet_eth_protocol_get_cpu_features(uintptr_t base);
 void rtlnet_eth_protocol_read_cpu_counters(uintptr_t base, rtlnet_eth_protocol_cpu_counters_t *counters);
 
 #endif /* RTLNET_ETH_PROTOCOL_H */

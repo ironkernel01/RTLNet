@@ -18,7 +18,7 @@ Overview:
     exit, end, debug read 0x44a00000, sh ver, then show interfaces (core
     absent message), the CPU network path (show cpu-path: AXI DMA found by
     the BSP driver; show tcp: lwIP state and TCP echo server; show
-    storm-control; show classifier), tcp echo port change and restore in
+    storm-control; show classifier; show offload), tcp echo port change and restore in
     configuration mode, show running-config (TCP echo, storm control,
     classifier lines), led 2 on + LEDS register read-back, led 2 off, disable.
   * Either bitstream: CPU-only (network cores and classifier absent, lwIP
@@ -139,6 +139,8 @@ try {
     Send-Step $sp 'show storm-control' "show storm-control`r" @(
         'Storm control \(broadcast to the CPU\): enabled, 10 frames per 100 ms') 'rtlnet#'
     Send-Step $sp 'show classifier' "show classifier`r" @('mode pass-all', 'MAC 0\s+: dst ff:ff:ff:ff:ff:ff -> police 0') 'rtlnet#'
+    Send-Step $sp 'show offload' "show offload`r" @('Checksum offload \(CPU path\)', 'Confirmed\s+: classifier (yes|no), offload TX (yes|no), offload RX (yes|no)',
+        '(not present in this build|lwIP flags\s+: 0x[0-9A-F]{4})') 'rtlnet#'
     Send-Step $sp 'conf t (tcp)' "configure terminal`r" @() 'rtlnet(config)#'
     Send-Step $sp 'tcp echo port 2007' "tcp echo port 2007`r" @() 'rtlnet(config)#'
     Send-Step $sp 'end (tcp)' "end`r" @() 'rtlnet#'

@@ -23,6 +23,7 @@
 #include "rtlnet_iperf.h"
 #include "rtlnet_lwip.h"
 #include "rtlnet_lwip_netif.h"
+#include "rtlnet_offload.h"
 #include "rtlnet_phy_rtl8211e.h"
 #include "rtlnet_platform.h"
 #include "rtlnet_tcp_echo.h"
@@ -416,6 +417,7 @@ void netmgr_init(void)
 
     /* CPU network path: the classifier leaves DROP-ALL (broadcast storm
      * default) before lwIP sees any frame; then the DMA netif. */
+    rtlnet_features_discover();
     g_present.cpupath_rc = cpupath_init();
     g_present.cls = cpupath_cls_present();
     g_present.dma = (rtlnet_netif_hw_init() == 0);

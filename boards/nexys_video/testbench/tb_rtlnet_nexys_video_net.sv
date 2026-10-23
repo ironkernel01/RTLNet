@@ -28,6 +28,12 @@
 //     unclaimed and arrives at the CPU byte-exact; a frame the CPU sends
 //     leaves on the PHY unchanged (padded to 60); the wrapper's CPU counters
 //     (CPU_RX_FRAMES, CPU_RX_CLAIMED, CPU_TX_FRAMES) agree.
+//   * CPU-path checksum offload (protocol sub-map 0x9000, discovery through CPU_CAPS bits 16..18): the
+//     stand-in's txo_config (the driver's register sequence) enables TX insert and RX trailer; a frame the
+//     CPU sends with garbage IPv4/TCP/UDP checksums leaves the PHY with correct ones; a TCP segment for an
+//     unclaimed port reaches the CPU padded to 8 bytes plus a trailer (length, sum 0xFFFF, flags verified,
+//     L4 offset 34, marker 0xA5), a corrupted one with the L4-bad flags; counters agree; with CTRL 0 both
+//     directions pass frames unchanged.
 //   * DHCP: START; the bench is the server: DISCOVER captured (xid, chaddr,
 //     options), OFFER injected, REQUEST captured (options 50/54), ACK
 //     injected; the leaf is bound and the wrapper's effective address switches
@@ -63,6 +69,7 @@ module tb_rtlnet_nexys_video_net;
   localparam logic [31:0] IPRF       = WIN + 32'h1_4000;
   localparam logic [31:0] UDPS       = WIN + 32'h1_5000;
   localparam logic [31:0] CLS        = WIN + 32'h1_8000;               // CPU-path classifier (protocol sub-map 0x8000)
+  localparam logic [31:0] OFL        = WIN + 32'h1_9000;               // CPU-path checksum offload (protocol sub-map 0x9000)
   localparam int          STORM_LIMIT  = 3;                            // broadcasts passed per window
   localparam int          STORM_WINDOW = 2;                            // window in ms (policer tick from 100 MHz)
   localparam int          STORM_BURST  = 8;                            // broadcasts sent in one burst
@@ -254,6 +261,47 @@ module tb_rtlnet_nexys_video_net;
       end
     end
   endtask
+
+  // Ethernet / IPv4 / TCP frame (20-byte TCP header, no options). good = correct IPv4 and TCP checksums,
+  // else both fields hold garbage (what the firmware sends when the offload inserts them).
+  function automatic bytes_t tcp_frame(input bit [47:0] dst_mac, input bit [47:0] src_mac, input bit [31:0] src_ip,
+                                       input bit [31:0] dst_ip, input bit [15:0] sport, input bit [15:0] dport,
+                                       input bytes_t payload, input bit good);
+    bytes_t q;
+    bytes_t ip;
+    bytes_t seg;
+    bytes_t ps;
+    bit [15:0] c;
+    push16(seg, sport); push16(seg, dport); push32(seg, 32'h1000_0001); push32(seg, 32'h2000_0002);
+    push16(seg, 16'h5018); push16(seg, 16'h1000); push16(seg, 16'h0000); push16(seg, 16'h0000);
+    for (int i = 0; i < $size(payload); i++) seg.push_back(payload[i]);
+    ip = ipv4_header(16'(20 + seg.size()), 16'h4321, 8'd6, src_ip, dst_ip);
+    if (good) begin
+      push32(ps, src_ip); push32(ps, dst_ip); ps.push_back(8'h00); ps.push_back(8'd6); push16(ps, 16'(seg.size()));
+      for (int i = 0; i < $size(seg); i++) ps.push_back(seg[i]);
+      c = inet_checksum(ps, 0, ps.size());
+      seg[16] = c[15:8]; seg[17] = c[7:0];
+    end else begin
+      ip[10] = 8'hDE; ip[11] = 8'hAD;
+      seg[16] = 8'hBE; seg[17] = 8'hEF;
+    end
+    q = eth_header(dst_mac, src_mac, 16'h0800);
+    for (int i = 0; i < $size(ip); i++) q.push_back(ip[i]);
+    for (int i = 0; i < $size(seg); i++) q.push_back(seg[i]);
+    return q;
+  endfunction
+
+  // Frame as the receive offload delivers it: padded to a multiple of 8 with zeros plus the 8-byte trailer.
+  function automatic bytes_t with_trailer(input bytes_t f, input bit [15:0] sum, input bit [15:0] flags, input bit [7:0] l4off);
+    bytes_t q;
+    q = f;
+    while ((q.size() % 8) != 0) q.push_back(8'h00);
+    q.push_back(f.size() & 8'hFF); q.push_back((f.size() >> 8) & 8'hFF);
+    q.push_back(sum[7:0]); q.push_back(sum[15:8]);
+    q.push_back(flags[7:0]); q.push_back(flags[15:8]);
+    q.push_back(l4off); q.push_back(8'hA5);
+    return q;
+  endfunction
 
   // BOOTP/DHCP server message from the bench (op 2), options given.
   function automatic bytes_t dhcp_server_msg(input bit [31:0] xid, input bit [47:0] chaddr, input bit [7:0] msg_type);
@@ -502,6 +550,84 @@ module tb_rtlnet_nexys_video_net;
     rd(PROT + 32'h060, d);
     tb_check(d == 1, $sformatf("CPU_TX_FRAMES %0d, expected 1", d));
 
+    // CPU-path checksum offload (protocol sub-map 0x9000): discovery, then transmit insert and receive trailer.
+    begin
+      bytes_t good_tcp;
+      bytes_t bad_tcp;
+      bytes_t pay;
+      bytes_t cpu_f;
+      bit     cpu_ok;
+      string  why;
+      logic [1:0] r;
+      rd(PROT + 32'h034, d);
+      tb_check(d[18:16] == 3'b111, $sformatf("CPU_CAPS 0x%08x: classifier, offload TX and RX present", d));
+      check_reg(OFL, 32'h5443_504F, "CPU-path offload ID");
+      check_reg(OFL + 32'h004, 32'h1022_2026, "CPU-path offload VERSION");
+      rd(OFL + 32'h008, d);
+      tb_check(d[5:0] == 6'h3F, $sformatf("offload CAPS 0x%08x", d));
+      check_reg(OFL + 32'h00C, 32'h0, "offload CTRL powers up 0");
+      rd(OFL + 32'h010, d);
+      tb_check(d[1:0] == 2'b11, $sformatf("offload STATUS 0x%08x: both paths idle", d));
+
+      // Enabled the way the firmware does it (driver register sequence).
+      dut.u_cpu.txo_config(OFL, 32'h7, r);
+      tb_check(r == 2'b00, $sformatf("offload configuration resp %b", r));
+
+      // Transmit: garbage checksums leave the board correct.
+      pay = rand_bytes(seed, 33);
+      f = tcp_frame(HOST_MAC, BOARD_MAC, BOARD_IP, HOST_IP, 16'd9999, 16'd40001, pay, 1'b0);
+      dut.u_cpu.eth_send(f);
+      expect_frame(tcp_frame(HOST_MAC, BOARD_MAC, BOARD_IP, HOST_IP, 16'd9999, 16'd40001, pay, 1'b1), "TX offload: TCP", got);
+      pay = rand_bytes(seed, 21);
+      req = udp_frame(HOST_MAC, BOARD_MAC, BOARD_IP, HOST_IP, 16'd9999, 16'd40001, pay, 16'h0001, 1'b0);
+      f = req;
+      f[24] = 8'h12; f[25] = 8'h34; f[40] = 8'h56; f[41] = 8'h78;
+      dut.u_cpu.eth_send(f);
+      expect_frame(udp_frame(HOST_MAC, BOARD_MAC, BOARD_IP, HOST_IP, 16'd9999, 16'd40001, pay, 16'h0001, 1'b1),
+                   "TX offload: UDP", got);
+      check_reg(OFL + 32'h040, 32'd3, "offload TX_FRAMES (the earlier CPU frame passed through unpatched)");
+      check_reg(OFL + 32'h044, 32'd2, "offload TX_IP_PATCHED");
+      check_reg(OFL + 32'h048, 32'd2, "offload TX_L4_PATCHED");
+
+      // Receive: a TCP segment for a port no hardware leaf owns reaches the CPU with the trailer.
+      pay = rand_bytes(seed, 61);
+      good_tcp = tcp_frame(BOARD_MAC, HOST_MAC, HOST_IP, BOARD_IP, 16'd40005, 16'd5001, pay, 1'b1);
+      u_phy.inject(good_tcp);
+      dut.u_cpu.eth_get(cpu_f, 200_000, cpu_ok);
+      tb_check(cpu_ok, "RX offload: good TCP segment reached the CPU");
+      if (cpu_ok) begin
+        tb_check(bytes_equal(cpu_f, with_trailer(good_tcp, 16'hFFFF, 16'h00E3, 8'd34), why),
+                 $sformatf("RX offload: good TCP segment with verified trailer: %s", why));
+      end
+      bad_tcp = good_tcp;
+      bad_tcp[60] = bad_tcp[60] ^ 8'h10;
+      u_phy.inject(bad_tcp);
+      dut.u_cpu.eth_get(cpu_f, 200_000, cpu_ok);
+      tb_check(cpu_ok, "RX offload: corrupted TCP segment reached the CPU");
+      if (cpu_ok) begin
+        tb_check(cpu_f.size() == good_tcp.size() + 8 + (8 - good_tcp.size() % 8) % 8, "RX offload: corrupted segment length");
+        tb_check(cpu_f[cpu_f.size() - 8 + 4] == 8'hA3 && cpu_f[cpu_f.size() - 8 + 5] == 8'h00,
+                 $sformatf("RX offload: corrupted segment flags 0x%02x%02x (verified, L4 bad)",
+                           cpu_f[cpu_f.size() - 8 + 5], cpu_f[cpu_f.size() - 8 + 4]));
+      end
+      check_reg(OFL + 32'h060, 32'd2, "offload RX_FRAMES");
+      check_reg(OFL + 32'h064, 32'd1, "offload RX_VERIFIED");
+      check_reg(OFL + 32'h06C, 32'd1, "offload RX_L4_BAD");
+      check_reg(OFL + 32'h068, 32'd0, "offload RX_IP_BAD");
+
+      // Disabled again: both paths pass frames unchanged.
+      dut.u_cpu.txo_config(OFL, 32'h0, r);
+      tb_check(r == 2'b00, $sformatf("offload disable resp %b", r));
+      rd(OFL + 32'h010, d);
+      tb_check(d[1:0] == 2'b11, $sformatf("offload STATUS 0x%08x after traffic", d));
+      u_phy.inject(good_tcp);
+      dut.u_cpu.eth_get(cpu_f, 200_000, cpu_ok);
+      tb_check(cpu_ok && bytes_equal(cpu_f, good_tcp, why), $sformatf("RX offload off: frame unchanged: %s", why));
+      f = tcp_frame(HOST_MAC, BOARD_MAC, BOARD_IP, HOST_IP, 16'd9999, 16'd40001, pay, 1'b0);
+      dut.u_cpu.eth_send(f);
+      expect_frame(f, "TX offload off: garbage checksums left as sent", got);
+    end
+
     // DHCP with the bench as server.
     wr(DHCP + 32'h00C, 32'h1);
     expect_frame(empty, "DHCP DISCOVER", got);
@@ -553,11 +679,11 @@ module tb_rtlnet_nexys_video_net;
 
     // Counters and PHY-side timing.
     rd(MAC + 32'h020, d);
-    tb_check(d - rx_good0 == 7 + 1 + STORM_BURST, $sformatf("MAC RX_GOOD advanced %0d, expected %0d", d - rx_good0, 7 + 1 + STORM_BURST));
+    tb_check(d - rx_good0 == 7 + 1 + STORM_BURST + 3, $sformatf("MAC RX_GOOD advanced %0d, expected %0d", d - rx_good0, 7 + 1 + STORM_BURST + 3));
     rd(MAC + 32'h024, d);
     tb_check(d == 0, $sformatf("MAC RX_BAD %0d", d));
     rd(MAC + 32'h02C, d);
-    tb_check(d - tx0 == 7, $sformatf("MAC TX_FRAMES advanced %0d, expected 7", d - tx0));
+    tb_check(d - tx0 == 7 + 3, $sformatf("MAC TX_FRAMES advanced %0d, expected 10", d - tx0));
     check_reg(ARP + 32'h024, 32'd2, "ARP REPLIES_SENT");
     check_reg(ICMP + 32'h024, 32'd1, "ICMP ECHO_REPLIES");
     tb_check(phy_viol == 0, $sformatf("PHY model RGMII TX timing violations: %0d", phy_viol));
