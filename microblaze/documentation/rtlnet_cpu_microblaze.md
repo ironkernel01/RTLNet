@@ -171,7 +171,7 @@ The board top instances `u_cpu` with exactly the section 15.6 ports. A replaceme
 | RTLNet drivers | `cores/<core>/driver/*.c`, compiled in place | each core's registers |
 | network manager | `src/rtlnet_netmgr.c/.h` | PHY bring-up, link monitor, DHCP auto-start, addresses, CPU path bring-up, InitLWIP calls |
 | CPU path control | `src/rtlnet_cpupath.c/.h` | CPU-path classifier configuration (broadcast storm default, filter tables, policers), wrapper CPU-path counters |
-| feature discovery, checksum offload | `src/rtlnet_offload.c/.h` | `rtlnet_features_discover` (wrapper CPU_CAPS bits, block header confirmation), `rtlnet_offload_apply` (CTRL and the lwIP checksum flags in the safe order), receive trailer policy `rtlnet_offload_rx_frame` (section 9.10) |
+| feature discovery, checksum offload | `src/rtlnet_offload.c/.h` | `rtlnet_features_discover` (wrapper CPU_CAPS bits, block header confirmation), `rtlnet_offload_apply` (CTRL and the lwIP checksum flags in the safe order), receive trailer policy `rtlnet_offload_rx_frame` (section 9.11) |
 | lwIP glue | `src/lwip/rtlnet_lwip.c/.h`, `src/lwip/lwipopts.h` | `InitLWIP()`, `sys_now`, main-loop service, status and counters |
 | netif | `src/lwip/rtlnet_lwip_netif.c/.h` | the AXI DMA: receive buffers (copy or zero-copy loan to lwIP), transmit (copy or in place), receive trailer, frame counters |
 | applications | `src/lwip/rtlnet_tcp_echo.c/.h`, `src/lwip/rtlnet_tcp_iperf.c/.h` | TCP echo server (port 7); TCP iperf 2 server (port 5001) status and CLI glue; both run at the same time, both on at boot |
@@ -241,28 +241,12 @@ at most 2 ms for the previous MM2S transfer and starts the next one (`tx_timeout
 flush or invalidate. A channel counts as busy only while it runs and is not idle: `XAxiDma_Busy` reports a
 halted channel (never started, or after a reset) as busy, which kept the first transmit waiting forever.
 
-With the checksum offload (section 9.10) the receive buffers are `RTLNET_NETIF_RX_BUFS` of 2048 bytes (4 copying,
+With the checksum offload (section 9.11) the receive buffers are `RTLNET_NETIF_RX_BUFS` of 2048 bytes (4 copying,
 16 with zero-copy receive), a free list instead of a ring (a buffer returns to the list when the copy is done or when
 lwIP frees the custom pbuf), and every DMA transfer may end in an 8-byte trailer (`roundup8(frame) + 8`, at most 1536
-bytes for a 1522-byte frame). Zero-copy transmit sends a frame built in one pbuf from lwIP's heap, which lives in the
-AXI BRAM, in place (the MM2S data realignment engine takes any byte address); the pbuf is referenced until the
+bytes for a 1522-byte frame). Zero-copy transmit (a build option, default off: section 9.11) sends a frame built in one pbuf from lwIP's heap,
+which then lives in the AXI BRAM, in place (the MM2S data realignment engine takes any byte address); the pbuf is referenced until the
 transfer is done (`tx_reap`); chained pbufs and pbufs outside the AXI BRAM are copied.
-
-### 9.10 Checksum offload in the firmware
-
-`src/rtlnet_offload.c` owns the discovery of the CPU-path blocks and the checksum offload control. Boot order:
-`rtlnet_features_discover()` (netmgr, before `cpupath_init`) reads the wrapper ID/VERSION, `CAPS.CPU_PATH_PRESENT` and
-`CPU_CAPS` bits 16..18 and confirms each advertised block's header (classifier `"CLSF"`; offload `"TCPO"` with CAPS
-bits equal to CPU_CAPS 17 / 18; a difference prints an error and the block counts as absent). `cpupath_init` uses the
-result for the classifier. `InitLWIP()` (first call, netif already added) runs the discovery if it has not run and calls
-`rtlnet_offload_apply(rtlnet_offload_request())` (default: everything present). One function changes CTRL and the lwIP
-flags (`NETIF_SET_CHECKSUM_CTRL`, via `rtlnet_lwip_set_checksum_ctrl`): turning a TX bit on writes CTRL, reads it back
-and then clears the matching `GEN_*` flags; turning it off sets the flags first, polls `STATUS.TX_IDLE` (bounded), then
-clears CTRL; the receive bit follows the trailer state machine (CHECK flags cleared with the first trailer, set again
-before CTRL is cleared, trailers parsed by marker until the first raw frame). The flags always derive from the CTRL
-read-back. CLI: `show offload`, `show version`, config `offload tx-ip|tx-l4|rx|all on|off` (shown in the running
-configuration when off). The same firmware runs on a bitstream with none, one or both paths: absent paths leave lwIP
-computing and checking in software (desktop demo and `show offload` cover every combination).
 
 ### 9.6 lwIP configuration and memory
 
@@ -325,7 +309,8 @@ The engine limits grew for the ACL syntax (14 tokens, 14 parameters, 160-charact
 
 ### 9.8 Size
 
-Build of record (section 9.10 tuning): text 162356 B, data 2104 B, bss 238280 B, heap 2 KiB, stack 8 KiB;
+Build of record with the checksum offload and zero-copy receive (section 9.11): text 167408 B, data 2108 B, bss
+263336 B (36864 B of it the AXI BRAM section), 387 KiB of the 512 KiB LMB. Build of record (section 9.10 tuning): text 162356 B, data 2104 B, bss 238280 B, heap 2 KiB, stack 8 KiB;
 the image ends at 381 KiB of the 512 KiB LMB (131 KiB free). Before the tuning: text 161412 B, bss 151412 B
 (rtlnet_lwiperf with -R, -r, -d and the classifier driver; install lwiperf without the classifier driver,
 commit a9e043e6: text 153724 B, 308 KiB; without lwiperf, commit 874f3966: 271 KiB). The CLI and drivers are
@@ -539,7 +524,7 @@ budget hits and the per-frame costs. Row 9 plus the unrolled copies, profile bui
 - The software checksum is the largest part of the lwIP time: moving from 16-bit to 32-bit reads saved 33 us per
   received frame; the remainder is estimated at 25 to 30 us per 1460 bytes in each direction. Checksum offload
   removes that in both directions, but only pays fully together with zero-copy, because the CPU still reads or
-  writes every payload byte while it copies.
+  writes every payload byte while it copies (measured in section 9.11: zero-copy receive pays, zero-copy transmit does not).
 - The rest of lwIP (TCP input and output, ACK generation, header handling) is about 35 to 40 us per frame;
   header alignment (`ETH_PAD_SIZE` 2) did not reduce it.
 - DMA and FIFO: no stall. The MM2S wait is 1.3 to 3.1 us per frame; there are no CPU FIFO drops in the single-flow
@@ -563,6 +548,114 @@ ping once a second, `tcp_echo_client.py --conns 2` in a loop): storm limiter see
 four-connection echo test, a ping and an iperf stream at the same time: passed 1210 of 23752 (limit holds), ping
 12/12, echo PASS, iperf 78.7 Mbit/s, CPU FIFO drops 374. `tcp_test.ps1` gates only on a throughput above zero for
 each mode, so its thresholds need no change.
+
+### 9.11 Checksum offload in the firmware
+
+`src/rtlnet_offload.c` owns the discovery of the CPU-path blocks and the checksum offload control. Boot order:
+`rtlnet_features_discover()` (netmgr, before `cpupath_init`) reads the wrapper ID/VERSION, `CAPS.CPU_PATH_PRESENT` and
+`CPU_CAPS` bits 16..18 and confirms each advertised block's header (classifier `"CLSF"`; offload `"TCPO"` with CAPS
+bits equal to CPU_CAPS 17 / 18; a difference prints an error and the block counts as absent). `cpupath_init` uses the
+result for the classifier. `InitLWIP()` (first call, netif already added) runs the discovery if it has not run and calls
+`rtlnet_offload_apply(rtlnet_offload_request())` (default: everything present). One function changes CTRL and the lwIP
+flags (`NETIF_SET_CHECKSUM_CTRL`, via `rtlnet_lwip_set_checksum_ctrl`): turning a TX bit on writes CTRL, reads it back
+and then clears the matching `GEN_*` flags; turning it off sets the flags first, polls `STATUS.TX_IDLE` (bounded), then
+clears CTRL; the receive bit follows the trailer state machine (CHECK flags cleared with the first trailer, set again
+before CTRL is cleared, trailers parsed by marker until the first raw frame). The flags always derive from the CTRL
+read-back. CLI: `show offload`, `show version`, config `offload tx-ip|tx-l4|rx|all on|off` (shown in the running
+configuration when off). The same firmware runs on a bitstream with none, one or both paths: absent paths leave lwIP
+computing and checking in software (desktop demo and `show offload` cover every combination).
+
+**Zero-copy options, memory and defaults.** Both are compile-time options (`lwipopts.h`, `-Define`):
+`RTLNET_NETIF_ZERO_COPY_RX` (default **on**) hands the DMA buffer to lwIP as a custom `PBUF_REF` pbuf;
+`RTLNET_NETIF_ZERO_COPY_TX` (default **off**) puts lwIP's heap in the AXI BRAM and DMAs a single-pbuf frame in
+place. The copy routines of section 9.10 (`axi_put_chain`, `axi_get_words`) remain the paths of the options that
+are off, and `axi_put_chain` also copies the chained pbufs of a zero-copy transmit build. The AXI BRAM is 128 KiB:
+
+| Item | RX off, TX off | **default: RX on, TX off** | RX on, TX on |
+|---|---|---|---|
+| receive buffers (2048 B each) | 4 = 8 KiB | 16 = 32 KiB | 16 = 32 KiB |
+| transmit buffers | 2 = 4 KiB | 2 = 4 KiB | 2 = 4 KiB |
+| lwIP heap (`MEM_SIZE` 64 KiB + 128) | LMB | LMB | 64.1 KiB |
+| `.axi_bram` section (linker) | 12288 B | **36864 B** | 102528 B |
+| free of 131072 B | 118784 B | 94208 B | 28544 B |
+
+The default image: text 167408 B, data 2108 B, bss 263336 B (of which 36864 B are the AXI BRAM section), 387 KiB
+of the 512 KiB LMB (the AXI BRAM section does not count against it).
+
+**Throughput** (hardware, 100 Mb/s link, `boards/nexys_video/scripts/offload_bench.ps1`, `iperf.exe -t 10`, mean of
+two runs, Mbit/s as the PC client reports them; `-d` is PC -> board + board -> PC; plain + UDP is TCP iperf with
+the RTL UDP iperf `-u -b 20M` at the same time; the checksum offload is switched at run time with
+`configure terminal` / `offload all on|off`, the zero-copy options are four firmware images; no profile timers):
+
+| Zero-copy RX / TX | Offload | plain | `-R` | `-d` (PC -> board + board -> PC = sum) | plain + UDP 20M (TCP / UDP) |
+|---|---|---|---|---|---|
+| off / off (word copies, section 9.10) | off | 86.8 | 81.9 | 21.1 + 60.0 = 81.1 | 70.2 / 20.9 |
+| off / off | on | 94.9 | 94.8 | 30.2 + 86.0 = 116.2 | 74.3 / 20.9 |
+| on / off (**default**) | off | 89.6 | 81.4 | 21.2 + 60.0 = 81.2 | 72.0 / 20.9 |
+| on / off (**default**) | on | 94.8 | 94.9 | 26.4 + 93.7 = 120.1 | 74.3 / 20.9 |
+| off / on | off | 82.0 | 58.8 | 17.6 + 47.3 = 64.9 | 66.8 / 20.9 |
+| off / on | on | 94.8 | 90.4 | 23.9 + 68.5 = 92.4 | 74.3 / 20.9 |
+| on / on | off | 84.4 | 61.8 | 17.6 + 47.0 = 64.6 | 68.6 / 20.9 |
+| on / on | on | 94.9 | 90.2 | 27.2 + 77.1 = 104.3 | 74.3 / 20.9 |
+
+The first row is the result of the tuning (section 9.10: 87.7 / 82.7 Mbit/s). With the checksum offload on, one
+direction reaches the TCP goodput of the 100 Mb/s link (94.9 Mbit/s) in every image; the images differ in what is
+left of the CPU (next table) and in the full-duplex `-d` test. The TCP echo client (`tcp_echo_client.py`, four
+connections, 152 messages) reports 7 to 19 Mbit/s in these runs without a pattern between the images (the PC side
+dominates a 0.5 s test); three consecutive runs on the profile images give 15.0 to 15.2 Mbit/s for every
+configuration.
+
+**CPU profile** (images built with `-Define RTLNET_NETIF_PROFILE=1`, `offload_profile.ps1`, 10 s per load,
+`clear counters` before and `show cpu-path` after; the timers cost about 3 % of the throughput; "busy" is the share of
+wall time spent in polls that delivered frames, lwIP and applications included; us per frame):
+
+| Load | Zero-copy RX | Offload | Mbit/s | busy | RX copy | lwIP input | TX copy |
+|---|---|---|---|---|---|---|---|
+| PC -> board | off | off | 82.9 | 97 % | 68.4 | 68.9 | 5.3 (ACK) |
+| PC -> board | on | off | 85.6 | 97 % | 2.7 | 130.1 | 5.3 |
+| PC -> board | off | on | 94.7 | 81 % | 70.5 | 26.6 | 5.3 |
+| PC -> board | **on** | on | 94.8 | **35 %** | 4.9 | 34.6 | 5.3 |
+| `-R` | off | off | 73.2 | 98 % | - | - | 73.7 |
+| `-R` | on | off | 72.1 | 97 % | - | - | 73.7 |
+| `-R` | off | on | 94.8 | 82 % | - | - | 73.7 |
+| `-R` | on | on | 94.8 | 83 % | - | - | 73.7 |
+| TCP echo x3 | off | on | 15.1 | 26 % | 49.2 | 159.7 | 66.2 |
+| TCP echo x3 | on | on | 14.8 | 37 % | 5.0 | 299.6 | 65.4 |
+
+Findings.
+
+- **Checksum offload** is the large step: it removes the software checksum (lwIP input 68.9 -> 26.6 us per received
+  data frame), takes the receive CPU load from 97 % to 81 % and lifts
+  both directions to the line rate (86.8 -> 94.9 and 81.9 -> 94.8 Mbit/s).
+- **Zero-copy receive** removes the 68 us copy per frame (70.5 -> 4.9 us), at the price of lwIP reading the
+  headers from the AXI BRAM (26.6 -> 34.6 us). Together with the offload (lwIP no longer reads the payload) the CPU
+  is 35 % busy at the line rate instead of 81 %; the headroom shows in `-d`, where the board -> PC half rises from
+  86.0 to 93.7 Mbit/s. Without the offload lwIP's software checksum reads every payload byte from the AXI BRAM
+  (130 us per frame) and the gain is small (+2.8 Mbit/s plain). The TCP echo, which copies the payload again with the
+  library `memcpy` (byte reads from the AXI BRAM), costs more CPU (37 % against 26 %) but is unchanged in throughput.
+- **Zero-copy transmit loses.** Moving lwIP's heap to the AXI BRAM makes every lwIP access to its segment and
+  header memory cost about 16 cycles. The reverse test always falls back to the copy: `iperf -R` sends ROM pbufs
+  chained behind a header pbuf (61915 frames copied, 4 sent in place in an 8 s run), so the frame path gains
+  nothing and the heap costs: `-R` 94.8 -> 90.4 Mbit/s with the offload, 81.9 -> 58.8 without; `-d` and the plain
+  test fall too. Only a sender whose frames are built in one pbuf (the TCP echo, plain iperf ACKs: 32595 of 32595
+  frames in place in the plain run) uses the in-place path, and for those the copy it saves is small (5 us per ACK,
+  66 us per echo frame, which does not decide the echo throughput). The default is therefore off.
+- The CPU is still the limit of the transmit side: a 1514-byte frame costs 73.7 us of word writes into the AXI
+  BRAM (60 us of it for the 379 AXI writes), so `-R` runs at 82 % busy at the line rate. A zero-copy transmit that
+  needs no heap in the AXI BRAM would remove that copy: the iperf payload is in ROM (the CPU's LMB, which the DMA
+  cannot reach), so it would need a data source in the AXI BRAM; open point.
+
+**Tests with the default image** (RX zero-copy on, TX off, offload on; board 192.169.1.199, commit of this
+revision): `cli_test.ps1` `CLI_TEST: PASS 28/28` (with the `show offload` step); `net_test.ps1 -Nic Ethernet
+-Speed 100` `NET_TEST: PASS 25/25` (UDP 94.0 and 94.4 Mbit/s, 0 lost; 10 Mb/s forced and restored);
+`tcp_test.ps1` `TCP_TEST: PASS 8/8` (echo 10.0 Mbit/s, PC -> board 94.8, `-R` 94.8, `-r` 94.8, `-d` board -> PC 93.8 +
+PC -> board 27.0 = 120.6, together: echo PASS, TCP 72.2, RTL UDP 20.9 Mbit/s 0/17825 lost); `offload_bench.ps1`
+`OFFLOAD_BENCH: PASS 19/19` (offload off: CTRL 0, hardware counters idle; offload on: tx l4 patched 492467 = ip
+patched 492467, rx verified 361494, ip bad 0, l4 bad 0, no policy drop, no `MISMATCH`, rx no buffer 0).
+Broadcast flood (`bcast_flood.py --rate 400 --seconds 10`, ping once a second, `tcp_echo_client.py --conns 2` in a
+loop): storm limiter seen 3998, passed 1003, dropped 2995 (limit 10 per 100 ms holds), ping 14/14, 8 of 8 echo runs
+PASS at 22.5 to 23.2 Mbit/s (17 Mbit/s before the offload), CPU FIFO drops 35 of 9022 frames (2 before: the echo
+runs faster and fills the 32 KiB FIFO more often; TCP retransmits, no run failed), offload counters clean.
 
 ## 10. Build and test commands
 
@@ -603,6 +696,7 @@ closed port (FAIL, connection refused).
 | Stock iperf 2.2.2 client against the Python board emulator | plain, -R, -r, -d complete with both directions in the summary |
 | Hardware iperf with `rtlnet_lwiperf` (classifier image, wired NIC to the DHCP address 192.169.1.199, `-t 10`, two runs each) | PC -> board 68.5 / 68.4 Mbit/s; `-R` 29.3 / 29.3 Mbit/s; `-r` 68.6 then 27.3 / 27.1 Mbit/s; `-d` 31.4 / 31.5 Mbit/s with 15.6 / 15.6 Mbit/s; the board's `show iperf` agrees with the client (section 9.9) |
 | Hardware iperf after the throughput tuning (section 9.10; send buffer 24 x MSS, window 8 x MSS, word-wise netif copies, 32-bit checksum) | PC -> board 87.6 / 87.8 Mbit/s; `-R` 82.7 / 82.7 Mbit/s; `-d` 21.3 + 60.4 Mbit/s (sum 81.7); TCP with RTL UDP iperf together 70.8 Mbit/s; `TCP_TEST: PASS 8/8`, `CLI_TEST: PASS 27/27`, `NET_TEST: PASS 25/25`, storm limiter holds under the flood |
+| Checksum offload on the board (section 9.11; network build with `rtlnet_tcp_offload`, default image) | `CLI_TEST: PASS 28/28`, `NET_TEST: PASS 25/25`, `TCP_TEST: PASS 8/8` (PC -> board 94.8, `-R` 94.8, `-d` 93.8 + 27.0 Mbit/s), `OFFLOAD_BENCH: PASS 19/19`; broadcast flood: limit holds, ping 14/14, echo 8/8 PASS; host: `--demo` 364 checks, `-LwipTest` 69, `-NetifTest` four combinations |
 | Hardware `tcp_test.ps1` / `tcp_echo_client.py` / `cli_test.ps1` (before the tuning) | `TCP_TEST: PASS 8/8`; `TCP_ECHO_TEST: PASS conns=4 messages=152`; `CLI_TEST: PASS 27/27`; lwIP heap used 124 B after 35 tests (no leak) |
 
 Details: `boards/nexys_video/documentation/rtlnet_nexys_video.md` sections 6.3 and 6.4.
@@ -627,6 +721,7 @@ Details: `boards/nexys_video/documentation/rtlnet_nexys_video.md` sections 6.3 a
 | 10-22-2026 | Initial version: block design script, wrapper, driver header, bus-functional model |
 | 10-22-2026 | Moved to `microblaze/`; LMB 512 KiB; AXI DMA and 128 KiB AXI BRAM with the frame streams; simulation stand-in renamed `rtlnet_microblaze_sim_stub`; BSP generated from the XSA; firmware on the BSP with lwIP, InitLWIP, DMA netif, TCP echo, CPU path CLI |
 | 10-22-2026 | lwIP glue and applications moved to `src/lwip/`; iperf server forked as `rtlnet_lwiperf` with -R, -r and -d; captured iperf 2.2.2 test header; desktop loopback test |
+| 10-22-2026 | Offload measurements and defaults (section 9.11): zero-copy receive on, zero-copy transmit off, AXI BRAM budget, throughput and CPU profile tables; netif merged with the word-wise copies of section 9.10 |
 | 10-22-2026 | AXI DMA data realignment engine on MM2S (zero-copy transmit); checksum offload in the firmware (feature discovery, `rtlnet_offload_apply`, receive trailer, zero-copy options, `show offload`, `offload` command, desktop netif test) |
 | 10-22-2026 | Classifier driver integrated: `rtlnet_cpupath.c` on the real driver API (context, `RTLNET_CLS_ACT_*`), boot call `rtlnet_classifier_config_bcast_storm(10, 100)`, MAC mask removed and EtherType entries 0..7 (range pairs) in the CLI, harness register model of the classifier; the sim stub classifier task follows the driver register map |
 | 10-22-2026 | TCP throughput tuning: netif TX/RX copies as 32-bit AXI accesses, optional CPU profile (`RTLNET_NETIF_PROFILE`), `TCP_SND_BUF` 24 x MSS, `TCP_WND` 8 x MSS, 32-bit lwIP checksum, memory resized (section 9.10) |

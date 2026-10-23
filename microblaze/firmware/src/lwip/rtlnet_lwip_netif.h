@@ -27,7 +27,7 @@
  * and applies the policy (bad IPv4 header or verified bad TCP/UDP checksum: drop
  * and count). The buffers hold roundup8(1522) + 8 bytes.
  *
- * Zero-copy options (lwipopts.h, default on, -D to switch off):
+ * Zero-copy options (lwipopts.h, RX default on, TX default off, -D to change):
  *   RTLNET_NETIF_ZERO_COPY_RX: a received buffer is handed to lwIP as a custom
  *     pbuf (PBUF_REF); lwIP's free callback returns the buffer to the free
  *     list from which the next S2MM transfer is armed. 16 buffers bound the

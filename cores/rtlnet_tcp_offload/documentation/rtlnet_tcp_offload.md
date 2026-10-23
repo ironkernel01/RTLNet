@@ -263,11 +263,16 @@ Firmware (as built, `microblaze/firmware/src/rtlnet_offload.c`, `src/lwip/rtlnet
 * **Netif receive** (`rtlnet_offload_rx_frame`): trailer found by marker and length consistency; policy verified good
   or unverified -> pass, IPv4 header bad or verified L4 bad -> drop and count, rx_csum on and no trailer -> drop and
   count. The pbuf length is the trailer's frame length. State machine OFF / ARMING / ON / DRAINING as described above.
-* **Zero copy** (compile-time, `lwipopts.h`, default on): `RTLNET_NETIF_ZERO_COPY_RX` hands the DMA buffer to lwIP
+* **Zero copy** (compile-time, `lwipopts.h`; receive default on, transmit default off, measurements in the
+  throughput table of the board documentation 6.6): `RTLNET_NETIF_ZERO_COPY_RX` hands the DMA buffer to lwIP
   as a custom `PBUF_REF` pbuf (16 buffers of 2048 bytes in the AXI BRAM, free list, S2MM armed from the free list);
   `RTLNET_NETIF_ZERO_COPY_TX` puts lwIP's heap in the AXI BRAM and DMAs a single-pbuf frame in place (MM2S has a data
   realignment engine, so any byte address works; the pbuf stays referenced until the transfer is done); chained pbufs
   and pbufs outside the AXI BRAM are copied.
+* Measured on the Nexys Video (100 Mb/s, PC iperf 2): with the offload on, plain and `-R` TCP reach 94.9 Mbit/s
+  (86.8 / 81.9 without); with zero-copy receive the CPU is 35 % busy at that rate (81 % with the receive copy);
+  zero-copy transmit lowers `-R` to 90.4 Mbit/s (lwIP heap in the AXI BRAM) and is off by default (tables:
+  `microblaze/documentation/rtlnet_cpu_microblaze.md` 9.11, `boards/nexys_video/documentation/rtlnet_nexys_video.md` 6.6).
 * Tests: host demo (`build.ps1 -Demo`: discovery of the none / TX only / RX only / both builds and the mismatch
   cases, the order of every CTRL / STATUS / lwIP-flag change, receive policy, CLI) and the netif test on real lwIP with
   a mock AXI DMA (`build.ps1 -NetifTest`, four zero-copy combinations).

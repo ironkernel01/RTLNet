@@ -25,6 +25,7 @@ Usage:
     [-Port COM4] [-Board 192.169.1.199] [-Seconds 10] [-Runs 2] [-Label zc-both] [-Iperf C:\IronKernel\tools\iperf\iperf.exe]
 Revision: 10-22-2026
   * 10-22-2026: initial version.
+  * 10-22-2026: modes plain, -R, -d, plain + UDP 20M concurrent; one table row per offload state.
 -------------------------------------------------------------------------------
 #>
 param(
@@ -67,7 +68,7 @@ function Read-UntilPrompt($sp, [int]$timeoutMs) {
     return $buf
 }
 
-function Cli([string]$line) {
+function Run-Cli([string]$line) {
     $script:sp.Write("$line`r")
     return (Read-UntilPrompt $script:sp 8000) -replace "`r", ''
 }
@@ -101,50 +102,68 @@ try {
     if (($sync -replace "`r", '').TrimEnd(' ') -notmatch $PromptRe) {
         Write-Output "OFFLOAD_BENCH: FAIL no prompt on $Port"; exit 1
     }
-    [void](Cli "end"); [void](Cli "disable"); [void](Cli "enable")
+    [void](Run-Cli "end"); [void](Run-Cli "disable"); [void](Run-Cli "enable")
     Write-Output "offload_bench: board $Board, label $Label, $Seconds s x $Runs per direction"
 
-    $show = Cli "show offload"
+    $show = Run-Cli "show offload"
     $show -split "`n" | ForEach-Object { Write-Output "    $_" }
     Record 'show offload: both paths confirmed' ($show -match 'Confirmed\s+: classifier \w+, offload TX yes, offload RX yes') ''
     $zcRx = ($show -match 'zero-copy RX on'); $zcTx = ($show -match 'zero-copy TX on')
     Write-Output "    firmware zero-copy: RX $zcRx, TX $zcTx"
 
     foreach ($state in @('off', 'on')) {
-        [void](Cli "configure terminal")
-        $o = Cli "offload all $state"
-        [void](Cli "end")
-        $s = Cli "show offload"
+        [void](Run-Cli "configure terminal")
+        $o = Run-Cli "offload all $state"
+        [void](Run-Cli "end")
+        $s = Run-Cli "show offload"
         $expectCtrl = $(if ($state -eq 'on') { '0x00000007' } else { '0x00000000' })
-        Record "offload $state: CTRL $expectCtrl" ($s -match "CTRL\s+: $expectCtrl") ''
+        Record "offload ${state}: CTRL $expectCtrl" ($s -match "CTRL\s+: $expectCtrl") ''
         Record "offload ${state}: lwIP flags agree" ($s -notmatch 'MISMATCH') ''
-        [void](Cli "clear counters")
+        [void](Run-Cli "clear counters")
 
         # TCP echo, 4 connections, every payload size.
         $echo = & python $Client $Board --conns 4 --timeout 60 2>&1 | ForEach-Object { "$_" }
         $v = $echo | Where-Object { $_ -match '^TCP_ECHO_TEST: ' } | Select-Object -Last 1
         Record "offload ${state}: TCP echo" ($v -match '^TCP_ECHO_TEST: PASS') "$v"
 
-        foreach ($dir in @('PC->board', 'board->PC')) {
-            $rates = @()
+        foreach ($mode in @('plain', '-R', '-d', 'plain+udp')) {
+            $r1 = @(); $r2 = @()
             for ($i = 0; $i -lt $Runs; $i++) {
-                if ($dir -eq 'PC->board') {
+                if ($mode -eq 'plain') {
                     $out = & $Iperf -c $Board -t $Seconds -f m 2>&1 | ForEach-Object { "$_" }
-                    $r = Iperf-Mbit $out '.'
-                } else {
+                    $v1 = Iperf-Mbit $out '.'; $v2 = $null
+                } elseif ($mode -eq '-R') {
                     $out = & $Iperf -c $Board -t $Seconds -R -f m 2>&1 | ForEach-Object { "$_" }
-                    $r = Iperf-Mbit @($out | Where-Object { $_ -match '^\[\s*\*1\]' }) '.'
-                    if ($null -eq $r) { $r = Iperf-Mbit $out '.' }
+                    $v1 = Iperf-Mbit @($out | Where-Object { $_ -match '^\[\s*\*1\]' }) '.'
+                    if ($null -eq $v1) { $v1 = Iperf-Mbit $out '.' }
+                    $v2 = $null
+                } elseif ($mode -eq '-d') {
+                    $j = Start-Job -ScriptBlock { param($x, $b, $s) & $x -c $b -t $s -d -f m 2>&1 | ForEach-Object { "$_" } } -ArgumentList $Iperf, $Board, $Seconds
+                    if (-not (Wait-Job -Job $j -Timeout ($Seconds * 2 + 30))) { Stop-Job $j }
+                    $out = @(Receive-Job $j); Remove-Job -Force $j
+                    $v1 = Iperf-Mbit @($out | Where-Object { $_ -notmatch '^\[\s+2\]' -and $_ -notmatch '^\[SUM\]' }) '.'      # PC -> board
+                    $v2 = Iperf-Mbit @($out | Where-Object { $_ -match '^\[\s+2\]' }) '.'         # board -> PC
+                } else {
+                    $jt = Start-Job -ScriptBlock { param($x, $b, $s) & $x -c $b -t $s -f m 2>&1 | ForEach-Object { "$_" } } -ArgumentList $Iperf, $Board, $Seconds
+                    $ju = Start-Job -ScriptBlock { param($x, $b, $s) & $x -c $b -u -b 20M -t $s -f m 2>&1 | ForEach-Object { "$_" } } -ArgumentList $Iperf, $Board, $Seconds
+                    $null = Wait-Job -Job $jt, $ju -Timeout ($Seconds * 2 + 30)
+                    $ot = @(Receive-Job $jt); $out = @(Receive-Job $ju); Remove-Job -Force $jt, $ju
+                    $v1 = Iperf-Mbit $ot '.'; $v2 = Iperf-Mbit $out '.'
                 }
-                if ($null -ne $r) { $rates += $r }
+                if ($null -ne $v1) { $r1 += $v1 }
+                if ($null -ne $v2) { $r2 += $v2 }
                 $out | Select-Object -Last 2 | ForEach-Object { Write-Output "      $_" }
             }
-            $mean = $(if ($rates.Count -gt 0) { ($rates | Measure-Object -Average).Average } else { 0 })
-            Record "offload ${state}: iperf $dir" ($rates.Count -eq $Runs -and $mean -gt 0) ("{0:N1} Mbit/s over {1} run(s): {2}" -f $mean, $rates.Count, (($rates | ForEach-Object { '{0:N1}' -f $_ }) -join ', '))
-            $script:rows += [pscustomobject]@{ Label = $Label; Offload = $state; Direction = $dir; Mbit = [math]::Round($mean, 1) }
+            $m1 = $(if ($r1.Count -gt 0) { ($r1 | Measure-Object -Average).Average } else { 0 })
+            $m2 = $(if ($r2.Count -gt 0) { ($r2 | Measure-Object -Average).Average } else { 0 })
+            $two = ($mode -eq '-d' -or $mode -eq 'plain+udp')
+            $ok = ($r1.Count -eq $Runs -and $m1 -gt 0 -and (-not $two -or ($r2.Count -eq $Runs -and $m2 -gt 0)))
+            Record "offload ${state}: iperf $mode" $ok ("{0:N1} / {1:N1} Mbit/s over {2} run(s): {3} | {4}" -f $m1, $m2, $r1.Count, (($r1 | ForEach-Object { '{0:N1}' -f $_ }) -join ', '), (($r2 | ForEach-Object { '{0:N1}' -f $_ }) -join ', '))
+            $script:rows += [pscustomobject]@{ Label = $Label; Offload = $state; Mode = $mode; A = [math]::Round($m1, 1); B = [math]::Round($m2, 1) }
         }
 
-        $after = Cli "show offload"
+        $after = Run-Cli "show offload"
+        $after -split "`n" | Where-Object { $_ -match 'TX counters|RX counters|RX policy|Build options' } | ForEach-Object { Write-Output "    [${state}] $($_.Trim())" }
         $txl4 = Counter $after 'l4 patched (\d+)'
         $rxv = Counter $after 'verified (\d+), ip bad'
         $rxipbad = Counter $after 'ip bad (\d+)'
@@ -160,19 +179,21 @@ try {
             Record 'off: hardware counters idle' ($txl4 -eq 0 -and $rxv -eq 0) "tx l4 patched $txl4, rx verified $rxv"
         }
     }
-    [void](Cli "configure terminal"); [void](Cli "offload all on"); [void](Cli "end")
+    [void](Run-Cli "configure terminal"); [void](Run-Cli "offload all on"); [void](Run-Cli "end")
 } finally {
     $sp.Close()
 }
 Write-Output ""
-Write-Output "| firmware | offload | PC->board Mbit/s | board->PC Mbit/s |"
+Write-Output "| firmware | offload | plain PC->board | -R board->PC | -d PC->board / board->PC | plain + UDP 20M: TCP / UDP |"
 foreach ($st in @('off', 'on')) {
-    $a = ($script:rows | Where-Object { $_.Offload -eq $st -and $_.Direction -eq 'PC->board' }).Mbit
-    $b = ($script:rows | Where-Object { $_.Offload -eq $st -and $_.Direction -eq 'board->PC' }).Mbit
-    Write-Output ("| {0} | {1} | {2} | {3} |" -f $Label, $st, $a, $b)
+    $pl = ($script:rows | Where-Object { $_.Offload -eq $st -and $_.Mode -eq 'plain' }).A
+    $rr = ($script:rows | Where-Object { $_.Offload -eq $st -and $_.Mode -eq '-R' }).A
+    $dd = $script:rows | Where-Object { $_.Offload -eq $st -and $_.Mode -eq '-d' }
+    $pu = $script:rows | Where-Object { $_.Offload -eq $st -and $_.Mode -eq 'plain+udp' }
+    Write-Output ("| {0} | {1} | {2} | {3} | {4} / {5} | {6} / {7} |" -f $Label, $st, $pl, $rr, $dd.A, $dd.B, $pu.A, $pu.B)
 }
 $failed = @($script:results | Where-Object { -not $_.Ok }).Count
 $total = $script:results.Count
-if ($failed -eq 0) { Write-Output "OFFLOAD_BENCH: PASS $total/$total"; exit 0 }
+if ($failed -eq 0 -and $total -gt 0) { Write-Output "OFFLOAD_BENCH: PASS $total/$total"; exit 0 }
 Write-Output "OFFLOAD_BENCH: FAIL $failed/$total"
 exit 1
