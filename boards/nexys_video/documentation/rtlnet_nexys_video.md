@@ -389,7 +389,7 @@ Network build of commit eb6754b6 (tree clean), 10-22-2026, Vivado 2025.2, `build
 Board simulation: `tb_rtlnet_nexys_video_net` TEST PASS, 141 checks at 10, 100 and 1000 Mb/s, including the offload
 section through the CPU path: TCP and UDP frames from the DMA stand-in leave with correct IPv4 and L4 checksums
 (CTRL tx bits), received frames carry a verified trailer (good, and a corrupted L4 checksum flagged), and with CTRL 0
-both directions are bit-exact pass-through.
+both directions are bit-exact pass-through. Full regression `scripts/rtlnet_regression.ps1`: 76 passed, 0 failed.
 
 Hardware throughput with the offload off and on, with and without zero-copy:
 `boards/nexys_video/scripts/offload_bench.ps1` (one run per firmware image; the CLI switches the offload at run
