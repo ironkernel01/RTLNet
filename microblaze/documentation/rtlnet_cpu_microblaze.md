@@ -171,13 +171,14 @@ The board top instances `u_cpu` with exactly the section 15.6 ports. A replaceme
 | RTLNet drivers | `cores/<core>/driver/*.c`, compiled in place | each core's registers |
 | network manager | `src/rtlnet_netmgr.c/.h` | PHY bring-up, link monitor, DHCP auto-start, addresses, CPU path bring-up, InitLWIP calls |
 | CPU path control | `src/rtlnet_cpupath.c/.h` | CPU-path classifier configuration (broadcast storm default, filter tables, policers), wrapper CPU-path counters |
+| feature discovery, checksum offload | `src/rtlnet_offload.c/.h` | `rtlnet_features_discover` (wrapper CPU_CAPS bits, block header confirmation), `rtlnet_offload_apply` (CTRL and the lwIP checksum flags in the safe order), receive trailer policy `rtlnet_offload_rx_frame` (section 9.10) |
 | lwIP glue | `src/lwip/rtlnet_lwip.c/.h`, `src/lwip/lwipopts.h` | `InitLWIP()`, `sys_now`, main-loop service, status and counters |
-| netif | `src/lwip/rtlnet_lwip_netif.c/.h` | the AXI DMA: receive ring, transmit, frame counters |
+| netif | `src/lwip/rtlnet_lwip_netif.c/.h` | the AXI DMA: receive buffers (copy or zero-copy loan to lwIP), transmit (copy or in place), receive trailer, frame counters |
 | applications | `src/lwip/rtlnet_tcp_echo.c/.h`, `src/lwip/rtlnet_tcp_iperf.c/.h` | TCP echo server (port 7); TCP iperf 2 server (port 5001) status and CLI glue; both run at the same time, both on at boot |
 | iperf server | `src/lwip/rtlnet_lwiperf.c/.h` | the project copy of lwIP's `lwiperf` with the reverse (-R), tradeoff (-r) and dual (-d) modes (section 9.9) |
 | CLI | `cli/menu.c`, `cli/cli_commands.c`, generated `cli/menu_table.c`, `cli/menu_commands.h`, `cli/MenuDocumentation.md` | MenuBuilder hierarchical rules (`cli/MenuBuilder_hierarchical.md`) |
 | desktop harness | `host/main.c`, `host/host_platform.c`, `host/host_lwip_stub.c` | scripted `--demo` of the real CLI and network manager against a register model |
-| host tests | `test/tcp_echo_client.py`, `test/iperf_header_capture.py`, `test/iperf_board_emulator.py`, `test/lwiperf_loopback/` | TCP echo test from the PC; iperf 2 header capture; the board's iperf behavior in Python against the stock client; desktop loopback test of `rtlnet_lwiperf.c` |
+| host tests | `test/tcp_echo_client.py`, `test/iperf_header_capture.py`, `test/iperf_board_emulator.py`, `test/lwiperf_loopback/`, `test/netif_host/` | TCP echo test from the PC; iperf 2 header capture; the board's iperf behavior in Python against the stock client; desktop loopback test of `rtlnet_lwiperf.c`; desktop test of the DMA netif on real lwIP with a mock AXI DMA |
 
 The hand-written start-up, linker script, UART, timer and string files of the first firmware are gone; the
 BSP provides those services. `rtlnet_fmt.c` stays as the console formatter (also used by the harness);
@@ -239,6 +240,29 @@ the pbuf chain into one of two 2 KiB TX buffers with 32-bit writes only (`axi_pu
 at most 2 ms for the previous MM2S transfer and starts the next one (`tx_timeouts`, `tx_too_long`, `tx_errors`). No caches exist, so the buffers need no
 flush or invalidate. A channel counts as busy only while it runs and is not idle: `XAxiDma_Busy` reports a
 halted channel (never started, or after a reset) as busy, which kept the first transmit waiting forever.
+
+With the checksum offload (section 9.10) the receive buffers are `RTLNET_NETIF_RX_BUFS` of 2048 bytes (4 copying,
+16 with zero-copy receive), a free list instead of a ring (a buffer returns to the list when the copy is done or when
+lwIP frees the custom pbuf), and every DMA transfer may end in an 8-byte trailer (`roundup8(frame) + 8`, at most 1536
+bytes for a 1522-byte frame). Zero-copy transmit sends a frame built in one pbuf from lwIP's heap, which lives in the
+AXI BRAM, in place (the MM2S data realignment engine takes any byte address); the pbuf is referenced until the
+transfer is done (`tx_reap`); chained pbufs and pbufs outside the AXI BRAM are copied.
+
+### 9.10 Checksum offload in the firmware
+
+`src/rtlnet_offload.c` owns the discovery of the CPU-path blocks and the checksum offload control. Boot order:
+`rtlnet_features_discover()` (netmgr, before `cpupath_init`) reads the wrapper ID/VERSION, `CAPS.CPU_PATH_PRESENT` and
+`CPU_CAPS` bits 16..18 and confirms each advertised block's header (classifier `"CLSF"`; offload `"TCPO"` with CAPS
+bits equal to CPU_CAPS 17 / 18; a difference prints an error and the block counts as absent). `cpupath_init` uses the
+result for the classifier. `InitLWIP()` (first call, netif already added) runs the discovery if it has not run and calls
+`rtlnet_offload_apply(rtlnet_offload_request())` (default: everything present). One function changes CTRL and the lwIP
+flags (`NETIF_SET_CHECKSUM_CTRL`, via `rtlnet_lwip_set_checksum_ctrl`): turning a TX bit on writes CTRL, reads it back
+and then clears the matching `GEN_*` flags; turning it off sets the flags first, polls `STATUS.TX_IDLE` (bounded), then
+clears CTRL; the receive bit follows the trailer state machine (CHECK flags cleared with the first trailer, set again
+before CTRL is cleared, trailers parsed by marker until the first raw frame). The flags always derive from the CTRL
+read-back. CLI: `show offload`, `show version`, config `offload tx-ip|tx-l4|rx|all on|off` (shown in the running
+configuration when off). The same firmware runs on a bitstream with none, one or both paths: absent paths leave lwIP
+computing and checking in software (desktop demo and `show offload` cover every combination).
 
 ### 9.6 lwIP configuration and memory
 
@@ -603,5 +627,6 @@ Details: `boards/nexys_video/documentation/rtlnet_nexys_video.md` sections 6.3 a
 | 10-22-2026 | Initial version: block design script, wrapper, driver header, bus-functional model |
 | 10-22-2026 | Moved to `microblaze/`; LMB 512 KiB; AXI DMA and 128 KiB AXI BRAM with the frame streams; simulation stand-in renamed `rtlnet_microblaze_sim_stub`; BSP generated from the XSA; firmware on the BSP with lwIP, InitLWIP, DMA netif, TCP echo, CPU path CLI |
 | 10-22-2026 | lwIP glue and applications moved to `src/lwip/`; iperf server forked as `rtlnet_lwiperf` with -R, -r and -d; captured iperf 2.2.2 test header; desktop loopback test |
+| 10-22-2026 | AXI DMA data realignment engine on MM2S (zero-copy transmit); checksum offload in the firmware (feature discovery, `rtlnet_offload_apply`, receive trailer, zero-copy options, `show offload`, `offload` command, desktop netif test) |
 | 10-22-2026 | Classifier driver integrated: `rtlnet_cpupath.c` on the real driver API (context, `RTLNET_CLS_ACT_*`), boot call `rtlnet_classifier_config_bcast_storm(10, 100)`, MAC mask removed and EtherType entries 0..7 (range pairs) in the CLI, harness register model of the classifier; the sim stub classifier task follows the driver register map |
 | 10-22-2026 | TCP throughput tuning: netif TX/RX copies as 32-bit AXI accesses, optional CPU profile (`RTLNET_NETIF_PROFILE`), `TCP_SND_BUF` 24 x MSS, `TCP_WND` 8 x MSS, 32-bit lwIP checksum, memory resized (section 9.10) |

@@ -33,7 +33,7 @@ network stack: every protocol runs in logic, and the CPU only configures and mon
 | UDP echo server | `rtlnet_udp_echo` | application on the socket payload streams: returns every datagram to its sender |
 | Frame filter/classifier | `rtlnet_classifier` | **designed, not built yet** (section 13) |
 | Checksum offload | `rtlnet_tcp_offload` | on the CPU DMA stream: inserts IPv4 / TCP / UDP checksums into frames the CPU sends (store-and-forward patch); checks them on frames the CPU receives and appends an 8-byte trailer beat with the result (cut-through) |
-| CPU network path | `rtlnet_eth_protocol` CPU port + `microblaze/` | every frame no enabled leaf claims goes to the CPU (`cpu_axis_ethernet_stream`, AXI DMA); the CPU sends frames back the same way; lwIP runs a TCP echo server on it |
+| CPU network path | `rtlnet_eth_protocol` CPU port + `microblaze/` | every frame no enabled leaf claims goes to the CPU (`cpu_axis_ethernet_stream`, AXI DMA); the CPU sends frames back the same way; lwIP runs a TCP echo server on it; the CPU-path classifier and the checksum offload sit on the two streams |
 | CPU core | `rtlnet_cpu_microblaze` | MicroBlaze block design behind a vendor-neutral core port list; replaceable by a Nios V / RISC-V core with the same ports |
 | Board top | `boards/nexys_video/hdl/rtlnet_nexys_video_top.sv` | the Nexys Video "Top.sv": clocks, resets, pins, CPU core, address decode, LEDs |
 
@@ -211,7 +211,7 @@ Protocol sub-map (offset inside 0x1_0000):
 | 0x4000 | iperf |
 | 0x5000 | UDP socket layer |
 | 0x8000 | `rtlnet_classifier` (CPU path, section 7.4) |
-| 0x9000 | `rtlnet_tcp_offload` (CPU path, section 14; **planned slot**, `0x44A1_9000`, not wired yet) |
+| 0x9000 | `rtlnet_tcp_offload` (CPU path, section 14; `0x44A1_9000`, `u_cpu_offload`, `CPU_TCP_OFFLOAD_ENABLE`; reads 0 when not built) |
 
 Other MicroBlaze peripherals sit in the block design's own map (LMB BRAM `0x0000_0000` 128 KiB, UART Lite
 `0x4060_0000`, interrupt controller `0x4120_0000`, MDM `0x4140_0000`, Timer `0x41C0_0000`). The single source of
@@ -463,7 +463,7 @@ AXI interconnect, the exported AXI4-Lite master and an interrupt controller. A N
 not change. `microblaze/rtlnet_microblaze_sim_stub.sv` (module `rtlnet_microblaze_sim_stub`, the simulation stand-in for the CPU) has the same ports and drives scripted
 AXI4-Lite transactions for the board bench.
 
-The block design also carries an AXI DMA (simple mode, 64-bit streams, `S2MM` from `s_axis_eth_*`, `MM2S` to
+The block design also carries an AXI DMA (simple mode, 64-bit streams, data realignment engine on MM2S only (transmit buffers at any byte address; the DMA buffers and lwIP's heap are in the AXI BRAM), `S2MM` from `s_axis_eth_*`, `MM2S` to
 `m_axis_eth_*`, both interrupts on the INTC) and an AXI BRAM for the DMA buffers; the LMB BRAM (256 KiB, up to
 512 KiB) holds code, stack, heap and the lwIP pools. **All firmware runs from internal block RAM only; no external
 memory (DDR) is used.** The MicroBlaze has **no caches**: code runs
@@ -556,9 +556,12 @@ ip_ok, l4_ok, verified), L4 offset, marker `0xA5`. The hardware drops nothing; t
 (ID `"TCPO"`): `CTRL` bits `tx_ip_csum`, `tx_l4_csum`, `rx_csum` (power-up 0 = both paths bit-exact pass-through), `STATUS`
 idle bits, `CAPS` (`TX_PRESENT`, `RX_PRESENT`, insert types, buffer size), counters. Full specification, latency
 and throughput table, trailer layout, lwIP mapping and verification record:
-`cores/rtlnet_tcp_offload/documentation/rtlnet_tcp_offload.md`. Integration into the protocol wrapper (RX after the
-classifier, TX before the CPU TX FIFO, sub-map slot `0x9000`, wrapper `CPU_CAPS` discovery bits 17 / 18) is the next
-step; the `TX_ENABLE` / `RX_ENABLE` single-path builds are future work.
+`cores/rtlnet_tcp_offload/documentation/rtlnet_tcp_offload.md`. It is instanced in the protocol wrapper's CPU path as
+`u_cpu_offload` (RX between the classifier and the CPU DMA S2MM stream, TX between the CPU DMA MM2S stream and the
+CPU TX FIFO), registers at sub-map `0x9000`, and advertised by wrapper `CPU_CAPS` bit 17 (TX) and bit 18 (RX), next to
+bit 16 for the classifier. Firmware discovers the blocks through those bits, confirms each block's own ID and CAPS, and
+configures lwIP from what is present (`rtlnet_offload_apply`); a build without a block is a firmware no-op for it.
+The `TX_ENABLE` / `RX_ENABLE` single-path builds are future work.
 
 ## 15. Core port lists (integration contract)
 
@@ -615,9 +618,11 @@ Parameters: `CLK_HZ` 100_000_000, `POR_RESET_MS` 20.
 Parameters: `PROTO_CLK_HZ` 50_000_000, `INGRESS_FIFO_KB` 16, `EGRESS_FIFO_KB` 8, `ARP_ENABLE`/`ICMP_ENABLE`/
 `DHCP_ENABLE`/`IPERF_ENABLE`/`UDP_ENABLE` 1, `ICMP_BUF_KB` 2, `DHCP_BUF_KB` 1, `IPERF_PORT` 5001,
 `NUM_SOCKETS` 4, `UDP_RX_BUF_KB` 16, `UDP_TX_BUF_KB` 8, `CPU_PATH_ENABLE` 1, `CPU_RX_FIFO_KB` 16, `CPU_TX_FIFO_KB` 8,
-`CPU_CLASSIFIER_ENABLE` 1, `CPU_AXIS_CLK_HZ` 100_000_000,
+`CPU_CLASSIFIER_ENABLE` 1, `CPU_TCP_OFFLOAD_ENABLE` 1, `CPU_AXIS_CLK_HZ` 100_000_000,
 `RAM_STYLE` "block". Queue instance names `u_ingress_fifo`, `u_egress_fifo`, `u_cpu_rx_fifo`, `u_cpu_tx_fifo`; the CPU-path classifier
-instance is `u_cpu_classifier` (section 13, registers at sub-map 0x8000). Arbiter
+instance is `u_cpu_classifier` (section 13, registers at sub-map 0x8000), the checksum offload instance is
+`u_cpu_offload` (section 14, registers at sub-map 0x9000). `CPU_CAPS` (0x034): `[7:0]` `CPU_RX_FIFO_KB`, `[15:8]`
+`CPU_TX_FIFO_KB`, bit 16 classifier, bit 17 offload TX, bit 18 offload RX; 0 without the CPU path. Arbiter
 priority: UDP socket, ICMP, ARP, DHCP, iperf, CPU.
 
 ### 15.4 Leaves (instanced inside `rtlnet_eth_protocol`)
@@ -696,3 +701,4 @@ and between the DMA MM2S stream and `u_cpu_tx_fifo` (TX).
 | 10-22-2026 | CPU network path (`cpu_axis_ethernet_stream`, leaf `claim`), AXI DMA, lwIP TCP echo server, `microblaze/` folder, BSP generated from the AMD install |
 | 10-22-2026 | Broadcast storm limiter on the CPU path (default 10 frames / 100 ms) |
 | 10-22-2026 | `rtlnet_tcp_offload`: checksum insert on the CPU TX stream, check with trailer on the CPU RX stream (core built; sub-map slot 0x9000 planned) |
+| 10-22-2026 | `rtlnet_tcp_offload` integrated in the protocol wrapper's CPU path (`u_cpu_offload`, window 0x9000, `CPU_CAPS` bits 16..18); default `TX_BUF_KB` 8; firmware discovery, `rtlnet_offload_apply`, receive trailer policy, zero-copy options; AXI DMA realignment engine on MM2S |

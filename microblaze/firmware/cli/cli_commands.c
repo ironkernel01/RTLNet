@@ -1428,6 +1428,7 @@ int cli_clear_counters(const MenuCommandContext *ctx)
         rtlnet_udp_echo_clear_counters(RTLNET_PLAT_ECHO_BASE);
     }
     (void)cpupath_cls_clear_counters();
+    rtlnet_offload_reset_stats();
     rtlnet_lwip_clear_counters();
     rtlnet_tcp_echo_clear_counters();
     fmt_printf("Counters cleared\n");

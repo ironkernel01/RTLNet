@@ -5,7 +5,7 @@
 | Core | `rtlnet_tcp_offload` |
 | Document revision | 10-22-2026 |
 | Register ID / VERSION | `"TCPO"` = `0x5443504F` / `0x10222026` |
-| Planned protocol sub-map slot | `0x9000` (`0x44A1_9000`); **documented, not wired in this revision** |
+| Protocol sub-map slot | `0x9000` (`0x44A1_9000`), instance `u_cpu_offload` in `rtlnet_eth_protocol` (`CPU_TCP_OFFLOAD_ENABLE`); wrapper `CPU_CAPS` bit 17 = TX present, bit 18 = RX present |
 | Clock | one stream clock `clk` (the CPU stream clock); register file crossing from `s_axi_aclk` inside the core |
 | Verification | `tb_rtlnet_tcp_offload` (4906 checks, 5 regression entries), driver host test (69 checks) |
 | Synthesis (xc7a200t-3, 250 MHz) | WNS +0.281 ns, own logic <= 2 LUT levels, 1867 LUT, 3613 FF, 1.5 BRAM tiles |
@@ -248,7 +248,29 @@ Ordering (one firmware function, never mismatched):
   a bad checksum -> drop and count; verified and good -> pass; unverified -> pass.
 * `IP_REASSEMBLY 0`: fragments are never verified.
 
-(The firmware side is phase B of the task and is not part of this revision.)
+Firmware (as built, `microblaze/firmware/src/rtlnet_offload.c`, `src/lwip/rtlnet_lwip_netif.c`):
+
+* **Discovery** (`rtlnet_features_discover`, once at boot, before the classifier boot configuration): wrapper
+  ID/VERSION, `CAPS.CPU_PATH_PRESENT`, `CPU_CAPS` bits 16..18, then the block's own header: classifier `"CLSF"` and
+  VERSION; offload `"TCPO"`, VERSION and `CAPS.TX_PRESENT` / `CAPS.RX_PRESENT` equal to bits 17 / 18. A mismatch is
+  printed and the block counts as absent. `show offload` and `show version` print the result.
+* **`rtlnet_offload_apply(want)`** is the only function that writes CTRL and sets the netif checksum flags
+  (`InitLWIP` calls it with "everything present" before the netif comes up; the CLI `offload tx-ip|tx-l4|rx|all on|off`
+  calls it with the changed request). It masks the request by what is present and follows the orders above; the lwIP
+  flags are always computed from the CTRL read-back (`rtlnet_offload_flags_for`), and `show offload` prints a
+  `MISMATCH` line if the netif's flags ever differ from what the read-back implies. TX idle polling is bounded
+  (`RTLNET_OFFLOAD_IDLE_POLLS`); on a timeout the CTRL bit stays on and the software checksum flags are restored.
+* **Netif receive** (`rtlnet_offload_rx_frame`): trailer found by marker and length consistency; policy verified good
+  or unverified -> pass, IPv4 header bad or verified L4 bad -> drop and count, rx_csum on and no trailer -> drop and
+  count. The pbuf length is the trailer's frame length. State machine OFF / ARMING / ON / DRAINING as described above.
+* **Zero copy** (compile-time, `lwipopts.h`, default on): `RTLNET_NETIF_ZERO_COPY_RX` hands the DMA buffer to lwIP
+  as a custom `PBUF_REF` pbuf (16 buffers of 2048 bytes in the AXI BRAM, free list, S2MM armed from the free list);
+  `RTLNET_NETIF_ZERO_COPY_TX` puts lwIP's heap in the AXI BRAM and DMAs a single-pbuf frame in place (MM2S has a data
+  realignment engine, so any byte address works; the pbuf stays referenced until the transfer is done); chained pbufs
+  and pbufs outside the AXI BRAM are copied.
+* Tests: host demo (`build.ps1 -Demo`: discovery of the none / TX only / RX only / both builds and the mismatch
+  cases, the order of every CTRL / STATUS / lwIP-flag change, receive policy, CLI) and the netif test on real lwIP with
+  a mock AXI DMA (`build.ps1 -NetifTest`, four zero-copy combinations).
 
 ## 9. Verification
 
@@ -299,8 +321,8 @@ xc7a200tsbg484-3, the 10G stand-in):
   the single-path and none-present builds with their bench, synthesis and host-test cases; the wrapper parameters
   `CPU_TCP_OFFLOAD_TX_ENABLE` / `CPU_TCP_OFFLOAD_RX_ENABLE`; the "same firmware binary on all builds" proof. The
   CAPS bits `TX_PRESENT` / `RX_PRESENT` and the wrapper `CPU_CAPS` bits 17 / 18 are in place for them and read 1.
-* Phase B (planned): instance in the protocol wrapper's CPU path (RX after the classifier, before S2MM; TX after
-  MM2S, before the CPU TX FIFO), sub-map slot `0x9000`, `CPU_CAPS` discovery bits, firmware zero-copy options.
+* Integrated in the protocol wrapper's CPU path (RX after the classifier, before the DMA S2MM; TX after the DMA MM2S,
+  before the CPU TX FIFO) with the `CPU_CAPS` bits 17 / 18 (phase B).
 
 ## 12. Revision history
 

@@ -69,6 +69,8 @@ param(
     [string[]]$Define = @()
 )
 $ErrorActionPreference = 'Stop'
+# powershell -File delivers '-Define A,B' as one string: split every entry on commas.
+$Define = @($Define | ForEach-Object { $_ -split ',' } | Where-Object { $_ -ne '' })
 $Fw      = $PSScriptRoot
 $Repo    = (Resolve-Path (Join-Path $Fw '..\..')).Path
 $Out     = Join-Path $Fw 'build'
