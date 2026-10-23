@@ -116,7 +116,7 @@
 #define RTLNET_TXO_TRF_VERIFIED        0x0080u   /* both checks were possible */
 
 /* Largest frame the trailer's length field and a DMA buffer sizing rule cover. */
-#define RTLNET_TXO_ROUNDUP8(n)         (((uint32_t)(n) + 7u) & ~7u)
+#define RTLNET_TXO_ROUNDUP8(n)         (((n) + 7u) & ~7u)   /* n unsigned; usable in #if */
 #define RTLNET_TXO_RX_BUFFER_BYTES(max_frame) (RTLNET_TXO_ROUNDUP8(max_frame) + RTLNET_TXO_TRAILER_BYTES)
 
 /* Driver bounds. */

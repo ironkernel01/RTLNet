@@ -51,7 +51,10 @@
 #include "menu.h"
 #include "rtlnet_classifier.h"
 #include "rtlnet_cpupath.h"
+#include "rtlnet_eth_protocol.h"
+#include "rtlnet_offload.h"
 #include "rtlnet_platform.h"
+#include "rtlnet_tcp_offload.h"
 
 /* One scripted step: characters to type, text that must (and must not)
  * appear in the console output, and the mode afterwards. */
@@ -155,7 +158,10 @@ static void demo_cls(uint32_t off, uint32_t want, const char *msg)
 static void demo_classifier(void)
 {
     uint32_t mem_boot[RTLNET_CLS_WINDOW_BYTES / 4u];
+    host_model_set_core(RTLNET_PLAT_PROT_BASE, RTLNET_ID_PROT);
+    host_model_set_wrapper(1, 0x00010810u);            /* CPU path with the classifier */
     host_model_set_core(RTLNET_PLAT_CLS_BASE, RTLNET_ID_CLS);
+    rtlnet_features_rediscover();
     host_capture_clear();
     demo_type("enable\r");
     demo_type("configure terminal\r");
@@ -276,6 +282,312 @@ static void demo_classifier(void)
     demo_type("end\r");
     demo_type("disable\r");
     host_model_set_core(RTLNET_PLAT_CLS_BASE, 0u);
+}
+
+
+/* ---------------------------------------------------------------------------
+ * Checksum offload: discovery of every build combination, the order of the
+ * register and lwIP-flag changes, the receive trailer policy and the CLI.
+ * ------------------------------------------------------------------------- */
+#define DEMO_CAPS_BOTH   (RTLNET_TXO_CAPS_TX_PRESENT | RTLNET_TXO_CAPS_RX_PRESENT | RTLNET_TXO_CAPS_INS_IP | \
+                          RTLNET_TXO_CAPS_INS_TCP | RTLNET_TXO_CAPS_INS_UDP | RTLNET_TXO_CAPS_VLAN | (8u << 8) | (1518u << 16))
+#define DEMO_CAPS_TX     (DEMO_CAPS_BOTH & ~RTLNET_TXO_CAPS_RX_PRESENT)
+#define DEMO_CAPS_RX     (DEMO_CAPS_BOTH & ~RTLNET_TXO_CAPS_TX_PRESENT)
+#define DEMO_CPU_QUEUES  0x0810u
+#define DEMO_FLAGS_ALL   0xFFFFu
+#define DEMO_CHECK_BITS  (RTLNET_CS_CHECK_IP | RTLNET_CS_CHECK_TCP | RTLNET_CS_CHECK_UDP)
+#define DEMO_GEN_BITS    (RTLNET_CS_GEN_IP | RTLNET_CS_GEN_TCP | RTLNET_CS_GEN_UDP)
+
+/**
+ * @brief Build a DMA buffer holding a frame of len bytes, its padding and a receive trailer.
+ * @param buf   Buffer of at least 2048 bytes.
+ * @param len   Frame length.
+ * @param flags Trailer flags.
+ * @param sum   Trailer folded sum.
+ * @return Transfer length (roundup8(len) + 8).
+ */
+static uint32_t demo_trailer_buf(uint8_t *buf, uint32_t len, uint16_t flags, uint16_t sum)
+{
+    uint32_t n = (len + 7u) & ~7u;
+    memset(buf, 0, 2048u);
+    for (uint32_t i = 0; i < len; i++) {
+        buf[i] = (uint8_t)(i * 5u + 1u);
+    }
+    buf[n + 0u] = (uint8_t)len;
+    buf[n + 1u] = (uint8_t)(len >> 8);
+    buf[n + 2u] = (uint8_t)sum;
+    buf[n + 3u] = (uint8_t)(sum >> 8);
+    buf[n + 4u] = (uint8_t)flags;
+    buf[n + 5u] = (uint8_t)(flags >> 8);
+    buf[n + 6u] = 34u;
+    buf[n + 7u] = 0xA5u;
+    return n + 8u;
+}
+
+/**
+ * @brief Index of the first logged event of a kind at or after a position.
+ * @param kind HOST_EV_*.
+ * @param from First index to look at.
+ * @return Index, or -1 when none.
+ */
+static int demo_find_event(int kind, unsigned from)
+{
+    for (unsigned i = from; i < host_events_count(); i++) {
+        if (host_event(i)->kind == kind) {
+            return (int)i;
+        }
+    }
+    return -1;
+}
+
+/**
+ * @brief Set up one build combination and run the discovery again.
+ * @param prot     1 when the wrapper answers.
+ * @param cpu_path 1 when it has the CPU path.
+ * @param cpu_caps CPU_CAPS value.
+ * @param txo_present 1 when the offload window answers.
+ * @param txo_caps Offload CAPS.
+ * @return None.
+ */
+static void demo_build(int prot, int cpu_path, uint32_t cpu_caps, int txo_present, uint32_t txo_caps)
+{
+    host_model_set_core(RTLNET_PLAT_PROT_BASE, prot ? RTLNET_ID_PROT : 0u);
+    host_model_set_wrapper(cpu_path, cpu_caps);
+    host_model_set_core(RTLNET_PLAT_CLS_BASE, (cpu_caps & RTLNET_PROTO_CPU_CAPS_CLASSIFIER) ? RTLNET_ID_CLS : 0u);
+    host_model_txo_set(txo_present, txo_caps);
+    host_capture_clear();
+    rtlnet_features_rediscover();
+}
+
+/**
+ * @brief The offload scenarios.
+ * @return None.
+ */
+static void demo_offload(void)
+{
+    uint8_t buf[2048];
+    uint32_t len;
+    uint32_t xfer;
+    const rtlnet_features_t *f;
+    const rtlnet_offload_state_t *st;
+    int e_ctrl;
+    int e_flags;
+    int e_status;
+    unsigned n0;
+
+    /* ---- Discovery of every combination. */
+    demo_build(0, 0, 0u, 0, 0u);
+    f = rtlnet_features();
+    demo_check(f->discovered && !f->wrapper_ok && !f->tx_present && !f->rx_present && f->errors == 0u, "discovery: no wrapper");
+    demo_check(rtlnet_offload_supported() == 0u, "discovery: nothing to offload without the wrapper");
+    demo_build(1, 0, 0u, 0, 0u);
+    f = rtlnet_features();
+    demo_check(f->wrapper_ok && !f->cpu_path && !f->tx_present && !f->cls_present && f->errors == 0u, "discovery: no CPU path");
+    demo_build(1, 1, DEMO_CPU_QUEUES, 0, 0u);
+    f = rtlnet_features();
+    demo_check(f->cpu_path && !f->cls_present && !f->tx_present && !f->rx_present && f->errors == 0u,
+               "discovery: CPU path with no optional block");
+    demo_build(1, 1, 0x00070000u | DEMO_CPU_QUEUES, 1, DEMO_CAPS_BOTH);
+    f = rtlnet_features();
+    demo_check(f->cls_present && f->tx_present && f->rx_present && f->errors == 0u && f->block_caps == DEMO_CAPS_BOTH,
+               "discovery: classifier and both offload paths");
+    demo_check(rtlnet_offload_supported() == RTLNET_OFFLOAD_ALL, "supported: tx-ip, tx-l4 and rx");
+    demo_build(1, 1, 0x00020000u | DEMO_CPU_QUEUES, 1, DEMO_CAPS_TX);
+    f = rtlnet_features();
+    demo_check(!f->cls_present && f->tx_present && !f->rx_present && f->errors == 0u, "discovery: offload TX only");
+    demo_check(rtlnet_offload_supported() == (RTLNET_OFFLOAD_TX_IP | RTLNET_OFFLOAD_TX_L4), "supported: TX bits only");
+    demo_build(1, 1, 0x00040000u | DEMO_CPU_QUEUES, 1, DEMO_CAPS_RX);
+    f = rtlnet_features();
+    demo_check(!f->tx_present && f->rx_present && f->errors == 0u, "discovery: offload RX only");
+    demo_check(rtlnet_offload_supported() == RTLNET_OFFLOAD_RX, "supported: RX bit only");
+    demo_build(1, 1, 0x00060000u | DEMO_CPU_QUEUES, 1, DEMO_CAPS_RX);
+    f = rtlnet_features();
+    demo_check(f->errors == 1u && !f->tx_present && !f->rx_present, "discovery: CPU_CAPS and core CAPS disagree: absent");
+    demo_check(strstr(host_capture_text(), "mismatch") != NULL, "discovery: the mismatch is logged");
+    demo_build(1, 1, 0x00060000u | DEMO_CPU_QUEUES, 0, 0u);
+    f = rtlnet_features();
+    demo_check(f->errors == 1u && !f->tx_present && !f->rx_present, "discovery: advertised but the window is empty: absent");
+    demo_build(1, 1, 0x00010000u | DEMO_CPU_QUEUES, 0, 0u);
+    host_model_set_core(RTLNET_PLAT_CLS_BASE, 0u);
+    host_capture_clear();
+    rtlnet_features_rediscover();
+    f = rtlnet_features();
+    demo_check(f->errors == 1u && !f->cls_present, "discovery: classifier advertised but absent: error, absent");
+    demo_build(1, 1, DEMO_CPU_QUEUES, 1, DEMO_CAPS_BOTH);
+    f = rtlnet_features();
+    demo_check(!f->tx_present && !f->rx_present && rtlnet_offload_supported() == 0u,
+               "discovery: a window that answers but is not advertised is not used");
+
+    /* ---- apply(): absent core, nothing to change, flags all software. */
+    host_events_clear();
+    demo_check(rtlnet_offload_apply(RTLNET_OFFLOAD_ALL) == RTLNET_OFFLOAD_OK, "apply without a core is a no-op");
+    demo_check(demo_find_event(HOST_EV_CTRL_WRITE, 0u) < 0, "apply without a core writes no CTRL");
+    demo_check(rtlnet_lwip_get_checksum_ctrl() == DEMO_FLAGS_ALL, "no core: every lwIP checksum in software");
+
+    /* ---- apply(): both paths on from CTRL 0. */
+    demo_build(1, 1, 0x00070000u | DEMO_CPU_QUEUES, 1, DEMO_CAPS_BOTH);
+    host_events_clear();
+    demo_check(rtlnet_offload_apply(RTLNET_OFFLOAD_ALL) == RTLNET_OFFLOAD_OK, "apply(all) from CTRL 0");
+    st = rtlnet_offload_state();
+    e_ctrl = demo_find_event(HOST_EV_CTRL_WRITE, 0u);
+    e_flags = demo_find_event(HOST_EV_FLAGS, 0u);
+    demo_check(e_ctrl >= 0 && e_flags > e_ctrl, "turning on: CTRL written before the lwIP GEN flags change");
+    demo_check(host_model_txo_ctrl() == RTLNET_OFFLOAD_ALL && st->ctrl == RTLNET_OFFLOAD_ALL, "CTRL reads back 7");
+    demo_check(rtlnet_lwip_get_checksum_ctrl() == (DEMO_FLAGS_ALL & ~DEMO_GEN_BITS),
+               "GEN flags cleared (from the read-back), CHECK flags still on while the receive trailers are unproven");
+    demo_check(st->rx_state == RTLNET_RX_TRAILER_ARMING, "receive trailers: arming");
+
+    /* Frames queued before the change carry no trailer and are checked in software. */
+    memset(buf, 0x11, sizeof(buf));
+    buf[63] = 0x22u;
+    demo_check(rtlnet_offload_rx_frame(buf, 64u, &len) == RTLNET_RXA_DELIVER_RAW && len == 64u,
+               "arming: a frame without trailer is delivered whole");
+    demo_check((rtlnet_lwip_get_checksum_ctrl() & DEMO_CHECK_BITS) == DEMO_CHECK_BITS, "arming: CHECK flags stay on");
+    n0 = host_events_count();
+    xfer = demo_trailer_buf(buf, 60u, 0x00E3u, 0xFFFFu);
+    demo_check(rtlnet_offload_rx_frame(buf, xfer, &len) == RTLNET_RXA_DELIVER_VERIFIED && len == 60u,
+               "first trailer: verified and good, frame length from the trailer");
+    demo_check(rtlnet_offload_state()->rx_state == RTLNET_RX_TRAILER_ON, "receive trailers: on");
+    demo_check(host_events_count() == n0 + 1u && host_event(n0)->kind == HOST_EV_FLAGS &&
+               host_event(n0)->value == (DEMO_FLAGS_ALL & ~DEMO_GEN_BITS & ~DEMO_CHECK_BITS),
+               "first trailer clears the CHECK flags");
+
+    /* Policy on trailers. */
+    xfer = demo_trailer_buf(buf, 1514u, 0x00A3u, 0x1234u);
+    demo_check(rtlnet_offload_rx_frame(buf, xfer, &len) == RTLNET_RXA_DROP_BAD_L4, "verified, bad L4 checksum: drop");
+    xfer = demo_trailer_buf(buf, 100u, 0x0001u, 0x0000u);
+    demo_check(rtlnet_offload_rx_frame(buf, xfer, &len) == RTLNET_RXA_DROP_BAD_IP, "IPv4 with a bad header: drop");
+    xfer = demo_trailer_buf(buf, 61u, 0x0000u, 0x0000u);
+    demo_check(rtlnet_offload_rx_frame(buf, xfer, &len) == RTLNET_RXA_DELIVER_UNVERIFIED && len == 61u, "unverified: pass");
+    xfer = demo_trailer_buf(buf, 42u, 0x0025u, 0x0000u);
+    demo_check(rtlnet_offload_rx_frame(buf, xfer, &len) == RTLNET_RXA_DELIVER_UNVERIFIED, "IPv4 good, UDP checksum 0: pass");
+    memset(buf, 0x33, sizeof(buf));
+    demo_check(rtlnet_offload_rx_frame(buf, 64u, &len) == RTLNET_RXA_DROP_NO_TRAILER, "rx on: a frame without trailer is dropped");
+    st = rtlnet_offload_state();
+    demo_check(st->rx_drop_l4 == 1u && st->rx_drop_ip == 1u && st->rx_no_trailer == 1u && st->rx_verified == 1u &&
+               st->rx_unverified == 2u && st->rx_trailer_frames == 5u, "receive policy counters");
+
+    /* ---- apply(): turn the transmit L4 offload off, keep tx-ip: GEN flags first, wait for idle, then CTRL. */
+    host_model_txo_idle_after(2u);
+    host_events_clear();
+    demo_check(rtlnet_offload_apply(RTLNET_OFFLOAD_TX_IP | RTLNET_OFFLOAD_RX) == RTLNET_OFFLOAD_OK, "apply(tx-ip + rx)");
+    e_flags = demo_find_event(HOST_EV_FLAGS, 0u);
+    e_status = demo_find_event(HOST_EV_STATUS_READ, 0u);
+    e_ctrl = demo_find_event(HOST_EV_CTRL_WRITE, 0u);
+    demo_check(e_flags == 0 && host_event(0)->value == (DEMO_FLAGS_ALL & ~RTLNET_CS_GEN_IP & ~DEMO_CHECK_BITS),
+               "turning tx-l4 off: the GEN_TCP / GEN_UDP flags are set before anything else");
+    demo_check(e_status > e_flags && e_ctrl > e_status, "turning tx-l4 off: STATUS.TX_IDLE polled before CTRL is written");
+    demo_check(host_event((unsigned)e_ctrl - 1u)->kind == HOST_EV_STATUS_READ && host_event((unsigned)e_ctrl - 1u)->value == 1u,
+               "CTRL written after TX_IDLE read 1");
+    demo_check(host_model_txo_ctrl() == (RTLNET_OFFLOAD_TX_IP | RTLNET_OFFLOAD_RX), "CTRL = tx-ip + rx");
+
+    /* ---- Receive off: CHECK flags first, CTRL second, trailers parsed until the first raw frame. */
+    host_events_clear();
+    demo_check(rtlnet_offload_apply(RTLNET_OFFLOAD_TX_IP) == RTLNET_OFFLOAD_OK, "apply(tx-ip): receive off");
+    e_flags = demo_find_event(HOST_EV_FLAGS, 0u);
+    e_ctrl = demo_find_event(HOST_EV_CTRL_WRITE, 0u);
+    demo_check(e_flags == 0 && host_event(0)->value == (DEMO_FLAGS_ALL & ~RTLNET_CS_GEN_IP) && e_ctrl > e_flags,
+               "turning rx off: CHECK flags set before CTRL is cleared");
+    demo_check(demo_find_event(HOST_EV_STATUS_READ, 0u) < 0, "turning rx off needs no TX idle wait");
+    demo_check(rtlnet_offload_state()->rx_state == RTLNET_RX_TRAILER_DRAINING, "receive trailers: draining");
+    xfer = demo_trailer_buf(buf, 70u, 0x0000u, 0u);
+    demo_check(rtlnet_offload_rx_frame(buf, xfer, &len) == RTLNET_RXA_DELIVER_UNVERIFIED && len == 70u,
+               "draining: a frame past the offload still carries its trailer");
+    memset(buf, 0x44, sizeof(buf));
+    demo_check(rtlnet_offload_rx_frame(buf, 128u, &len) == RTLNET_RXA_DELIVER_RAW && len == 128u,
+               "draining: the first raw frame is delivered whole");
+    demo_check(rtlnet_offload_state()->rx_state == RTLNET_RX_TRAILER_OFF, "receive trailers: off after the first raw frame");
+    demo_check(rtlnet_offload_rx_frame(buf, 1000u, &len) == RTLNET_RXA_DELIVER_RAW && len == 1000u, "off: frames are raw");
+
+    /* ---- Timeout: TX never goes idle; CTRL stays, software checksums come back. */
+    host_model_txo_idle_after(0xFFFFFFFFu);
+    host_events_clear();
+    demo_check(rtlnet_offload_apply(0u) == RTLNET_OFFLOAD_ERR_TIMEOUT, "apply(0) with TX never idle times out");
+    demo_check(demo_find_event(HOST_EV_CTRL_WRITE, 0u) < 0 && host_model_txo_ctrl() == RTLNET_OFFLOAD_TX_IP,
+               "timeout: CTRL left on");
+    demo_check(rtlnet_lwip_get_checksum_ctrl() == (DEMO_FLAGS_ALL & ~RTLNET_CS_GEN_IP), "timeout: flags follow the CTRL read-back");
+    demo_check(rtlnet_offload_state()->idle_timeouts == 1u, "timeout counted");
+    host_model_txo_idle_after(2u);
+    demo_check(rtlnet_offload_apply(0u) == RTLNET_OFFLOAD_OK && host_model_txo_ctrl() == 0u &&
+               rtlnet_lwip_get_checksum_ctrl() == DEMO_FLAGS_ALL, "everything off: CTRL 0, every checksum in software");
+
+    /* ---- Read-back mismatch: the flags follow the hardware, not the request. */
+    host_model_txo_stuck(RTLNET_OFFLOAD_TX_L4);
+    demo_check(rtlnet_offload_apply(RTLNET_OFFLOAD_TX_L4) == RTLNET_OFFLOAD_ERR_IO, "stuck CTRL bit: read-back mismatch reported");
+    demo_check(rtlnet_lwip_get_checksum_ctrl() == DEMO_FLAGS_ALL, "stuck CTRL bit: lwIP keeps its checksums");
+    host_model_txo_stuck(0u);
+    demo_check(rtlnet_offload_apply(RTLNET_OFFLOAD_TX_L4) == RTLNET_OFFLOAD_OK &&
+               rtlnet_lwip_get_checksum_ctrl() == (DEMO_FLAGS_ALL & ~(RTLNET_CS_GEN_TCP | RTLNET_CS_GEN_UDP)),
+               "tx-l4 on clears GEN_TCP and GEN_UDP only");
+
+    /* ---- A restart finds CTRL as the previous run left it. */
+    host_model_txo_set_ctrl(RTLNET_OFFLOAD_ALL);
+    rtlnet_features_rediscover();
+    host_events_clear();
+    demo_check(rtlnet_offload_apply(RTLNET_OFFLOAD_TX_IP) == RTLNET_OFFLOAD_OK && host_model_txo_ctrl() == RTLNET_OFFLOAD_TX_IP,
+               "restart with CTRL 7: reconciled to the request");
+    demo_check(host_event(0)->kind == HOST_EV_FLAGS, "restart: flags first when bits go off");
+
+    /* ---- Single-path builds. */
+    demo_build(1, 1, 0x00020000u | DEMO_CPU_QUEUES, 1, DEMO_CAPS_TX);
+    demo_check(rtlnet_offload_apply(RTLNET_OFFLOAD_ALL) == RTLNET_OFFLOAD_OK &&
+               host_model_txo_ctrl() == (RTLNET_OFFLOAD_TX_IP | RTLNET_OFFLOAD_TX_L4) &&
+               rtlnet_offload_state()->rx_state == RTLNET_RX_TRAILER_OFF &&
+               (rtlnet_lwip_get_checksum_ctrl() & DEMO_CHECK_BITS) == DEMO_CHECK_BITS,
+               "TX-only build: the request is masked, receive checks stay in software");
+    demo_build(1, 1, 0x00040000u | DEMO_CPU_QUEUES, 1, DEMO_CAPS_RX);
+    demo_check(rtlnet_offload_apply(RTLNET_OFFLOAD_ALL) == RTLNET_OFFLOAD_OK && host_model_txo_ctrl() == RTLNET_OFFLOAD_RX &&
+               (rtlnet_lwip_get_checksum_ctrl() & DEMO_GEN_BITS) == DEMO_GEN_BITS &&
+               rtlnet_offload_state()->rx_state == RTLNET_RX_TRAILER_ARMING,
+               "RX-only build: transmit checksums stay in software");
+
+    /* ---- The CLI. */
+    demo_build(1, 1, 0x00070000u | DEMO_CPU_QUEUES, 1, DEMO_CAPS_BOTH);
+    host_model_set_core(RTLNET_PLAT_CLS_BASE, RTLNET_ID_CLS);
+    host_capture_clear();
+    demo_type("enable\r");
+    demo_type("show offload\r");
+    demo_check(strstr(host_capture_text(), "Confirmed       : classifier yes, offload TX yes, offload RX yes") != NULL,
+               "show offload: discovery");
+    demo_check(strstr(host_capture_text(), "zero-copy RX") != NULL && strstr(host_capture_text(), "lwIP flags") != NULL,
+               "show offload: lwIP flags and build options");
+    demo_check(strstr(host_capture_text(), "MISMATCH:") == NULL, "show offload: flags agree with CTRL");
+    demo_check(rtlnet_offload_apply(RTLNET_OFFLOAD_ALL) == RTLNET_OFFLOAD_OK, "apply(all) for the CLI");
+    rtlnet_lwip_set_checksum_ctrl(DEMO_FLAGS_ALL);
+    host_capture_clear();
+    demo_type("show offload\r");
+    demo_check(strstr(host_capture_text(), "% MISMATCH: lwIP flags 0xFFFF") != NULL, "show offload: MISMATCH line when lwIP disagrees");
+    demo_type("configure terminal\r");
+    host_capture_clear();
+    demo_type("offload tx-l4 off\r");
+    demo_check(host_model_txo_ctrl() == (RTLNET_OFFLOAD_TX_IP | RTLNET_OFFLOAD_RX), "offload tx-l4 off: CTRL");
+    demo_type("offload rx off\r");
+    demo_check(host_model_txo_ctrl() == RTLNET_OFFLOAD_TX_IP, "offload rx off: CTRL");
+    demo_type("offload bogus on\r");
+    demo_check(strstr(host_capture_text(), "% Invalid offload") != NULL, "offload: bad word");
+    demo_type("offload rx maybe\r");
+    demo_check(strstr(host_capture_text(), "% Invalid state") != NULL, "offload: bad state");
+    host_capture_clear();
+    demo_type("end\r");
+    demo_type("show running-config\r");
+    demo_check(strstr(host_capture_text(), "offload tx-l4 off") != NULL && strstr(host_capture_text(), "offload rx off") != NULL &&
+               strstr(host_capture_text(), "offload tx-ip off") == NULL, "running-config lists the offloads that are off");
+    host_capture_clear();
+    demo_type("show version\r");
+    demo_check(strstr(host_capture_text(), "classifier yes, checksum offload TX yes, RX yes") != NULL, "show version: CPU path blocks");
+    demo_type("configure terminal\r");
+    demo_type("offload all on\r");
+    demo_type("end\r");
+    demo_check(host_model_txo_ctrl() == RTLNET_OFFLOAD_ALL, "offload all on: CTRL 7");
+    host_model_txo_set(0, 0u);
+    host_model_set_wrapper(0, 0u);
+    host_model_set_core(RTLNET_PLAT_PROT_BASE, 0u);
+    host_model_set_core(RTLNET_PLAT_CLS_BASE, 0u);
+    rtlnet_features_rediscover();
+    host_capture_clear();
+    demo_type("show offload\r");
+    demo_check(strstr(host_capture_text(), "not present in this build") != NULL, "show offload without the core");
+    demo_type("disable\r");
 }
 
 /**
@@ -470,6 +782,9 @@ static int demo_run(int inject_failure)
 
     /* The classifier present: boot configuration, CLI and counters through the driver. */
     demo_classifier();
+
+    /* Checksum offload: discovery, change order, receive policy, CLI. */
+    demo_offload();
 
     /* Reload restarts the console in user exec mode with default settings. */
     demo_type("enable\r");

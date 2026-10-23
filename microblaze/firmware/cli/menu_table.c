@@ -38,6 +38,7 @@
  *  10-22-2026  MenuBuilder AI / Steve Spano    Network commands on the core drivers; phy, clear, iperf, advertise, duplex, mac-address
  *  10-22-2026  MenuBuilder AI / Steve Spano    CPU network path: show tcp, show cpu-path, tcp echo, storm-control, classifier
  *  10-22-2026  MenuBuilder AI / Steve Spano    TCP iperf server (lwiperf), phy reset, phy mmd / c45, LED and EEE in show phy
+ *  10-22-2026  MenuBuilder AI / Steve Spano    Checksum offload: show offload, offload tx-ip / tx-l4 / rx / all on|off
  * ===========================================================================
  */
 #include "menu.h"
@@ -94,6 +95,8 @@ const MenuCommandDef g_menu_commands[] = {
       "Broadcast storm limiter: policer 0 and its counters", cli_show_storm, MENU_MODE_NONE },
     { "cli_show_classifier", MENU_MODE_EXEC, "SHOW CLASSIFIER",
       "CPU-path classifier: mode, tables, ACL, policers, counters", cli_show_classifier, MENU_MODE_NONE },
+    { "cli_show_offload", MENU_MODE_EXEC, "SHOW OFFLOAD",
+      "Checksum offload: discovery, CTRL, lwIP flags, counters, zero-copy options", cli_show_offload, MENU_MODE_NONE },
     { "cli_show_running", MENU_MODE_PRIV, "SHOW RUNNING-CONFIG",
       "Current configuration", cli_show_running, MENU_MODE_NONE },
     { "cli_disable", MENU_MODE_PRIV, "DISABLE",
@@ -150,6 +153,8 @@ const MenuCommandDef g_menu_commands[] = {
       "Disable the TCP echo server (open connections stay)", cli_tcp_echo_disable, MENU_MODE_NONE },
     { "cli_tcp_echo_port", MENU_MODE_CONFIG, "TCP ECHO PORT [PORT]",
       "TCP echo server port (default 7)", cli_tcp_echo_port, MENU_MODE_NONE },
+    { "cli_offload", MENU_MODE_CONFIG, "OFFLOAD [WHAT] [STATE]",
+      "Checksum offload: tx-ip, tx-l4, rx or all, on or off (as far as the build has it; lwIP follows)", cli_offload, MENU_MODE_NONE },
     { "cli_cls_mode", MENU_MODE_CONFIG, "CLASSIFIER MODE [MODE]",
       "Mode: drop-all, pass-all, pass-on-match or drop-on-match", cli_cls_mode, MENU_MODE_NONE },
     { "cli_cls_policer", MENU_MODE_CONFIG, "CLASSIFIER POLICER [INDEX] [PKTS] [MS] {DISABLE}",
@@ -241,6 +246,7 @@ const MenuKeywordDef g_menu_keywords[] = {
     { MENU_MODE_CONFIG, "IPERF", "iperf servers (UDP in RTL, TCP in firmware)" },
     { MENU_MODE_CONFIG, "IPERF TCP", "TCP iperf server (lwIP lwiperf, default port 5001)" },
     { MENU_MODE_CONFIG, "TCP ECHO", "TCP echo server (lwIP, default port 7)" },
+    { MENU_MODE_CONFIG, "OFFLOAD", "Checksum offload on the CPU path (hardware IPv4/TCP/UDP checksums)" },
     { MENU_MODE_CONFIG, "CLASSIFIER", "CPU-path classifier (filter tables, policers, mode)" },
     { MENU_MODE_CONFIG, "NO CLASSIFIER", "Clear a classifier entry or disable a policer" },
     { MENU_MODE_CONFIG_IF, "STORM-CONTROL", "Broadcast storm limiter (classifier policer 0)" },

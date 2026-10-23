@@ -25,9 +25,12 @@
  * Project:   RTLNet Nexys Video firmware, CLI desktop harness
  * Purpose:   Harness-side controls of the host platform (host_platform.c):
  *            console capture for the --demo checks, the register model's set
- *            of present cores, the classifier register model and the reload
- *            counter. The platform services
- *            themselves are declared in src/rtlnet_platform.h.
+ *            of present cores, the classifier register model, the protocol
+ *            wrapper's CAPS / CPU_CAPS model, the checksum offload register
+ *            model with an event log (CTRL writes, STATUS reads, lwIP flag
+ *            changes: the order the firmware performs them in) and the reload
+ *            counter. The platform services themselves are declared in
+ *            src/rtlnet_platform.h.
  */
 #ifndef HOST_PLATFORM_H
 #define HOST_PLATFORM_H
@@ -42,5 +45,29 @@ uint32_t    host_model_leds(void);
 uint32_t    host_model_cls_peek(uint32_t offset);
 void        host_model_cls_poke(uint32_t offset, uint32_t value);
 int         host_reload_count(void);
+
+/* Protocol wrapper: CAPS.CPU_PATH_PRESENT and CPU_CAPS (bits 16..18 are the optional blocks). */
+void        host_model_set_wrapper(int cpu_path, uint32_t cpu_caps);
+
+/* Checksum offload window: present with this CAPS (0 removes it); STATUS.TX_IDLE after this many STATUS
+ * reads (0xFFFFFFFF: never); CTRL bits that do not stick; CTRL and counters as the harness sees them. */
+void        host_model_txo_set(int present, uint32_t caps);
+void        host_model_txo_idle_after(uint32_t reads);
+void        host_model_txo_stuck(uint32_t mask);
+uint32_t    host_model_txo_ctrl(void);
+void        host_model_txo_set_ctrl(uint32_t ctrl);
+
+/* Event log: what the firmware did, in order. */
+#define HOST_EV_CTRL_WRITE   1   /* CTRL written (value as written) */
+#define HOST_EV_STATUS_READ  2   /* STATUS read (value 1 when it returned TX_IDLE) */
+#define HOST_EV_FLAGS        3   /* lwIP checksum flags set (value = flags) */
+typedef struct {
+    int      kind;
+    uint32_t value;
+} host_event_t;
+void                 host_events_clear(void);
+unsigned             host_events_count(void);
+const host_event_t  *host_event(unsigned index);
+void                 host_event_flags(uint32_t flags);
 
 #endif /* HOST_PLATFORM_H */

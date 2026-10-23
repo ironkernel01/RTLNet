@@ -52,6 +52,7 @@
 #include "rtlnet_mmio.h"
 #include "rtlnet_nexys_video_sysregs.h"
 #include "rtlnet_platform.h"
+#include "rtlnet_tcp_offload.h"
 
 #define HOST_CAPTURE_MAX   65536u
 #define HOST_MAX_CORES     16u
@@ -75,6 +76,22 @@ static clock_t   g_t0;
 static int       g_cls_on;                    /* the classifier model answers at RTLNET_PLAT_CLS_BASE */
 static uint32_t  g_cls_mode;                  /* CTRL.MODE */
 static uint32_t  g_cls_mem[HOST_CLS_WORDS];   /* every other register word as written */
+
+/* Protocol wrapper CAPS / CPU_CAPS model. */
+static int       g_wrap_on;
+static uint32_t  g_wrap_cpu_caps;
+
+/* Checksum offload register model. */
+#define HOST_EV_MAX        256u
+static int       g_txo_on;
+static uint32_t  g_txo_caps;
+static uint32_t  g_txo_ctrl;
+static uint32_t  g_txo_stuck;
+static uint32_t  g_txo_idle_after = 2u;
+static uint32_t  g_txo_status_reads;
+static uint32_t  g_txo_cnt[RTLNET_TXO_NUM_TX_COUNTERS + RTLNET_TXO_NUM_RX_COUNTERS];
+static host_event_t g_ev[HOST_EV_MAX];
+static unsigned  g_ev_n;
 
 /**
  * @brief Clear the console capture buffer.
@@ -125,6 +142,182 @@ void host_model_set_core(uintptr_t base, uint32_t id)
             g_core_id[i]   = id;
             return;
         }
+    }
+}
+
+/**
+ * @brief Protocol wrapper model: CAPS bit 5 (CPU path present) and CPU_CAPS.
+ * @param cpu_path 1 when the CPU path is built.
+ * @param cpu_caps CPU_CAPS value (queue sizes and bits 16..18).
+ * @return None.
+ */
+void host_model_set_wrapper(int cpu_path, uint32_t cpu_caps)
+{
+    g_wrap_on = 1;
+    g_wrap_cpu_caps = cpu_path ? cpu_caps : 0u;
+    if (!cpu_path) {
+        g_wrap_on = 2;
+    }
+}
+
+/**
+ * @brief Checksum offload window model.
+ * @param present 1 for a core answering its header, 0 for an absent core (reads 0).
+ * @param caps    CAPS value.
+ * @return None. CTRL and the counters restart from 0.
+ */
+void host_model_txo_set(int present, uint32_t caps)
+{
+    g_txo_on = present;
+    g_txo_caps = caps;
+    g_txo_ctrl = 0u;
+    g_txo_stuck = 0u;
+    g_txo_idle_after = 2u;
+    g_txo_status_reads = 0u;
+    memset(g_txo_cnt, 0, sizeof(g_txo_cnt));
+}
+
+/**
+ * @brief STATUS reads before TX_IDLE reads 1 (0xFFFFFFFF: never).
+ * @param reads Count; the read counter restarts.
+ * @return None.
+ */
+void host_model_txo_idle_after(uint32_t reads)
+{
+    g_txo_idle_after = reads;
+    g_txo_status_reads = 0u;
+}
+
+/**
+ * @brief CTRL bits that ignore writes (a read-back mismatch).
+ * @param mask Bits.
+ * @return None.
+ */
+void host_model_txo_stuck(uint32_t mask)
+{
+    g_txo_stuck = mask;
+}
+
+/**
+ * @brief CTRL as the model holds it.
+ * @return Value.
+ */
+uint32_t host_model_txo_ctrl(void)
+{
+    return g_txo_ctrl;
+}
+
+/**
+ * @brief Set CTRL directly (hardware state the firmware finds at start-up).
+ * @param ctrl Value.
+ * @return None.
+ */
+void host_model_txo_set_ctrl(uint32_t ctrl)
+{
+    g_txo_ctrl = ctrl & RTLNET_TXO_CTRL_MASK;
+}
+
+/**
+ * @brief Clear the event log.
+ * @return None.
+ */
+void host_events_clear(void)
+{
+    g_ev_n = 0u;
+}
+
+/**
+ * @brief Number of logged events.
+ * @return Count.
+ */
+unsigned host_events_count(void)
+{
+    return g_ev_n;
+}
+
+/**
+ * @brief One logged event.
+ * @param index 0 is the oldest.
+ * @return Pointer, NULL beyond the log.
+ */
+const host_event_t *host_event(unsigned index)
+{
+    return (index < g_ev_n) ? &g_ev[index] : NULL;
+}
+
+/**
+ * @brief Append an event.
+ * @param kind  HOST_EV_*.
+ * @param value Event value.
+ * @return None.
+ */
+static void host_event_add(int kind, uint32_t value)
+{
+    if (g_ev_n < HOST_EV_MAX) {
+        g_ev[g_ev_n].kind = kind;
+        g_ev[g_ev_n].value = value;
+        g_ev_n++;
+    }
+}
+
+/**
+ * @brief Log a change of the lwIP checksum flags (called by the lwIP stub).
+ * @param flags The flags set.
+ * @return None.
+ */
+void host_event_flags(uint32_t flags)
+{
+    host_event_add(HOST_EV_FLAGS, flags);
+}
+
+/**
+ * @brief Checksum offload model read.
+ * @param off Offset in the 4 KiB window.
+ * @return Register value.
+ */
+static uint32_t host_txo_read(uint32_t off)
+{
+    switch (off) {
+    case RTLNET_TXO_REG_ID:      return RTLNET_TXO_ID_VALUE;
+    case RTLNET_TXO_REG_VERSION: return RTLNET_TXO_VERSION_VALUE;
+    case RTLNET_TXO_REG_CAPS:    return g_txo_caps;
+    case RTLNET_TXO_REG_CTRL:    return g_txo_ctrl;
+    case RTLNET_TXO_REG_STATUS: {
+        int idle = (g_txo_idle_after != 0xFFFFFFFFu && g_txo_status_reads >= g_txo_idle_after) ? 1 : 0;
+        g_txo_status_reads++;
+        host_event_add(HOST_EV_STATUS_READ, (uint32_t)idle);
+        return (uint32_t)idle | RTLNET_TXO_STATUS_RX_IDLE;
+    }
+    case RTLNET_TXO_REG_LATENCY: return 18u | (17u << 8);
+    default:
+        break;
+    }
+    for (uint32_t i = 0u; i < RTLNET_TXO_NUM_TX_COUNTERS; i++) {
+        if (off == RTLNET_TXO_REG_CNT_TX(i)) {
+            return g_txo_cnt[i];
+        }
+    }
+    for (uint32_t i = 0u; i < RTLNET_TXO_NUM_RX_COUNTERS; i++) {
+        if (off == RTLNET_TXO_REG_CNT_RX(i)) {
+            return g_txo_cnt[RTLNET_TXO_NUM_TX_COUNTERS + i];
+        }
+    }
+    return 0u;
+}
+
+/**
+ * @brief Checksum offload model write: CTRL (bits 2:0, stuck bits keep their value) and CNT_CLEAR.
+ * @param off   Offset in the 4 KiB window.
+ * @param value Value.
+ * @return None.
+ */
+static void host_txo_write(uint32_t off, uint32_t value)
+{
+    if (off == RTLNET_TXO_REG_CTRL) {
+        host_event_add(HOST_EV_CTRL_WRITE, value);
+        g_txo_ctrl = (g_txo_ctrl & g_txo_stuck) | (value & RTLNET_TXO_CTRL_MASK & ~g_txo_stuck);
+    } else if (off == RTLNET_TXO_REG_CNT_CLEAR && (value & 1u) != 0u) {
+        memset(g_txo_cnt, 0, sizeof(g_txo_cnt));
     }
 }
 
@@ -250,6 +443,15 @@ uint32_t rtlnet_host_reg_read32(uintptr_t addr)
     if (g_cls_on && addr >= RTLNET_PLAT_CLS_BASE && addr < RTLNET_PLAT_CLS_BASE + RTLNET_CLS_WINDOW_BYTES) {
         return host_cls_read((uint32_t)(addr - RTLNET_PLAT_CLS_BASE));
     }
+    if (g_txo_on && addr >= RTLNET_PLAT_TXO_BASE && addr < RTLNET_PLAT_TXO_BASE + RTLNET_TXO_WINDOW_BYTES) {
+        return host_txo_read((uint32_t)(addr - RTLNET_PLAT_TXO_BASE));
+    }
+    if (g_wrap_on == 1 && addr == RTLNET_PLAT_PROT_BASE + 0x008u) {
+        return 0x00000020u;                    /* CAPS: CPU_PATH_PRESENT */
+    }
+    if (g_wrap_on == 1 && addr == RTLNET_PLAT_PROT_BASE + 0x034u) {
+        return g_wrap_cpu_caps;
+    }
     if (addr >= RTLNET_PLAT_SYS_BASE && addr < RTLNET_PLAT_SYS_BASE + 0x1000u) {
         return host_sysreg_read((uint32_t)(addr - RTLNET_PLAT_SYS_BASE));
     }
@@ -281,6 +483,10 @@ void rtlnet_host_reg_write32(uintptr_t addr, uint32_t value)
 {
     if (g_cls_on && addr >= RTLNET_PLAT_CLS_BASE && addr < RTLNET_PLAT_CLS_BASE + RTLNET_CLS_WINDOW_BYTES) {
         host_cls_write((uint32_t)(addr - RTLNET_PLAT_CLS_BASE), value);
+        return;
+    }
+    if (g_txo_on && addr >= RTLNET_PLAT_TXO_BASE && addr < RTLNET_PLAT_TXO_BASE + RTLNET_TXO_WINDOW_BYTES) {
+        host_txo_write((uint32_t)(addr - RTLNET_PLAT_TXO_BASE), value);
         return;
     }
     if (addr >= RTLNET_PLAT_SYS_BASE && addr < RTLNET_PLAT_SYS_BASE + 0x1000u) {

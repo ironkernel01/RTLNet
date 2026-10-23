@@ -37,12 +37,14 @@ Overview:
     src/lwip/rtlnet_lwiperf.c and a scripted iperf 2 client in one host process
     over lwIP's 127.0.0.1 interface); the exit code follows the anchored
     LWIPERF_LOOPBACK: PASS / FAIL line. -NoFirmware: harness only. -Bsp: regenerate
-    the BSP even when it is up to date. -Xsa: another hardware export.
+    the BSP even when it is up to date. -Xsa: another hardware export. -Define:
+    extra -D macros for the firmware and lwIP compilation (the zero-copy options of
+    src/lwip/lwipopts.h: RTLNET_NETIF_ZERO_COPY_RX=0, RTLNET_NETIF_ZERO_COPY_TX=0).
   * Exit code 0 only when every requested step succeeded; prints
     RTLNET_FW: PASS <elf>.
 Usage:
   powershell -NoProfile -ExecutionPolicy Bypass -File microblaze/firmware/build.ps1 `
-    [-Xsa <xsa>] [-Bsp] [-HostHarness] [-Demo] [-LwipTest] [-NoFirmware]
+    [-Xsa <xsa>] [-Bsp] [-HostHarness] [-Demo] [-LwipTest] [-NoFirmware] [-Define NAME=VALUE,...]
 Revision: 10-22-2026
   * 10-22-2026: initial version.
   * 10-22-2026: generated standalone BSP, lwIP, BSP linker conventions;
@@ -57,7 +59,8 @@ param(
     [switch]$HostHarness,
     [switch]$Demo,
     [switch]$LwipTest,
-    [switch]$NoFirmware
+    [switch]$NoFirmware,
+    [string[]]$Define = @()
 )
 $ErrorActionPreference = 'Stop'
 $Fw      = $PSScriptRoot
@@ -84,14 +87,15 @@ function Fwd([string]$p) { return ($p -replace '\\', '/') }
 
 # Core drivers (cores/<core>/driver): the only code that touches each core.
 $drvCores = @('rtlnet_eth_mac', 'rtlnet_mdio', 'rtlnet_eth_protocol', 'rtlnet_arp', 'rtlnet_icmp',
-              'rtlnet_dhcp', 'rtlnet_iperf', 'rtlnet_udp_socket', 'rtlnet_udp_echo', 'rtlnet_classifier')
+              'rtlnet_dhcp', 'rtlnet_iperf', 'rtlnet_udp_socket', 'rtlnet_udp_echo', 'rtlnet_classifier',
+              'rtlnet_tcp_offload')
 $drvSrcs = @(
     'cores/rtlnet_eth_mac/driver/rtlnet_eth_mac.c', 'cores/rtlnet_mdio/driver/rtlnet_mdio.c',
     'cores/rtlnet_mdio/driver/rtlnet_phy_rtl8211e.c', 'cores/rtlnet_eth_protocol/driver/rtlnet_eth_protocol.c',
     'cores/rtlnet_arp/driver/rtlnet_arp.c', 'cores/rtlnet_icmp/driver/rtlnet_icmp.c',
     'cores/rtlnet_dhcp/driver/rtlnet_dhcp.c', 'cores/rtlnet_iperf/driver/rtlnet_iperf.c',
     'cores/rtlnet_udp_socket/driver/rtlnet_udp_socket.c', 'cores/rtlnet_udp_echo/driver/rtlnet_udp_echo.c',
-    'cores/rtlnet_classifier/driver/rtlnet_classifier.c'
+    'cores/rtlnet_classifier/driver/rtlnet_classifier.c', 'cores/rtlnet_tcp_offload/driver/rtlnet_tcp_offload.c'
 ) | Where-Object { Test-Path -LiteralPath (Join-Path $Repo $_) }
 $inc = @(
     "-I$Fw/src", "-I$Fw/src/lwip", "-I$Fw/cli",
@@ -99,7 +103,7 @@ $inc = @(
     "-I$Repo/microblaze/driver"
 ) + ($drvCores | Where-Object { Test-Path -LiteralPath (Join-Path $Repo "cores/$_/driver") } |
      ForEach-Object { "-I$Repo/cores/$_/driver" })
-$common = @('-std=c11', '-Wall', '-Wextra', '-Werror', '-pedantic')
+$common = @('-std=c11', '-Wall', '-Wextra', '-Werror', '-pedantic') + ($Define | ForEach-Object { "-D$_" })
 
 # lwIP core, IPv4 and Ethernet sources compiled from the install (firmware and loopback test).
 $lwipSrcs = @('core/init.c', 'core/def.c', 'core/inet_chksum.c', 'core/ip.c', 'core/mem.c', 'core/memp.c',
@@ -187,11 +191,11 @@ _end = .;
     $sysInc  = @('-isystem', $bspInc, "-specs=$bspSpec")
     # -O2 on the frame path (netif, lwIP glue, TCP echo, lwIP), -Os elsewhere (CLI, drivers).
     $cflags  = $common + @('-g', '-ffunction-sections', '-fdata-sections')
-    $fastSrc = @('rtlnet_lwip_netif', 'rtlnet_lwip', 'rtlnet_tcp_echo', 'rtlnet_tcp_iperf', 'rtlnet_lwiperf')
+    $fastSrc = @('rtlnet_lwip_netif', 'rtlnet_lwip', 'rtlnet_tcp_echo', 'rtlnet_tcp_iperf', 'rtlnet_lwiperf', 'rtlnet_offload')
     $objs = @()
     $fwSrcs = @(
         'src/main.c', 'src/rtlnet_platform.c', 'src/rtlnet_board.c', 'src/rtlnet_fmt.c', 'src/rtlnet_netmgr.c',
-        'src/rtlnet_cpupath.c', 'src/lwip/rtlnet_lwip.c', 'src/lwip/rtlnet_lwip_netif.c', 'src/lwip/rtlnet_tcp_echo.c',
+        'src/rtlnet_cpupath.c', 'src/rtlnet_offload.c', 'src/lwip/rtlnet_lwip.c', 'src/lwip/rtlnet_lwip_netif.c', 'src/lwip/rtlnet_tcp_echo.c',
         'src/lwip/rtlnet_tcp_iperf.c', 'src/lwip/rtlnet_lwiperf.c',
         'cli/menu.c', 'cli/menu_table.c', 'cli/cli_commands.c'
     ) | ForEach-Object { "$Fw/$_" }
@@ -202,7 +206,7 @@ _end = .;
         $objs += $o
     }
     # lwIP core: third-party sources, compiled in place with their own warning level.
-    $lwipFlags = @('-std=gnu11', '-O2', '-g', '-ffunction-sections', '-fdata-sections', '-w')
+    $lwipFlags = @('-std=gnu11', '-O2', '-g', '-ffunction-sections', '-fdata-sections', '-w') + ($Define | ForEach-Object { "-D$_" })
     foreach ($s in $lwipSrcs) {
         $o = Join-Path $objDir ('lwip_' + ($s -replace '[/\\]', '_') -replace '\.c$', '.o')
         Invoke-Step $MbGcc ($mbflags + $lwipFlags + $lwipInc + $sysInc + @('-c', "$LwipDir/src/$s", '-o', $o))
@@ -222,7 +226,8 @@ _end = .;
 # board layer against a register model; lwIP replaced by host/host_lwip_stub.c.
 if ($HostHarness -or $Demo) {
     $hsrcs = @('host/main.c', 'host/host_platform.c', 'host/host_lwip_stub.c', 'src/rtlnet_board.c', 'src/rtlnet_fmt.c',
-               'src/rtlnet_netmgr.c', 'src/rtlnet_cpupath.c', 'cli/menu.c', 'cli/menu_table.c', 'cli/cli_commands.c') |
+               'src/rtlnet_netmgr.c', 'src/rtlnet_cpupath.c', 'src/rtlnet_offload.c', 'cli/menu.c', 'cli/menu_table.c',
+               'cli/cli_commands.c') |
              ForEach-Object { "$Fw/$_" }
     $exe = Join-Path $Out 'menu.exe'
     Invoke-Step 'gcc' ($common + @('-O2', '-DRTLNET_HOST_TEST', "-I$Fw/host") + $inc + $hsrcs +

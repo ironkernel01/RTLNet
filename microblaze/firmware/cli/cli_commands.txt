@@ -15,6 +15,7 @@ REVISION:10-22-2026:Initial hierarchical command set
 REVISION:10-22-2026:Network commands on the core drivers; phy, clear, iperf, advertise, duplex, mac-address
 REVISION:10-22-2026:CPU network path: show tcp, show cpu-path, tcp echo, storm-control, classifier
 REVISION:10-22-2026:TCP iperf server (lwiperf), phy reset, phy mmd / c45, LED and EEE in show phy
+REVISION:10-22-2026:Checksum offload: show offload, offload tx-ip / tx-l4 / rx / all on|off
 
 # ---------------------------------------------------------------------------
 # Modes
@@ -43,6 +44,7 @@ KEYWORD:config:TCP:TCP applications on lwIP (CPU network path)
 KEYWORD:config:IPERF:iperf servers (UDP in RTL, TCP in firmware)
 KEYWORD:config:IPERF TCP:TCP iperf server (lwIP lwiperf, default port 5001)
 KEYWORD:config:TCP ECHO:TCP echo server (lwIP, default port 7)
+KEYWORD:config:OFFLOAD:Checksum offload on the CPU path (hardware IPv4/TCP/UDP checksums)
 KEYWORD:config:CLASSIFIER:CPU-path classifier (filter tables, policers, mode)
 KEYWORD:config:NO CLASSIFIER:Clear a classifier entry or disable a policer
 KEYWORD:config-if:STORM-CONTROL:Broadcast storm limiter (classifier policer 0)
@@ -71,6 +73,7 @@ cli_show_tcp:exec:SHOW TCP:lwIP interface, TCP echo server, connections and coun
 cli_show_cpu_path:exec:SHOW CPU-PATH:CPU network path: DMA frames and errors, wrapper CPU-path counters
 cli_show_storm:exec:SHOW STORM-CONTROL:Broadcast storm limiter: policer 0 and its counters
 cli_show_classifier:exec:SHOW CLASSIFIER:CPU-path classifier: mode, tables, ACL, policers, counters
+cli_show_offload:exec:SHOW OFFLOAD:Checksum offload: discovery, CTRL, lwIP flags, counters, zero-copy options
 
 # ---------------------------------------------------------------------------
 # Privileged exec
@@ -107,6 +110,7 @@ cli_iperf_tcp_port:config:IPERF TCP PORT [PORT]:TCP iperf server port (default 5
 cli_tcp_echo_enable:config:TCP ECHO ENABLE:Enable the TCP echo server
 cli_tcp_echo_disable:config:TCP ECHO DISABLE:Disable the TCP echo server (open connections stay)
 cli_tcp_echo_port:config:TCP ECHO PORT [PORT]:TCP echo server port (default 7)
+cli_offload:config:OFFLOAD [WHAT] [STATE]:Checksum offload: tx-ip, tx-l4, rx or all, on or off (as far as the build has it; lwIP follows)
 cli_cls_mode:config:CLASSIFIER MODE [MODE]:Mode: drop-all, pass-all, pass-on-match or drop-on-match
 cli_cls_policer:config:CLASSIFIER POLICER [INDEX] [PKTS] [MS] {DISABLE}:Policer 0..3: frames per window in ms (or disable)
 cli_cls_mac:config:CLASSIFIER MAC [ENTRY] [WHICH] [MAC] {W1} {W2} {W3} {W4}:MAC entry (0..15): dst|src <mac> gate|classify|police <p>

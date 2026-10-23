@@ -29,6 +29,7 @@
  *       0x44A1_4000        iperf leaf                 "IPRF"
  *       0x44A1_5000        UDP socket leaf            "UDPS"
  *       0x44A1_8000        CPU-path classifier        "CLSF"
+ *       0x44A1_9000        CPU-path checksum offload  "TCPO"
  *     0x44A2_0000   4 KiB  CLASSIFIER (reserved, reads 0)
  *   0xC000_0000  128 KiB  AXI BRAM (DMA frame buffers only)        CPU core
  *
@@ -71,6 +72,7 @@
 #define RTLNET_PLAT_IPERF_BASE      (RTLNET_PLAT_PROT_BASE + 0x4000u)
 #define RTLNET_PLAT_UDP_BASE        (RTLNET_PLAT_PROT_BASE + 0x5000u)
 #define RTLNET_PLAT_CLS_BASE        (RTLNET_PLAT_PROT_BASE + 0x8000u)   /* CPU-path classifier */
+#define RTLNET_PLAT_TXO_BASE        (RTLNET_PLAT_PROT_BASE + 0x9000u)   /* CPU-path checksum offload */
 #define RTLNET_PLAT_CLASSIFIER_BASE (RTLNET_PLAT_WINDOW_BASE + 0x20000u)
 
 /* Core ID codes (four ASCII characters, first character in bits [31:24]). */
@@ -85,6 +87,7 @@
 #define RTLNET_ID_UDP               0x55445053u   /* "UDPS" */
 #define RTLNET_ID_ECHO              0x4543484Fu   /* "ECHO" */
 #define RTLNET_ID_CLS               0x434C5346u   /* "CLSF" */
+#define RTLNET_ID_TXO               0x5443504Fu   /* "TCPO" */
 
 /* Firmware identity. */
 #define RTLNET_FW_NAME              "rtlnet-fw"
