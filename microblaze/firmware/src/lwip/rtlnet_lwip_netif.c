@@ -342,15 +342,22 @@ static void tx_reap(void)
     }
 }
 
+#if RTLNET_NETIF_ZERO_COPY_TX
 /*
  * in_axi_bram -- a buffer lies wholly in the AXI BRAM, where the DMA can read it.
+ * The desktop test builds its pbufs in lwIP's heap, which stands in for the AXI BRAM there.
  * Returns: 1 yes, 0 no.
  */
 static int in_axi_bram(const void *p, uint32_t len)
 {
     uintptr_t a = (uintptr_t)p;
+#ifdef RTLNET_HOST_TEST
+    return (a >= (uintptr_t)rtlnet_lwip_heap && a + len <= (uintptr_t)rtlnet_lwip_heap + RTLNET_LWIP_HEAP_BYTES) ? 1 : 0;
+#else
     return (a >= RTLNET_CPU_AXI_BRAM_BASE && a + len <= (uintptr_t)RTLNET_CPU_AXI_BRAM_BASE + RTLNET_CPU_AXI_BRAM_SIZE) ? 1 : 0;
+#endif
 }
+#endif
 
 /*
  * netif_linkoutput -- send one frame.

@@ -12,6 +12,9 @@
 #ifndef LWIPOPTS_LOOPBACK_H
 #define LWIPOPTS_LOOPBACK_H
 
+/* The loopback test has no AXI BRAM: lwIP keeps its own heap. */
+#define RTLNET_NETIF_ZERO_COPY_TX       0
+#define RTLNET_NETIF_ZERO_COPY_RX       0
 #include "../../src/lwip/lwipopts.h"
 
 #undef LWIP_SINGLE_NETIF

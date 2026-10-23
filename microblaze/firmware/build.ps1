@@ -36,7 +36,12 @@ Overview:
     test of the iperf server (test/lwiperf_loopback: lwIP core from the install,
     src/lwip/rtlnet_lwiperf.c and a scripted iperf 2 client in one host process
     over lwIP's 127.0.0.1 interface); the exit code follows the anchored
-    LWIPERF_LOOPBACK: PASS / FAIL line. -NoFirmware: harness only. -Bsp: regenerate
+    LWIPERF_LOOPBACK: PASS / FAIL line. -NetifTest: build and run, for each combination of
+    the zero-copy options (RTLNET_NETIF_ZERO_COPY_RX / _TX = 1/1, 0/0, 1/0, 0/1), the desktop
+    test of the DMA netif (test/netif_host: rtlnet_lwip_netif.c, rtlnet_offload.c and the core
+    drivers on lwIP from the install, a mock of the AXI DMA driver and a register model of the
+    protocol wrapper and the checksum offload core); each run ends with NETIF_HOST: PASS / FAIL.
+    -NoFirmware: harness only. -Bsp: regenerate
     the BSP even when it is up to date. -Xsa: another hardware export. -Define:
     extra -D macros for the firmware and lwIP compilation (the zero-copy options of
     src/lwip/lwipopts.h: RTLNET_NETIF_ZERO_COPY_RX=0, RTLNET_NETIF_ZERO_COPY_TX=0).
@@ -44,7 +49,7 @@ Overview:
     RTLNET_FW: PASS <elf>.
 Usage:
   powershell -NoProfile -ExecutionPolicy Bypass -File microblaze/firmware/build.ps1 `
-    [-Xsa <xsa>] [-Bsp] [-HostHarness] [-Demo] [-LwipTest] [-NoFirmware] [-Define NAME=VALUE,...]
+    [-Xsa <xsa>] [-Bsp] [-HostHarness] [-Demo] [-LwipTest] [-NetifTest] [-NoFirmware] [-Define NAME=VALUE,...]
 Revision: 10-22-2026
   * 10-22-2026: initial version.
   * 10-22-2026: generated standalone BSP, lwIP, BSP linker conventions;
@@ -59,6 +64,7 @@ param(
     [switch]$HostHarness,
     [switch]$Demo,
     [switch]$LwipTest,
+    [switch]$NetifTest,
     [switch]$NoFirmware,
     [string[]]$Define = @()
 )
@@ -277,6 +283,42 @@ if ($LwipTest) {
     $ltVerdict = $ltLog | Where-Object { $_ -match '^LWIPERF_LOOPBACK: (PASS|FAIL)' } | Select-Object -Last 1
     if ($ltRc -ne 0 -or -not $ltVerdict -or $ltVerdict -notmatch '^LWIPERF_LOOPBACK: PASS') {
         throw "lwiperf loopback test did not pass"
+    }
+}
+
+# Desktop test of the DMA netif (host gcc) for every combination of the zero-copy options.
+if ($NetifTest) {
+    $nt = Join-Path $Out 'nettest'
+    $ntSrcs = @("$Fw/src/lwip/rtlnet_lwip_netif.c", "$Fw/src/rtlnet_offload.c", "$Fw/src/rtlnet_fmt.c",
+                "$Repo/cores/rtlnet_eth_protocol/driver/rtlnet_eth_protocol.c",
+                "$Repo/cores/rtlnet_tcp_offload/driver/rtlnet_tcp_offload.c", "$Fw/test/netif_host/netif_host_test.c")
+    foreach ($combo in @(@(1, 1), @(0, 0), @(1, 0), @(0, 1))) {
+        if (Test-Path -LiteralPath $nt) { Remove-Item -Recurse -Force -LiteralPath $nt }
+        New-Item -ItemType Directory -Force -Path $nt | Out-Null
+        $zc = @("-DRTLNET_NETIF_ZERO_COPY_RX=$($combo[0])", "-DRTLNET_NETIF_ZERO_COPY_TX=$($combo[1])", '-DRTLNET_HOST_TEST')
+        $ntInc = @("-I$Fw/test/netif_host", "-I$Fw/src", "-I$Fw/src/lwip", "-I$Repo/cores/rtlnet_common/driver",
+                   "-I$Repo/microblaze/driver", "-I$Repo/cores/rtlnet_eth_protocol/driver", "-I$Repo/cores/rtlnet_classifier/driver",
+                   "-I$Repo/cores/rtlnet_tcp_offload/driver", '-isystem', "$LwipDir/src/include", '-isystem', "$LwipDir/contrib/ports/xilinx/include")
+        $ntObjs = @()
+        foreach ($s in $lwipSrcs) {
+            $o = Join-Path $nt (($s -replace '[/\\]', '_') -replace '\.c$', '.o')
+            Invoke-Step 'gcc' (@('-std=gnu11', '-O1', '-g', '-w') + $zc + $ntInc + @('-c', "$LwipDir/src/$s", '-o', $o))
+            $ntObjs += $o
+        }
+        foreach ($s in $ntSrcs) {
+            $o = Join-Path $nt (([System.IO.Path]::GetFileNameWithoutExtension($s)) + '.o')
+            Invoke-Step 'gcc' (@('-std=gnu11', '-O1', '-g', '-Wall', '-Wextra', '-Werror') + $zc + $ntInc + @('-c', $s, '-o', $o))
+            $ntObjs += $o
+        }
+        $ntExe = Join-Path $Out 'netif_host.exe'
+        Invoke-Step 'gcc' (@('-o', $ntExe) + $ntObjs)
+        $ntLog = & $ntExe
+        $ntRc = $LASTEXITCODE
+        $ntLog | ForEach-Object { Write-Output $_ }
+        $ntVerdict = $ntLog | Where-Object { $_ -match '^NETIF_HOST: (PASS|FAIL)' } | Select-Object -Last 1
+        if ($ntRc -ne 0 -or -not $ntVerdict -or $ntVerdict -notmatch '^NETIF_HOST: PASS') {
+            throw "netif host test did not pass (zero-copy RX $($combo[0]), TX $($combo[1]))"
+        }
     }
 }
 exit 0
