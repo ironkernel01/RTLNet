@@ -299,14 +299,14 @@ core lands), u_cpu's DMA streams on `s_axis_cpu_eth_*` / `m_axis_cpu_eth_*` in c
 | Timing (post-route) | WNS +0.221 ns, WHS +0.018 ns, WPWS +0.264 ns; 0 failing endpoints |
 | Utilization | 16169 LUTs (12.08 %), 21183 FFs (7.92 %), 196.5 BRAM tiles (53.84 %), 5 DSP48 |
 | CDC | fifo 9, gray 6, axil_cdc 3 instances, as expected (`build_bitstream.tcl`) |
-| Firmware | text 153724 B, data 2104 B, bss 151624 B (lwIP with the echo and iperf servers): 307 KiB of 512 KiB |
+| Firmware | text 153724 B, data 2104 B, bss 151624 B (lwIP with the echo and iperf servers): 307 KiB of 512 KiB; after the TCP throughput tuning (`microblaze/documentation/rtlnet_cpu_microblaze.md` section 9.10): text 162356 B, data 2104 B, bss 238280 B, 381 KiB of 512 KiB |
 | Console | `cli_test.ps1` PASS 27/27; start-up: `PHY: RTL8211E ID 0x001CC915, RX delay 0xAD77 -> 0xAD77, MDC half period 266 ns, LEDs LINK steady, ACT blink, USER off; EEE off, auto-negotiation restarted`, `CPU path: DMA ok, classifier absent, lwIP up (TCP echo, TCP iperf)` |
 | PHY LEDs / EEE | `show phy`: LCR 0x0070, LACR 0x0010 (read back), MMD 7.60 = 0x0000 (EEE not advertised); the LED behaviour itself was not observed (no view of the board) |
 | lwIP identity | `show tcp`: netif MAC 02:49:4b:52:4e:01, IPv4 192.169.1.199 / 24, gateway 192.169.1.1 (the DHCP lease), "RTL identity: matches" |
 | TCP echo alone | `tcp_echo_client.py`, 4 connections x 76 messages (1 B .. 64 KiB, 2.36 MB each way), byte-exact: PASS, 14.0 Mbit/s each way over Wi-Fi with the 16 KiB FIFO; 15.7 Mbit/s (4 x 38 messages) over the wired PC NIC with the 32 KiB FIFO |
-| TCP iperf alone | iperf 2.2.2 `-c 192.169.1.199 -t 10` (PC wired NIC 192.169.1.178): 68.4 Mbit/s PC -> board |
-| iperf board -> PC modes (`rtlnet_lwiperf`, classifier image, `-t 10`, two runs each) | `-R` (reverse on the same connection): 29.3 Mbit/s, 29.3 Mbit/s; `-r` (tradeoff, board connects back to the PC's listener): PC -> board 68.6 Mbit/s, then board -> PC 27.3 / 27.1 Mbit/s; `-d` (dual): PC -> board 31.4 / 31.5 Mbit/s while board -> PC 15.6 / 15.6 Mbit/s; no firewall block of the connect-back. Before `rtlnet_lwiperf` (install lwiperf) `-r` and `-R` did not work |
-| Together | TCP echo (2 connections x 76 messages) PASS, TCP iperf 51.6 Mbit/s, RTL UDP iperf `-u -b 20M` 20.9 Mbit/s, 0/17828 lost; `tcp_test.ps1`: TCP_TEST PASS 5/5 |
+| TCP iperf alone | iperf 2.2.2 `-c 192.169.1.199 -t 10` (PC wired NIC 192.169.1.178): 68.4 Mbit/s PC -> board; after the tuning (send buffer 24 x MSS, window 8 x MSS, word-wise netif copies, 32-bit checksum) 87.6 / 87.8 Mbit/s |
+| iperf board -> PC modes (`rtlnet_lwiperf`, classifier image, `-t 10`, two runs each) | `-R` (reverse on the same connection): 29.3 Mbit/s, 29.3 Mbit/s; `-r` (tradeoff, board connects back to the PC's listener): PC -> board 68.6 Mbit/s, then board -> PC 27.3 / 27.1 Mbit/s; `-d` (dual): PC -> board 31.4 / 31.5 Mbit/s while board -> PC 15.6 / 15.6 Mbit/s; no firewall block of the connect-back. Before `rtlnet_lwiperf` (install lwiperf) `-r` and `-R` did not work. After the tuning: `-R` 82.7 / 82.7 Mbit/s; `-r` board -> PC 79.6 Mbit/s; `-d` PC -> board 21.3 Mbit/s while board -> PC 60.4 Mbit/s (sum 81.7). The earlier `-R` rate was the CPU copying the frame into the AXI BRAM byte by byte (307 us per frame), not the window |
+| Together | TCP echo (2 connections x 76 messages) PASS, TCP iperf 51.6 Mbit/s, RTL UDP iperf `-u -b 20M` 20.9 Mbit/s, 0/17828 lost; `tcp_test.ps1`: TCP_TEST PASS 5/5. After the tuning: TCP iperf 70.8 / 70.8 Mbit/s with the UDP iperf (20.9 Mbit/s, 0/17833 and 0/17834 lost) |
 | Board counters after the runs | DMA receive 165436 frames, no pbuf 0, errors 0; transmit 164660, timeouts 0; wrapper: CPU FIFO drops 4 of 165439 frames to the CPU; lwIP heap max 21668 of 32768, pbuf pool max 2 of 32 |
 | CPU RX FIFO | 16 KiB: four echo connections overflowed it (24 drops, 0.4 s retransmission stalls); 32 KiB: 4 drops over the whole test, no stall in the echo latencies |
 
@@ -347,7 +347,7 @@ Hardware (board at 192.169.1.199 by DHCP, PC wired NIC "Ethernet" 192.169.1.178)
 | Start-up | `show classifier`: hardware MODE pass-all, STATUS 0x00000100, 16 + 16 entries, 2 rules, 4 policers, 64 bytes compared, delay line 31 beats, verdict latency 23 clocks (the build parameters of the classifier documentation) |
 | `cli_test.ps1` | `CLI_TEST: PASS 27/27` |
 | `net_test.ps1 -Nic Ethernet -Speed 100` | `NET_TEST: PASS 25/25` (ping 0/64/1472 x20 no loss, UDP echo client 200 datagrams, iperf UDP 90 Mb/s PC -> board 94.1 Mbit/s 0/40093 lost, board -> PC 94.4 Mbit/s 0/40126 lost, 10 Mb/s forced and restored) |
-| `tcp_test.ps1` | `TCP_TEST: PASS 5/5` before `rtlnet_lwiperf` (echo 4 connections 9.6 Mbit/s, TCP iperf 68.6 Mbit/s PC -> board, together: echo PASS, iperf 51.5 Mbit/s, UDP 20.9 Mbit/s 0/17837 lost); with `rtlnet_lwiperf` `TCP_TEST: PASS 8/8` (also `-R` 29.3, `-r` 27.3 and `-d` 15.6 Mbit/s board -> PC; together: echo PASS, iperf 51.3 Mbit/s, UDP 20.9 Mbit/s 0/17835 lost) |
+| `tcp_test.ps1` | `TCP_TEST: PASS 5/5` before `rtlnet_lwiperf` (echo 4 connections 9.6 Mbit/s, TCP iperf 68.6 Mbit/s PC -> board, together: echo PASS, iperf 51.5 Mbit/s, UDP 20.9 Mbit/s 0/17837 lost); with `rtlnet_lwiperf` `TCP_TEST: PASS 8/8` (also `-R` 29.3, `-r` 27.3 and `-d` 15.6 Mbit/s board -> PC; together: echo PASS, iperf 51.3 Mbit/s, UDP 20.9 Mbit/s 0/17835 lost); after the TCP throughput tuning `TCP_TEST: PASS 8/8` (echo 7.2 Mbit/s, PC -> board 87.8, `-R` 82.7, `-r` 79.6, `-d` 60.7 Mbit/s board -> PC; together: echo PASS, iperf 68.6 Mbit/s, UDP 20.9 Mbit/s 0/17820 lost), `CLI_TEST: PASS 27/27`, `NET_TEST: PASS 25/25` |
 | `show phy` | LCR 0x0070, LACR 0x0010 (read back, ext page 0x2C), EEE: MMD 7.60 = 0x0000 (off); RX delay 0x8575 -> 0xAD75; 100 Mb/s full duplex, partner 10h/10f/100h/100f |
 | Broadcast flood | see below |
 
@@ -366,6 +366,8 @@ time; counters cleared (`clear counters`) before, read after:
 | Classifier STATUS after the flood | 0x00010100: the sticky STALL_SEEN bit is set (the delay line met output back-pressure while the CPU path was loaded); no frame was lost to it (OVERRUN_DROPPED 0, CPU FIFO drops 0) |
 
 Per policer window the board passes 10 broadcasts; unicast TCP and ICMP frames pass unchanged.
+
+After the TCP throughput tuning (firmware rebuilt `-Werror` clean, same bitstream) a flood at 400 datagrams per second for 10 s with ping and `tcp_echo_client.py --conns 2` in a loop gave seen 3999, passed 1010, dropped 2989, ping 14/14, 20 of 20 echo runs PASS (17 at 26.7 to 27.1 Mbit/s), CPU FIFO drops 2; at 2000 per second for 12 s with a four-connection echo test and an iperf stream also running: passed 1210 of 23752, ping 12/12, echo PASS, iperf 78.7 Mbit/s, CPU FIFO drops 374 (the larger TCP window of 8 x MSS per connection exceeds the 32 KiB CPU FIFO when five connections run together; TCP retransmits).
 
 After the rebase onto the lwiperf merge (firmware rebuilt `-Werror` clean, merged into the same bitstream, text 159.6 KB) the console test passed 27/27, `tcp_test.ps1` 5/5 (iperf `-R` now returns 29.3 Mbit/s board -> PC) and a second flood gave seen 4002, passed 1013, dropped 2989, ping 14/14, TCP echo PASS.
 

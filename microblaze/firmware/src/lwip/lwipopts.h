@@ -17,24 +17,48 @@
  *
  * Memory (all in the LMB block RAM, .bss; only the DMA buffers live in the
  * AXI BRAM, rtlnet_lwip_netif.c):
- *   MEM_SIZE                      32 KiB heap: tcp_write copies of echoed
- *                                 data, outgoing headers, lwiperf state
- *   PBUF_POOL_SIZE x BUFSIZE      32 x 1536 B = 48 KiB: every received frame
+ *   MEM_SIZE                      64 KiB heap: tcp_write copies of echoed
+ *                                 data (TCP_WRITE_FLAG_COPY: up to TCP_WND
+ *                                 of 8 x 1460 B per echo connection, 37 KB
+ *                                 used with four connections), outgoing
+ *                                 headers, lwiperf state
+ *   PBUF_POOL_SIZE x BUFSIZE      64 x 1536 B = 96 KiB: every received frame
  *                                 is copied into a pool pbuf
- *   MEMP (PCBs, segments, pbufs)  about 16 KiB
- * TCP window and send buffer: 4 x MSS each (5840 B). The bound is the
- * wrapper's CPU receive FIFO, not lwIP memory: the PC sends a whole window
- * per connection at line rate while the CPU drains slower, so the sum of
- * the open windows must fit the FIFO (CPU_RX_FIFO_KB 32 in the board top:
- * five connections of 4 MSS). With the 16 KiB FIFO, four echo connections
- * of 4 MSS overflowed it (24 "CPU FIFO drops", retransmission stalls of
- * about 0.4 s); frames dropped there show as "CPU FIFO drops" in show
- * cpu-path and as TCP retransmissions.
+ *   MEMP (PCBs, segments, pbufs)  about 9 KiB (MEMP_NUM_TCP_SEG 256 and
+ *                                 MEMP_NUM_PBUF 96 for the 24-segment send
+ *                                 queue: the iperf reverse test queues one
+ *                                 ROM pbuf and one TCP segment per MSS)
+ * The whole image ends at 381 KiB of the 512 KiB LMB (text 158 KiB, data 2,
+ * bss 233, heap 2, stack 8).
+ * TCP send buffer: 24 x MSS (35040 B), TCP_SND_QUEUELEN 4 x that / MSS = 96.
+ * The reverse (-R) test needs it: the PC acknowledges anywhere from every
+ * second to every eighth segment (the rate follows the pacing of the frames
+ * and the window the board advertises), so the send buffer must cover several
+ * acknowledgement intervals to keep the link busy (8 x MSS: 68 Mbit/s,
+ * 16: 75, 24: 83, 32: 83, the CPU limit).
+ * TCP window: 8 x MSS (11680 B). With an 8 x MSS send buffer, 4 x MSS gave 81
+ * and 6 x MSS 88 Mbit/s PC to board but only 56 Mbit/s board to PC (about
+ * 6000 ACKs per test against 29000 with 8 x MSS); 16 x MSS gained nothing and
+ * overflowed the wrapper's CPU receive FIFO. The FIFO is the hard bound: the
+ * PC sends a whole window per connection at line rate while the CPU drains
+ * slower (a frame costs about 135 us), so the sum of the open windows should
+ * fit it (CPU_RX_FIFO_KB 32 in the board top). 8 x MSS fits two connections;
+ * four echo connections plus the iperf stream together open 58 KB, and the
+ * frames that do not fit show as "CPU FIFO drops" (11 for the four-connection
+ * echo test, 374 under the broadcast flood plus echo plus iperf) and as TCP
+ * retransmissions; every test still passes.
+ * LWIP_CHKSUM_ALGORITHM 3 (32-bit reads, the software checksum is the largest
+ * single cost of a frame without offload) took PC to board from 77 to 85
+ * Mbit/s and board to PC from 63 to 68.
  *
- * Drift consequence: a TCP_WND larger than the pool lets the peer send more
- * than lwIP can buffer; frames are then dropped in the netif (counted as
- * rx_no_pbuf) and TCP retransmits, which shows as low throughput, not as an
- * error.
+ * Drift rule: PBUF_POOL_SIZE must hold TCP_WND for every TCP connection that
+ * can be open at once, plus margin: (TCP_WND / TCP_MSS) x connections + 16 =
+ * 8 x 6 (four echo, two iperf) + 16 = 64 pbufs. A TCP_WND larger than the
+ * pool lets the peer send more than lwIP can buffer; frames are then dropped
+ * in the netif (counted as rx_no_pbuf) and TCP retransmits, which shows as low
+ * throughput, not as an error. The pool is rarely loaded (the main loop
+ * delivers every frame as it arrives: peak 3 of 64 in the echo test), the
+ * echo server holds a received pbuf until it is echoed.
  */
 #ifndef LWIPOPTS_H
 #define LWIPOPTS_H
@@ -56,18 +80,18 @@
 #define MEM_LIBC_MALLOC                 0
 #define MEMP_MEM_MALLOC                 0
 #define MEM_ALIGNMENT                   4
-#define MEM_SIZE                        (32 * 1024)
-#define MEMP_NUM_PBUF                   16
+#define MEM_SIZE                        (64 * 1024)
+#define MEMP_NUM_PBUF                   96
 #define MEMP_NUM_RAW_PCB                1
 #define MEMP_NUM_UDP_PCB                2
 #define MEMP_NUM_TCP_PCB                12
 #define MEMP_NUM_TCP_PCB_LISTEN         4
-#define MEMP_NUM_TCP_SEG                64
+#define MEMP_NUM_TCP_SEG                256
 #define MEMP_NUM_REASSDATA              2
 #define MEMP_NUM_FRAG_PBUF              4
 #define MEMP_NUM_ARP_QUEUE              8
 #define MEMP_NUM_SYS_TIMEOUT            (LWIP_NUM_SYS_TIMEOUT_INTERNAL + 2)
-#define PBUF_POOL_SIZE                  32
+#define PBUF_POOL_SIZE                  64
 #define PBUF_POOL_BUFSIZE               1536
 #define PBUF_LINK_HLEN                  14
 #define ETH_PAD_SIZE                    0
@@ -100,8 +124,8 @@
 
 /* TCP. */
 #define TCP_MSS                         1460
-#define TCP_WND                         (4 * TCP_MSS)
-#define TCP_SND_BUF                     (4 * TCP_MSS)
+#define TCP_WND                         (8 * TCP_MSS)
+#define TCP_SND_BUF                     (24 * TCP_MSS)
 #define TCP_SND_QUEUELEN                ((4 * (TCP_SND_BUF) + (TCP_MSS - 1)) / (TCP_MSS))
 #define TCP_QUEUE_OOSEQ                 1
 #define TCP_OVERSIZE                    TCP_MSS
@@ -119,6 +143,7 @@
 #define CHECKSUM_CHECK_TCP              1
 #define CHECKSUM_CHECK_ICMP             1
 #define LWIP_CHECKSUM_ON_COPY           0
+#define LWIP_CHKSUM_ALGORITHM           3
 
 /* Netif. */
 #define LWIP_NETIF_STATUS_CALLBACK      0

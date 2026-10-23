@@ -2371,6 +2371,29 @@ int cli_show_cpu_path(const MenuCommandContext *ctx)
                (unsigned)n->rx_unbound, (unsigned)n->rx_errors);
     fmt_printf("  DMA transmit    : frames %u, bytes %u; timeouts %u, too long %u, errors %u\n", (unsigned)n->tx_frames,
                (unsigned)n->tx_bytes, (unsigned)n->tx_timeouts, (unsigned)n->tx_too_long, (unsigned)n->tx_errors);
+#if RTLNET_NETIF_PROFILE
+    {
+        /* Profile since the last CLEAR COUNTERS: busy = polls that delivered frames (lwIP and applications included). */
+        uint32_t tpu = RTLNET_PLAT_TICKS_PER_US;
+        uint32_t wall_ms = (plat_ticks() - n->prof_clear) / (tpu * 1000u);
+        uint32_t busy_ms = n->prof_busy / (tpu * 1000u);
+        uint32_t rxf = (n->rx_frames != 0u) ? n->rx_frames : 1u;
+        uint32_t txf = (n->tx_frames != 0u) ? n->tx_frames : 1u;
+        fmt_printf("  CPU profile     : wall %u ms, busy %u ms (%u%%), poll budget hit %u times\n", (unsigned)wall_ms,
+                   (unsigned)busy_ms, (unsigned)((wall_ms != 0u) ? (busy_ms * 100u / wall_ms) : 0u),
+                   (unsigned)n->rx_budget_hits);
+        fmt_printf("  Per RX frame    : copy %u.%02u us, lwIP input %u.%02u us\n",
+                   (unsigned)(n->prof_rx_copy / rxf / tpu), (unsigned)(n->prof_rx_copy / rxf % tpu),
+                   (unsigned)(n->prof_rx_input / rxf / tpu), (unsigned)(n->prof_rx_input / rxf % tpu));
+        fmt_printf("  Per TX frame    : copy %u.%02u us, DMA wait %u.%02u us, DMA start %u.%02u us\n",
+                   (unsigned)(n->prof_tx_copy / txf / tpu), (unsigned)(n->prof_tx_copy / txf % tpu),
+                   (unsigned)(n->prof_tx_wait / txf / tpu), (unsigned)(n->prof_tx_wait / txf % tpu),
+                   (unsigned)(n->prof_tx_start / txf / tpu), (unsigned)(n->prof_tx_start / txf % tpu));
+    }
+#else
+    fmt_printf("  CPU profile     : not built (RTLNET_NETIF_PROFILE 0); poll budget hit %u times\n",
+               (unsigned)n->rx_budget_hits);
+#endif
     rc = cpupath_wrapper_counters(&w);
     if (rc == CPUPATH_OK) {
         fmt_printf("  Wrapper         : CPU path %s, CPU FIFOs rx %u KiB tx %u KiB\n", w.enabled ? "enabled" : "disabled",
