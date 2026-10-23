@@ -16,8 +16,9 @@ touching the protocol layer.
 
 ## 1. Scope
 
-The first RTLNet build is an RTL Ethernet/IPv4 stack on the Nexys Video. It contains no TCP and no software
-network stack: every protocol runs in logic, and the CPU only configures and monitors.
+The first RTLNet build is an RTL Ethernet/IPv4 stack on the Nexys Video. ARP, ICMP, DHCP, UDP and iperf UDP run
+in logic. TCP runs in lwIP on the MicroBlaze through the CPU network path, with hardware checksum offload; the
+CPU also configures and monitors the RTL.
 
 | Function | Core | Notes |
 |---|---|---|
@@ -31,7 +32,7 @@ network stack: every protocol runs in logic, and the CPU only configures and mon
 | iperf 2 TCP server | firmware (`rtlnet_lwiperf`, the RTLNet copy of lwIP's iperf server, on lwIP) | `iperf -c <board>` on TCP port 5001 through the CPU network path; `-R`, `-r` and `-d` measure board -> PC |
 | UDP socket layer | `rtlnet_udp_socket` | N bound ports, payload streams to and from applications |
 | UDP echo server | `rtlnet_udp_echo` | application on the socket payload streams: returns every datagram to its sender |
-| Frame filter/classifier | `rtlnet_classifier` | **designed, not built yet** (section 13) |
+| Frame filter/classifier | `rtlnet_classifier` | on the CPU receive path: configurable L2-L4 filter with policers, drop-all until configured, broadcast storm limiter at boot (section 13) |
 | Checksum offload | `rtlnet_tcp_offload` | on the CPU DMA stream: inserts IPv4 / TCP / UDP checksums into frames the CPU sends (store-and-forward patch); checks them on frames the CPU receives and appends an 8-byte trailer beat with the result (cut-through) |
 | CPU network path | `rtlnet_eth_protocol` CPU port + `microblaze/` | every frame no enabled leaf claims goes to the CPU (`cpu_axis_ethernet_stream`, AXI DMA); the CPU sends frames back the same way; lwIP runs a TCP echo server on it; the CPU-path classifier and the checksum offload sit on the two streams |
 | CPU core | `rtlnet_cpu_microblaze` | MicroBlaze block design behind a vendor-neutral core port list; replaceable by a Nios V / RISC-V core with the same ports |
