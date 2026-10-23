@@ -69,6 +69,145 @@ static int chan_busy(int rx)
     return ((sr & (XAXIDMA_HALTED_MASK | XAXIDMA_IDLE_MASK)) == 0u) ? 1 : 0;
 }
 
+/* Profile (RTLNET_NETIF_PROFILE in the header): timer reads around the copy and lwIP calls cost
+ * about 3% of the receive throughput, so a build without them is the one to measure speed with. */
+#if RTLNET_NETIF_PROFILE
+#define PROF_NOW()          plat_ticks()
+#define PROF_ADD(field, t0) do { g_st.field += plat_ticks() - (t0); } while (0)
+#else
+#define PROF_NOW()          0u
+#define PROF_ADD(field, t0) ((void)(t0))
+#endif
+
+/* 32-bit access to byte buffers (the frame buffers are byte arrays). */
+typedef uint32_t __attribute__((may_alias)) word_t;
+
+/*
+ * axi_put_chain -- copy a pbuf chain into a TX buffer in the AXI BRAM with word writes only.
+ * The CPU reaches the AXI BRAM over M_AXI_DP, about 16 cycles per access whatever its width, and the
+ * pieces of a chain start at odd offsets (54 byte header, then the payload at any alignment). A byte
+ * copy, which is what memcpy does for mismatched alignments, cost about 20 cycles per byte (307 us per
+ * frame). Here the bytes are packed into words in registers (little endian): bytes of a piece are
+ * consumed until its source is word aligned, then every source word is shifted into place against the
+ * pending bytes and written as one aligned word.
+ * Returns: nothing; the last partial word is written whole (the DMA length cuts it).
+ */
+static void axi_put_chain(volatile word_t *dst, const struct pbuf *p)
+{
+    uint32_t acc = 0u;   /* pending bytes, lowest byte first */
+    uint32_t nb = 0u;    /* number of pending bytes, 0..3 */
+    for (; p != NULL; p = p->next) {
+        const uint8_t *s = (const uint8_t *)p->payload;
+        uint32_t n = p->len;
+#if defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
+        while (n != 0u && ((uintptr_t)s & 3u) != 0u) {
+            acc |= (uint32_t)*s++ << (8u * nb);
+            n--;
+            if (++nb == 4u) {
+                *dst++ = acc;
+                acc = 0u;
+                nb = 0u;
+            }
+        }
+        if (n >= 4u) {
+            const word_t *w = (const word_t *)(const void *)s;
+            if (nb == 0u) {
+                while (n >= 16u) {
+                    uint32_t v0 = w[0];
+                    uint32_t v1 = w[1];
+                    uint32_t v2 = w[2];
+                    uint32_t v3 = w[3];
+                    dst[0] = v0;
+                    dst[1] = v1;
+                    dst[2] = v2;
+                    dst[3] = v3;
+                    dst += 4;
+                    w += 4;
+                    n -= 16u;
+                }
+                while (n >= 4u) {
+                    *dst++ = *w++;
+                    n -= 4u;
+                }
+            } else {
+                uint32_t up = 8u * nb;
+                uint32_t down = 32u - up;
+                while (n >= 16u) {
+                    uint32_t v0 = w[0];
+                    uint32_t v1 = w[1];
+                    uint32_t v2 = w[2];
+                    uint32_t v3 = w[3];
+                    dst[0] = acc | (v0 << up);
+                    dst[1] = (v0 >> down) | (v1 << up);
+                    dst[2] = (v1 >> down) | (v2 << up);
+                    dst[3] = (v2 >> down) | (v3 << up);
+                    acc = v3 >> down;
+                    dst += 4;
+                    w += 4;
+                    n -= 16u;
+                }
+                while (n >= 4u) {
+                    uint32_t v = *w++;
+                    *dst++ = acc | (v << up);
+                    acc = v >> down;
+                    n -= 4u;
+                }
+            }
+            s = (const uint8_t *)(const void *)w;
+        }
+#endif
+        while (n != 0u) {
+            acc |= (uint32_t)*s++ << (8u * nb);
+            n--;
+            if (++nb == 4u) {
+                *dst++ = acc;
+                acc = 0u;
+                nb = 0u;
+            }
+        }
+    }
+    if (nb != 0u) {
+        *dst = acc;
+    }
+}
+
+/*
+ * axi_get_words -- copy a received frame from an RX buffer in the AXI BRAM into a pbuf payload.
+ * Whole 32-bit reads (about 16 cycles each over M_AXI_DP, no way to overlap two of them), eight
+ * per loop pass; the payload of a pool pbuf is word aligned. Words past len are copied too (the
+ * pool payload is larger than a frame, so the write stays inside it).
+ * Returns: nothing.
+ */
+static void axi_get_words(word_t *dst, const volatile word_t *src, uint32_t n_bytes)
+{
+    uint32_t n = (n_bytes + 3u) >> 2;
+    while (n >= 8u) {
+        uint32_t a = src[0];
+        uint32_t b = src[1];
+        uint32_t c = src[2];
+        uint32_t d = src[3];
+        uint32_t e = src[4];
+        uint32_t f = src[5];
+        uint32_t g = src[6];
+        uint32_t h = src[7];
+        dst[0] = a;
+        dst[1] = b;
+        dst[2] = c;
+        dst[3] = d;
+        dst[4] = e;
+        dst[5] = f;
+        dst[6] = g;
+        dst[7] = h;
+        dst += 8;
+        src += 8;
+        n -= 8u;
+    }
+    while (n != 0u) {
+        *dst++ = *src++;
+        n--;
+    }
+}
+
 /*
  * rx_arm -- start an S2MM simple transfer into the current ring entry.
  * Returns: nothing; g_rx_armed tells whether the transfer started.
@@ -129,7 +268,7 @@ void rtlnet_netif_set_hwaddr(const uint8_t mac[6])
  * netif_linkoutput -- send one frame: copy the chain, start MM2S.
  * Steps:
  *   1. Reject frames longer than a buffer.
- *   2. Copy the pbuf chain into the free TX buffer.
+ *   2. Copy the pbuf chain into the free TX buffer (axi_put_chain: word writes only).
  *   3. Wait (bounded) for the previous transfer; on an MM2S error reset the
  *      DMA and re-arm the receive side.
  *   4. Start the simple transfer, switch buffers, count.
@@ -140,6 +279,8 @@ static err_t netif_linkoutput(struct netif *nif, struct pbuf *p)
     uint8_t *buf;
     uint16_t len = p->tot_len;
     uint32_t t0;
+    uint32_t t1;
+    uint32_t t2;
     uint32_t sr;
     (void)nif;
     if (!g_present) {
@@ -150,15 +291,19 @@ static err_t netif_linkoutput(struct netif *nif, struct pbuf *p)
         return ERR_IF;
     }
     buf = g_tx_buf[g_tx_idx];
-    (void)pbuf_copy_partial(p, buf, len, 0u);
-    t0 = plat_ticks();
+    t0 = PROF_NOW();
+    axi_put_chain((volatile word_t *)(void *)buf, p);
+    t1 = plat_ticks();
+    PROF_ADD(prof_tx_copy, t0);
     while (chan_busy(0)) {
-        if ((plat_ticks() - t0) >= RTLNET_NETIF_TX_WAIT_US * RTLNET_PLAT_TICKS_PER_US) {
+        if ((plat_ticks() - t1) >= RTLNET_NETIF_TX_WAIT_US * RTLNET_PLAT_TICKS_PER_US) {
             g_st.tx_timeouts++;
             LINK_STATS_INC(link.drop);
             return ERR_IF;
         }
     }
+    t2 = PROF_NOW();
+    PROF_ADD(prof_tx_wait, t1);
     sr = XAxiDma_ReadReg(g_dma.RegBase, XAXIDMA_TX_OFFSET + XAXIDMA_SR_OFFSET);
     if (sr & XAXIDMA_ERR_ALL_MASK) {
         g_st.tx_errors++;
@@ -170,6 +315,7 @@ static err_t netif_linkoutput(struct netif *nif, struct pbuf *p)
         LINK_STATS_INC(link.err);
         return ERR_IF;
     }
+    PROF_ADD(prof_tx_start, t2);
     g_tx_idx = (g_tx_idx + 1u) % RTLNET_NETIF_TX_BUFS;
     g_st.tx_frames++;
     g_st.tx_bytes += len;
@@ -207,6 +353,8 @@ int8_t rtlnet_netif_init(struct netif *nif)
 static void rx_deliver(struct netif *nif, const uint8_t *buf, uint32_t len)
 {
     struct pbuf *p;
+    uint32_t t0;
+    uint32_t t1;
     if (len < RTLNET_NETIF_MIN_FRAME || len > RTLNET_NETIF_BUF_BYTES) {
         g_st.rx_runts++;
         return;
@@ -215,19 +363,27 @@ static void rx_deliver(struct netif *nif, const uint8_t *buf, uint32_t len)
         g_st.rx_unbound++;
         return;
     }
+    t0 = PROF_NOW();
     p = pbuf_alloc(PBUF_RAW, (u16_t)len, PBUF_POOL);
     if (p == NULL) {
         g_st.rx_no_pbuf++;
         LINK_STATS_INC(link.memerr);
         return;
     }
-    (void)pbuf_take(p, buf, (u16_t)len);
+    if (p->next == NULL && ((uintptr_t)p->payload & 3u) == 0u && (len + 3u) <= PBUF_POOL_BUFSIZE) {
+        axi_get_words((word_t *)p->payload, (const volatile word_t *)(const void *)buf, len);
+    } else {
+        (void)pbuf_take(p, buf, (u16_t)len);
+    }
+    t1 = PROF_NOW();
+    PROF_ADD(prof_rx_copy, t0);
     g_st.rx_frames++;
     g_st.rx_bytes += len;
     LINK_STATS_INC(link.recv);
     if (nif->input(p, nif) != ERR_OK) {
         pbuf_free(p);
     }
+    PROF_ADD(prof_rx_input, t1);
 }
 
 /*
@@ -244,7 +400,9 @@ void rtlnet_netif_poll(struct netif *nif)
     if (!g_present) {
         return;
     }
-    for (unsigned n = 0; n < RTLNET_NETIF_RX_BUDGET; n++) {
+    uint32_t t_poll = PROF_NOW();
+    unsigned n;
+    for (n = 0; n < RTLNET_NETIF_RX_BUDGET; n++) {
         uint32_t sr;
         uint32_t len;
         unsigned done;
@@ -262,13 +420,19 @@ void rtlnet_netif_poll(struct netif *nif)
             return;
         }
         if (chan_busy(1)) {
-            return;
+            break;
         }
         len = XAxiDma_ReadReg(g_dma.RegBase, XAXIDMA_RX_OFFSET + XAXIDMA_BUFFLEN_OFFSET);
         done = g_rx_idx;
         g_rx_idx = (g_rx_idx + 1u) % RTLNET_NETIF_RX_BUFS;
         rx_arm();
         rx_deliver(nif, g_rx_buf[done], len);
+    }
+    if (n != 0u) {
+        PROF_ADD(prof_busy, t_poll);
+        if (n >= RTLNET_NETIF_RX_BUDGET) {
+            g_st.rx_budget_hits++;
+        }
     }
 }
 
@@ -288,6 +452,7 @@ const rtlnet_netif_stats_t *rtlnet_netif_stats(void)
 void rtlnet_netif_clear_stats(void)
 {
     memset(&g_st, 0, sizeof(g_st));
+    g_st.prof_clear = PROF_NOW();
 }
 
 /*

@@ -47,6 +47,11 @@ struct netif;
 #define RTLNET_NETIF_MIN_FRAME    14u       /* Ethernet header */
 #define RTLNET_NETIF_MTU          1500u
 
+/* 1: timers around the copies and the lwIP input in rtlnet_netif_stats_t (show cpu-path prints them). */
+#ifndef RTLNET_NETIF_PROFILE
+#define RTLNET_NETIF_PROFILE      0
+#endif
+
 #if RTLNET_NETIF_BUF_BYTES < 1518u
 #error "RTLNET_NETIF_BUF_BYTES is smaller than a maximum Ethernet frame"
 #endif
@@ -64,6 +69,15 @@ typedef struct {
     uint32_t tx_too_long;
     uint32_t tx_errors;       /* MM2S error status or refused transfer */
     uint32_t dma_resets;
+    uint32_t rx_budget_hits;  /* polls that used the whole frame budget (more frames were waiting) */
+    /* Profile, in cpu_clk ticks (RTLNET_PLAT_TICKS_PER_US per microsecond), since the last clear. */
+    uint32_t prof_clear;      /* plat_ticks() at the clear: wall time = now - prof_clear */
+    uint32_t prof_busy;       /* polls that delivered frames: all work done from them, lwIP and applications included */
+    uint32_t prof_rx_copy;    /* pbuf_alloc + pbuf_take of received frames (AXI BRAM read) */
+    uint32_t prof_rx_input;   /* netif->input: lwIP receive path, TCP, applications, and the frames they send */
+    uint32_t prof_tx_copy;    /* pbuf chain written to the TX buffer (AXI BRAM word writes) */
+    uint32_t prof_tx_wait;    /* wait for the previous MM2S transfer */
+    uint32_t prof_tx_start;   /* XAxiDma_SimpleTransfer */
 } rtlnet_netif_stats_t;
 
 int                         rtlnet_netif_hw_init(void);
