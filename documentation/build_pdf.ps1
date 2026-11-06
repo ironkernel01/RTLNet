@@ -1,11 +1,13 @@
 # build_pdf.ps1 - Markdown to PDF for the documents in this folder (headless Chrome, pdf_generator.md).
-#   powershell -NoProfile -ExecutionPolicy Bypass -File Documentation\build_pdf.ps1 [rtlnet_product_brief]
+#   powershell -NoProfile -ExecutionPolicy Bypass -File Documentation\build_pdf.ps1 [rtlnet_product_brief] [-Sync]
+# -Sync uploads the new PDF to the project's Google Drive folder (diagrams\tools\sync_drive.py),
+# updating the same Drive file so its links stay valid.
 # The page is the Markdown between pdf\head.html and pdf\foot.html, rendered in the browser
 # (marked, mermaid 10.9.1, WaveDrom) and printed by Chrome. The CDN scripts need internet.
 # render.html is assembled next to the .md so the drawing paths (..\diagrams\out\png) resolve,
 # and is deleted after the print. Mermaid 10.9.1 shows the label break &#10; as a space, so it
 # becomes <br/> inside mermaid fences only; the .md keeps &#10;.
-param([string]$Name = 'rtlnet_product_brief')
+param([string]$Name = 'rtlnet_product_brief', [switch]$Sync)
 $ErrorActionPreference = 'Stop'
 
 $dir = $PSScriptRoot
@@ -48,3 +50,8 @@ for ($i = 0; $i -lt 60 -and -not (Test-Path $pdf); $i++) { Start-Sleep -Millisec
 Remove-Item $render
 if (-not (Test-Path $pdf)) { throw "Chrome did not write $pdf" }
 "wrote $pdf ($((Get-Item $pdf).Length) bytes)"
+
+if ($Sync) {
+    & python (Join-Path (Split-Path $dir) 'diagrams\tools\sync_drive.py') $pdf
+    if ($LASTEXITCODE) { throw "Drive sync of $pdf failed" }
+}
