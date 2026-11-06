@@ -74,7 +74,8 @@ $Define = @($Define | ForEach-Object { $_ -split ',' } | Where-Object { $_ -ne '
 $Fw      = $PSScriptRoot
 $Repo    = (Resolve-Path (Join-Path $Fw '..\..')).Path
 $Out     = Join-Path $Fw 'build'
-$Xilinx  = 'C:/Xilinx/2025.2'
+. (Join-Path $Repo 'scripts\rtlnet_tools.ps1')
+$Xilinx  = (Resolve-RtlnetXilinx).Root
 $MbBin   = "$Xilinx/gnu/microblaze/nt/bin"
 $MbGcc   = Join-Path $MbBin 'mb-gcc.exe'
 $MbSize  = Join-Path $MbBin 'mb-size.exe'
@@ -121,7 +122,7 @@ $lwipSrcs = @('core/init.c', 'core/def.c', 'core/inet_chksum.c', 'core/ip.c', 'c
               'core/ipv4/ip4_frag.c', 'netif/ethernet.c')
 
 # 1. The generated CLI tables must match the command file.
-Invoke-Step 'python' @("$Fw/cli/check_menu.py")
+Invoke-Step (Resolve-RtlnetPython) @("$Fw/cli/check_menu.py")
 
 if (-not $NoFirmware) {
     # 2. BSP from the XSA.

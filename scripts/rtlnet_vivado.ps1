@@ -1,7 +1,7 @@
 <#
 -------------------------------------------------------------------------------
 File: rtlnet_vivado.ps1
-Purpose: run one Vivado 2025.2 batch job with a machine-wide concurrency limit,
+Purpose: run one Vivado batch job (install located by rtlnet_tools.ps1) with a machine-wide concurrency limit,
   so parallel work in several checkouts / git worktrees never runs more Vivado
   processes than the workstation's memory holds.
 Overview:
@@ -16,8 +16,9 @@ Usage:
   powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rtlnet_vivado.ps1 `
     -Tcl scripts/rtlnet_synth_check.tcl -Log .sim/synth/mac.log `
     -TclArgs rtlnet_eth_mac,cores/rtlnet_eth_mac/hdl/rtlnet_eth_mac.f,xc7a200tsbg484-1
-Revision: 10-22-2026
+Revision: 11-06-2026
   * 10-22-2026: initial version.
+  * 11-06-2026: Vivado located by rtlnet_tools.ps1 (no fixed install path).
 -------------------------------------------------------------------------------
 #>
 param(
@@ -30,7 +31,8 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $Repo    = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-$Vivado  = 'C:/Xilinx/2025.2/Vivado/bin/vivado.bat'
+. (Join-Path $PSScriptRoot 'rtlnet_tools.ps1')
+$Vivado  = (Resolve-RtlnetXilinx).Vivado + '/bin/vivado.bat'
 $Shared  = Join-Path $env:LOCALAPPDATA 'RTLNet'
 New-Item -ItemType Directory -Force -Path $Shared | Out-Null
 

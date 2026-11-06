@@ -2,7 +2,7 @@
 # -----------------------------------------------------------------------------
 # File: rtlnet_bsp.py
 # Purpose: generate and build the standalone BSP of the RTLNet MicroBlaze
-#   firmware from the hardware export (XSA) with the Vitis 2025.2 Python API.
+#   firmware from the hardware export (XSA) with the Vitis 2026.1 Python API.
 #   Run by microblaze/firmware/build.ps1 as `vitis -s rtlnet_bsp.py <xsa> <ws>`.
 # Overview:
 #   * Creates the Vitis workspace <ws> (inside the ignored build folder), a

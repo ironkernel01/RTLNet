@@ -42,7 +42,7 @@
 #     the processor path <hier>/rtlnet_cpu_i/microblaze_0; the BSP flow
 #     (microblaze/firmware/build.ps1) names microblaze_0 and finds the DMA,
 #     UART, timer and INTC by their XSA instance names.
-# Language: Vivado Tcl (2025.2).
+# Language: Vivado Tcl (2026.1).
 # Revision: 10-22-2026
 #   * 10-22-2026: initial version.
 #   * 10-22-2026: LMB 512 KiB (code, data, stack, lwIP); AXI DMA (simple mode, 64-bit streams) with the

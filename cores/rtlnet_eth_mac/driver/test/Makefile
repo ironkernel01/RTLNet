@@ -6,7 +6,8 @@
 REPO      := ../../../..
 BUILD_DIR := $(REPO)/.sim/rtlnet_eth_mac_driver
 CC        := gcc
-MBGCC     := C:/Xilinx/2025.2/gnu/microblaze/nt/bin/mb-gcc.exe
+# mb-gcc: from RTLNET_XILINX (install root) when set, else from PATH.
+MBGCC     := $(if $(RTLNET_XILINX),$(RTLNET_XILINX)/gnu/microblaze/nt/bin/mb-gcc.exe,mb-gcc)
 CFLAGS    := -std=c11 -Wall -Wextra -Werror -O2
 INCLUDES  := -I.. -I$(REPO)/cores/rtlnet_common/driver
 

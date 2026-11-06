@@ -22,7 +22,7 @@ Overview:
     exit code 0 only on PASS.
 Usage:
   powershell -NoProfile -ExecutionPolicy Bypass -File boards/nexys_video/scripts/offload_bench.ps1 `
-    [-Port COM4] [-Board 192.169.1.199] [-Seconds 10] [-Runs 2] [-Label zc-both] [-Iperf C:\IronKernel\tools\iperf\iperf.exe]
+    [-Port COM4] [-Board 192.169.1.199] [-Seconds 10] [-Runs 2] [-Label zc-both] [-Iperf <iperf.exe>]
 Revision: 10-22-2026
   * 10-22-2026: initial version.
   * 10-22-2026: modes plain, -R, -d, plain + UDP 20M concurrent; one table row per offload state.
@@ -34,10 +34,13 @@ param(
     [int]$Seconds = 10,
     [int]$Runs = 2,
     [string]$Label = 'run',
-    [string]$Iperf = 'C:\IronKernel\tools\iperf\iperf.exe'
+    [string]$Iperf = ''
 )
 $ErrorActionPreference = 'Continue'
 $Repo   = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..')).Path
+. (Join-Path $Repo 'scripts\rtlnet_tools.ps1')
+$Python = Resolve-RtlnetPython
+if (-not $Iperf) { $Iperf = Resolve-RtlnetIperf; if (-not $Iperf) { $Iperf = 'iperf.exe' } }
 $Client = Join-Path $Repo 'microblaze\firmware\test\tcp_echo_client.py'
 $PromptRe = '(rtlnet(\([a-z-]+\))?[>#])$'
 $script:results = @()
@@ -122,7 +125,7 @@ try {
         [void](Run-Cli "clear counters")
 
         # TCP echo, 4 connections, every payload size.
-        $echo = & python $Client $Board --conns 4 --timeout 60 2>&1 | ForEach-Object { "$_" }
+        $echo = & $Python $Client $Board --conns 4 --timeout 60 2>&1 | ForEach-Object { "$_" }
         $v = $echo | Where-Object { $_ -match '^TCP_ECHO_TEST: ' } | Select-Object -Last 1
         Record "offload ${state}: TCP echo" ($v -match '^TCP_ECHO_TEST: PASS') "$v"
 

@@ -25,7 +25,7 @@ Overview:
     are printed for the record.
 Usage:
   powershell -NoProfile -ExecutionPolicy Bypass -File boards/nexys_video/scripts/tcp_test.ps1 `
-    [-Board 192.169.1.199] [-Seconds 10] [-UdpRate 20M] [-Iperf C:\IronKernel\tools\iperf\iperf.exe]
+    [-Board 192.169.1.199] [-Seconds 10] [-UdpRate 20M] [-Iperf <iperf.exe>]
 Revision: 10-22-2026
   * 10-22-2026: initial version.
   * 10-22-2026: -R, -r and -d are gates with throughput (rtlnet_lwiperf).
@@ -35,12 +35,15 @@ param(
     [string]$Board = '192.169.1.199',
     [int]$Seconds = 10,
     [string]$UdpRate = '20M',
-    [string]$Iperf = 'C:\IronKernel\tools\iperf\iperf.exe'
+    [string]$Iperf = ''
 )
 # Native tools write to stderr (iperf errors); PowerShell 5.1 turns that into
 # error records under 2>&1, so the script continues and checks the text.
 $ErrorActionPreference = 'Continue'
 $Repo   = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..')).Path
+. (Join-Path $Repo 'scripts\rtlnet_tools.ps1')
+$Python = Resolve-RtlnetPython
+if (-not $Iperf) { $Iperf = Resolve-RtlnetIperf; if (-not $Iperf) { $Iperf = 'iperf.exe' } }
 $Client = Join-Path $Repo 'microblaze\firmware\test\tcp_echo_client.py'
 $script:results = @()
 function Record([string]$name, [bool]$ok, [string]$detail) {
@@ -60,7 +63,7 @@ if (-not (Test-Path -LiteralPath $Iperf)) { Write-Output "TCP_TEST: FAIL no iper
 Write-Output "tcp_test: board $Board, iperf $Iperf, $Seconds s per run"
 
 # 1. TCP echo alone.
-$echo = & python $Client $Board --conns 4 --timeout 30 2>&1 | ForEach-Object { "$_" }
+$echo = & $Python $Client $Board --conns 4 --timeout 30 2>&1 | ForEach-Object { "$_" }
 $echo | Select-Object -Last 3 | ForEach-Object { Write-Output "    $_" }
 $v = $echo | Where-Object { $_ -match '^TCP_ECHO_TEST: ' } | Select-Object -Last 1
 Record 'TCP echo, 4 connections' ($v -match '^TCP_ECHO_TEST: PASS') "$v"
@@ -86,7 +89,7 @@ foreach ($mode in @('-R', '-r', '-d')) {
 }
 
 # 4. Coexistence: echo + TCP iperf + UDP iperf at the same time.
-$jEcho = Start-Job -ScriptBlock { param($c, $b) & python $c $b --conns 2 --rounds 2 --timeout 60 2>&1 | ForEach-Object { "$_" } } -ArgumentList $Client, $Board
+$jEcho = Start-Job -ScriptBlock { param($p, $c, $b) & $p $c $b --conns 2 --rounds 2 --timeout 60 2>&1 | ForEach-Object { "$_" } } -ArgumentList $Python, $Client, $Board
 $jTcp  = Start-Job -ScriptBlock { param($i, $b, $s) & $i -c $b -t $s -f k 2>&1 | ForEach-Object { "$_" } } -ArgumentList $Iperf, $Board, $Seconds
 $jUdp  = Start-Job -ScriptBlock { param($i, $b, $s, $u) & $i -c $b -u -b $u -t $s -f k 2>&1 | ForEach-Object { "$_" } } -ArgumentList $Iperf, $Board, $Seconds, $UdpRate
 $null = Wait-Job -Job $jEcho, $jTcp, $jUdp -Timeout ($Seconds * 3 + 120)

@@ -16,7 +16,8 @@
 #   * 10-22-2026: initial version.
 # -----------------------------------------------------------------------------
 CC     := gcc
-MBCC   := C:/Xilinx/2025.2/gnu/microblaze/nt/bin/mb-gcc.exe
+# mb-gcc: from RTLNET_XILINX (install root) when set, else from PATH.
+MBCC   := $(if $(RTLNET_XILINX),$(RTLNET_XILINX)/gnu/microblaze/nt/bin/mb-gcc.exe,mb-gcc)
 BUILD  := build
 INC    := -I.. -I../../../rtlnet_common/driver
 # -std=c11 with -pedantic: the drivers are plain C11; RTLNET_HOST_TEST routes

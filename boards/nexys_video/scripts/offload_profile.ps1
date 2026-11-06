@@ -13,7 +13,7 @@ Overview:
     has a profile (the image was built with the profile).
 Usage:
   powershell -NoProfile -ExecutionPolicy Bypass -File boards/nexys_video/scripts/offload_profile.ps1 `
-    [-Port COM4] [-Board 192.169.1.199] [-Seconds 10] [-Label prof] [-Iperf C:\IronKernel\tools\iperf\iperf.exe]
+    [-Port COM4] [-Board 192.169.1.199] [-Seconds 10] [-Label prof] [-Iperf <iperf.exe>]
 Revision: 10-22-2026
   * 10-22-2026: initial version.
 -------------------------------------------------------------------------------
@@ -23,10 +23,13 @@ param(
     [string]$Board = '192.169.1.199',
     [int]$Seconds = 10,
     [string]$Label = 'prof',
-    [string]$Iperf = 'C:\IronKernel\tools\iperf\iperf.exe'
+    [string]$Iperf = ''
 )
 $ErrorActionPreference = 'Continue'
 $Repo   = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..')).Path
+. (Join-Path $Repo 'scripts\rtlnet_tools.ps1')
+$Python = Resolve-RtlnetPython
+if (-not $Iperf) { $Iperf = Resolve-RtlnetIperf; if (-not $Iperf) { $Iperf = 'iperf.exe' } }
 $Client = Join-Path $Repo 'microblaze\firmware\test\tcp_echo_client.py'
 $PromptRe = '(rtlnet(\([a-z-]+\))?[>#])$'
 $rows = 0
@@ -92,7 +95,7 @@ try {
             } else {
                 $rs = @()
                 for ($i = 0; $i -lt 3; $i++) {
-                    $e = & python $Client $Board --conns 4 --timeout 60 2>&1 | ForEach-Object { "$_" }
+                    $e = & $Python $Client $Board --conns 4 --timeout 60 2>&1 | ForEach-Object { "$_" }
                     $v = $e | Where-Object { $_ -match '^TCP_ECHO_TEST: PASS' } | Select-Object -Last 1
                     if ($v -match 'throughput=([\d.]+) kbit/s') { $rs += [double]$Matches[1] / 1000.0 }
                 }

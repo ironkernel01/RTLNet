@@ -15,7 +15,7 @@ Overview:
     ping (arp -a), ping sweep 0 / 64 / 1472 bytes with -n 20 each, the UDP
     echo client (cores/rtlnet_udp_echo/testbench/udp_echo_client.py) to port
     7, and iperf 2 at 90 % of the link rate in both directions (-u, -u -R; at most 1 %
-    loss) with the binary from -Iperf, PATH, or C:\IronKernel\tools\iperf. A host check that
+    loss) with the binary from -Iperf, PATH, RTLNET_IPERF or <repo>/../tools/iperf. A host check that
     cannot run is reported BLOCKED with the reason, never as passed.
   * Prints the transcript to boards/nexys_video/build/net_test_transcript.txt
     and one line per check; the last line is "NET_TEST: PASS n/n" (blocked
@@ -36,6 +36,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $Board = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $Repo  = (Resolve-Path (Join-Path $Board '..\..')).Path
+. (Join-Path $Repo 'scripts\rtlnet_tools.ps1')
 $TranscriptPath = Join-Path $Board 'build\net_test_transcript.txt'
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $TranscriptPath) | Out-Null
 $PromptRe = '(rtlnet(\([a-z-]+\))?[>#])\s*$'
@@ -138,15 +139,15 @@ try {
         $arp = & arp -a
         Note 'ARP entry of the board on the PC' ([bool]($arp | Select-String -SimpleMatch $boardIp | Select-String -Pattern '02-49-4b-52-4e-01')) ''
         $py = Join-Path $Repo 'cores\rtlnet_udp_echo\testbench\udp_echo_client.py'
-        $e = & python -I $py $boardIp -p 7 -n 200 --timeout 1.0 2>&1
+        $e = & (Resolve-RtlnetPython) -I $py $boardIp -p 7 -n 200 --timeout 1.0 2>&1
         [void]$script:log.Append(($e -join "`n") + "`n")
         Note 'UDP echo client 200 datagrams' ($LASTEXITCODE -eq 0) ($e | Select-Object -Last 1)
-        # iperf 2: -Iperf, else iperf/iperf2 on PATH, else the IronKernel tools folder.
+        # iperf 2: -Iperf, else iperf/iperf2 on PATH, else rtlnet_tools.ps1 (RTLNET_IPERF, <repo>/../tools/iperf).
         $ipexe = $null
         if ($Iperf -and (Test-Path -LiteralPath $Iperf)) { $ipexe = $Iperf }
         if (-not $ipexe) { $c = Get-Command iperf -ErrorAction SilentlyContinue; if ($c) { $ipexe = $c.Source } }
         if (-not $ipexe) { $c = Get-Command iperf2 -ErrorAction SilentlyContinue; if ($c) { $ipexe = $c.Source } }
-        if (-not $ipexe -and (Test-Path -LiteralPath 'C:\IronKernel\tools\iperf\iperf.exe')) { $ipexe = 'C:\IronKernel\tools\iperf\iperf.exe' }
+        if (-not $ipexe) { $ipexe = Resolve-RtlnetIperf }
         if ($ipexe) {
             # Offered load 90 % of the link rate, 1470-byte datagrams, 5 s, both directions;
             # pass = a loss figure was reported and it is at most 1 %.
@@ -165,7 +166,7 @@ try {
                 }
             }
         } else {
-            $script:blocked += 'iperf -u (no iperf 2 binary: use -Iperf, PATH, or C:\IronKernel\tools\iperf)'
+            $script:blocked += 'iperf -u (no iperf 2 binary: use -Iperf, RTLNET_IPERF or PATH)'
         }
     }
 

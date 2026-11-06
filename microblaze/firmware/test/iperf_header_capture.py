@@ -16,18 +16,22 @@ Overview:
 How to run:
   python microblaze/firmware/test/iperf_header_capture.py --port 5101 --run "plain=-t 2" \
       --run "R=-t 2 -R" --run "r=-t 2 -r" --run "d=-t 2 -d"
-  (--run starts C:/IronKernel/tools/iperf/iperf.exe -c 127.0.0.1 -p <port> with the
+  (--run starts iperf (RTLNET_IPERF, PATH or <repo>/../tools/iperf) -c 127.0.0.1 -p <port> with the
   given options for each capture; without --run the listener waits for any client.)
 Revision: 10-22-2026
 """
 import argparse
+import os
+import shutil
 import socket
 import struct
 import subprocess
 import sys
 import time
 
-IPERF = r"C:/IronKernel/tools/iperf/iperf.exe"
+IPERF = (os.environ.get("RTLNET_IPERF") or shutil.which("iperf")
+         or os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                          "..", "..", "..", "..", "tools", "iperf", "iperf.exe")))
 ACCEPT_MAX = 6          # connections per capture
 LEGACY_FIELDS = ("flags", "numThreads", "mPort", "bufferlen", "mWinBand", "mAmount")
 

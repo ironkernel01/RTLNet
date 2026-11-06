@@ -37,7 +37,8 @@ if (-not $Elf) { $Elf = Join-Path $Repo 'microblaze\firmware\build\firmware.elf'
 if (-not $Mmi) { $Mmi = Join-Path $Build 'rtlnet_nexys_video.mmi' }
 if (-not $Bit) { $Bit = Join-Path $Build 'rtlnet_nexys_video_hw.bit' }
 if (-not $Out) { $Out = Join-Path $Build 'rtlnet_nexys_video.bit' }
-$UpdateMem = 'C:\Xilinx\2025.2\Vivado\bin\updatemem.bat'
+. (Join-Path $Repo 'scripts\rtlnet_tools.ps1')
+$UpdateMem = (Resolve-RtlnetXilinx).Vivado + '/bin/updatemem.bat'
 $ExpectProc = 'u_cpu/u_bd/rtlnet_cpu_i/microblaze_0'
 
 function Fail([string]$m) { Write-Output "RTLNET_MERGE: FAIL $m"; exit 1 }

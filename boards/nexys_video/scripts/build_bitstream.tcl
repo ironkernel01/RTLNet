@@ -1,6 +1,6 @@
 # -----------------------------------------------------------------------------
 # File: build_bitstream.tcl
-# Purpose: scripted, reproducible Vivado 2025.2 non-project build of the RTLNet
+# Purpose: scripted, reproducible Vivado 2026.1 non-project build of the RTLNet
 #   Nexys Video board top: block design from Tcl, synthesis, CDC constraints,
 #   implementation, gated reports, bitstream and the MicroBlaze memory map
 #   (MMI) for updatemem.

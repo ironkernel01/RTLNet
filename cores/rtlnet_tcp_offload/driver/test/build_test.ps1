@@ -21,8 +21,9 @@ Revision: 10-22-2026
 #>
 param(
     [switch]$NoTarget,
-    [string]$MbGcc = 'C:/Xilinx/2025.2/gnu/microblaze/nt/bin/mb-gcc.exe'
+    [string]$MbGcc = ''
 )
+if (-not $MbGcc) { . (Join-Path $PSScriptRoot '..\..\..\..\scripts\rtlnet_tools.ps1'); $MbGcc = (Resolve-RtlnetXilinx).MbBin + '/mb-gcc.exe' }
 $ErrorActionPreference = 'Stop'
 
 $Here  = $PSScriptRoot

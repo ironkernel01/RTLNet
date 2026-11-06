@@ -22,6 +22,8 @@ How to run:
 Revision: 10-22-2026
 """
 import argparse
+import os
+import shutil
 import socket
 import struct
 import subprocess
@@ -29,7 +31,9 @@ import sys
 import threading
 import time
 
-IPERF = r"C:/IronKernel/tools/iperf/iperf.exe"
+IPERF = (os.environ.get("RTLNET_IPERF") or shutil.which("iperf")
+         or os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                          "..", "..", "..", "..", "tools", "iperf", "iperf.exe")))
 PATTERN = (b"0123456789" * 160)
 SEG = 1460
 

@@ -11,7 +11,7 @@ Overview:
     vsimsa process it does not own is running. It never stops another process.
   * Builds the vendor simulation libraries once per Vivado version, in place
     from the Vivado install (nothing copied into the repository), into
-    %LOCALAPPDATA%/RTLNet/xlib-2025.2: library `xpm` (xpm_memory, xpm_cdc)
+    %LOCALAPPDATA%/RTLNet/xlib-<tool version>: library `xpm` (xpm_memory, xpm_cdc)
     and `unisims_ver` (the primitives the RTLNet pin layers and board tops
     use, plus glbl). Stamp: xlib.done.
   * Expands the bench filelist (paths relative to the repository root,
@@ -53,12 +53,14 @@ $Defines  = @($Defines  | ForEach-Object { $_ -split ',' } | Where-Object { $_ -
 $PlusArgs = @($PlusArgs | ForEach-Object { $_ -split ',' } | Where-Object { $_ -ne '' })
 
 $Repo     = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-$AldecBin = 'C:/Aldec/Active-HDL-11.1-x64/BIN'
+$AldecBin = Resolve-RtlnetAldec
 $Vsimsa   = Join-Path $AldecBin 'vsimsa.exe'
-$Vivado   = 'C:/Xilinx/2025.2/Vivado'
+. (Join-Path $PSScriptRoot 'rtlnet_tools.ps1')
+$Xil      = Resolve-RtlnetXilinx
+$Vivado   = $Xil.Vivado
 $SimRoot  = Join-Path $Repo '.sim'
 $Shared   = Join-Path $env:LOCALAPPDATA 'RTLNet'
-$XlibDir  = Join-Path $Shared 'xlib-2025.2'
+$XlibDir  = Join-Path $Shared "xlib-$($Xil.Version)"
 $RunName  = if ($Tag) { "${Bench}_$Tag" } else { $Bench }
 $WorkDir  = Join-Path $SimRoot $RunName
 

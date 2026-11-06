@@ -9,6 +9,7 @@
 # becomes <br/> inside mermaid fences only; the .md keeps &#10;.
 param([string]$Name = 'rtlnet_product_brief', [switch]$Sync)
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot '..\scripts\rtlnet_tools.ps1')
 
 $dir = $PSScriptRoot
 $md = Join-Path $dir "$Name.md"
@@ -52,6 +53,6 @@ if (-not (Test-Path $pdf)) { throw "Chrome did not write $pdf" }
 "wrote $pdf ($((Get-Item $pdf).Length) bytes)"
 
 if ($Sync) {
-    & python (Join-Path (Split-Path $dir) 'diagrams\tools\sync_drive.py') $pdf
+    & (Resolve-RtlnetPython) (Join-Path (Split-Path $dir) 'diagrams\tools\sync_drive.py') $pdf
     if ($LASTEXITCODE) { throw "Drive sync of $pdf failed" }
 }
