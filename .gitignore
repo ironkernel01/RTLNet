@@ -92,3 +92,6 @@ desktop.ini
 
 # Agent tooling (worktrees, local settings)
 .claude/
+
+# Diagram tooling (npm install in diagrams/)
+node_modules/
