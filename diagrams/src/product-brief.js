@@ -1,11 +1,11 @@
 // Drawing set: product-brief (1 sheet: RTLNet in the FPGA and what it connects to) for
 // documentation/rtlnet_product_brief.md.
-// Build: node diagrams/src/product-brief.js  ->  diagrams/out/product-brief.pptx + out/svg/product-brief-1.svg
-// Render: powershell -File diagrams\tools\render_svg.ps1 product-brief   (or render.ps1 on the .pptx)
+// Build: node diagrams/src/product-brief.js  ->  diagrams/out/product-brief.pptx
+// Render: powershell -File diagrams\tools\render.ps1 diagrams\out\product-brief.pptx  ->  out/png/product-brief-1.png
 // Fills: white = RTLNet RTL cores, blue = CPU-path accelerators, gray = soft CPU subsystem,
 // yellow = outside the FPGA.
 const path = require("path");
-const { newDeck, helpers, writeSvg, FILL } = require("../lib/engslides");
+const { newDeck, helpers, FILL } = require("../lib/engslides");
 
 const pres = newDeck("IronKernel RTLNet");
 const { box, container, wire, label, notes, legend, frame } = helpers(pres);
@@ -70,5 +70,4 @@ notes(s, 0.6, 5.6, 12.1, 1.0, [
 legend(s, 0.6, 6.8, [["RTLNet RTL core", W], ["CPU-path accelerator", B], ["Soft CPU subsystem", G], ["Outside the FPGA", Y]], 2.6);
 frame(s);
 
-writeSvg(pres, path.join(__dirname, "..", "out", "svg"), "product-brief").forEach((f) => console.log("wrote", f));
 pres.writeFile({ fileName: path.join(__dirname, "..", "out", "product-brief.pptx") }).then((f) => console.log("wrote", f));
