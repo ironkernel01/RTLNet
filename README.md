@@ -63,7 +63,7 @@ Other folders:
 
 ## Tools
 
-- AMD Vivado / Vitis 2025.2 (synthesis, implementation, MicroBlaze GCC, BSP)
+- AMD Vivado / Vitis 2026.1 with the free Vivado Basic license (synthesis, implementation, MicroBlaze GCC, BSP); tools are located by `scripts/rtlnet_tools.ps1` (override with `RTLNET_XILINX`, `RTLNET_ALDEC`, `RTLNET_PYTHON`, `RTLNET_HOST_CC`, `RTLNET_IPERF`)
 - Aldec Active-HDL 11.1 (all simulation)
 - lwIP 2.2.0 is compiled in place from the Vitis install. Only the RTLNet-specific files live in
   `microblaze/firmware/src/lwip/`.

@@ -21,6 +21,9 @@ Overview:
   * Resolve-RtlnetPython -> python.exe: $env:RTLNET_PYTHON, python on PATH
     (not the Store alias), the py launcher, Python3* folders under
     %LOCALAPPDATA%/Programs/Python, Program Files and drive roots.
+  * Resolve-RtlnetHostCc -> host gcc for the desktop harnesses and driver host
+    tests: $env:RTLNET_HOST_CC, gcc on PATH, the newest MinGW gcc of the AMD
+    install (<root>/tps/mingw/<ver>/win64.o/nt/bin).
   * Resolve-RtlnetIperf -> iperf 2 executable or $null: $env:RTLNET_IPERF,
     iperf.exe on PATH, <repo>/../tools/iperf/iperf.exe.
 Revision: 11-06-2026
@@ -114,6 +117,19 @@ function Resolve-RtlnetPython {
     $best = $found | Sort-Object { [int](($_.Name -replace '[^0-9]', '') + '0') } -Descending | Select-Object -First 1
     if ($best) { return (Join-Path $best.FullName 'python.exe') }
     throw 'no Python 3 found: set RTLNET_PYTHON to python.exe or put it on PATH'
+}
+
+function Resolve-RtlnetHostCc {
+    if ($env:RTLNET_HOST_CC) { return $env:RTLNET_HOST_CC }
+    $onPath = Get-Command gcc.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($onPath) { return $onPath.Source }
+    # Fallback: the MinGW gcc shipped inside the AMD install (newest version).
+    $x = Resolve-RtlnetXilinx
+    $found = Get-ChildItem -LiteralPath "$($x.Root)/tps/mingw" -Directory -ErrorAction SilentlyContinue |
+             Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'win64.o\nt\bin\gcc.exe') }
+    $best = $found | Sort-Object { Get-RtlnetReleaseKey $_.Name } -Descending | Select-Object -First 1
+    if ($best) { return (ConvertTo-RtlnetFwd (Join-Path $best.FullName 'win64.o\nt\bin\gcc.exe')) }
+    throw 'no host C compiler found: set RTLNET_HOST_CC to gcc.exe or put gcc on PATH'
 }
 
 function Resolve-RtlnetIperf {

@@ -5,7 +5,7 @@
 | Product line | IronKernel RTLNet |
 | Document revision | 10-22-2026 |
 | First target | Digilent Nexys Video (Artix-7 XC7A200T-1SBG484C, Realtek RTL8211E RGMII PHY) |
-| Toolchain | Vivado 2025.2 (synthesis, implementation), Aldec Active-HDL 11.1 (simulation), MicroBlaze GCC 13.3 |
+| Toolchain | Vivado 2026.1 (synthesis, implementation), Aldec Active-HDL 11.1 (simulation), MicroBlaze GCC 13.4 |
 | Languages | SystemVerilog-2012 for all RTL and benches (`.sv`), C11 for drivers and firmware |
 
 This document is the contract every RTLNet core is built against. A core that follows it can be dropped into

@@ -23,7 +23,10 @@ param(
     [switch]$NoTarget,
     [string]$MbGcc = ''
 )
-if (-not $MbGcc) { . (Join-Path $PSScriptRoot '..\..\..\..\scripts\rtlnet_tools.ps1'); $MbGcc = (Resolve-RtlnetXilinx).MbBin + '/mb-gcc.exe' }
+. (Join-Path $PSScriptRoot '..\..\..\..\scripts\rtlnet_tools.ps1')
+if (-not $MbGcc) { $MbGcc = (Resolve-RtlnetXilinx).MbBin + '/mb-gcc.exe' }
+$HostCc = Resolve-RtlnetHostCc
+$env:PATH = (Split-Path -Parent $HostCc) + ';' + $env:PATH
 $ErrorActionPreference = 'Stop'
 
 $Here   = $PSScriptRoot
@@ -39,7 +42,7 @@ $inc  = @("-I$Drv", "-I$Mmio")
 $srcs = @((Join-Path $Here 'test_rtlnet_mdio_host.c'), (Join-Path $Drv 'rtlnet_mdio.c'),
           (Join-Path $Drv 'rtlnet_phy_rtl8211e.c'))
 
-& gcc -std=c11 -Wall -Wextra -Werror -pedantic -O2 -DRTLNET_HOST_TEST @inc @srcs -o $Exe
+& $HostCc -std=c11 -Wall -Wextra -Werror -pedantic -O2 -DRTLNET_HOST_TEST @inc @srcs -o $Exe
 if ($LASTEXITCODE -ne 0) { Fail 'host build' }
 
 $out = & $Exe

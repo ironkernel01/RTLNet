@@ -11,7 +11,7 @@ Overview:
   2. BSP (skipped when build/ws is newer than the XSA, or with -NoFirmware):
      `vitis -s bsp/rtlnet_bsp.py <xsa> build/ws` creates the platform
      component from the XSA (standalone OS on microblaze_0, console
-     axi_uartlite_0) and builds it: build/ws/p/microblaze_0/d/bsp/{include,
+     axi_uartlite_0) and builds it: build/ws/plt/microblaze_0/dom/bsp/{include,
      lib} (libxil.a, libxilstandalone.a, libxiltimer.a), Xilinx.spec.
      Vivado/bin goes on PATH first (the Vitis server runs sdtgen and lopper
      from there).
@@ -76,6 +76,9 @@ $Repo    = (Resolve-Path (Join-Path $Fw '..\..')).Path
 $Out     = Join-Path $Fw 'build'
 . (Join-Path $Repo 'scripts\rtlnet_tools.ps1')
 $Xilinx  = (Resolve-RtlnetXilinx).Root
+# Host gcc (desktop harnesses); its bin on PATH for the MinGW runtime DLLs of the built tests.
+$HostCc  = try { Resolve-RtlnetHostCc } catch { 'gcc' }
+if ($HostCc -ne 'gcc') { $env:PATH = (Split-Path -Parent $HostCc) + ';' + $env:PATH }
 $MbBin   = "$Xilinx/gnu/microblaze/nt/bin"
 $MbGcc   = Join-Path $MbBin 'mb-gcc.exe'
 $MbSize  = Join-Path $MbBin 'mb-size.exe'
@@ -85,7 +88,7 @@ $LwipDir = "$Esw/ThirdParty/sw_services/lwip220_v1_3/src/lwip-2.2.0"
 $LdTmpl  = "$Esw/scripts/linker_files/lscript_mb.ld.in"
 if (-not $Xsa) { $Xsa = Join-Path $Repo 'boards\nexys_video\build\rtlnet_nexys_video.xsa' }
 $Ws      = Join-Path $Out 'ws'
-$BspDir  = Join-Path $Ws 'p\microblaze_0\d\bsp'
+$BspDir  = Join-Path $Ws 'plt\microblaze_0\dom\bsp'
 New-Item -ItemType Directory -Force -Path $Out | Out-Null
 
 function Invoke-Step([string]$exe, [string[]]$argv) {
@@ -127,6 +130,7 @@ Invoke-Step (Resolve-RtlnetPython) @("$Fw/cli/check_menu.py")
 if (-not $NoFirmware) {
     # 2. BSP from the XSA.
     if (-not (Test-Path -LiteralPath $Xsa)) { throw "no hardware export at $Xsa (build the bitstream first: boards/nexys_video/scripts/build.ps1)" }
+    $Xsa = (Resolve-Path -LiteralPath $Xsa).Path   # Vitis runs from $Out: a relative -Xsa must not resolve there
     $marker = Join-Path $Out 'bsp.stamp'
     $fresh = (Test-Path -LiteralPath $marker) -and (Test-Path -LiteralPath (Join-Path $BspDir 'lib\libxil.a')) -and
              ((Get-Item -LiteralPath $marker).LastWriteTime -ge (Get-Item -LiteralPath $Xsa).LastWriteTime) -and
@@ -239,7 +243,7 @@ if ($HostHarness -or $Demo) {
                'cli/cli_commands.c') |
              ForEach-Object { "$Fw/$_" }
     $exe = Join-Path $Out 'menu.exe'
-    Invoke-Step 'gcc' ($common + @('-O2', '-DRTLNET_HOST_TEST', "-I$Fw/host") + $inc + $hsrcs +
+    Invoke-Step $HostCc ($common + @('-O2', '-DRTLNET_HOST_TEST', "-I$Fw/host") + $inc + $hsrcs +
         ($drvSrcs | ForEach-Object { "$Repo/$_" }) + @('-o', $exe))
     Write-Output "RTLNET_HOST: built $exe"
     if ($Demo) {
@@ -270,16 +274,16 @@ if ($LwipTest) {
     $ltObjs = @()
     foreach ($s in $lwipSrcs) {
         $o = Join-Path $lt (($s -replace '[/\\]', '_') -replace '\.c$', '.o')
-        Invoke-Step 'gcc' (@('-std=gnu11', '-O1', '-g', '-w') + $ltInc + @('-c', "$LwipDir/src/$s", '-o', $o))
+        Invoke-Step $HostCc (@('-std=gnu11', '-O1', '-g', '-w') + $ltInc + @('-c', "$LwipDir/src/$s", '-o', $o))
         $ltObjs += $o
     }
     foreach ($s in @("$Fw/src/lwip/rtlnet_lwiperf.c", "$Fw/test/lwiperf_loopback/lwiperf_loopback_test.c")) {
         $o = Join-Path $lt (([System.IO.Path]::GetFileNameWithoutExtension($s)) + '.o')
-        Invoke-Step 'gcc' (@('-std=gnu11', '-O1', '-g', '-Wall', '-Wextra', '-Werror') + $ltInc + @('-c', $s, '-o', $o))
+        Invoke-Step $HostCc (@('-std=gnu11', '-O1', '-g', '-Wall', '-Wextra', '-Werror') + $ltInc + @('-c', $s, '-o', $o))
         $ltObjs += $o
     }
     $ltExe = Join-Path $Out 'lwiperf_loopback.exe'
-    Invoke-Step 'gcc' (@('-o', $ltExe) + $ltObjs)
+    Invoke-Step $HostCc (@('-o', $ltExe) + $ltObjs)
     $ltLog = & $ltExe
     $ltRc = $LASTEXITCODE
     $ltLog | ForEach-Object { Write-Output $_ }
@@ -305,16 +309,16 @@ if ($NetifTest) {
         $ntObjs = @()
         foreach ($s in $lwipSrcs) {
             $o = Join-Path $nt (($s -replace '[/\\]', '_') -replace '\.c$', '.o')
-            Invoke-Step 'gcc' (@('-std=gnu11', '-O1', '-g', '-w') + $zc + $ntInc + @('-c', "$LwipDir/src/$s", '-o', $o))
+            Invoke-Step $HostCc (@('-std=gnu11', '-O1', '-g', '-w') + $zc + $ntInc + @('-c', "$LwipDir/src/$s", '-o', $o))
             $ntObjs += $o
         }
         foreach ($s in $ntSrcs) {
             $o = Join-Path $nt (([System.IO.Path]::GetFileNameWithoutExtension($s)) + '.o')
-            Invoke-Step 'gcc' (@('-std=gnu11', '-O1', '-g', '-Wall', '-Wextra', '-Werror') + $zc + $ntInc + @('-c', $s, '-o', $o))
+            Invoke-Step $HostCc (@('-std=gnu11', '-O1', '-g', '-Wall', '-Wextra', '-Werror') + $zc + $ntInc + @('-c', $s, '-o', $o))
             $ntObjs += $o
         }
         $ntExe = Join-Path $Out 'netif_host.exe'
-        Invoke-Step 'gcc' (@('-o', $ntExe) + $ntObjs)
+        Invoke-Step $HostCc (@('-o', $ntExe) + $ntObjs)
         $ntLog = & $ntExe
         $ntRc = $LASTEXITCODE
         $ntLog | ForEach-Object { Write-Output $_ }

@@ -6,7 +6,7 @@
 | Document revision | 10-22-2026 |
 | Top | `boards/nexys_video/hdl/rtlnet_nexys_video_top.sv` (`rtlnet_nexys_video_top`) |
 | Builds | network (`build.ps1 -Network`, `RTLNET_WITH_NETWORK`: MAC, MDIO, protocol wrapper with ARP/ICMP/DHCP/iperf/UDP socket leaves, CPU network path with its classifier, UDP echo) and CPU-only (default); both built, timing met, on hardware |
-| Tools | Vivado 2025.2, MicroBlaze GCC 13.3, Active-HDL 11.1 |
+| Tools | Vivado 2026.1, MicroBlaze GCC 13.4, Active-HDL 11.1 |
 | Firmware | one image for both builds (`microblaze/firmware`, standalone BSP generated from the build's XSA, lwIP TCP echo on the CPU network path); absent cores are probed and reported "not present in this build" |
 
 ## 1. Files

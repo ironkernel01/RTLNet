@@ -94,19 +94,19 @@ the firmware places nothing loadable in the AXI BRAM, so updatemem fills the LMB
 
 `boards/nexys_video/scripts/build_bitstream.tcl` writes `build/rtlnet_nexys_video.xsa`
 (`write_hw_platform -fixed -include_bit`) after the bitstream. `microblaze/firmware/build.ps1` turns it
-into a standalone BSP with the Vitis 2025.2 Python API, `vitis -s bsp/rtlnet_bsp.py <xsa> build/ws`:
+into a standalone BSP with the Vitis 2026.1 Python API, `vitis -s bsp/rtlnet_bsp.py <xsa> build/ws`:
 
-1. `client.create_platform_component(name="p", hw_design=<xsa>, os="standalone", cpu="microblaze_0",
-   domain_name="d")` (the Vitis server runs `sdtgen` and `lopper`; `Vivado/bin` must be on `PATH`, the
+1. `client.create_platform_component(name="plt", hw_design=<xsa>, os="standalone", cpu="microblaze_0",
+   domain_name="dom")` (the Vitis server runs `sdtgen` and `lopper`; `Vivado/bin` must be on `PATH`, the
    Vitis `bin` of this install has no `sdtgen`);
 2. `domain.set_config("os", "standalone_stdin"/"standalone_stdout", "axi_uartlite_0")`;
 3. `platform.build()`.
 
-Output (ignored folder `microblaze/firmware/build/ws/p/microblaze_0/d/bsp`): `include/` (xparameters.h,
+Output (ignored folder `microblaze/firmware/build/ws/plt/microblaze_0/dom/bsp`): `include/` (xparameters.h,
 driver headers), `lib/libxil.a` (drivers), `lib/libxilstandalone.a`, `lib/libxiltimer.a`, `Xilinx.spec`
 (start files `crt0`, `crti`, `crtbegin`, `crtinit`), `cflags.yaml`. Versions used from
-`C:\Xilinx\2025.2\Vitis\data\embeddedsw`: standalone v9.4, axidma v9.20, uartlite v3.12, tmrctr v4.14,
-intc v3.21, bram v4.13, xiltimer v2.3. The drivers use the system-device-tree API (`-DSDT`, base
+`<install>/Vitis/data/embeddedsw` (2026.1): standalone v9.5, axidma v9.21, uartlite v3.13, tmrctr v4.15,
+intc v3.22, bram v4.14, xiltimer v2.4. The drivers use the system-device-tree API (`-DSDT`, base
 addresses instead of device IDs).
 
 **lwIP is not a BSP library here.** The install's `lwip220` library refuses a hardware design without a
@@ -119,12 +119,12 @@ with `firmware/src/lwip/lwipopts.h` and the install's `contrib/ports/xilinx/incl
 copied.
 
 Windows path limit: the BSP build fails on object paths above about 250 characters, so the workspace,
-platform and domain names are one letter each; `build.ps1` stops with a clear message when a checkout is
+platform and domain names are short (`plt`, `dom`: Vitis 2026.1 needs 3 to 100 characters); `build.ps1` stops with a clear message when a checkout is
 too deep.
 
 ## 6. Firmware toolchain contract
 
-`mb-gcc` 13.3 (`C:\Xilinx\2025.2\gnu\microblaze\nt\bin`), processor flags taken from the BSP's
+`mb-gcc` 13.4 (`<install>/gnu/microblaze/nt/bin`, located by `scripts/rtlnet_tools.ps1`), processor flags taken from the BSP's
 `cflags.yaml` (`-mxl-barrel-shift -mlittle-endian -mxl-pattern-compare -mno-xl-soft-mul -mcpu=v11.0`) plus
 `-mno-xl-soft-div -DSDT`; `-specs=Xilinx.spec`; the linker script `build/lscript.ld` is generated from the
 install's template `Vitis/data/embeddedsw/scripts/linker_files/lscript_mb.ld.in` (vectors at 0x0/0x8/0x10/0x20,

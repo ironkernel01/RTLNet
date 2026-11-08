@@ -6,7 +6,7 @@
 #   Run by microblaze/firmware/build.ps1 as `vitis -s rtlnet_bsp.py <xsa> <ws>`.
 # Overview:
 #   * Creates the Vitis workspace <ws> (inside the ignored build folder), a
-#     platform component "p" from <xsa> with one standalone domain "d" on
+#     platform component "plt" from <xsa> with one standalone domain "dom" on
 #     microblaze_0, sets stdin/stdout to the console UART (axi_uartlite_0),
 #     and builds it. The BSP (headers, libxil.a, libxilstandalone.a,
 #     libxiltimer.a, the spec file) is generated from the AMD install; nothing
@@ -30,8 +30,8 @@ import sys
 
 import vitis
 
-PLATFORM = "p"
-DOMAIN = "d"
+PLATFORM = "plt"   # Vitis 2026.1: names of 3..100 characters; short to bound path length
+DOMAIN = "dom"
 CPU = "microblaze_0"
 CONSOLE = "axi_uartlite_0"
 
