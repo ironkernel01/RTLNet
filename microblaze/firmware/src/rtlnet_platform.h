@@ -20,6 +20,7 @@
  *     0x44A0_1000   4 KiB  MAC  rtlnet_eth_mac        "MAC1"
  *     0x44A0_2000   4 KiB  MDIO rtlnet_mdio           "MDIO"
  *     0x44A0_3000   4 KiB  ECHO rtlnet_udp_echo       "ECHO"
+ *     0x44A0_4000   4 KiB  ARB  rtlnet_axi_arbiter     "ARBT" (DDR3 arbiter)
  *     0x44A1_0000  64 KiB  PROTOCOL rtlnet_eth_protocol, sub-map:
  *       0x44A1_0000        wrapper                    "PROT"
  *       0x44A1_1000        ARP leaf                   "ARP1"
@@ -30,6 +31,7 @@
  *       0x44A1_8000        CPU-path classifier        "CLSF"
  *       0x44A1_9000        CPU-path checksum offload  "TCPO"
  *     0x44A2_0000   4 KiB  CLASSIFIER (reserved, reads 0)
+ *   0x8000_0000  512 MiB  DDR3 SDRAM (cached, M_AXI_DDR)           CPU core
  *   0xC000_0000  128 KiB  AXI BRAM (DMA frame buffers only)        CPU core
  *
  * The CPU-core part comes from microblaze/driver/
@@ -57,12 +59,18 @@
 #define RTLNET_PLAT_TIMER_BASE      RTLNET_CPU_TIMER_BASE
 #define RTLNET_PLAT_CPU_CLK_HZ      RTLNET_CPU_CLK_HZ
 
+/* DDR3 window and its caches (single definition in rtlnet_cpu_microblaze.h). */
+#define RTLNET_PLAT_DDR_BASE        RTLNET_CPU_DDR_BASE
+#define RTLNET_PLAT_DDR_SIZE        RTLNET_CPU_DDR_SIZE
+#define RTLNET_PLAT_CACHE_LINE      RTLNET_CPU_CACHE_LINE_BYTES
+
 /* RTLNet window (architecture section 6.1). */
 #define RTLNET_PLAT_WINDOW_BASE     RTLNET_CPU_RTLNET_BASE
 #define RTLNET_PLAT_SYS_BASE        (RTLNET_PLAT_WINDOW_BASE + 0x00000u)
 #define RTLNET_PLAT_MAC_BASE        (RTLNET_PLAT_WINDOW_BASE + 0x01000u)
 #define RTLNET_PLAT_MDIO_BASE       (RTLNET_PLAT_WINDOW_BASE + 0x02000u)
 #define RTLNET_PLAT_ECHO_BASE       (RTLNET_PLAT_WINDOW_BASE + 0x03000u)
+#define RTLNET_PLAT_ARB_BASE        (RTLNET_PLAT_WINDOW_BASE + 0x04000u)
 #define RTLNET_PLAT_PROT_BASE       (RTLNET_PLAT_WINDOW_BASE + 0x10000u)
 #define RTLNET_PLAT_ARP_BASE        (RTLNET_PLAT_PROT_BASE + 0x1000u)
 #define RTLNET_PLAT_ICMP_BASE       (RTLNET_PLAT_PROT_BASE + 0x2000u)
@@ -84,12 +92,13 @@
 #define RTLNET_ID_IPERF             0x49505246u   /* "IPRF" */
 #define RTLNET_ID_UDP               0x55445053u   /* "UDPS" */
 #define RTLNET_ID_ECHO              0x4543484Fu   /* "ECHO" */
+#define RTLNET_ID_ARB               0x41524254u   /* "ARBT" */
 #define RTLNET_ID_CLS               0x434C5346u   /* "CLSF" */
 #define RTLNET_ID_TXO               0x5443504Fu   /* "TCPO" */
 
 /* Firmware identity. */
 #define RTLNET_FW_NAME              "rtlnet-fw"
-#define RTLNET_FW_VERSION           "10-22-2026"
+#define RTLNET_FW_VERSION           "11-09-2026"
 
 /* Free-running tick (AXI Timer 0 at cpu_clk). */
 #define RTLNET_PLAT_TICKS_PER_US    (RTLNET_PLAT_CPU_CLK_HZ / 1000000u)
@@ -109,5 +118,15 @@ void     plat_poll(void);
 void     plat_led_set(unsigned index, int on);
 uint32_t plat_led_state(void);
 void     plat_reload(void);
+
+/* Data cache maintenance for the DDR3 window. The range is widened to whole cache lines
+ * (RTLNET_PLAT_CACHE_LINE). Flush writes back and invalidates (the data cache is write-through,
+ * so nothing is dirty; the call keeps the sequence valid for a write-back cache); invalidate
+ * drops the lines so the next read comes from memory. No-ops where the build has no caches. */
+void     plat_dcache_flush_range(uintptr_t addr, size_t len);
+void     plat_dcache_invalidate_range(uintptr_t addr, size_t len);
+void     plat_dcache_flush_all(void);
+void     plat_mem_barrier(void);
+void     plat_dcache_invalidate_all(void);
 
 #endif /* RTLNET_PLATFORM_H */

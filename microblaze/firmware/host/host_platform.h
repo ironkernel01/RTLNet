@@ -49,6 +49,16 @@ int         host_reload_count(void);
 /* Protocol wrapper: CAPS.CPU_PATH_PRESENT and CPU_CAPS (bits 16..18 are the optional blocks). */
 void        host_model_set_wrapper(int cpu_path, uint32_t cpu_caps);
 
+/* DDR3 path: the arbiter window present or absent, CLK_STATUS calibration bit, the memory window
+ * (sparse, 4 KiB pages, emptied by host_model_ddr_clear). Fault injection for the memory test: an
+ * address line stuck low (bit number, 0 = none) and an AND mask on every word read (0xFFFFFFFF = none).
+ * The arbiter counters count the model's 32-bit accesses; STATUS.ERR is set by host_model_ddr_error(). */
+void        host_model_ddr_set(int arbiter_present, int calibrated);
+void        host_model_ddr_alias_bit(unsigned bit);
+void        host_model_ddr_data_and(uint32_t mask);
+void        host_model_ddr_error(void);
+void        host_model_ddr_clear(void);
+
 /* Checksum offload window: present with this CAPS (0 removes it); STATUS.TX_IDLE after this many STATUS
  * reads (0xFFFFFFFF: never); CTRL bits that do not stick; CTRL and counters as the harness sees them. */
 void        host_model_txo_set(int present, uint32_t caps);

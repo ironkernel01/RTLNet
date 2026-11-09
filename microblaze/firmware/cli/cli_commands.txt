@@ -16,6 +16,7 @@ REVISION:10-22-2026:Network commands on the core drivers; phy, clear, iperf, adv
 REVISION:10-22-2026:CPU network path: show tcp, show cpu-path, tcp echo, storm-control, classifier
 REVISION:10-22-2026:TCP iperf server (lwiperf), phy reset, phy mmd / c45, LED and EEE in show phy
 REVISION:10-22-2026:Checksum offload: show offload, offload tx-ip / tx-l4 / rx / all on|off
+REVISION:11-09-2026:DDR3: show ddr, ddr test [size in MiB]; clear counters also clears the DDR3 arbiter
 
 # ---------------------------------------------------------------------------
 # Modes
@@ -32,6 +33,7 @@ MODE-ENTER:cli_enter_socket:config:SOCKET [INDEX]:config-sock:rtlnet(config-sock
 # ---------------------------------------------------------------------------
 KEYWORD:exec:SHOW:Show running system information
 KEYWORD:priv:DEBUG:Raw register access
+KEYWORD:priv:DDR:DDR3 memory
 KEYWORD:priv:LED:Set a user LED (2..7)
 KEYWORD:priv:PHY:PHY registers over MDIO
 KEYWORD:priv:PHY MMD:MMD registers, Clause 45 over Clause 22 (registers 13/14)
@@ -74,12 +76,14 @@ cli_show_cpu_path:exec:SHOW CPU-PATH:CPU network path: DMA frames and errors, wr
 cli_show_storm:exec:SHOW STORM-CONTROL:Broadcast storm limiter: policer 0 and its counters
 cli_show_classifier:exec:SHOW CLASSIFIER:CPU-path classifier: mode, tables, ACL, policers, counters
 cli_show_offload:exec:SHOW OFFLOAD:Checksum offload: discovery, CTRL, lwIP flags, counters, zero-copy options
+cli_show_ddr:exec:SHOW DDR:DDR3 calibration, caches, arbiter identity, error status and counters
 
 # ---------------------------------------------------------------------------
 # Privileged exec
 # ---------------------------------------------------------------------------
 cli_show_running:priv:SHOW RUNNING-CONFIG:Current configuration
 cli_disable:priv:DISABLE:Leave privileged exec mode
+cli_ddr_test:priv:DDR TEST {SIZE}:DDR3 memory test from 0x80000000: data bus, address bus, random fill and verify, with MB/s (SIZE in MiB, 1..512, default 16)
 cli_debug_read:priv:DEBUG READ [ADDR]:Read a 32-bit word (hex 0x... or decimal address)
 cli_debug_write:priv:DEBUG WRITE [ADDR] [VALUE]:Write a 32-bit word
 cli_phy_read:priv:PHY READ [REG]:Read a PHY register (0..31) over MDIO

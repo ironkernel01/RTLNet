@@ -66,6 +66,8 @@ RTLNet/
     rtlnet_udp_socket/  rtlnet_udp_echo/
     rtlnet_classifier/            configurable frame filter
     rtlnet_tcp_offload/           IPv4 / TCP / UDP checksum insert (TX) and check with trailer (RX) on the CPU path
+    rtlnet_axi_arbiter/           N:1 AXI4 arbiter in front of the DDR3 controller (illegal-burst guard, per-master counters)
+    rtlnet_ddr/                   DDR3 controller behind a vendor-neutral AXI4 slave (MIG IP generated from a committed project)
   microblaze/                     everything MicroBlaze: CPU core (hdl, driver, testbench, documentation) and
                                   firmware/ (CLI + lwIP TCP echo application; BSP, drivers and lwIP are generated or
                                   compiled in place from the AMD install, never copied)
@@ -172,14 +174,16 @@ driver header, mirrored by `localparam`s in its register file with a pointer com
   100 MHz osc --> MMCM (board top): clk125, clk125_90, clk200, axis_clk 62.5, proto_clk 50, cpu_clk 100
                                                                                        |
    USB-UART <--> +------------- rtlnet_cpu_microblaze (CPU core, cpu_clk) ------------+
-   JTAG    <-->  |  MicroBlaze, 128 KiB LMB BRAM, MDM (debug), AXI UART Lite 115200, |
-                 |  AXI Timer, AXI interconnect, M_AXI_RTLNET exported (AXI4-Lite)  |
+   JTAG    <-->  |  MicroBlaze (8 KiB I + 8 KiB D cache over the DDR3 window), 512  |
+                 |  KiB LMB BRAM, MDM, AXI UART Lite, AXI Timer, AXI DMA, AXI BRAM, |
+                 |  M_AXI_RTLNET exported (AXI4-Lite), M_AXI_DDR exported (128-bit) |
                  +-------------------------------------------------------------------+
-                                     | AXI4-Lite, cpu_clk
-                          rtlnet_axil_decoder (board top)
-        +-----------+-----------+-------------+-----------------------------+------------+
-        | SYS       | MAC       | MDIO        | PROTOCOL (64 KiB window)    | UDP ECHO   |
-        v           v           v             v                             v
+                         | AXI4-Lite, cpu_clk                  | AXI4 128-bit, cpu_clk (SmartConnect inside)
+                         |                                  rtlnet_axi_cdc (u_ddr_cdc, cpu_clk -> ui_clk)
+                rtlnet_axil_decoder (board top)         rtlnet_axi_arbiter --> rtlnet_ddr (MIG, DDR3 pins)
+   +-----------+-----------+-------------+--------------------------+------------+-------------+
+   | SYS       | MAC       | MDIO        | PROTOCOL (64 KiB window) | UDP ECHO   | ARBITER     |
+   v           v           v             v                          v            v (registers)
    board regs  rtlnet_eth_mac  rtlnet_mdio  rtlnet_eth_protocol            rtlnet_udp_echo
                (RGMII pins)    (MDC/MDIO,    | filter, queues, arbiter      ^      |
                    |  ^         PHY reset)   | ARP ICMP DHCP iperf UDP-sock |      |
@@ -198,6 +202,7 @@ MicroBlaze sees the RTLNet window at `0x44A0_0000`, 1 MiB. Offsets inside the wi
 | 0x0_1000 | 4 KiB | `rtlnet_eth_mac` | axis_clk (through `rtlnet_axil_cdc`) |
 | 0x0_2000 | 4 KiB | `rtlnet_mdio` | cpu_clk |
 | 0x0_3000 | 4 KiB | `rtlnet_udp_echo` | app clock (through `rtlnet_axil_cdc`) |
+| 0x0_4000 | 4 KiB | `rtlnet_axi_arbiter` (DDR3 arbiter, ID `ARBT`) | ui_clk (through `rtlnet_axil_cdc`) |
 | 0x1_0000 | 64 KiB | `rtlnet_eth_protocol` (sub-map below) | proto_clk (one `rtlnet_axil_cdc`, then an internal decoder) |
 | 0x2_0000 | 4 KiB | `rtlnet_classifier` (reserved) | axis_clk |
 
@@ -214,9 +219,10 @@ Protocol sub-map (offset inside 0x1_0000):
 | 0x8000 | `rtlnet_classifier` (CPU path, section 7.4) |
 | 0x9000 | `rtlnet_tcp_offload` (CPU path, section 14; `0x44A1_9000`, `u_cpu_offload`, `CPU_TCP_OFFLOAD_ENABLE`; reads 0 when not built) |
 
-Other MicroBlaze peripherals sit in the block design's own map (LMB BRAM `0x0000_0000` 128 KiB, UART Lite
-`0x4060_0000`, interrupt controller `0x4120_0000`, Timer `0x41C0_0000`). The single source of
-these addresses for firmware is `microblaze/driver/rtlnet_cpu_microblaze.h`.
+Other MicroBlaze addresses sit in the block design's own map (LMB BRAM `0x0000_0000` 512 KiB, AXI DMA registers
+`0x4040_0000`, UART Lite `0x4060_0000`, interrupt controller `0x4120_0000`, Timer `0x41C0_0000`, DDR3 SDRAM
+`0x8000_0000` 512 MiB through the instruction and data caches and `M_AXI_DDR`, AXI BRAM `0xC000_0000` 128 KiB). The
+single source of these addresses for firmware is `microblaze/driver/rtlnet_cpu_microblaze.h`.
 
 ---
 
@@ -425,16 +431,24 @@ derives the depth from it and stops elaboration with `$fatal` on a size it canno
 | Clock | Source | Frequency | Domain contents |
 |---|---|---|---|
 | `sys_clk` | 100 MHz oscillator R4 | 100 MHz | MMCM input only |
+| `ddr_sys_clk` | MMCM CLKOUT6 through BUFG `u_bufg_ddrsys` | 100 MHz | DDR3 controller PLL input (MIG "No Buffer"; the pad cannot feed both the MMCM and the controller PLL, Place 30-172) |
 | `clk125` | MMCM CLKOUT0 | 125 MHz | MAC TX byte engine, TX FIFO read, RGMII TX ODDRs, RXC rate detector |
 | `clk125_90` | MMCM CLKOUT1, 90 deg | 125 MHz | TXC forwarding ODDR and its retiming flops; the board clock monitor (its own `rtlnet_reset_sync`) |
 | `clk200` | MMCM CLKOUT2 | 200 MHz | IDELAYCTRL reference |
 | `axis_clk` | MMCM CLKOUT3 | 62.5 MHz | MAC client side and registers, protocol filter, queue fast sides |
 | `proto_clk` | MMCM CLKOUT4 | 50 MHz | protocol leaves, wrapper registers, socket layer, UDP echo |
 | `cpu_clk` | MMCM CLKOUT5 | 100 MHz | MicroBlaze subsystem, AXI4-Lite decoder, MDIO core, system registers |
+| `ui_clk` | DDR3 controller (MIG PLL from `ddr_sys_clk`, BUFG inside the IP) | 100 MHz | DDR3 AXI4 side: controller, `rtlnet_axi_arbiter` datapath and register file, the `rtlnet_axi_cdc` master side (`u_ddr_cdc`) |
 | `rx_clk` | PHY RXC via BUFR | 125 / 25 / 2.5 MHz | MAC receive engine, RX FIFO write; stops on link loss |
 
 One external reset (`cpu_resetn` button AND `mmcm_locked`) enters `rtlnet_reset_sync` once per domain. Packet
-FIFOs require both sides to reset together; every FIFO's two resets derive from one assertion.
+FIFOs require both sides to reset together; every FIFO's two resets derive from one assertion. The `ui_clk` domain
+adds the controller's own reset: its `rtlnet_reset_sync` takes the board assertion AND the MIG ui reset, and the same
+assertion resets the controller (`sys_rstn`), so a button press recalibrates the DDR3. The arbiter's register
+crossing, the calibration flag (`rtlnet_sync` into cpu_clk, CLK_STATUS bit 1) and the DDR3 bridge `u_ddr_cdc`
+(`rtlnet_axi_cdc`, five `rtlnet_packet_fifo` instances) are the only `ui_clk` crossings. The CPU's `M_AXI_DDR` (128-bit,
+`cpu_clk`) crosses to `ui_clk` in `u_ddr_cdc` ahead of the arbiter; the SmartConnect in the CPU block design has one
+clock.
 
 Every crossing is one of: `rtlnet_packet_fifo` (Gray frame counters), `rtlnet_sync`, `rtlnet_pulse_sync`,
 `rtlnet_gray_sync`, `rtlnet_axil_cdc`, `rtlnet_reset_sync`. `scripts/rtlnet_constrain_cdc.tcl` finds each by
@@ -454,21 +468,25 @@ vendor neutral so another soft or hard processor drops in with a wrapper of the 
 | clock, reset | `clk` (cpu_clk, 100 MHz), `resetn` (synchronous, active low) |
 | console | `uart_rxd` (from the USB-UART bridge), `uart_txd` (to it) |
 | register master | `m_axi_*` AXI4-Lite master, 32-bit address and data, into `rtlnet_axil_decoder` |
+| DDR3 master | `m_axi_ddr_*` 128-bit AXI4 master on `clk` (instruction and data caches), into `rtlnet_axi_cdc` and `rtlnet_axi_arbiter` |
 | interrupts | `irq[7:0]` level inputs (PHY interrupt, DHCP event, ...) |
 
 `rtlnet_cpu_microblaze.sv` wraps the block design `rtlnet_cpu` (Tcl-generated from
 `microblaze/hdl/rtlnet_cpu_bd.tcl`): MicroBlaze (little endian, 32-bit, no MMU, hardware
-multiplier/divider/barrel shifter), 128 KiB LMB BRAM, MDM (JTAG debug), AXI UART Lite (115200 8N1), AXI Timer,
-AXI interconnect, the exported AXI4-Lite master and an interrupt controller. A Nios V core would be
+multiplier/divider/barrel shifter, 8 KiB instruction and 8 KiB write-through data cache over the DDR3 window only),
+512 KiB LMB BRAM, MDM (JTAG debug), AXI UART Lite (115200 8N1), AXI Timer, AXI interconnect, the exported AXI4-Lite
+master, a SmartConnect that joins the two cache masters into the exported 128-bit `M_AXI_DDR` and an interrupt controller. A Nios V core would be
 `rtlnet_cpu_niosv.sv` around a Platform Designer system with the same ports; the RTL below the decoder does
 not change. `microblaze/rtlnet_microblaze_sim_stub.sv` (module `rtlnet_microblaze_sim_stub`, the simulation stand-in for the CPU) has the same ports and drives scripted
 AXI4-Lite transactions for the board bench.
 
 The block design also carries an AXI DMA (simple mode, 64-bit streams, data realignment engine on MM2S only (transmit buffers at any byte address; the DMA buffers and lwIP's heap are in the AXI BRAM), `S2MM` from `s_axis_eth_*`, `MM2S` to
-`m_axis_eth_*`, both interrupts on the INTC) and an AXI BRAM for the DMA buffers; the LMB BRAM (256 KiB, up to
-512 KiB) holds code, stack, heap and the lwIP pools. **All firmware runs from internal block RAM only; no external
-memory (DDR) is used.** The MicroBlaze has **no caches**: code runs
-from the single-cycle LMB and the DMA buffers are accessed uncached, so no coherence handling exists.
+`m_axis_eth_*`, both interrupts on the INTC) and an AXI BRAM for the DMA buffers; the LMB BRAM (512 KiB) holds code,
+stack, heap and the lwIP pools. **All firmware code and data run from internal block RAM**; the DDR3 window
+(`0x8000_0000`, 512 MiB) is used by the `ddr test` memory test and is the frame store of the camera design (`documentation/gige.md`).
+The MicroBlaze caches (8 KiB instruction, 8 KiB write-through data) cover only the DDR3 window: code runs from the
+single-cycle LMB and the DMA buffers are accessed uncached, so the DMA path has no coherence handling; software that
+shares the DDR3 window with another master flushes or invalidates the data cache around the access.
 
 Firmware (`microblaze/firmware`) is C11 built with `mb-gcc` against a standalone BSP that is **generated at build time
 from the hardware export (XSA) by the Vitis tools in the AMD install** (standalone OS, `axidma`, `uartlite`,
@@ -674,6 +692,7 @@ DHCP control (start, stop, renew now, auto-start) lives in the DHCP leaf's own r
 | clock, reset | `clk` (cpu_clk 100 MHz), `resetn` |
 | console | in `uart_rxd`, out `uart_txd` |
 | register master | `m_axi_*` AXI4-Lite master, 32-bit address |
+| DDR3 master | `m_axi_ddr_*` AXI4 master on `clk` (the board top crosses it to `ui_clk` in `rtlnet_axi_cdc`): `awaddr[31:0]`, `awlen`, `awsize`, `awburst`, `awlock`, `awcache`, `awprot`, `awqos`, `awvalid`/`awready`, `wdata[127:0]`, `wstrb[15:0]`, `wlast`, `wvalid`/`wready`, `bresp`, `bvalid`/`bready`, the AR channel likewise, `rdata[127:0]`, `rresp`, `rlast`, `rvalid`/`rready`; no ID signals |
 | interrupts | in `irq[7:0]` |
 | Ethernet frames to the network (clk) | out `m_axis_eth_tdata[63:0]`, `m_axis_eth_tkeep[7:0]`, `m_axis_eth_tvalid`, `m_axis_eth_tlast`; in `m_axis_eth_tready` (AXI DMA MM2S; to the wrapper's `s_axis_cpu_eth_*`) |
 | Ethernet frames from the network (clk) | in `s_axis_eth_tdata[63:0]`, `s_axis_eth_tkeep[7:0]`, `s_axis_eth_tvalid`, `s_axis_eth_tlast`; out `s_axis_eth_tready` (AXI DMA S2MM; from the wrapper's `m_axis_cpu_eth_*`) |
@@ -704,3 +723,5 @@ and between the DMA MM2S stream and `u_cpu_tx_fifo` (TX).
 | 10-22-2026 | `rtlnet_tcp_offload`: checksum insert on the CPU TX stream, check with trailer on the CPU RX stream (core built; sub-map slot 0x9000 planned) |
 | 10-22-2026 | `rtlnet_tcp_offload` integrated in the protocol wrapper's CPU path (`u_cpu_offload`, window 0x9000, `CPU_CAPS` bits 16..18); default `TX_BUF_KB` 8; firmware discovery, `rtlnet_offload_apply`, receive trailer policy, zero-copy options; AXI DMA realignment engine on MM2S |
 | 11-09-2026 | MicroBlaze V block design without the JTAG UART: the MDM address 0x4140_0000 is unmapped |
+| 11-09-2026 | DDR3 (Phase 0 stage 1): `rtlnet_ddr` (MIG, 512 MiB) and `rtlnet_axi_arbiter` in the board top; MicroBlaze V caches (8 KiB I, 8 KiB write-through D over `0x8000_0000..0x9FFF_FFFF`), SmartConnect and the exported 128-bit `M_AXI_DDR`; arbiter window `0x44A0_4000`; `ui_clk` domain; firmware `show ddr`, `ddr test`; the CPU's `M_AXI_DDR` runs on `cpu_clk` and crosses to `ui_clk` in the board top's `rtlnet_axi_cdc` (`u_ddr_cdc`), so the SmartConnect has one clock |
+| 11-09-2026 | DDR3 controller `sys_clk` is MMCM CLKOUT6 through a BUFG (`ddr_sys_clk`); the arbiter's CPU master sets `NARROW_MASK` for the write-through data cache's 32-bit stores |

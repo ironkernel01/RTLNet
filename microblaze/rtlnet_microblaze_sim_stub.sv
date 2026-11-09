@@ -41,14 +41,19 @@
 //     PASS_ALL; resp 2'b11 when the ID does not read "CLSF").
 //   * txo_config(base, ctrl, resp): the register sequence of rtlnet_tcp_offload_init +
 //     rtlnet_tcp_offload_set_ctrl (ID/VERSION check, CTRL write and read-back).
+//   * DDR3 AXI4 master m_axi_ddr_* (clk domain, 128-bit, as the real core): idle unless a task
+//     runs. ddr_write(addr, data, strb) and ddr_read(addr, data, resp) are one-beat INCR
+//     transactions (16-byte beat, AxSIZE 4); ddr_write4 / ddr_read4 are 4-beat bursts (the
+//     data-cache line fill shape). resp 2'b10 and ddr_timeouts++ on a timeout.
 //   * Simulation only; never synthesized.
 // Language: SystemVerilog-2012 (simulation only).
-// Revision: 10-22-2026
+// Revision: 11-09-2026
 //   * 10-22-2026: initial version.
 //   * 10-22-2026: m_axis_eth_* / s_axis_eth_* frame streams, eth_send/eth_get.
 //   * 10-22-2026: renamed from rtlnet_cpu_bfm; register-sequence tasks.
 //   * 10-22-2026: cls_config_bcast_storm follows the driver's register map and write order exactly.
 //   * 10-22-2026: txo_config (checksum offload CTRL sequence).
+//   * 11-09-2026: DDR3 master ports m_axi_ddr_*, idle.
 // Clocks: clk (cpu_clk); resetn synchronous to clk, active low.
 // -----------------------------------------------------------------------------
 `timescale 1ns / 1ps
@@ -85,6 +90,41 @@ module rtlnet_microblaze_sim_stub #(
   input  logic        m_axi_rvalid,
   output logic        m_axi_rready,
 
+  // DDR3 AXI4 master, clk domain: idle in this stub.
+  output logic [31:0]  m_axi_ddr_awaddr,
+  output logic [7:0]   m_axi_ddr_awlen,
+  output logic [2:0]   m_axi_ddr_awsize,
+  output logic [1:0]   m_axi_ddr_awburst,
+  output logic         m_axi_ddr_awlock,
+  output logic [3:0]   m_axi_ddr_awcache,
+  output logic [2:0]   m_axi_ddr_awprot,
+  output logic [3:0]   m_axi_ddr_awqos,
+  output logic         m_axi_ddr_awvalid,
+  input  logic         m_axi_ddr_awready,
+  output logic [127:0] m_axi_ddr_wdata,
+  output logic [15:0]  m_axi_ddr_wstrb,
+  output logic         m_axi_ddr_wlast,
+  output logic         m_axi_ddr_wvalid,
+  input  logic         m_axi_ddr_wready,
+  input  logic [1:0]   m_axi_ddr_bresp,
+  input  logic         m_axi_ddr_bvalid,
+  output logic         m_axi_ddr_bready,
+  output logic [31:0]  m_axi_ddr_araddr,
+  output logic [7:0]   m_axi_ddr_arlen,
+  output logic [2:0]   m_axi_ddr_arsize,
+  output logic [1:0]   m_axi_ddr_arburst,
+  output logic         m_axi_ddr_arlock,
+  output logic [3:0]   m_axi_ddr_arcache,
+  output logic [2:0]   m_axi_ddr_arprot,
+  output logic [3:0]   m_axi_ddr_arqos,
+  output logic         m_axi_ddr_arvalid,
+  input  logic         m_axi_ddr_arready,
+  input  logic [127:0] m_axi_ddr_rdata,
+  input  logic [1:0]   m_axi_ddr_rresp,
+  input  logic         m_axi_ddr_rlast,
+  input  logic         m_axi_ddr_rvalid,
+  output logic         m_axi_ddr_rready,
+
   // Interrupt requests, level, active high (observed only).
   input  logic [7:0]  irq,
 
@@ -110,6 +150,7 @@ module rtlnet_microblaze_sim_stub #(
   byte unsigned uart_rx_q[$];
   int           uart_rx_errors = 0;
   int           axil_timeouts  = 0;
+  int           ddr_timeouts   = 0;
   frame_t       eth_rx_q[$];
   bit           eth_rx_ready       = 1'b1;
   int           eth_tx_frames      = 0;
@@ -131,9 +172,125 @@ module rtlnet_microblaze_sim_stub #(
     m_axis_eth_tkeep  = '0;
     m_axis_eth_tvalid = 1'b0;
     m_axis_eth_tlast  = 1'b0;
+    m_axi_ddr_awaddr  = '0;
+    m_axi_ddr_awlen   = '0;
+    m_axi_ddr_awsize  = 3'd4;
+    m_axi_ddr_awburst = 2'b01;
+    m_axi_ddr_awlock  = 1'b0;
+    m_axi_ddr_awcache = '0;
+    m_axi_ddr_awprot  = '0;
+    m_axi_ddr_awqos   = '0;
+    m_axi_ddr_awvalid = 1'b0;
+    m_axi_ddr_wdata   = '0;
+    m_axi_ddr_wstrb   = '0;
+    m_axi_ddr_wlast   = 1'b0;
+    m_axi_ddr_wvalid  = 1'b0;
+    m_axi_ddr_bready  = 1'b0;
+    m_axi_ddr_araddr  = '0;
+    m_axi_ddr_arlen   = '0;
+    m_axi_ddr_arsize  = 3'd4;
+    m_axi_ddr_arburst = 2'b01;
+    m_axi_ddr_arlock  = 1'b0;
+    m_axi_ddr_arcache = '0;
+    m_axi_ddr_arprot  = '0;
+    m_axi_ddr_arqos   = '0;
+    m_axi_ddr_arvalid = 1'b0;
+    m_axi_ddr_rready  = 1'b0;
   end
 
   assign s_axis_eth_tready = eth_rx_ready;
+
+  // DDR3 write burst of n beats (1..4) at a 16-byte aligned address: AW, then the W beats, then B.
+  task automatic ddr_write_burst(input logic [31:0] addr, input int n, input logic [127:0] d [4],
+                                 input logic [15:0] strb, output logic [1:0] resp);
+    int t;
+    @(posedge clk);
+    m_axi_ddr_awaddr  <= addr;
+    m_axi_ddr_awlen   <= 8'(n - 1);
+    m_axi_ddr_awvalid <= 1'b1;
+    t = 0;
+    while (t < TIMEOUT) begin
+      @(posedge clk);
+      t++;
+      if (m_axi_ddr_awvalid && m_axi_ddr_awready) begin
+        m_axi_ddr_awvalid <= 1'b0;
+        break;
+      end
+    end
+    for (int b = 0; b < n; b++) begin
+      m_axi_ddr_wdata  <= d[b];
+      m_axi_ddr_wstrb  <= strb;
+      m_axi_ddr_wlast  <= (b == n - 1);
+      m_axi_ddr_wvalid <= 1'b1;
+      while (t < TIMEOUT) begin
+        @(posedge clk);
+        t++;
+        if (m_axi_ddr_wvalid && m_axi_ddr_wready) begin
+          m_axi_ddr_wvalid <= 1'b0;
+          break;
+        end
+      end
+    end
+    m_axi_ddr_wlast <= 1'b0;
+    m_axi_ddr_bready <= 1'b1;
+    while (!(m_axi_ddr_bvalid && m_axi_ddr_bready) && t < TIMEOUT) begin
+      @(posedge clk);
+      t++;
+    end
+    resp = (t < TIMEOUT) ? m_axi_ddr_bresp : 2'b10;
+    if (t >= TIMEOUT) ddr_timeouts++;
+    m_axi_ddr_awvalid <= 1'b0;
+    m_axi_ddr_wvalid  <= 1'b0;
+    m_axi_ddr_bready  <= 1'b0;
+  endtask
+
+  // DDR3 read burst of n beats (1..4) at a 16-byte aligned address.
+  task automatic ddr_read_burst(input logic [31:0] addr, input int n, output logic [127:0] d [4],
+                                output logic [1:0] resp);
+    int t;
+    int b;
+    @(posedge clk);
+    m_axi_ddr_araddr  <= addr;
+    m_axi_ddr_arlen   <= 8'(n - 1);
+    m_axi_ddr_arvalid <= 1'b1;
+    t = 0;
+    while (t < TIMEOUT) begin
+      @(posedge clk);
+      t++;
+      if (m_axi_ddr_arvalid && m_axi_ddr_arready) begin
+        m_axi_ddr_arvalid <= 1'b0;
+        break;
+      end
+    end
+    m_axi_ddr_rready <= 1'b1;
+    resp = 2'b00;
+    b = 0;
+    while (b < n && t < TIMEOUT) begin
+      @(posedge clk);
+      t++;
+      if (m_axi_ddr_rvalid && m_axi_ddr_rready) begin
+        d[b] = m_axi_ddr_rdata;
+        if (m_axi_ddr_rresp != 2'b00) resp = m_axi_ddr_rresp;
+        b++;
+      end
+    end
+    if (t >= TIMEOUT) begin resp = 2'b10; ddr_timeouts++; end
+    m_axi_ddr_arvalid <= 1'b0;
+    m_axi_ddr_rready  <= 1'b0;
+  endtask
+
+  task automatic ddr_write(input logic [31:0] addr, input logic [127:0] data, input logic [15:0] strb,
+                           output logic [1:0] resp);
+    logic [127:0] d [4];
+    d[0] = data;
+    ddr_write_burst(addr, 1, d, strb, resp);
+  endtask
+
+  task automatic ddr_read(input logic [31:0] addr, output logic [127:0] data, output logic [1:0] resp);
+    logic [127:0] d [4];
+    ddr_read_burst(addr, 1, d, resp);
+    data = d[0];
+  endtask
 
   // Wait until the board top releases the CPU reset.
   task automatic wait_reset_release();

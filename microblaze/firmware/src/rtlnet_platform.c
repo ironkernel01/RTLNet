@@ -25,6 +25,7 @@
 
 #include "rtlnet_board.h"
 
+#include "xil_cache.h"      /* Xil_DCacheFlushRange, Xil_DCacheInvalidateRange */
 #include "xil_exception.h"  /* Xil_ExceptionInit, Xil_ExceptionRegisterHandler, Xil_ExceptionEnable, Xil_ExceptionDisable */
 #include "xintc.h"          /* XIntc */
 #include "xstatus.h"        /* XST_SUCCESS */
@@ -296,6 +297,85 @@ void plat_led_set(unsigned index, int on)
 uint32_t plat_led_state(void)
 {
     return g_led_bits;
+}
+
+/*
+ * plat_cache_span -- widen a byte range to whole cache lines.
+ * Steps:
+ *   1. Round the start down and the end up to RTLNET_PLAT_CACHE_LINE.
+ *      (The BSP range routines skip a partial last line, so the span handed to
+ *      them is always line aligned at both ends.)
+ * Returns: nothing; *start and *bytes hold the aligned span.
+ */
+static void plat_cache_span(uintptr_t addr, size_t len, uintptr_t *start, size_t *bytes)
+{
+    uintptr_t first = addr & ~(uintptr_t)(RTLNET_PLAT_CACHE_LINE - 1u);
+    uintptr_t last  = (addr + len + (RTLNET_PLAT_CACHE_LINE - 1u)) & ~(uintptr_t)(RTLNET_PLAT_CACHE_LINE - 1u);
+    *start = first;
+    *bytes = (size_t)(last - first);
+}
+
+/*
+ * plat_dcache_flush_range -- write back and invalidate the data cache lines of a range.
+ * Steps:
+ *   1. Widen the range to whole lines; an empty range does nothing.
+ *   2. Xil_DCacheFlushRange (BSP, cbo.flush per line).
+ * Returns: nothing.
+ */
+void plat_dcache_flush_range(uintptr_t addr, size_t len)
+{
+    uintptr_t start;
+    size_t bytes;
+    if (len == 0u) {
+        return;
+    }
+    plat_cache_span(addr, len, &start, &bytes);
+    Xil_DCacheFlushRange(start, (unsigned)bytes);
+}
+
+/*
+ * plat_dcache_invalidate_range -- drop the data cache lines of a range.
+ * Steps:
+ *   1. Widen the range to whole lines; an empty range does nothing.
+ *   2. Xil_DCacheInvalidateRange (BSP, cbo.inval per line).
+ * Returns: nothing.
+ */
+void plat_dcache_invalidate_range(uintptr_t addr, size_t len)
+{
+    uintptr_t start;
+    size_t bytes;
+    if (len == 0u) {
+        return;
+    }
+    plat_cache_span(addr, len, &start, &bytes);
+    Xil_DCacheInvalidateRange(start, (unsigned)bytes);
+}
+
+/*
+ * plat_mem_barrier -- order earlier memory accesses before later ones (RISC-V fence).
+ * Returns: nothing.
+ */
+void plat_mem_barrier(void)
+{
+    __asm__ volatile ("fence" ::: "memory");
+}
+
+/*
+ * plat_dcache_flush_all -- write back and invalidate the whole data cache.
+ * Returns: nothing.
+ */
+void plat_dcache_flush_all(void)
+{
+    Xil_DCacheFlush();
+}
+
+/*
+ * plat_dcache_invalidate_all -- drop every line of the data cache.
+ * Returns: nothing.
+ */
+void plat_dcache_invalidate_all(void)
+{
+    Xil_DCacheInvalidate();
 }
 
 /*

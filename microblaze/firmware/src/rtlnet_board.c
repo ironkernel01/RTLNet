@@ -45,6 +45,17 @@ uint32_t board_clk_khz(unsigned index)
 }
 
 /*
+ * board_ddr_calibrated -- DDR3 controller calibration state.
+ * Steps:
+ *   1. Read CLK_STATUS and test NXV_CLK_DDR_CALIB (init_calib_complete, synchronized into cpu_clk).
+ * Returns: 1 calibrated, 0 not (yet).
+ */
+int board_ddr_calibrated(void)
+{
+    return (board_sys_read(NXV_SYS_CLK_STATUS) & NXV_CLK_DDR_CALIB) ? 1 : 0;
+}
+
+/*
  * board_probe -- read a core's standard header and compare its ID.
  * Steps:
  *   1. Read ID; a window without its core reads 0 (stub or DECERR).

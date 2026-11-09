@@ -591,6 +591,109 @@ static void demo_offload(void)
 }
 
 /**
+ * @brief DDR3 path: show ddr without and with the arbiter, ddr test (default size, a given size, bad
+ *        arguments), calibration refused, the memory test catching a stuck address line and a stuck
+ *        data bit, and the arbiter counters clearing.
+ * @return None.
+ */
+static void demo_ddr(void)
+{
+    demo_type("enable\r");
+
+    /* Without the arbiter window and without calibration. */
+    host_model_ddr_set(0, 0);
+    host_model_ddr_clear();
+    host_capture_clear();
+    demo_type("show ddr\r");
+    demo_check(strstr(host_capture_text(), "Calibration     : NOT done") != NULL &&
+               strstr(host_capture_text(), "DDR3 arbiter not present in this build") != NULL, "show ddr: no arbiter, not calibrated");
+    host_capture_clear();
+    demo_type("ddr test\r");
+    demo_check(strstr(host_capture_text(), "DDR3 arbiter not present in this build") != NULL, "ddr test: arbiter absent");
+
+    /* Arbiter present, controller not calibrated: the test refuses. */
+    host_model_ddr_set(1, 0);
+    host_capture_clear();
+    demo_type("ddr test 1\r");
+    demo_check(strstr(host_capture_text(), "% DDR3 is not calibrated") != NULL &&
+               strstr(host_capture_text(), "DDR3 test:") == NULL, "ddr test: refused before calibration");
+
+    /* Calibrated: show ddr, then the default size and a given size. */
+    host_model_ddr_set(1, 1);
+    host_capture_clear();
+    demo_type("show ddr\r");
+    demo_check(strstr(host_capture_text(), "Calibration     : done") != NULL &&
+               strstr(host_capture_text(), "ID \"ARBT\" 0x41524254, version 11-09-2026 at 0x44A04000") != NULL &&
+               strstr(host_capture_text(), "1 master(s), 16-byte beats, ID width 1, 8 outstanding, high-priority mask 0x01") != NULL &&
+               strstr(host_capture_text(), "illegal-burst flag clear") != NULL &&
+               strstr(host_capture_text(), "Master 0 (CPU caches): AW bursts 0,") != NULL, "show ddr: calibrated, arbiter identity and counters");
+    host_capture_clear();
+    demo_type("ddr test\r");
+    demo_check(strstr(host_capture_text(), "DDR3 test: 16 MiB at 0x80000000") != NULL &&
+               strstr(host_capture_text(), "Data bus        : PASS") != NULL &&
+               strstr(host_capture_text(), "Address bus     : PASS (22 address offsets)") != NULL &&
+               strstr(host_capture_text(), "Random fill     : PASS (16 MiB written and verified)") != NULL &&
+               strstr(host_capture_text(), "MB/s") != NULL &&
+               strstr(host_capture_text(), "DDR3 test PASS") != NULL, "ddr test: default 16 MiB passes");
+    host_capture_clear();
+    demo_type("ddr test 0x2\r");
+    demo_check(strstr(host_capture_text(), "DDR3 test: 2 MiB") != NULL && strstr(host_capture_text(), "DDR3 test PASS") != NULL,
+               "ddr test 0x2: hexadecimal size accepted");
+    host_capture_clear();
+    demo_type("show ddr\r");
+    demo_check(strstr(host_capture_text(), "Master 0 (CPU caches): AW bursts 0,") == NULL &&
+               strstr(host_capture_text(), "Master 0 (CPU caches): AW bursts ") != NULL, "show ddr: counters count the test traffic");
+    host_capture_clear();
+    demo_type("clear counters\r");
+    demo_type("show ddr\r");
+    demo_check(strstr(host_capture_text(), "Master 0 (CPU caches): AW bursts 0, AR bursts 0, W beats 0, R beats 0, errors 0,") != NULL,
+               "clear counters clears the arbiter");
+
+    /* Bad arguments are rejected, not clamped. */
+    static const char *const bad[] = { "ddr test 0\r", "ddr test 513\r", "ddr test 1000000\r", "ddr test abc\r", "ddr test 1.5\r",
+                                       "ddr test -1\r" };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        char msg[96];
+        host_capture_clear();
+        demo_type(bad[i]);
+        (void)snprintf(msg, sizeof(msg), "[%s]: rejected without running", bad[i]);
+        demo_check(strstr(host_capture_text(), "% Invalid size in MiB (1..512)") != NULL &&
+                   strstr(host_capture_text(), "DDR3 test:") == NULL, msg);
+    }
+
+    /* The test catches faults: an address line stuck low, a data bit stuck low. */
+    host_model_ddr_clear();
+    host_model_ddr_alias_bit(20);
+    host_capture_clear();
+    demo_type("ddr test 4\r");
+    demo_check(strstr(host_capture_text(), "Address bus     : FAIL") != NULL &&
+               strstr(host_capture_text(), "DDR3 test FAIL") != NULL &&
+               strstr(host_capture_text(), "First mismatch  : address bus") != NULL, "ddr test: stuck address line caught");
+    host_model_ddr_clear();
+    host_model_ddr_data_and(~(1u << 17));
+    host_capture_clear();
+    demo_type("ddr test 1\r");
+    demo_check(strstr(host_capture_text(), "Data bus        : FAIL") != NULL &&
+               strstr(host_capture_text(), "Random fill     : FAIL") != NULL &&
+               strstr(host_capture_text(), "DDR3 test FAIL") != NULL, "ddr test: stuck data bit caught");
+    host_model_ddr_clear();
+
+    /* The arbiter's error flag shows in show ddr and clears with clear counters. */
+    host_model_ddr_error();
+    host_capture_clear();
+    demo_type("show ddr\r");
+    demo_check(strstr(host_capture_text(), "illegal-burst flag SET") != NULL, "show ddr: illegal-burst flag set");
+    demo_type("clear counters\r");
+    host_capture_clear();
+    demo_type("show ddr\r");
+    demo_check(strstr(host_capture_text(), "illegal-burst flag clear") != NULL, "clear counters clears the illegal-burst flag");
+
+    host_model_ddr_set(0, 0);
+    host_model_ddr_clear();
+    demo_type("disable\r");
+}
+
+/**
  * @brief Run one scripted step and check its output and the mode afterwards.
  * @param st Step.
  * @return None.
@@ -616,7 +719,7 @@ static void demo_run_step(const demo_step_t *st)
 /* The scripted session. "\r" ends a line, "\x03" Ctrl-C, "\x1a" Ctrl-Z,
  * "\b" backspace, "\x1b[A" up arrow. */
 static const demo_step_t g_steps[] = {
-    { "show version\r", { "Board ID        : NXVD", "Register map    : 10-22-2026", "not in this build (CPU-only)", "rtlnet>" },
+    { "show version\r", { "Board ID        : NXVD", "Register map    : 11-09-2026", "not in this build (CPU-only)", "rtlnet>" },
       NULL, MENU_MODE_EXEC },
     { "sh ver\r", { "Build ID        : 0x1234abcd", "tree clean", NULL, NULL }, NULL, MENU_MODE_EXEC },
     { "s v\r", { "Firmware        : rtlnet-fw", NULL, NULL, NULL }, NULL, MENU_MODE_EXEC },
@@ -652,7 +755,7 @@ static const demo_step_t g_steps[] = {
     { "exit\r", { "% Already at the top level", NULL, NULL, NULL }, NULL, MENU_MODE_EXEC },
     { "enable\r", { "rtlnet#", NULL, NULL, NULL }, NULL, MENU_MODE_PRIV },
     { "debug read 0x44a00000\r", { "0x44A00000 = 0x4E585644", NULL, NULL, NULL }, NULL, MENU_MODE_PRIV },
-    { "deb r 0x44A00004\r", { "0x44A00004 = 0x10222026", NULL, NULL, NULL }, NULL, MENU_MODE_PRIV },
+    { "deb r 0x44A00004\r", { "0x44A00004 = 0x11092026", NULL, NULL, NULL }, NULL, MENU_MODE_PRIV },
     { "debug write 0x44a00024 0x1234abcd\r", { "reads back 0x1234ABCD", NULL, NULL, NULL }, NULL, MENU_MODE_PRIV },
     { "debug read 0x44a00002\r", { "is not word aligned", NULL, NULL, NULL }, NULL, MENU_MODE_PRIV },
     { "debug read 0x44a01000\r", { "0x44A01000 = 0x00000000", NULL, NULL, NULL }, NULL, MENU_MODE_PRIV },
@@ -785,6 +888,9 @@ static int demo_run(int inject_failure)
 
     /* Checksum offload: discovery, change order, receive policy, CLI. */
     demo_offload();
+
+    /* DDR3 path: show ddr, ddr test, fault detection. */
+    demo_ddr();
 
     /* Reload restarts the console in user exec mode with default settings. */
     demo_type("enable\r");

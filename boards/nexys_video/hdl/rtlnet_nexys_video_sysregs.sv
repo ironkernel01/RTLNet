@@ -17,11 +17,15 @@
 //   * Clock monitor: each beacon is a divide-by-32 square wave of one clock;
 //     both of its edges are counted over each 1 ms window, so
 //     f(kHz) = CLK_MEAS[i] * 16 (with MS_CYCLES = CPU_CLK_HZ / 1000).
+//   * CLK_STATUS bit 1 is the DDR3 controller's init_calib_complete (ui_clk domain,
+//     asynchronous to cpu_clk), synchronized through rtlnet_sync like every other
+//     asynchronous input; it reads 1 once the controller has calibrated.
 //   * LEDS[7:1] are firmware-owned register bits; led[0] is driven by the
 //     board top from the MMCM lock and LEDS[0] reads 0.
 // Language: SystemVerilog-2012.
-// Revision: 10-22-2026
+// Revision: 11-09-2026
 //   * 10-22-2026: initial version.
+//   * 11-09-2026: CLK_STATUS bit 1 = DDR3 calibration complete (input ddr_calib_async); VERSION 11-09-2026.
 // Clocks: clk (cpu_clk 100 MHz) only; resetn synchronous to clk, active low.
 // -----------------------------------------------------------------------------
 module rtlnet_nexys_video_sysregs #(
@@ -60,6 +64,9 @@ module rtlnet_nexys_video_sysregs #(
   input  logic [7:0]         sw_async,
   input  logic [4:0]         btn_async,
   input  logic               mmcm_locked_async,
+
+  // DDR3 controller calibration complete, ui_clk domain level, asynchronous to clk.
+  input  logic               ddr_calib_async,
 
   // PHY side-band levels, asynchronous: {mdio pad input, eth_pme_b, eth_int_b}
   // (PHY pins active low); RGMII receive pin levels {rxck, rxd[3:0], rxctl}.
@@ -102,7 +109,7 @@ module rtlnet_nexys_video_sysregs #(
   localparam logic [11:0] REG_CLK_MEAS0   = 12'h040;
 
   localparam logic [31:0] ID_VALUE        = 32'h4E58_5644;   // "NXVD"
-  localparam logic [31:0] VERSION_VALUE   = 32'h1022_2026;   // 10-22-2026
+  localparam logic [31:0] VERSION_VALUE   = 32'h1109_2026;   // 11-09-2026
   localparam int          NUM_LEDS        = 8;
   localparam int          NUM_SW          = 8;
   localparam int          NUM_BTN         = 5;
@@ -122,6 +129,7 @@ module rtlnet_nexys_video_sysregs #(
   logic [7:0]         sw_q;
   logic [4:0]         btn_q;
   logic               locked_q;
+  logic               calib_q;
   logic [2:0]         phy_q;
   logic [5:0]         rgmii_rx_q;
   logic [5:0]         net_status_q;
@@ -191,6 +199,10 @@ module rtlnet_nexys_video_sysregs #(
   // MMCM lock into cpu_clk (status only; the reset tree uses the raw lock).
   rtlnet_sync #(.WIDTH(1), .STAGES(3)) u_lock_sync (
     .clk(clk), .resetn(resetn), .d(mmcm_locked_async), .q(locked_q));
+
+  // DDR3 calibration-complete level into cpu_clk.
+  rtlnet_sync #(.WIDTH(1), .STAGES(3)) u_calib_sync (
+    .clk(clk), .resetn(resetn), .d(ddr_calib_async), .q(calib_q));
 
   // PHY side-band pins into cpu_clk.
   rtlnet_sync #(.WIDTH(3), .STAGES(3)) u_phy_sync (
@@ -292,7 +304,7 @@ module rtlnet_nexys_video_sysregs #(
         REG_LEDS:        reg_rd_data <= {24'd0, led_fw};
         REG_SWITCHES:    reg_rd_data <= {24'd0, sw_q};
         REG_BUTTONS:     reg_rd_data <= {27'd0, btn_q};
-        REG_CLK_STATUS:  reg_rd_data <= 32'({clk_alive, 7'd0, locked_q});
+        REG_CLK_STATUS:  reg_rd_data <= 32'({clk_alive, 6'd0, calib_q, locked_q});
         REG_SCRATCH:     reg_rd_data <= scratch;
         REG_UPTIME_MS:   reg_rd_data <= uptime_ms;
         REG_CPU_CLK_HZ:  reg_rd_data <= 32'(CPU_CLK_HZ);

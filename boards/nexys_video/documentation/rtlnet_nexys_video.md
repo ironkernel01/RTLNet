@@ -36,13 +36,15 @@
 
 | Clock | MMCM output | Frequency | Measured on the board (CLK_MEAS) |
 |---|---|---|---|
-| `sys_clk` | R4 input | 100 MHz | — |
+| `sys_clk` | R4 input | 100 MHz | — (MMCM input only) |
 | `clk125` | CLKOUT0 /8 | 125 MHz | 124.992 / 125.008 MHz |
 | `clk125_90` | CLKOUT1 /8, 90 deg | 125 MHz | 124.992 / 125.008 MHz |
 | `clk200` | CLKOUT2 /5 | 200 MHz | 200.000 MHz |
 | `axis_clk` | CLKOUT3 /16 | 62.5 MHz | 62.512 MHz |
 | `proto_clk` (= app_clk) | CLKOUT4 /20 | 50 MHz | 50.000 MHz |
 | `cpu_clk` | CLKOUT5 /10 | 100 MHz | reference |
+| `ddr_sys_clk` | CLKOUT6 /10 through BUFG `u_bufg_ddrsys` | 100 MHz | MIG PLL input (the oscillator pad cannot feed the MMCM and the MIG PLL together: Place 30-172) |
+| `ui_clk` | MIG user clock (PLL inside the IP) | 100 MHz | DDR3 AXI4 side, arbiter, the `u_ddr_cdc` bridge master side, `ddr_resetn` domain |
 
 VCO 1000 MHz (M = 10, D = 1), feedback through `u_bufg_fb`, `RST` tied low. The clock monitor counts
 both edges of each beacon per 1 ms of cpu_clk (resolution 16 kHz, hence the ±16 kHz readings).
@@ -50,7 +52,7 @@ both edges of each beacon per 1 ms of cpu_clk (resolution 16 kHz, hence the ±16
 Reset: `rst_arstn = cpu_resetn & mmcm_locked` into `u_rst_clk125`, `u_rst_clk125_90` (beacon only),
 `u_rst_clk200`, `u_rst_axis`, `u_rst_proto`, `u_rst_cpu` (`rtlnet_reset_sync`, 4 stages). The AND is
 the one LUT on asynchronous clear pins (methodology LUTAR-1, waived by rule in the build with its
-glitch argument). The PHY reset `eth_rst_b` is a register: low after reset release, high 20 ms later
+glitch argument). `u_rst_ddr` (clk `ui_clk`) takes `rst_arstn` alone; the MIG ui reset (`ui_resetn_mig`) is ANDed after the chain, so no LUT drives its clear pins. The PHY reset `eth_rst_b` is a register: low after reset release, high 20 ms later
 (CPU-only build; the MDIO core owns it in the network build).
 
 ## 3. RTLNet window and system registers
@@ -107,7 +109,7 @@ Exit codes of `build_bitstream.tcl`: 99 arguments, 11 missing file, 12 block des
 error or critical warning, 13 CDC constraint script, 25/26 opt/place, 30 route, 20 timing (setup WNS,
 hold WHS, pulse width, any failing endpoint; threshold 0), 21 utilization above 80 %, 22 check_timing
 (no_clock, unconstrained endpoints, loops, multiple clocks), 23 latches or user asynchronous
-clear/preset endpoints outside `rtlnet_reset_sync` and the vendor block design, 27 report_cdc
+clear/preset endpoints outside `rtlnet_reset_sync`, the vendor block design and the vendor DDR3 controller (`u_ddr/g_amd.u_ddr/u_mig`), 27 report_cdc
 Critical/Warning or an unwaived methodology finding, 24 critical warnings during implementation,
 40 write_bitstream, 41 write_mem_info, 42 write_hw_platform.
 
@@ -119,16 +121,27 @@ Methodology waivers (printed on every run, each an explicit rule with its reason
 | LUTAR-1 | LUT and pins inside `u_cpu/u_bd/` | vendor MDM JTAG control logic |
 | TIMING-9 | any | allowed only because report_cdc (gated) has no Critical/Warning finding left; the asynchronous groups are the MDM BSCAN clocks of the vendor IP |
 | TIMING-47 | false paths between `rgmii_rxc_v` and `rgmii_rxc` | RGMII same-edge capture: the opposite-edge setup and same-edge hold pairs describe no capture (MAC documentation section 6) |
+| LUTAR-1 | the AMD MIG IP (`u_ddr/g_amd.u_ddr/u_mig`): the LUT `u_iodelay_ctrl/rstdiv2_sync_r[11]_i_1` and every pin it drives, a `u_ddr3_infrastructure/rstdiv0_sync_r1_reg_rep*/PRE` | vendor-generated reset logic of the memory controller (reset synchronizer, no user logic); required target |
+| PDRC-190 | the AMD MIG IP: the 12 cells `temp_mon_enabled.u_tempmon/device_temp_sync_r5_reg[0..11]` | vendor-generated temperature monitor synchronizer, placement fixed by the IP; each of the 12 indices is a required target |
+| XDCB-5 | the AMD MIG IP: its `set_max_delay -to [get_pins -hier ... device_temp_sync_r1_reg[*]/D]` constraint | vendor IP constraint text; required target |
+
+A waiver marked required lists its targets in `build_bitstream.tcl`; a required target that matches no finding fails
+the build (exit 27), so a stale waiver or a changed IP is never silent. The build prints `required waiver <rule>: n of m
+targets matched` on every run.
+
+CDC-8 inside the MIG (`u_iodelay_ctrl/rst_ref_sync_r_reg[0][*]` and `u_ddr3_infrastructure/rstdiv0_sync_r_reg[*]`,
+first stages of the vendor reset synchronizers) is cleared by setting `ASYNC_REG TRUE` on exactly those cells after
+synthesis (`build_bitstream.tcl`); a missing target fails the build. It is a property change, not a waiver.
 
 The report_cdc gate parses the ID summary of `report_cdc -details` (the clock-pair summary of a plain
 `report_cdc` carries no IDs; the gate fails when the ID table is missing).
 
 CDC constraints (`scripts/rtlnet_constrain_cdc.tcl`, sourced after synthesis): classes sync, reset,
 gray, fifo, axil_cdc by cell name; per-class counts and a per-instance list
-(`build/reports/cdc_instances.txt`) are written; `::rtlnet_cdc_required` is `{sync reset}` for the
+(`build/reports/cdc_instances.txt`) are written; `::rtlnet_cdc_required` is `{sync reset axil_cdc fifo}` for the
 CPU-only build and all five for the network build (zero matches of a required class is an error);
-`::rtlnet_cdc_expect` pins the instance counts (network: fifo 10, axil_cdc 5, gray 6; CPU-only: 0, 0,
-0; the fourth `rtlnet_axil_cdc` is the CPU-path classifier's register crossing, the fifth the checksum offload's, the
+`::rtlnet_cdc_expect` pins the instance counts (network: fifo 15, axil_cdc 6, gray 6; CPU-only: 5, 1,
+0; the five DDR3 bridge FIFOs `u_ddr_cdc/u_{aw,w,b,ar,r}_fifo` are in both builds; the fourth `rtlnet_axil_cdc` is the CPU-path classifier's register crossing, the fifth the checksum offload's, the sixth the DDR3 arbiter's (the only one in the CPU-only build), the
 tenth fifo the offload's TX buffer; the synchronizers of the crossings are counted in the sync class), so a crossing added or lost by a core change fails the build until reviewed. For the findings
 report_cdc cannot recognize the script creates native waivers (`create_waiver -type CDC`), scoped to
 one instance's source and destination registers with the protocol as the reason: CDC-6 on every Gray
@@ -490,6 +503,50 @@ Points that differ from the classic image:
    (`timespec_get`, `TIME_UTC` undeclared): the host gcc of the install is MinGW-w64 9.5.0 (msvcrt), whose C runtime has
    no C11 `timespec_get`. The test file and the host toolchain are unchanged by the port, so the failure does not come from it.
 
+### 6.8 Phase 0 stage 1: DDR3 with MicroBlaze V caches (11-09-2026)
+
+The network image gains the DDR3 path: `u_ddr` (`rtlnet_ddr`, MIG, 512 MiB, 128-bit AXI4 on `ui_clk`), `u_arb`
+(`rtlnet_axi_arbiter`, one master) and the bridge `u_ddr_cdc` (`rtlnet_axi_cdc`, `cpu_clk` to `ui_clk`, `MAX_BURST_BEATS`
+16, ID width 1). MicroBlaze V runs 8 KiB instruction and 8 KiB write-through data caches over `0x8000_0000..0x9FFF_FFFF`;
+the block design's SmartConnect `sc_ddr` has one clock (`cpu_clk`) and exports the 128-bit `M_AXI_DDR`. Build
+`build.ps1 -Network` (log `phase0_ddr_build_run6.log.txt`, transcript `phase0_ddr_build_run6.txt`, `RTLNET_BUILD: PASS`),
+board measurements on the same setup as section 6.7 (JTAG, COM3, 1000 Mb/s, PC on Wi-Fi). The build reaches this result with Explore
+placement and routing directives and a post-route `phys_opt_design` while setup slack is negative.
+
+| Check | Phase 0a (MicroBlaze V, no DDR3) | Phase 0 stage 1 |
+|---|---|---|
+| Post-route WNS / WHS / WPWS | 0.221 / 0.025 / 0.264 ns | 0.221 / 0.051 / 0.000 ns |
+| LUT / FF / BRAM tiles / DSP | 22762 / 31553 / 228.5 / 6 | 32353 / 41937 / 239.5 / 6 |
+| Utilization (LUT / FF / BRAM / DSP) | 17.0 / 11.8 / 62.6 / 0.8 % | 24.18 / 15.67 / 65.62 / 0.81 % |
+| Firmware text / data / bss (bytes) | 112502 / 1128 / 263688 | 118450 / 1128 / 267792 |
+| `rtlnet_cdc` | PASS | PASS: fifo 15 (160 cells), axil_cdc 6 (382), gray 6 (192), sync 33, reset 9 |
+| report_cdc | clean | no unwaived finding; waived by the CDC script: CDC-1 x159, CDC-6 x238, CDC-15 x237 |
+| CLI_TEST | PASS 28/28 | PASS 33/33 |
+| `show ddr` after calibration | none | `Calibration : done`, arbiter `errors 0`, illegal-burst flag clear |
+| `ddr test` (16 MiB) | none | data bus, address bus and random fill PASS; write 28.39 MB/s, read 12.90 MB/s |
+| `ddr test 64` | none | PASS; write 28.39 MB/s, read 12.90 MB/s |
+| `show ddr` after both tests | none | AW bursts 16779338, AR bursts 16787808, errors 0, wait cycles 5, illegal-burst flag clear |
+| NET_TEST (`-Nic Wi-Fi -Speed 1000`) | PASS 25/25 | PASS 25/25 |
+| UDP iperf `-u -b 900M`, PC to board / board to PC | 412 Mbit/s, 0/174955 lost / 944 Mbit/s, 0/401242 lost | 360 Mbit/s, 0/165977 lost / 943 Mbit/s, 0/401242 lost |
+| TCP_TEST | PASS 8/8 | PASS 8/8 |
+| TCP iperf PC to board (Mbit/s) | 68.5 | 68.1 |
+| TCP iperf `-R` / `-r` / `-d` board to PC (Mbit/s) | 97.7 / 94.1 / 86.9 | 98.0 / 96.3 / 88.9 |
+| Together: echo, TCP iperf, UDP iperf | echo PASS, 63.4, 20.9 Mbit/s 0/17820 lost | echo PASS, 64.2, 21.0 Mbit/s 0/17827 lost |
+
+The `ddr test` rates are the MicroBlaze V data cache path (32-bit stores written through, 4-beat line fills), not the
+controller's bandwidth. The 12 PDRC-190 findings of the MIG temperature monitor, the LUTAR-1 of its reset logic and the XDCB-5 of its
+constraint are waived per section 5 (each a required target; the build printed `required waiver LUTAR-1: 1 of 1`,
+`PDRC-190: 12 of 12`, `XDCB-5: 1 of 1`). The first build with the bridge in front of the arbiter replaced the SmartConnect clock crossing
+(which had produced 386 CDC-15 and a TIMING-11 inside `sc_ddr`) and cleared both. CDC-8 inside the MIG was cleared with
+ASYNC_REG on the first two stages of each reset chain; with ASYNC_REG on every stage (12 and 15 cells) the build reported two PDRC-190
+findings on the chains (`phase0_ddr_build_run5.log.txt`). The CPU-only build counts (`fifo 5 axil_cdc 1 gray 0`) were not built in this
+run.
+
+Board benches: `rtlnet_regression.ps1`, `RTLNET_REGRESSION` summary in `phase0_ddr_regression.txt`; `tb_rtlnet_nexys_video_top`
+(`checks=124`) now writes and reads DDR3 through `u_ddr_cdc`, the arbiter and the memory model with the stub's
+`ddr_write`/`ddr_read` tasks (single beat, partial strobe, 4-beat burst). Transcripts: `phase0_ddr_cli.txt`, `phase0_ddr_net.txt`,
+`phase0_ddr_tcp.txt`, `phase0_ddr_program.txt`.
+
 ## 7. Network integration (done 10-22-2026) and what remains
 
 Integrated: `u_mac`, `u_mdio`, `u_protocol` (every leaf, the CPU network path and its classifier), `u_echo` under
@@ -520,3 +577,4 @@ Open:
 | 10-22-2026 | CPU-path classifier enabled in the network build (`CPU_CLASSIFIER_ENABLE` 1), CDC expectation `axil_cdc 4`, firmware on the classifier driver, bench checks for drop-all and broadcast limiting, hardware results of section 6.5; open items refreshed |
 | 11-09-2026 | Phase 0a: MicroBlaze V replaces the classic MicroBlaze in the block design; hardware results of section 6.7 |
 | 11-09-2026 | Phase 0a follow-up: JTAG UART removed (CDC gate passes unmodified), JTAG load of an ELF into MicroBlaze V (`jtag_load_elf.ps1`), new measurements in section 6.7 |
+| 11-09-2026 | Phase 0 stage 1: DDR3 (`rtlnet_ddr`, `rtlnet_axi_arbiter`, bridge `u_ddr_cdc`), MicroBlaze V caches; build gates (MIG ASYNC_REG, three required MIG waivers, fifo 15 / CPU-only 5); results in section 6.8 |

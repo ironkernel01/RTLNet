@@ -18,7 +18,9 @@ Overview:
     exit, end, debug read 0x44a00000, sh ver, then show interfaces (core
     absent message), the CPU network path (show cpu-path: AXI DMA found by
     the BSP driver; show tcp: lwIP state and TCP echo server; show
-    storm-control; show classifier; show offload), tcp echo port change and restore in
+    storm-control; show classifier; show offload), the DDR3 path (show ddr: calibration done, arbiter
+    identity, no illegal-burst flag; ddr test at the default size and at 64 MiB: all phases PASS and
+    MB/s printed; a bad size rejected; the arbiter counters and error flag after the tests), tcp echo port change and restore in
     configuration mode, show running-config (TCP echo, storm control,
     classifier lines), led 2 on + LEDS register read-back, led 2 off, disable.
   * Either bitstream: CPU-only (network cores and classifier absent, lwIP
@@ -28,9 +30,10 @@ Overview:
     "CLI_TEST: FAIL <failed>/<n>"; exit code 0 only on PASS.
 Usage:
   powershell -NoProfile -ExecutionPolicy Bypass -File boards/nexys_video/scripts/cli_test.ps1 [-Port COM3] [-Baud 115200]
-Revision: 10-22-2026
+Revision: 11-09-2026
   * 10-22-2026: initial version.
   * 10-22-2026: CPU network path steps (BSP-based firmware).
+  * 11-09-2026: register map 11-09-2026; DDR3 steps (show ddr, ddr test, bad size).
 -------------------------------------------------------------------------------
 #>
 param(
@@ -68,9 +71,10 @@ function Read-UntilPrompt($sp, [int]$timeoutMs) {
     return $buf
 }
 
-function Send-Step($sp, [string]$name, [string]$text, [string[]]$expect, [string]$promptExpect) {
+function Send-Step($sp, [string]$name, [string]$text, [string[]]$expect, [string]$promptExpect, [int]$timeoutMs = 0) {
+    if ($timeoutMs -le 0) { $timeoutMs = $StepTimeoutMs }
     $sp.Write($text)
-    $out = Read-UntilPrompt $sp $StepTimeoutMs
+    $out = Read-UntilPrompt $sp $timeoutMs
     [void]$script:log.Append($out)
     $clean = $out -replace "`r", ''
     $fails = @()
@@ -117,7 +121,7 @@ try {
     }
 
     Send-Step $sp 'show version' "show version`r" @(
-        'Board ID\s+: NXVD \(0x4E585644\)', 'Register map\s+: 10-22-2026', 'Build ID\s+: 0x[0-9a-f]{8} \(git [0-9a-f]{8}\), tree (clean|dirty)',
+        'Board ID\s+: NXVD \(0x4E585644\)', 'Register map\s+: 11-09-2026', 'Build ID\s+: 0x[0-9a-f]{8} \(git [0-9a-f]{8}\), tree (clean|dirty)',
         'Firmware\s+: rtlnet-fw') 'rtlnet>'
     Send-Step $sp 'show system' "show system`r" @(
         'MMCM\s+: locked', 'CPU clock\s+: 100000000 Hz', 'Clock clk125\s*: 12[45]\.\d{3} MHz', 'Clock clk200\s*: (199|200)\.\d{3} MHz',
@@ -129,7 +133,7 @@ try {
     Send-Step $sp 'exit' "exit`r" @() 'rtlnet#'
     Send-Step $sp 'end' "end`r" @() 'rtlnet#'
     Send-Step $sp 'debug read 0x44a00000' "debug read 0x44a00000`r" @('0x44A00000 = 0x4E585644') 'rtlnet#'
-    Send-Step $sp 'sh ver' "sh ver`r" @('Board ID\s+: NXVD', 'Register map\s+: 10-22-2026') 'rtlnet#'
+    Send-Step $sp 'sh ver' "sh ver`r" @('Board ID\s+: NXVD', 'Register map\s+: 11-09-2026') 'rtlnet#'
     Send-Step $sp 'show interfaces' "show interfaces`r" @('(% MAC not present in this build|eth0 is (up|down))') 'rtlnet#'
     Send-Step $sp 'show cpu-path' "show cpu-path`r" @(
         'AXI DMA\s+: 0x40400000, S2MM status 0x[0-9A-F]{8}, MM2S status 0x[0-9A-F]{8}', 'DMA receive\s+: frames \d+',
@@ -141,6 +145,21 @@ try {
     Send-Step $sp 'show classifier' "show classifier`r" @('mode pass-all', 'MAC 0\s+: dst ff:ff:ff:ff:ff:ff -> police 0') 'rtlnet#'
     Send-Step $sp 'show offload' "show offload`r" @('Checksum offload \(CPU path\)', 'Confirmed\s+: classifier (yes|no), offload TX (yes|no), offload RX (yes|no)',
         '(not present in this build|lwIP flags\s+: 0x[0-9A-F]{4})') 'rtlnet#'
+    Send-Step $sp 'show ddr' "show ddr`r" @(
+        'Calibration\s+: done', 'Arbiter\s+: ID "ARBT" 0x41524254, version 11-09-2026 at 0x44A04000',
+        'Arbiter config\s+: 1 master\(s\), 16-byte beats, ID width 1, 8 outstanding', 'illegal-burst flag clear',
+        'Master 0 \(CPU caches\): AW bursts \d+') 'rtlnet#'
+    Send-Step $sp 'ddr test (bad size)' "ddr test 513`r" @('% Invalid size in MiB \(1\.\.512\) "513"') 'rtlnet#'
+    Send-Step $sp 'ddr test (default)' "ddr test`r" @(
+        'DDR3 test: 16 MiB at 0x80000000', 'Data bus\s+: PASS', 'Address bus\s+: PASS \(22 address offsets\)',
+        'Random fill\s+: PASS \(16 MiB written and verified\)', 'Write\s+: \d+\.\d\d MB/s', 'Read\s+: \d+\.\d\d MB/s',
+        'Master 0 \(CPU caches\):.* errors 0,', 'DDR3 test PASS') 'rtlnet#' 120000
+    Send-Step $sp 'ddr test 64' "ddr test 64`r" @(
+        'DDR3 test: 64 MiB at 0x80000000', 'Data bus\s+: PASS', 'Address bus\s+: PASS \(24 address offsets\)',
+        'Random fill\s+: PASS \(64 MiB written and verified\)', 'Write\s+: \d+\.\d\d MB/s', 'Read\s+: \d+\.\d\d MB/s',
+        'Master 0 \(CPU caches\):.* errors 0,', 'DDR3 test PASS') 'rtlnet#' 300000
+    Send-Step $sp 'show ddr (after)' "show ddr`r" @('Calibration\s+: done', 'illegal-burst flag clear',
+        'Master 0 \(CPU caches\): AW bursts [1-9]\d*, AR bursts [1-9]\d*, W beats [1-9]\d*, R beats [1-9]\d*, errors 0,') 'rtlnet#'
     Send-Step $sp 'conf t (tcp)' "configure terminal`r" @() 'rtlnet(config)#'
     Send-Step $sp 'tcp echo port 2007' "tcp echo port 2007`r" @() 'rtlnet(config)#'
     Send-Step $sp 'end (tcp)' "end`r" @() 'rtlnet#'

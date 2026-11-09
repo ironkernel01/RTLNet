@@ -8,7 +8,16 @@
 //   * Clocks (architecture section 9): MMCME2_ADV u_mmcm, 100 MHz in, VCO
 //     1000 MHz; CLKOUT0 clk125, CLKOUT1 clk125_90 (90 deg), CLKOUT2 clk200,
 //     CLKOUT3 axis_clk 62.5 MHz, CLKOUT4 proto_clk 50 MHz, CLKOUT5 cpu_clk
-//     100 MHz, each on a BUFG; feedback through BUFG u_bufg_fb.
+//     100 MHz, CLKOUT6 ddr_sys_clk 100 MHz (MIG PLL input), each on a BUFG; feedback through BUFG u_bufg_fb.
+//   * DDR3 (cores/rtlnet_ddr, cores/rtlnet_axi_arbiter): u_ddr is the MIG memory
+//     controller (512 MiB, 128-bit AXI4 on ui_clk 100 MHz) with sys_clk = MMCM
+//     CLKOUT6 (100 MHz, BUFG u_bufg_ddrsys; MIG "No Buffer") and ref_clk = clk200.
+//     (The sysclk pad net directly into the MIG PLL is rejected by the placer,
+//     Place 30-172: the clock-capable pin and the PLL are not a legal pair.) The CPU's M_AXI_DDR (caches, 0x8000_0000, cpu_clk) goes
+//     through u_ddr_cdc (rtlnet_axi_cdc, cpu_clk to ui_clk) and u_arb (rtlnet_axi_arbiter, one master) into u_ddr; the arbiter's
+//     registers are decoder slave 6. The ui_clk reset ddr_resetn is an
+//     rtlnet_reset_sync (clk ui_clk) of rst_arstn, ANDed with the MIG ui reset after the chain;
+//     init_calib_complete enters the system registers through rtlnet_sync.
 //   * Resets: one assertion, rst_arstn = cpu_resetn (button, low = pressed)
 //     AND mmcm_locked, enters one rtlnet_reset_sync per clock. Glitch argument
 //     for the AND: either input low asserts every domain at once (safe in any
@@ -25,6 +34,7 @@
 //       slave 3 ECHO       0x44A0_3000   4 KiB  u_echo      (stub without network)
 //       slave 4 PROTOCOL   0x44A1_0000  64 KiB  u_protocol  (stub without network)
 //       slave 5 CLASSIFIER 0x44A2_0000   4 KiB  reserved: always the stub
+//       slave 6 ARBITER    0x44A0_4000   4 KiB  u_arb       (DDR3 arbiter)
 //     A stub answers every access OKAY with read data 0, so firmware probing a
 //     core's ID reads 0 ("not present"); other addresses get DECERR.
 //   * PHY: the board top owns the eth_mdio IOBUF. Without the network cores
@@ -41,13 +51,18 @@
 //     completes on either bitstream.
 //   * LEDs: led[0] MMCM locked, led[7:1] system-register bits (led[1] is the
 //     firmware heartbeat by convention).
-//   * MMCM, BUFG and IOBUF primitives appear in this file only.
+//   * MMCM, BUFG and IOBUF primitives appear in this file only (the MIG clocking is inside its IP).
 // Language: SystemVerilog-2012.
-// Revision: 10-22-2026
+// Revision: 11-09-2026
 //   * 10-22-2026: initial version.
 //   * 10-22-2026: CPU network path between u_cpu and u_protocol.
-// Clocks: sysclk (100 MHz pin) -> MMCM; clk125, clk125_90, clk200, axis_clk,
-//   proto_clk, cpu_clk as above; the MAC's receive clock is internal to it.
+//   * 11-09-2026: DDR3 memory controller, AXI4 arbiter (decoder slave 6), CPU DDR3 master, DDR3 pins,
+//     calibration status into the system registers.
+//   * 11-09-2026: u_ddr_cdc (rtlnet_axi_cdc) between the CPU DDR3 master (cpu_clk) and the arbiter (ui_clk).
+//   * 11-09-2026: the MIG ui reset is ANDed after the ui_clk reset chain (no LUT on the chain's asynchronous pin).
+// Clocks: sysclk (100 MHz pin) -> MMCM (CLKOUT6 -> MIG PLL); clk125, clk125_90, clk200, axis_clk,
+//   proto_clk, cpu_clk as above; ui_clk (MIG user clock, 100 MHz, DDR3 AXI4 side); the MAC's
+//   receive clock is internal to it.
 // Pins: names, balls, banks and I/O standards from the Digilent
 //   Nexys-Video-Master.xdc (Rev. A); constraints in
 //   boards/nexys_video/constraints/rtlnet_nexys_video.xdc.
@@ -113,7 +128,25 @@ module rtlnet_nexys_video_top #(
   // eth_pme_b W14 (bank 13, 2.5 V, LVCMOS25, active low, asynchronous).
   output logic       eth_rst_b,
   input  logic       eth_int_b,
-  input  logic       eth_pme_b
+  input  logic       eth_pme_b,
+
+  // DDR3 SDRAM MT41K256M16 (16 bit, one rank), banks 34 and 35 (1.5 V), SSTL15
+  // (differential strobes and clock DIFF_SSTL15), balls and properties from the MIG
+  // project (cores/rtlnet_ddr/ip/rtlnet_ddr_mig.prj) in the board XDC.
+  inout  wire  [15:0] ddr3_dq,
+  inout  wire  [1:0]  ddr3_dqs_n,
+  inout  wire  [1:0]  ddr3_dqs_p,
+  output logic [14:0] ddr3_addr,
+  output logic [2:0]  ddr3_ba,
+  output logic        ddr3_ras_n,
+  output logic        ddr3_cas_n,
+  output logic        ddr3_we_n,
+  output logic        ddr3_reset_n,
+  output logic [0:0]  ddr3_ck_p,
+  output logic [0:0]  ddr3_ck_n,
+  output logic [0:0]  ddr3_cke,
+  output logic [1:0]  ddr3_dm,
+  output logic [0:0]  ddr3_odt
 );
 
   // ---------------------------------------------------------------------------
@@ -121,7 +154,7 @@ module rtlnet_nexys_video_top #(
   // ---------------------------------------------------------------------------
   localparam int          CPU_CLK_HZ   = 100_000_000;
   localparam int          PROTO_CLK_HZ = 50_000_000;
-  localparam int          NUM_SLV      = 6;
+  localparam int          NUM_SLV      = 7;
   localparam int          AW           = 32;
   localparam int          SLV_SYS      = 0;
   localparam int          SLV_MAC      = 1;
@@ -129,11 +162,17 @@ module rtlnet_nexys_video_top #(
   localparam int          SLV_ECHO     = 3;
   localparam int          SLV_PROT     = 4;
   localparam int          SLV_CLS      = 5;
+  localparam int          SLV_ARB      = 6;
+  localparam int          DDR_ADDR_W   = 29;           // 512 MiB
+  localparam int          DDR_DATA_W   = 128;
+  localparam int          ARB_ID_W     = 1;            // CPU master: no IDs, one constant ID bit
+  localparam int          DDR_ID_W     = ARB_ID_W + 1; // arbiter memory-side ID (IDX_W = 1 for one master)
   localparam logic [31:0] RTLNET_BASE  = 32'h44A0_0000;
   localparam logic [31:0] WIN_4K       = 32'h0000_1000;
   localparam logic [31:0] WIN_64K      = 32'h0001_0000;
   // Slave i at [i*AW +: AW]; listed highest index first.
   localparam logic [NUM_SLV*AW-1:0] SLAVE_BASE = {
+    RTLNET_BASE + 32'h0000_4000,    // 6 ARBITER
     RTLNET_BASE + 32'h0002_0000,    // 5 CLASSIFIER (reserved)
     RTLNET_BASE + 32'h0001_0000,    // 4 PROTOCOL
     RTLNET_BASE + 32'h0000_3000,    // 3 ECHO
@@ -141,13 +180,13 @@ module rtlnet_nexys_video_top #(
     RTLNET_BASE + 32'h0000_1000,    // 1 MAC
     RTLNET_BASE + 32'h0000_0000     // 0 SYS
   };
-  localparam logic [NUM_SLV*AW-1:0] SLAVE_SIZE = {WIN_4K, WIN_64K, WIN_4K, WIN_4K, WIN_4K, WIN_4K};
+  localparam logic [NUM_SLV*AW-1:0] SLAVE_SIZE = {WIN_4K, WIN_4K, WIN_64K, WIN_4K, WIN_4K, WIN_4K, WIN_4K};
 `ifdef RTLNET_WITH_NETWORK
   localparam logic        NETWORK      = 1'b1;
-  localparam logic [NUM_SLV-1:0] STUB_MASK = 6'b10_0000;   // classifier only
+  localparam logic [NUM_SLV-1:0] STUB_MASK = 7'b010_0000;   // classifier only
 `else
   localparam logic        NETWORK      = 1'b0;
-  localparam logic [NUM_SLV-1:0] STUB_MASK = 6'b11_1110;   // every window but SYS
+  localparam logic [NUM_SLV-1:0] STUB_MASK = 7'b011_1110;   // every window but SYS and ARBITER
 `endif
 
   // ---------------------------------------------------------------------------
@@ -161,6 +200,8 @@ module rtlnet_nexys_video_top #(
   logic axis_clk_mmcm;
   logic proto_clk_mmcm;
   logic cpu_clk_mmcm;
+  logic ddr_sys_clk_mmcm;
+  logic ddr_sys_clk;           // 100 MHz: MIG PLL input (CLKOUT6)
   logic clk125;                // 125 MHz, 0 deg: MAC transmit, RXC rate detector
   logic clk125_90;             // 125 MHz, 90 deg: RGMII TXC forwarding only
   logic clk200;                // 200 MHz: IDELAYCTRL reference
@@ -175,6 +216,11 @@ module rtlnet_nexys_video_top #(
   logic axis_resetn;
   logic proto_resetn;
   logic cpu_resetn_sync;
+  logic ui_clk;                // 100 MHz: MIG user clock, DDR3 AXI4 side, arbiter datapath
+  logic ui_resetn_mig;         // MIG ui reset, active low, synchronous to ui_clk
+  logic ddr_resetn_sync;       // ui_clk reset chain of rst_arstn, released synchronously
+  logic ddr_resetn;            // ui_clk reset: ddr_resetn_sync and the MIG ui reset
+  logic ddr_calib;             // init_calib_complete, ui_clk domain
 
   // ---------------------------------------------------------------------------
   // CPU register master and decoder ports
@@ -197,6 +243,110 @@ module rtlnet_nexys_video_top #(
   logic                  cpu_rvalid;
   logic                  cpu_rready;
   logic [7:0]            cpu_irq;
+
+  // CPU DDR3 master (ui_clk domain, 128-bit, no IDs) and the arbiter's memory side.
+  logic [31:0]           cpu_ddr_awaddr;
+  logic [7:0]            cpu_ddr_awlen;
+  logic [2:0]            cpu_ddr_awsize;
+  logic [1:0]            cpu_ddr_awburst;
+  logic                  cpu_ddr_awlock;
+  logic [3:0]            cpu_ddr_awcache;
+  logic [2:0]            cpu_ddr_awprot;
+  logic [3:0]            cpu_ddr_awqos;
+  logic                  cpu_ddr_awvalid;
+  logic                  cpu_ddr_awready;
+  logic [127:0]          cpu_ddr_wdata;
+  logic [15:0]           cpu_ddr_wstrb;
+  logic                  cpu_ddr_wlast;
+  logic                  cpu_ddr_wvalid;
+  logic                  cpu_ddr_wready;
+  logic [1:0]            cpu_ddr_bresp;
+  logic                  cpu_ddr_bvalid;
+  logic                  cpu_ddr_bready;
+  logic [31:0]           cpu_ddr_araddr;
+  logic [7:0]            cpu_ddr_arlen;
+  logic [2:0]            cpu_ddr_arsize;
+  logic [1:0]            cpu_ddr_arburst;
+  logic                  cpu_ddr_arlock;
+  logic [3:0]            cpu_ddr_arcache;
+  logic [2:0]            cpu_ddr_arprot;
+  logic [3:0]            cpu_ddr_arqos;
+  logic                  cpu_ddr_arvalid;
+  logic                  cpu_ddr_arready;
+  logic [127:0]          cpu_ddr_rdata;
+  logic [1:0]            cpu_ddr_rresp;
+  logic                  cpu_ddr_rlast;
+  logic                  cpu_ddr_rvalid;
+  logic                  cpu_ddr_rready;
+
+  // Bridge u_ddr_cdc memory side (ui_clk domain, ID width ARB_ID_W) into the arbiter's slave port.
+  logic [ARB_ID_W-1:0]   br_awid;
+  logic [DDR_ADDR_W-1:0] br_awaddr;
+  logic [7:0]            br_awlen;
+  logic [2:0]            br_awsize;
+  logic [1:0]            br_awburst;
+  logic                  br_awvalid;
+  logic                  br_awready;
+  logic [DDR_DATA_W-1:0] br_wdata;
+  logic [DDR_DATA_W/8-1:0] br_wstrb;
+  logic                  br_wlast;
+  logic                  br_wvalid;
+  logic                  br_wready;
+  logic [ARB_ID_W-1:0]   br_bid;
+  logic [1:0]            br_bresp;
+  logic                  br_bvalid;
+  logic                  br_bready;
+  logic [ARB_ID_W-1:0]   br_arid;
+  logic [DDR_ADDR_W-1:0] br_araddr;
+  logic [7:0]            br_arlen;
+  logic [2:0]            br_arsize;
+  logic [1:0]            br_arburst;
+  logic                  br_arvalid;
+  logic                  br_arready;
+  logic [ARB_ID_W-1:0]   br_rid;
+  logic [DDR_DATA_W-1:0] br_rdata;
+  logic [1:0]            br_rresp;
+  logic                  br_rlast;
+  logic                  br_rvalid;
+  logic                  br_rready;
+
+  logic [DDR_ID_W-1:0]   mem_awid;
+  logic [DDR_ADDR_W-1:0] mem_awaddr;
+  logic [7:0]            mem_awlen;
+  logic [2:0]            mem_awsize;
+  logic [1:0]            mem_awburst;
+  logic                  mem_awlock;
+  logic [3:0]            mem_awcache;
+  logic [2:0]            mem_awprot;
+  logic [3:0]            mem_awqos;
+  logic                  mem_awvalid;
+  logic                  mem_awready;
+  logic [DDR_DATA_W-1:0] mem_wdata;
+  logic [DDR_DATA_W/8-1:0] mem_wstrb;
+  logic                  mem_wlast;
+  logic                  mem_wvalid;
+  logic                  mem_wready;
+  logic [DDR_ID_W-1:0]   mem_bid;
+  logic [1:0]            mem_bresp;
+  logic                  mem_bvalid;
+  logic                  mem_bready;
+  logic [DDR_ID_W-1:0]   mem_arid;
+  logic [DDR_ADDR_W-1:0] mem_araddr;
+  logic [7:0]            mem_arlen;
+  logic [2:0]            mem_arsize;
+  logic [1:0]            mem_arburst;
+  logic                  mem_arlock;
+  logic [3:0]            mem_arcache;
+  logic [2:0]            mem_arprot;
+  logic [3:0]            mem_arqos;
+  logic                  mem_arvalid;
+  logic                  mem_arready;
+  logic [DDR_ID_W-1:0]   mem_rid;
+  logic [DDR_DATA_W-1:0] mem_rdata;
+  logic [1:0]            mem_rresp;
+  logic                  mem_rlast;
+  logic                  mem_rvalid;
+  logic                  mem_rready;
 
   // CPU network path (cpu_clk): eth_tx = frames the CPU sends, eth_rx =
   // frames to the CPU.
@@ -305,7 +455,7 @@ module rtlnet_nexys_video_top #(
     .CLKOUT3B     (),
     .CLKOUT4      (proto_clk_mmcm),
     .CLKOUT5      (cpu_clk_mmcm),
-    .CLKOUT6      (),
+    .CLKOUT6      (ddr_sys_clk_mmcm),
     .LOCKED       (mmcm_locked),
     .RST          (1'b0),
     .PWRDWN       (1'b0),
@@ -332,6 +482,7 @@ module rtlnet_nexys_video_top #(
   BUFG u_bufg_axis      (.I(axis_clk_mmcm),  .O(axis_clk));
   BUFG u_bufg_proto     (.I(proto_clk_mmcm), .O(proto_clk));
   BUFG u_bufg_cpu       (.I(cpu_clk_mmcm),   .O(cpu_clk));
+  BUFG u_bufg_ddrsys    (.I(ddr_sys_clk_mmcm), .O(ddr_sys_clk));
 
   // The one reset assertion: button pressed or MMCM not locked.
   assign rst_arstn = cpu_resetn & mmcm_locked;
@@ -353,6 +504,13 @@ module rtlnet_nexys_video_top #(
 
   // Reset release into cpu_clk.
   rtlnet_reset_sync u_rst_cpu (.clk(cpu_clk), .arstn(rst_arstn), .resetn(cpu_resetn_sync));
+
+  // Reset release into ui_clk: the board reset assertion enters the chain (no logic on the
+  // asynchronous pin); the MIG ui reset (low while the controller clock tree is unlocked, a
+  // ui_clk flop output) is ANDed into the released, synchronous reset. Either low asserts every
+  // ui_clk register; release needs the chain released and the MIG reset released.
+  rtlnet_reset_sync u_rst_ddr (.clk(ui_clk), .arstn(rst_arstn), .resetn(ddr_resetn_sync));
+  assign ddr_resetn = ddr_resetn_sync & ui_resetn_mig;
 
   // Clock beacons for the system-register clock monitor, one per MMCM output
   // other than cpu_clk (the measuring clock).
@@ -400,6 +558,39 @@ module rtlnet_nexys_video_top #(
     .m_axi_rvalid  (cpu_rvalid),
     .m_axi_rready  (cpu_rready),
     .irq           (cpu_irq),
+    .m_axi_ddr_awaddr  (cpu_ddr_awaddr),
+    .m_axi_ddr_awlen   (cpu_ddr_awlen),
+    .m_axi_ddr_awsize  (cpu_ddr_awsize),
+    .m_axi_ddr_awburst (cpu_ddr_awburst),
+    .m_axi_ddr_awlock  (cpu_ddr_awlock),
+    .m_axi_ddr_awcache (cpu_ddr_awcache),
+    .m_axi_ddr_awprot  (cpu_ddr_awprot),
+    .m_axi_ddr_awqos   (cpu_ddr_awqos),
+    .m_axi_ddr_awvalid (cpu_ddr_awvalid),
+    .m_axi_ddr_awready (cpu_ddr_awready),
+    .m_axi_ddr_wdata   (cpu_ddr_wdata),
+    .m_axi_ddr_wstrb   (cpu_ddr_wstrb),
+    .m_axi_ddr_wlast   (cpu_ddr_wlast),
+    .m_axi_ddr_wvalid  (cpu_ddr_wvalid),
+    .m_axi_ddr_wready  (cpu_ddr_wready),
+    .m_axi_ddr_bresp   (cpu_ddr_bresp),
+    .m_axi_ddr_bvalid  (cpu_ddr_bvalid),
+    .m_axi_ddr_bready  (cpu_ddr_bready),
+    .m_axi_ddr_araddr  (cpu_ddr_araddr),
+    .m_axi_ddr_arlen   (cpu_ddr_arlen),
+    .m_axi_ddr_arsize  (cpu_ddr_arsize),
+    .m_axi_ddr_arburst (cpu_ddr_arburst),
+    .m_axi_ddr_arlock  (cpu_ddr_arlock),
+    .m_axi_ddr_arcache (cpu_ddr_arcache),
+    .m_axi_ddr_arprot  (cpu_ddr_arprot),
+    .m_axi_ddr_arqos   (cpu_ddr_arqos),
+    .m_axi_ddr_arvalid (cpu_ddr_arvalid),
+    .m_axi_ddr_arready (cpu_ddr_arready),
+    .m_axi_ddr_rdata   (cpu_ddr_rdata),
+    .m_axi_ddr_rresp   (cpu_ddr_rresp),
+    .m_axi_ddr_rlast   (cpu_ddr_rlast),
+    .m_axi_ddr_rvalid  (cpu_ddr_rvalid),
+    .m_axi_ddr_rready  (cpu_ddr_rready),
     .m_axis_eth_tdata  (cpu_eth_tx_tdata),
     .m_axis_eth_tkeep  (cpu_eth_tx_tkeep),
     .m_axis_eth_tvalid (cpu_eth_tx_tvalid),
@@ -489,6 +680,7 @@ module rtlnet_nexys_video_top #(
     .sw_async          (sw),
     .btn_async         ({btnu, btnr, btnl, btnd, btnc}),
     .mmcm_locked_async (mmcm_locked),
+    .ddr_calib_async   (ddr_calib),
     .phy_async         ({mdio_i, eth_pme_b, eth_int_b}),
     .rgmii_rx_async    (rgmii_rx_levels),
     .phy_rst_n         (phy_rst_n),
@@ -496,6 +688,265 @@ module rtlnet_nexys_video_top #(
     .clk_beacon_async  (clk_beacon),
     .led_fw            (led_fw),
     .tick_ms           (tick_ms)
+  );
+
+  // DDR3 clock-domain bridge: the CPU's M_AXI_DDR (cpu_clk) to the arbiter and controller (ui_clk).
+  // The CPU port has no IDs (ID tied 0); the bridge carries ARB_ID_W bits. Bursts: 1 beat
+  // (instruction line) and 4 beats (data line fill), so MAX_BURST_BEATS 16 has margin. Both
+  // resets release from the one board assertion.
+  rtlnet_axi_cdc #(
+    .ADDR_W          (DDR_ADDR_W),
+    .DATA_W          (DDR_DATA_W),
+    .ID_W            (ARB_ID_W),
+    .MAX_BURST_BEATS (16)
+  ) u_ddr_cdc (
+    .s_clk         (cpu_clk),
+    .s_resetn      (cpu_resetn_sync),
+    .s_axi_awid    (1'b0),
+    .s_axi_awaddr  (cpu_ddr_awaddr[DDR_ADDR_W-1:0]),
+    .s_axi_awlen   (cpu_ddr_awlen),
+    .s_axi_awsize  (cpu_ddr_awsize),
+    .s_axi_awburst (cpu_ddr_awburst),
+    .s_axi_awlock  (cpu_ddr_awlock),
+    .s_axi_awcache (cpu_ddr_awcache),
+    .s_axi_awprot  (cpu_ddr_awprot),
+    .s_axi_awqos   (cpu_ddr_awqos),
+    .s_axi_awvalid (cpu_ddr_awvalid),
+    .s_axi_awready (cpu_ddr_awready),
+    .s_axi_wdata   (cpu_ddr_wdata),
+    .s_axi_wstrb   (cpu_ddr_wstrb),
+    .s_axi_wlast   (cpu_ddr_wlast),
+    .s_axi_wvalid  (cpu_ddr_wvalid),
+    .s_axi_wready  (cpu_ddr_wready),
+    .s_axi_bid     (),
+    .s_axi_bresp   (cpu_ddr_bresp),
+    .s_axi_bvalid  (cpu_ddr_bvalid),
+    .s_axi_bready  (cpu_ddr_bready),
+    .s_axi_arid    (1'b0),
+    .s_axi_araddr  (cpu_ddr_araddr[DDR_ADDR_W-1:0]),
+    .s_axi_arlen   (cpu_ddr_arlen),
+    .s_axi_arsize  (cpu_ddr_arsize),
+    .s_axi_arburst (cpu_ddr_arburst),
+    .s_axi_arlock  (cpu_ddr_arlock),
+    .s_axi_arcache (cpu_ddr_arcache),
+    .s_axi_arprot  (cpu_ddr_arprot),
+    .s_axi_arqos   (cpu_ddr_arqos),
+    .s_axi_arvalid (cpu_ddr_arvalid),
+    .s_axi_arready (cpu_ddr_arready),
+    .s_axi_rid     (),
+    .s_axi_rdata   (cpu_ddr_rdata),
+    .s_axi_rresp   (cpu_ddr_rresp),
+    .s_axi_rlast   (cpu_ddr_rlast),
+    .s_axi_rvalid  (cpu_ddr_rvalid),
+    .s_axi_rready  (cpu_ddr_rready),
+    .m_clk         (ui_clk),
+    .m_resetn      (ddr_resetn),
+    .m_axi_awid    (br_awid),
+    .m_axi_awaddr  (br_awaddr),
+    .m_axi_awlen   (br_awlen),
+    .m_axi_awsize  (br_awsize),
+    .m_axi_awburst (br_awburst),
+    .m_axi_awlock  (),
+    .m_axi_awcache (),
+    .m_axi_awprot  (),
+    .m_axi_awqos   (),
+    .m_axi_awvalid (br_awvalid),
+    .m_axi_awready (br_awready),
+    .m_axi_wdata   (br_wdata),
+    .m_axi_wstrb   (br_wstrb),
+    .m_axi_wlast   (br_wlast),
+    .m_axi_wvalid  (br_wvalid),
+    .m_axi_wready  (br_wready),
+    .m_axi_bid     (br_bid),
+    .m_axi_bresp   (br_bresp),
+    .m_axi_bvalid  (br_bvalid),
+    .m_axi_bready  (br_bready),
+    .m_axi_arid    (br_arid),
+    .m_axi_araddr  (br_araddr),
+    .m_axi_arlen   (br_arlen),
+    .m_axi_arsize  (br_arsize),
+    .m_axi_arburst (br_arburst),
+    .m_axi_arlock  (),
+    .m_axi_arcache (),
+    .m_axi_arprot  (),
+    .m_axi_arqos   (),
+    .m_axi_arvalid (br_arvalid),
+    .m_axi_arready (br_arready),
+    .m_axi_rid     (br_rid),
+    .m_axi_rdata   (br_rdata),
+    .m_axi_rresp   (br_rresp),
+    .m_axi_rlast   (br_rlast),
+    .m_axi_rvalid  (br_rvalid),
+    .m_axi_rready  (br_rready)
+  );
+
+  // DDR3 memory path. u_arb: one master (the CPU caches through u_ddr_cdc), ui_clk datapath and register file,
+  // register port on cpu_clk (window ARBITER). The bridge carries a one-bit ID, always 0. The CPU byte address is 0x8000_0000 + offset; the
+  // low 29 bits address the 512 MiB.
+  rtlnet_axi_arbiter #(
+    .NUM_MASTERS     (1),
+    .ADDR_W          (DDR_ADDR_W),
+    .DATA_W          (DDR_DATA_W),
+    .ID_W            (ARB_ID_W),
+    .HIGH_PRIO_MASK  (1'b1),
+    .NARROW_MASK     (1'b1),   // the CPU's write-through data cache issues 32-bit stores
+    .MAX_OUTSTANDING (8)
+  ) u_arb (
+    .clk           (ui_clk),
+    .resetn        (ddr_resetn),
+    .s_axi_aclk    (cpu_clk),
+    .s_axi_aresetn (cpu_resetn_sync),
+    .s_awid        (br_awid),
+    .s_awaddr      (br_awaddr),
+    .s_awlen       (br_awlen),
+    .s_awsize      (br_awsize),
+    .s_awburst     (br_awburst),
+    .s_awvalid     (br_awvalid),
+    .s_awready     (br_awready),
+    .s_wdata       (br_wdata),
+    .s_wstrb       (br_wstrb),
+    .s_wlast       (br_wlast),
+    .s_wvalid      (br_wvalid),
+    .s_wready      (br_wready),
+    .s_bid         (br_bid),
+    .s_bresp       (br_bresp),
+    .s_bvalid      (br_bvalid),
+    .s_bready      (br_bready),
+    .s_arid        (br_arid),
+    .s_araddr      (br_araddr),
+    .s_arlen       (br_arlen),
+    .s_arsize      (br_arsize),
+    .s_arburst     (br_arburst),
+    .s_arvalid     (br_arvalid),
+    .s_arready     (br_arready),
+    .s_rid         (br_rid),
+    .s_rdata       (br_rdata),
+    .s_rresp       (br_rresp),
+    .s_rlast       (br_rlast),
+    .s_rvalid      (br_rvalid),
+    .s_rready      (br_rready),
+    .m_axi_awid    (mem_awid),
+    .m_axi_awaddr  (mem_awaddr),
+    .m_axi_awlen   (mem_awlen),
+    .m_axi_awsize  (mem_awsize),
+    .m_axi_awburst (mem_awburst),
+    .m_axi_awlock  (mem_awlock),
+    .m_axi_awcache (mem_awcache),
+    .m_axi_awprot  (mem_awprot),
+    .m_axi_awqos   (mem_awqos),
+    .m_axi_awvalid (mem_awvalid),
+    .m_axi_awready (mem_awready),
+    .m_axi_wdata   (mem_wdata),
+    .m_axi_wstrb   (mem_wstrb),
+    .m_axi_wlast   (mem_wlast),
+    .m_axi_wvalid  (mem_wvalid),
+    .m_axi_wready  (mem_wready),
+    .m_axi_bid     (mem_bid),
+    .m_axi_bresp   (mem_bresp),
+    .m_axi_bvalid  (mem_bvalid),
+    .m_axi_bready  (mem_bready),
+    .m_axi_arid    (mem_arid),
+    .m_axi_araddr  (mem_araddr),
+    .m_axi_arlen   (mem_arlen),
+    .m_axi_arsize  (mem_arsize),
+    .m_axi_arburst (mem_arburst),
+    .m_axi_arlock  (mem_arlock),
+    .m_axi_arcache (mem_arcache),
+    .m_axi_arprot  (mem_arprot),
+    .m_axi_arqos   (mem_arqos),
+    .m_axi_arvalid (mem_arvalid),
+    .m_axi_arready (mem_arready),
+    .m_axi_rid     (mem_rid),
+    .m_axi_rdata   (mem_rdata),
+    .m_axi_rresp   (mem_rresp),
+    .m_axi_rlast   (mem_rlast),
+    .m_axi_rvalid  (mem_rvalid),
+    .m_axi_rready  (mem_rready),
+    .s_axi_awaddr  (dec_awaddr[SLV_ARB*AW +: 12]),
+    .s_axi_awvalid (dec_awvalid[SLV_ARB]),
+    .s_axi_awready (dec_awready[SLV_ARB]),
+    .s_axi_wdata   (dec_wdata[SLV_ARB*32 +: 32]),
+    .s_axi_wstrb   (dec_wstrb[SLV_ARB*4 +: 4]),
+    .s_axi_wvalid  (dec_wvalid[SLV_ARB]),
+    .s_axi_wready  (dec_wready[SLV_ARB]),
+    .s_axi_bresp   (dec_bresp[SLV_ARB*2 +: 2]),
+    .s_axi_bvalid  (dec_bvalid[SLV_ARB]),
+    .s_axi_bready  (dec_bready[SLV_ARB]),
+    .s_axi_araddr  (dec_araddr[SLV_ARB*AW +: 12]),
+    .s_axi_arvalid (dec_arvalid[SLV_ARB]),
+    .s_axi_arready (dec_arready[SLV_ARB]),
+    .s_axi_rdata   (dec_rdata[SLV_ARB*32 +: 32]),
+    .s_axi_rresp   (dec_rresp[SLV_ARB*2 +: 2]),
+    .s_axi_rvalid  (dec_rvalid[SLV_ARB]),
+    .s_axi_rready  (dec_rready[SLV_ARB]),
+    .err_irq       ()
+  );
+
+  // DDR3 controller: sys_clk is MMCM CLKOUT6 (ddr_sys_clk), ref_clk clk200.
+  // sys_rstn is the board reset assertion: a button press recalibrates the memory.
+  rtlnet_ddr #(
+    .ADDR_W (DDR_ADDR_W),
+    .DATA_W (DDR_DATA_W),
+    .ID_W   (DDR_ID_W)
+  ) u_ddr (
+    .sys_clk             (ddr_sys_clk),
+    .ref_clk             (clk200),
+    .sys_rstn            (rst_arstn),
+    .ui_clk              (ui_clk),
+    .ui_resetn           (ui_resetn_mig),
+    .s_axi_aresetn       (ddr_resetn),
+    .init_calib_complete (ddr_calib),
+    .s_axi_awid          (mem_awid),
+    .s_axi_awaddr        (mem_awaddr),
+    .s_axi_awlen         (mem_awlen),
+    .s_axi_awsize        (mem_awsize),
+    .s_axi_awburst       (mem_awburst),
+    .s_axi_awlock        (mem_awlock),
+    .s_axi_awcache       (mem_awcache),
+    .s_axi_awprot        (mem_awprot),
+    .s_axi_awqos         (mem_awqos),
+    .s_axi_awvalid       (mem_awvalid),
+    .s_axi_awready       (mem_awready),
+    .s_axi_wdata         (mem_wdata),
+    .s_axi_wstrb         (mem_wstrb),
+    .s_axi_wlast         (mem_wlast),
+    .s_axi_wvalid        (mem_wvalid),
+    .s_axi_wready        (mem_wready),
+    .s_axi_bid           (mem_bid),
+    .s_axi_bresp         (mem_bresp),
+    .s_axi_bvalid        (mem_bvalid),
+    .s_axi_bready        (mem_bready),
+    .s_axi_arid          (mem_arid),
+    .s_axi_araddr        (mem_araddr),
+    .s_axi_arlen         (mem_arlen),
+    .s_axi_arsize        (mem_arsize),
+    .s_axi_arburst       (mem_arburst),
+    .s_axi_arlock        (mem_arlock),
+    .s_axi_arcache       (mem_arcache),
+    .s_axi_arprot        (mem_arprot),
+    .s_axi_arqos         (mem_arqos),
+    .s_axi_arvalid       (mem_arvalid),
+    .s_axi_arready       (mem_arready),
+    .s_axi_rid           (mem_rid),
+    .s_axi_rdata         (mem_rdata),
+    .s_axi_rresp         (mem_rresp),
+    .s_axi_rlast         (mem_rlast),
+    .s_axi_rvalid        (mem_rvalid),
+    .s_axi_rready        (mem_rready),
+    .ddr3_dq             (ddr3_dq),
+    .ddr3_dqs_n          (ddr3_dqs_n),
+    .ddr3_dqs_p          (ddr3_dqs_p),
+    .ddr3_addr           (ddr3_addr),
+    .ddr3_ba             (ddr3_ba),
+    .ddr3_ras_n          (ddr3_ras_n),
+    .ddr3_cas_n          (ddr3_cas_n),
+    .ddr3_we_n           (ddr3_we_n),
+    .ddr3_reset_n        (ddr3_reset_n),
+    .ddr3_ck_p           (ddr3_ck_p),
+    .ddr3_ck_n           (ddr3_ck_n),
+    .ddr3_cke            (ddr3_cke),
+    .ddr3_dm             (ddr3_dm),
+    .ddr3_odt            (ddr3_odt)
   );
 
   // Stub windows: OKAY, read data 0, writes ignored (cores not in this build,

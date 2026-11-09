@@ -46,6 +46,7 @@
  *  10-22-2026  MenuBuilder AI / Steve Spano    Initial hierarchical command set
  *  10-22-2026  MenuBuilder AI / Steve Spano    Network commands on the core drivers; phy, clear, iperf, advertise, duplex, mac-address
  *  10-22-2026  MenuBuilder AI / Steve Spano    CPU network path: show tcp, show cpu-path, tcp echo, storm-control, classifier
+ *  11-09-2026  MenuBuilder AI / Steve Spano    DDR3: show ddr, ddr test; clear counters clears the DDR3 arbiter
  * ===========================================================================
  */
 #include "cli_commands.h"
@@ -56,7 +57,9 @@
 #include "menu_commands.h"
 #include "rtlnet_arp.h"
 #include "rtlnet_board.h"
+#include "rtlnet_axi_arbiter.h"
 #include "rtlnet_cpupath.h"
+#include "rtlnet_ddrtest.h"
 #include "rtlnet_dhcp.h"
 #include "rtlnet_eth_mac.h"
 #include "rtlnet_eth_protocol.h"
@@ -1428,6 +1431,10 @@ int cli_clear_counters(const MenuCommandContext *ctx)
         rtlnet_udp_echo_clear_counters(RTLNET_PLAT_ECHO_BASE);
     }
     (void)cpupath_cls_clear_counters();
+    if (rtlnet_axi_arbiter_probe(RTLNET_PLAT_ARB_BASE, NULL) == 0) {
+        rtlnet_axi_arbiter_clear(RTLNET_PLAT_ARB_BASE);
+        rtlnet_axi_arbiter_err_clear(RTLNET_PLAT_ARB_BASE);
+    }
     rtlnet_offload_reset_stats();
     rtlnet_lwip_clear_counters();
     rtlnet_tcp_echo_clear_counters();
@@ -3018,4 +3025,177 @@ int cli_offload(const MenuCommandContext *ctx)
         fmt_printf("%% CTRL did not read back as written\n");
     }
     return (rc == RTLNET_OFFLOAD_OK) ? 0 : -1;
+}
+
+/* ------------------------------------------------------------------------- */
+/* DDR3 memory                                                               */
+/* ------------------------------------------------------------------------- */
+
+#define CLI_DDR_DEFAULT_MIB   16u
+#define CLI_DDR_MAX_MIB       (RTLNET_PLAT_DDR_SIZE / (1024u * 1024u))
+#define CLI_DDR_SEED          0x1D872B41u
+#define CLI_DDR_SETTLE_POLLS  20000u   /* bound on the wait for the arbiter's write-in-flight flag */
+
+static const cli_core_t g_core_arb = { "DDR3 arbiter", RTLNET_PLAT_ARB_BASE, RTLNET_ID_ARB };
+
+static unsigned g_ddr_dots;
+
+/**
+ * @brief Settle callback of the memory test: order the writes before the reads.
+ * @return None. Executes a memory fence, then waits (bounded) for the arbiter to report no write in
+ *         flight; a stuck flag ends the wait and the test's compare reports any resulting mismatch.
+ */
+static void cli_ddr_settle(void)
+{
+    rtlnet_axi_arbiter_status_t st;
+    plat_mem_barrier();
+    for (unsigned i = 0; i < CLI_DDR_SETTLE_POLLS; i++) {
+        if (rtlnet_axi_arbiter_err_status(RTLNET_PLAT_ARB_BASE, &st) != 0 || !st.wr_busy) {
+            return;
+        }
+    }
+}
+
+/**
+ * @brief Progress callback of the memory test: one dot per 10 percent.
+ * @param percent 0..100 done.
+ * @return None.
+ */
+static void cli_ddr_progress(unsigned percent)
+{
+    while (g_ddr_dots < percent / 10u) {
+        fmt_printf(".");
+        g_ddr_dots++;
+    }
+}
+
+/**
+ * @brief Print a rate given in MB/s times 100.
+ * @param x100 Rate times 100.
+ * @return None.
+ */
+static void cli_print_rate(uint32_t x100)
+{
+    fmt_printf("%u.%02u MB/s", (unsigned)(x100 / 100u), (unsigned)(x100 % 100u));
+}
+
+/**
+ * @brief Print one arbiter master's counters.
+ * @param m Master index.
+ * @return None.
+ */
+static void cli_print_arb_master(uint32_t m)
+{
+    static const char *const names[] = { "CPU caches" };
+    rtlnet_axi_arbiter_counters_t c;
+    if (rtlnet_axi_arbiter_read_counters(RTLNET_PLAT_ARB_BASE, m, &c) != 0) {
+        return;
+    }
+    fmt_printf("  Master %u (%s): AW bursts %u, AR bursts %u, W beats %u, R beats %u, errors %u, wait cycles %u\n",
+               (unsigned)m, (m < (sizeof(names) / sizeof(names[0]))) ? names[m] : "unused", (unsigned)c.aw_bursts,
+               (unsigned)c.ar_bursts, (unsigned)c.w_beats, (unsigned)c.r_beats, (unsigned)c.errors,
+               (unsigned)c.wait_cycles);
+}
+
+/**
+ * @brief SHOW DDR: DDR3 calibration, the cache setup, the arbiter's identity,
+ *        configuration, error status and per-master counters.
+ * @param ctx Unused.
+ * @return 0.
+ */
+int cli_show_ddr(const MenuCommandContext *ctx)
+{
+    rtlnet_axi_arbiter_caps_t caps;
+    rtlnet_axi_arbiter_status_t st;
+    int cal = board_ddr_calibrated();
+    (void)ctx;
+    fmt_printf("DDR3\n");
+    fmt_printf("  Calibration     : %s (init_calib_complete)\n", cal ? "done" : "NOT done");
+    fmt_printf("  Memory          : %u MiB at 0x%08X, MT41K256M16 16-bit DDR3-800, AXI4 128-bit on ui_clk\n",
+               (unsigned)(RTLNET_PLAT_DDR_SIZE / (1024u * 1024u)), (unsigned)RTLNET_PLAT_DDR_BASE);
+    fmt_printf("  Caches          : instruction %u KiB, data %u KiB write-through, %u-byte lines, over the window only\n",
+               (unsigned)(RTLNET_CPU_ICACHE_BYTES / 1024u), (unsigned)(RTLNET_CPU_DCACHE_BYTES / 1024u),
+               (unsigned)RTLNET_PLAT_CACHE_LINE);
+    if (rtlnet_axi_arbiter_probe(RTLNET_PLAT_ARB_BASE, &caps) != 0) {
+        uint32_t id = board_debug_read32(RTLNET_PLAT_ARB_BASE + RTLNET_REG_ID);
+        fmt_printf("%% %s not present in this build (ID 0x%08X at 0x%08X, expected 0x%08X)\n", g_core_arb.name,
+                   (unsigned)id, (unsigned)g_core_arb.base, (unsigned)g_core_arb.id);
+        return 0;
+    }
+    fmt_printf("  Arbiter         : ID \"ARBT\" 0x%08X, version ", (unsigned)RTLNET_ARB_ID_VALUE);
+    cli_print_datecode(RTLNET_ARB_VERSION_VALUE);
+    fmt_printf(" at 0x%08X\n", (unsigned)RTLNET_PLAT_ARB_BASE);
+    fmt_printf("  Arbiter config  : %u master(s), %u-byte beats, ID width %u, %u outstanding, high-priority mask 0x%02X, narrow mask 0x%02X\n",
+               (unsigned)caps.num_masters, (unsigned)caps.bytes_per_beat, (unsigned)caps.id_w,
+               (unsigned)caps.max_outstanding, (unsigned)caps.high_prio_mask, (unsigned)caps.narrow_mask);
+    if (rtlnet_axi_arbiter_err_status(RTLNET_PLAT_ARB_BASE, &st) == 0) {
+        fmt_printf("  Arbiter status  : illegal-burst flag %s, write in flight %u, read in flight %u\n",
+                   st.err ? "SET (a burst was answered with SLVERR)" : "clear", (unsigned)st.wr_busy,
+                   (unsigned)st.rd_busy);
+    }
+    for (uint32_t m = 0; m < caps.num_masters; m++) {
+        cli_print_arb_master(m);
+    }
+    return 0;
+}
+
+/**
+ * @brief DDR TEST {SIZE}: data-bus, address-bus and random fill/verify test
+ *        of SIZE MiB (default 16, 1..512) from 0x80000000, with write and
+ *        read rates; the arbiter counters are cleared first and shown after.
+ * @param ctx argv[0] = optional size in MiB.
+ * @return 0 when the test ran and passed, -1 for a bad size, an uncalibrated
+ *         or absent DDR3 path, or a failed test.
+ */
+int cli_ddr_test(const MenuCommandContext *ctx)
+{
+    uint32_t mib = CLI_DDR_DEFAULT_MIB;
+    ddrtest_result_t r;
+    static const char *const phase_name[] = { "none", "data bus", "address bus", "random fill" };
+    if (ctx->argc > 0 && (cli_parse_u32(ctx->argv[0], &mib) != 0 || mib < 1u || mib > CLI_DDR_MAX_MIB)) {
+        return cli_bad_value("size in MiB (1..512)", ctx->argv[0]);
+    }
+    if (!cli_core_check(&g_core_arb)) {
+        return -1;
+    }
+    if (!board_ddr_calibrated()) {
+        fmt_printf("%% DDR3 is not calibrated (see show ddr)\n");
+        return -1;
+    }
+    rtlnet_axi_arbiter_clear(RTLNET_PLAT_ARB_BASE);
+    rtlnet_axi_arbiter_err_clear(RTLNET_PLAT_ARB_BASE);
+    fmt_printf("DDR3 test: %u MiB at 0x%08X ", (unsigned)mib, (unsigned)RTLNET_PLAT_DDR_BASE);
+    g_ddr_dots = 0u;
+    if (ddrtest_run(RTLNET_PLAT_DDR_BASE, mib * 1024u * 1024u, CLI_DDR_SEED, cli_ddr_settle, cli_ddr_progress, &r) != 0) {
+        fmt_printf("\n%% DDR3 test rejected its arguments\n");
+        return -1;
+    }
+    fmt_printf("\n");
+    fmt_printf("  Data bus        : %s (128 walking ones and 128 walking zeros at the first and last line)",
+               (r.data_errors == 0u) ? "PASS" : "FAIL");
+    if (r.data_errors != 0u) {
+        fmt_printf(", %u mismatches", (unsigned)r.data_errors);
+    }
+    fmt_printf("\n  Address bus     : %s (%u address offsets)", (r.addr_errors == 0u) ? "PASS" : "FAIL",
+               (unsigned)r.addr_offsets);
+    if (r.addr_errors != 0u) {
+        fmt_printf(", %u mismatches", (unsigned)r.addr_errors);
+    }
+    fmt_printf("\n  Random fill     : %s (%u MiB written and verified)", (r.random_errors == 0u) ? "PASS" : "FAIL",
+               (unsigned)mib);
+    if (r.random_errors != 0u) {
+        fmt_printf(", %u mismatches", (unsigned)r.random_errors);
+    }
+    fmt_printf("\n  Write           : ");
+    cli_print_rate(ddrtest_rate_x100(r.write_bytes, r.write_ticks, RTLNET_PLAT_TICKS_PER_US));
+    fmt_printf("  (%u ms)\n  Read            : ", (unsigned)(r.write_ticks / (1000u * RTLNET_PLAT_TICKS_PER_US)));
+    cli_print_rate(ddrtest_rate_x100(r.read_bytes, r.read_ticks, RTLNET_PLAT_TICKS_PER_US));
+    fmt_printf("  (%u ms)\n", (unsigned)(r.read_ticks / (1000u * RTLNET_PLAT_TICKS_PER_US)));
+    if (r.first_phase != DDRTEST_PHASE_NONE) {
+        fmt_printf("  First mismatch  : %s at 0x%08X, expected 0x%08X, read 0x%08X\n", phase_name[(unsigned)r.first_phase],
+                   (unsigned)r.first_addr, (unsigned)r.first_expected, (unsigned)r.first_actual);
+    }
+    cli_print_arb_master(0u);
+    fmt_printf("DDR3 test %s\n", r.pass ? "PASS" : "FAIL");
+    return r.pass ? 0 : -1;
 }

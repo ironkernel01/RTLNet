@@ -39,21 +39,27 @@
  *  Revision    Author                          Description
  * ---------------------------------------------------------------------------
  *  10-22-2026  MenuBuilder AI / Steve Spano    Initial hierarchical command set
+ *  11-09-2026  MenuBuilder AI / Steve Spano    DDR3 window and arbiter model, calibration bit, cache calls
  * ===========================================================================
  */
 #include "host_platform.h"
 
 #include <stdio.h>    /* fwrite, fflush */
+#include <stdlib.h>   /* calloc, free */
 #include <string.h>   /* memcpy */
 #include <time.h>     /* clock */
 
 #include "cli_commands.h"
+#include "rtlnet_axi_arbiter.h"
 #include "rtlnet_classifier.h"
+#include "rtlnet_ddrtest.h"
 #include "rtlnet_mmio.h"
 #include "rtlnet_nexys_video_sysregs.h"
 #include "rtlnet_platform.h"
 #include "rtlnet_tcp_offload.h"
 
+/* VERSION of the modelled cores (the 10-22-2026 register maps); the system registers have their own. */
+#define HOST_CORE_VERSION  0x10222026u
 #define HOST_CAPTURE_MAX   65536u
 #define HOST_MAX_CORES     16u
 #define HOST_MAX_WORDS     64u
@@ -76,6 +82,18 @@ static clock_t   g_t0;
 static int       g_cls_on;                    /* the classifier model answers at RTLNET_PLAT_CLS_BASE */
 static uint32_t  g_cls_mode;                  /* CTRL.MODE */
 static uint32_t  g_cls_mem[HOST_CLS_WORDS];   /* every other register word as written */
+
+/* DDR3 window (sparse 4 KiB pages) and the arbiter register model. */
+#define HOST_DDR_PAGE_BYTES  4096u
+#define HOST_DDR_PAGES       (RTLNET_PLAT_DDR_SIZE / HOST_DDR_PAGE_BYTES)
+#define HOST_ARB_CAPS        0x01081101u   /* 1 master, 16-byte beat, ID_W 1, 8 outstanding, high-priority mask 1 */
+static int       g_ddr_arb_on;
+static int       g_ddr_cal;
+static unsigned  g_ddr_alias;
+static uint32_t  g_ddr_and = 0xFFFFFFFFu;
+static int       g_arb_err;
+static uint32_t  g_arb_cnt[6];             /* AW bursts, AR bursts, W beats, R beats, errors, wait cycles */
+static uint32_t *g_ddr_page[HOST_DDR_PAGES];
 
 /* Protocol wrapper CAPS / CPU_CAPS model. */
 static int       g_wrap_on;
@@ -401,6 +419,167 @@ void host_model_cls_poke(uint32_t offset, uint32_t value)
 }
 
 /**
+ * @brief DDR3 path model: the arbiter window present, the calibration bit.
+ * @param arbiter_present 1 when the arbiter window answers.
+ * @param calibrated      1 when CLK_STATUS shows init_calib_complete.
+ * @return None.
+ */
+void host_model_ddr_set(int arbiter_present, int calibrated)
+{
+    g_ddr_arb_on = arbiter_present;
+    g_ddr_cal    = calibrated;
+}
+
+/**
+ * @brief Fault injection: address bit stuck low in the memory window.
+ * @param bit Bit number (2..28); 0 removes the fault.
+ * @return None.
+ */
+void host_model_ddr_alias_bit(unsigned bit)
+{
+    g_ddr_alias = bit;
+}
+
+/**
+ * @brief Fault injection: AND mask applied to every word read from the window.
+ * @param mask Mask (0xFFFFFFFF = no fault).
+ * @return None.
+ */
+void host_model_ddr_data_and(uint32_t mask)
+{
+    g_ddr_and = mask;
+}
+
+/**
+ * @brief Set the arbiter's sticky illegal-burst flag and count one error.
+ * @return None.
+ */
+void host_model_ddr_error(void)
+{
+    g_arb_err = 1;
+    g_arb_cnt[4]++;
+}
+
+/**
+ * @brief Empty the memory window, clear the counters, the error flag and the injected faults.
+ * @return None.
+ */
+void host_model_ddr_clear(void)
+{
+    for (size_t i = 0; i < HOST_DDR_PAGES; i++) {
+        free(g_ddr_page[i]);
+        g_ddr_page[i] = NULL;
+    }
+    memset(g_arb_cnt, 0, sizeof(g_arb_cnt));
+    g_arb_err   = 0;
+    g_ddr_alias = 0u;
+    g_ddr_and   = 0xFFFFFFFFu;
+}
+
+/**
+ * @brief Page of the memory window holding an address.
+ * @param addr   Byte address inside the window.
+ * @param create 1 allocates a missing page.
+ * @return Page (HOST_DDR_PAGE_BYTES / 4 words) or NULL (absent, or outside the window).
+ */
+static uint32_t *host_ddr_page(uintptr_t addr, int create)
+{
+    uint32_t off;
+    uint32_t idx;
+    if (addr < RTLNET_PLAT_DDR_BASE || addr - RTLNET_PLAT_DDR_BASE >= RTLNET_PLAT_DDR_SIZE) {
+        return NULL;
+    }
+    off = (uint32_t)(addr - RTLNET_PLAT_DDR_BASE);
+    if (g_ddr_alias != 0u) {
+        off &= ~(1u << g_ddr_alias);
+    }
+    idx = off / HOST_DDR_PAGE_BYTES;
+    if (g_ddr_page[idx] == NULL && create) {
+        g_ddr_page[idx] = (uint32_t *)calloc(HOST_DDR_PAGE_BYTES / 4u, sizeof(uint32_t));
+    }
+    return g_ddr_page[idx];
+}
+
+/**
+ * @brief Memory window word index of an address (aliasing applied).
+ * @param addr Byte address inside the window.
+ * @return Word index inside its page.
+ */
+static uint32_t host_ddr_word(uintptr_t addr)
+{
+    uint32_t off = (uint32_t)(addr - RTLNET_PLAT_DDR_BASE);
+    if (g_ddr_alias != 0u) {
+        off &= ~(1u << g_ddr_alias);
+    }
+    return (off % HOST_DDR_PAGE_BYTES) / 4u;
+}
+
+/**
+ * @brief ddrtest host hook: word read from the DDR3 window model.
+ * @param addr Byte address.
+ * @return Stored word (0 for a never-written word), the injected data mask applied.
+ */
+uint32_t rtlnet_host_mem_read32(uintptr_t addr)
+{
+    uint32_t *pg = host_ddr_page(addr, 0);
+    g_arb_cnt[1]++;
+    g_arb_cnt[3]++;
+    return ((pg != NULL) ? pg[host_ddr_word(addr)] : 0u) & g_ddr_and;
+}
+
+/**
+ * @brief ddrtest host hook: word write into the DDR3 window model.
+ * @param addr  Byte address.
+ * @param value Word.
+ * @return None.
+ */
+void rtlnet_host_mem_write32(uintptr_t addr, uint32_t value)
+{
+    uint32_t *pg = host_ddr_page(addr, 1);
+    g_arb_cnt[0]++;
+    g_arb_cnt[2]++;
+    if (pg != NULL) {
+        pg[host_ddr_word(addr)] = value;
+    }
+}
+
+/**
+ * @brief Model of the arbiter register read mux.
+ * @param off Register offset.
+ * @return Register value.
+ */
+static uint32_t host_arb_read(uint32_t off)
+{
+    switch (off) {
+    case RTLNET_REG_ID:           return RTLNET_ARB_ID_VALUE;
+    case RTLNET_REG_VERSION:      return RTLNET_ARB_VERSION_VALUE;
+    case RTLNET_REG_CAPS:         return HOST_ARB_CAPS;
+    case RTLNET_ARB_REG_STATUS:   return g_arb_err ? RTLNET_ARB_STATUS_ERR : 0u;
+    default:
+        if (off >= RTLNET_ARB_MASTER_BASE && off < RTLNET_ARB_MASTER_BASE + RTLNET_ARB_MASTER_STRIDE && (off & 3u) == 0u &&
+            (off - RTLNET_ARB_MASTER_BASE) / 4u < 6u) {
+            return g_arb_cnt[(off - RTLNET_ARB_MASTER_BASE) / 4u];
+        }
+        return 0u;
+    }
+}
+
+/**
+ * @brief Model of the arbiter register writes: CTRL.CNT_CLEAR and STATUS.ERR write-1-to-clear.
+ * @param off   Register offset.
+ * @param value Value.
+ * @return None.
+ */
+static void host_arb_write(uint32_t off, uint32_t value)
+{
+    if (off == RTLNET_ARB_REG_CTRL && (value & RTLNET_ARB_CTRL_CNT_CLEAR) != 0u) {
+        memset(g_arb_cnt, 0, sizeof(g_arb_cnt));
+    } else if (off == RTLNET_ARB_REG_STATUS && (value & RTLNET_ARB_STATUS_ERR) != 0u) {
+        g_arb_err = 0;
+    }
+}
+
+/**
  * @brief Model of the board system-register read mux.
  * @param off Register offset.
  * @return Register value (fixed values, a running uptime, the RW registers).
@@ -417,7 +596,8 @@ static uint32_t host_sysreg_read(uint32_t off)
     case NXV_SYS_LEDS:        return g_leds & NXV_LED_WRITABLE_MASK;
     case NXV_SYS_SWITCHES:    return 0xA5u;
     case NXV_SYS_BUTTONS:     return NXV_BTN_C;
-    case NXV_SYS_CLK_STATUS:  return NXV_CLK_MMCM_LOCKED | (0x1Fu << NXV_CLK_ALIVE_SHIFT);
+    case NXV_SYS_CLK_STATUS:  return NXV_CLK_MMCM_LOCKED | (g_ddr_cal ? NXV_CLK_DDR_CALIB : 0u) |
+                                     (0x1Fu << NXV_CLK_ALIVE_SHIFT);
     case NXV_SYS_SCRATCH:     return g_scratch;
     case NXV_SYS_UPTIME_MS:   return plat_uptime_ms();
     case NXV_SYS_CPU_CLK_HZ:  return RTLNET_PLAT_CPU_CLK_HZ;
@@ -446,6 +626,9 @@ uint32_t rtlnet_host_reg_read32(uintptr_t addr)
     if (g_txo_on && addr >= RTLNET_PLAT_TXO_BASE && addr < RTLNET_PLAT_TXO_BASE + RTLNET_TXO_WINDOW_BYTES) {
         return host_txo_read((uint32_t)(addr - RTLNET_PLAT_TXO_BASE));
     }
+    if (g_ddr_arb_on && addr >= RTLNET_PLAT_ARB_BASE && addr < RTLNET_PLAT_ARB_BASE + 0x1000u) {
+        return host_arb_read((uint32_t)(addr - RTLNET_PLAT_ARB_BASE));
+    }
     if (g_wrap_on == 1 && addr == RTLNET_PLAT_PROT_BASE + 0x008u) {
         return 0x00000020u;                    /* CAPS: CPU_PATH_PRESENT */
     }
@@ -459,7 +642,7 @@ uint32_t rtlnet_host_reg_read32(uintptr_t addr)
         if (g_core_id[i] != 0u && addr >= g_core_base[i] && addr < g_core_base[i] + 0x10u) {
             switch ((uint32_t)(addr - g_core_base[i])) {
             case RTLNET_REG_ID:      return g_core_id[i];
-            case RTLNET_REG_VERSION: return NXV_SYS_VERSION_VALUE;
+            case RTLNET_REG_VERSION: return HOST_CORE_VERSION;
             default:                 return 0u;
             }
         }
@@ -487,6 +670,10 @@ void rtlnet_host_reg_write32(uintptr_t addr, uint32_t value)
     }
     if (g_txo_on && addr >= RTLNET_PLAT_TXO_BASE && addr < RTLNET_PLAT_TXO_BASE + RTLNET_TXO_WINDOW_BYTES) {
         host_txo_write((uint32_t)(addr - RTLNET_PLAT_TXO_BASE), value);
+        return;
+    }
+    if (g_ddr_arb_on && addr >= RTLNET_PLAT_ARB_BASE && addr < RTLNET_PLAT_ARB_BASE + 0x1000u) {
+        host_arb_write((uint32_t)(addr - RTLNET_PLAT_ARB_BASE), value);
         return;
     }
     if (addr >= RTLNET_PLAT_SYS_BASE && addr < RTLNET_PLAT_SYS_BASE + 0x1000u) {
@@ -628,6 +815,40 @@ void plat_led_set(unsigned index, int on)
 uint32_t plat_led_state(void)
 {
     return g_leds;
+}
+
+/**
+ * @brief Data cache calls: the host model has no caches.
+ * @param addr Unused.
+ * @param len  Unused.
+ * @return None.
+ */
+void plat_dcache_flush_range(uintptr_t addr, size_t len)
+{
+    (void)addr;
+    (void)len;
+}
+
+void plat_dcache_invalidate_range(uintptr_t addr, size_t len)
+{
+    (void)addr;
+    (void)len;
+}
+
+void plat_dcache_flush_all(void)
+{
+}
+
+void plat_dcache_invalidate_all(void)
+{
+}
+
+/**
+ * @brief Memory barrier (no-op on the host).
+ * @return None.
+ */
+void plat_mem_barrier(void)
+{
 }
 
 /**

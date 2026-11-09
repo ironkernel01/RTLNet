@@ -32,6 +32,7 @@ install is committed.
 | clock, reset | `clk`, `resetn` | cpu_clk 100 MHz from the board MMCM; `resetn` synchronous to `clk`, active low (board `rtlnet_reset_sync`) |
 | console | in `uart_rxd`, out `uart_txd` | USB-UART bridge, 115200 8N1; `uart_rxd` is asynchronous, idle high |
 | register master | `m_axi_aw*`, `m_axi_w*`, `m_axi_b*`, `m_axi_ar*`, `m_axi_r*` | AXI4-Lite master, 32-bit address and data, full processor addresses (0x44A0_0000..0x44AF_FFFF), into `rtlnet_axil_decoder`; one transaction at a time |
+| DDR3 master | `m_axi_ddr_*` | AXI4 master, 128-bit data, 32-bit address (`0x8000_0000`..`0x9FFF_FFFF`), no ID signals, on `clk` (`cpu_clk`) with `resetn`; the 32 to 128-bit width conversion is in the SmartConnect `sc_ddr`; the board top carries the port to the memory controller clock (`ui_clk`) through `rtlnet_axi_cdc` (`u_ddr_cdc`) |
 | interrupts | in `irq[7:0]` | level, active high, synchronous to `clk`; INTC inputs 0..7 |
 | frames to the network | out `m_axis_eth_tdata[63:0]`, `m_axis_eth_tkeep[7:0]`, `m_axis_eth_tvalid`, `m_axis_eth_tlast`; in `m_axis_eth_tready` | AXI DMA MM2S, RTLNet stream (architecture 4), complete Ethernet frames without FCS; to the protocol wrapper's `s_axis_cpu_eth_*` |
 | frames from the network | in `s_axis_eth_tdata[63:0]`, `s_axis_eth_tkeep[7:0]`, `s_axis_eth_tvalid`, `s_axis_eth_tlast`; out `s_axis_eth_tready` | AXI DMA S2MM, frames no protocol leaf claims, from the wrapper's `m_axis_cpu_eth_*` |
@@ -45,7 +46,7 @@ not use them). The frame streams are in `clk`; the protocol wrapper's CPU FIFOs 
 
 | Cell | IP | Configuration |
 |---|---|---|
-| `microblaze_0` | MicroBlaze V 1.0 (`microblaze_riscv`) | RV32, little endian, RV32I with M (hardware multiply, standard divider, `C_USE_MULDIV` 1), C (compressed, `C_USE_COMPRESSION` 1), Zicsr, Zba/Zbb/Zbs (`C_USE_BITMAN_A/_B/_S` 1), barrel shifter (performance), performance pipeline (`C_OPTIMIZATION` 0), no MMU, **no caches**, no FPU, no atomics, **no branch target cache** (kept off: no measured need, and it is not free in LUTs and timing), misaligned-access exceptions on (the BSP handles them transparently), interrupt input (normal), debug enabled (serial JTAG interface), D-AXI (`M_AXI_DP`) on, I-AXI off, ILMB and DLMB, `C_BASE_VECTORS` 0 (reset vector 0x0), bus exceptions off (a DECERR reads as data) |
+| `microblaze_0` | MicroBlaze V 1.0 (`microblaze_riscv`) | RV32, little endian, RV32I with M (hardware multiply, standard divider, `C_USE_MULDIV` 1), C (compressed, `C_USE_COMPRESSION` 1), Zicsr, Zba/Zbb/Zbs (`C_USE_BITMAN_A/_B/_S` 1), barrel shifter (performance), performance pipeline (`C_OPTIMIZATION` 0), no MMU, **8 KiB instruction cache and 8 KiB write-through data cache** (`C_USE_ICACHE` 1, `C_USE_DCACHE` 1, `C_DCACHE_USE_WRITEBACK` 0, 16-byte lines, both over `0x8000_0000`..`0x9FFF_FFFF` only; the LMB and the AXI BRAM are uncached), no FPU, no atomics, **no branch target cache** (kept off: no measured need, and it is not free in LUTs and timing), misaligned-access exceptions on (the BSP handles them transparently), interrupt input (normal), debug enabled (serial JTAG interface), D-AXI (`M_AXI_DP`) on, I-AXI off, ILMB and DLMB, `C_BASE_VECTORS` 0 (reset vector 0x0), bus exceptions off (a DECERR reads as data) |
 | `ilmb_v10`, `dlmb_v10` | LMB 3.0 | instruction and data local memory buses |
 | `ilmb_bram_if_cntlr`, `dlmb_bram_if_cntlr` | LMB BRAM controller 4.0 | no ECC |
 | `lmb_bram` | Block Memory Generator 8.4 | true dual port, BRAM controller mode; **512 KiB = 128 RAMB36** (code, data, stack, heap, lwIP) |
@@ -59,11 +60,11 @@ not use them). The frame streams are in `clk`; the protocol wrapper's CPU FIFOs 
 | `axi_periph` | AXI Interconnect 2.1 | 1 slave (M_AXI_DP), 6 masters: UART, timer, INTC, `M_AXI_RTLNET`, DMA registers, memory path |
 | `axi_mem` | AXI Interconnect 2.1 | 3 slaves (memory path from `axi_periph`, DMA MM2S, DMA S2MM), 1 master (AXI BRAM controller); 32 -> 64-bit conversion for the CPU path |
 | `rst_cpu` | Processor System Reset 5.0 | `ext_reset_in` = port `resetn` (active low), `mb_debug_sys_rst` from the MDM; `dcm_locked` tied 1 |
+| `sc_ddr` | SmartConnect 1.0 | 2 slave ports (S00 instruction cache `M_AXI_IC`, S01 data cache `M_AXI_DC`), 1 master port to the exported `M_AXI_DDR`, one clock (`aclk` = `clk`); 32 to 128-bit width conversion, no clock crossing; reset `aresetn` from `rst_cpu` |
 | `const_one` | inline constant 1.0 | `dcm_locked` tie |
 
-No clocking wizard: every clock pin is the `clk` port (`FREQ_HZ` 100 MHz). All firmware runs from internal
-block RAM; no external memory is used. Block RAM of the core: 160 RAMB36 (LMB 128, AXI BRAM 32) of the
-XC7A200T's 365.
+No clocking wizard: every clock pin is the `clk` port (`FREQ_HZ` 100 MHz), the SmartConnect included. All firmware runs from internal
+block RAM; no firmware section is placed in DDR3, which the `ddr test` memory test uses and, later, the video frame store. Block RAM of the core: 160 RAMB36 (LMB 128, AXI BRAM 32) plus the cache RAM of the processor (a few RAMB36 and RAMB18, see the build totals in the board document).
 
 ## 4. Address map
 
@@ -75,6 +76,7 @@ XC7A200T's 365.
 | 0x4120_0000 | 64 KiB | AXI INTC |
 | 0x41C0_0000 | 64 KiB | AXI Timer |
 | 0x44A0_0000 | 1 MiB | `M_AXI_RTLNET` (RTLNet register window, decoded by the board top) |
+| 0x8000_0000 | 512 MiB | `M_AXI_DDR` (DDR3 through the 8 KiB instruction cache and the 8 KiB write-through data cache; only this window is cacheable; decoded by `sc_ddr`, carried to `ui_clk` by `rtlnet_axi_cdc`, served by `rtlnet_axi_arbiter` and `rtlnet_ddr`) |
 | 0xC000_0000 | 128 KiB | AXI BRAM: DMA frame buffers (MicroBlaze data side and both DMA channels) |
 
 Interrupt inputs: 0..7 = `irq[7:0]`, 8 = timer, 9 = UART, 10 = DMA MM2S, 11 = DMA S2MM. Reset vector 0x0 (`C_BASE_VECTORS`); exceptions and
@@ -242,7 +244,7 @@ frame is copied into a pool pbuf with 32-bit reads (`axi_get_words`) and given t
 counted (`rx_no_pbuf`); an S2MM error status resets the DMA and re-arms (`rx_errors`, `dma_resets`). While
 no transfer is armed the wrapper's 16 KiB CPU receive FIFO holds the frames. Transmit: `linkoutput` copies
 the pbuf chain into one of two 2 KiB TX buffers with 32-bit writes only (`axi_put_chain`, section 9.10), waits
-at most 2 ms for the previous MM2S transfer and starts the next one (`tx_timeouts`, `tx_too_long`, `tx_errors`). No caches exist, so the buffers need no
+at most 2 ms for the previous MM2S transfer and starts the next one (`tx_timeouts`, `tx_too_long`, `tx_errors`). The AXI BRAM is outside the cached window, so the buffers need no
 flush or invalidate. A channel counts as busy only while it runs and is not idle: `XAxiDma_Busy` reports a
 halted channel (never started, or after a reset) as busy, which kept the first transmit waiting forever.
 
@@ -732,3 +734,4 @@ Details: `boards/nexys_video/documentation/rtlnet_nexys_video.md` sections 6.3 a
 | 10-22-2026 | TCP throughput tuning: netif TX/RX copies as 32-bit AXI accesses, optional CPU profile (`RTLNET_NETIF_PROFILE`), `TCP_SND_BUF` 24 x MSS, `TCP_WND` 8 x MSS, 32-bit lwIP checksum, memory resized (section 9.10) |
 | 11-09-2026 | Processor changed from the classic MicroBlaze 11.0 to MicroBlaze V (RV32IMC, Zicsr, Zba/Zbb/Zbs, no caches) with `mdm_riscv`; RISC-V toolchain, BSP flags check and linker template; `Xil_ExceptionDisable()` in the platform layer; measurements in `boards/nexys_video/documentation/rtlnet_nexys_video.md` section 6.7 |
 | 11-09-2026 | JTAG UART of the MDM removed (CDC gate passes); address 0x4140_0000 unmapped; `axi_periph` has 6 masters; JTAG load of an ELF with `boards/nexys_video/scripts/jtag_load_elf.ps1` |
+| 11-09-2026 | Phase 0 stage 1: 8 KiB instruction and 8 KiB write-through data caches over `0x8000_0000..0x9FFF_FFFF`, SmartConnect `sc_ddr` (one clock, `cpu_clk`), exported 128-bit `M_AXI_DDR` on `clk`; the board top crosses it to `ui_clk` in `rtlnet_axi_cdc`; results in `boards/nexys_video/documentation/rtlnet_nexys_video.md` section 6.8 |

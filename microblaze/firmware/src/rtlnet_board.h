@@ -32,6 +32,7 @@ typedef struct {
 uint32_t board_sys_read(uint32_t offset);
 void     board_sys_write(uint32_t offset, uint32_t value);
 uint32_t board_clk_khz(unsigned index);
+int      board_ddr_calibrated(void);
 int      board_probe(uintptr_t base, uint32_t expected_id, board_probe_t *out);
 uint32_t board_debug_read32(uintptr_t addr);
 void     board_debug_write32(uintptr_t addr, uint32_t value);

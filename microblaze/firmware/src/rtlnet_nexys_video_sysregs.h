@@ -15,6 +15,10 @@
  * ignore writes; partial-strobe writes are ignored (architecture section 5).
  *
  * This header holds offsets, bit positions and contract prose only.
+ *
+ * Revision: 11-09-2026
+ *   * 10-22-2026: initial version.
+ *   * 11-09-2026: CLK_STATUS bit 1 = DDR3 calibration complete; VERSION 11-09-2026.
  */
 #ifndef RTLNET_NEXYS_VIDEO_SYSREGS_H
 #define RTLNET_NEXYS_VIDEO_SYSREGS_H
@@ -41,7 +45,7 @@
 
 /* Register values. */
 #define NXV_SYS_ID_VALUE        0x4E585644u   /* "NXVD" */
-#define NXV_SYS_VERSION_VALUE   0x10222026u   /* 10-22-2026 */
+#define NXV_SYS_VERSION_VALUE   0x11092026u   /* 11-09-2026 */
 
 /* CAPS bits. */
 #define NXV_CAPS_NETWORK        0x00000001u   /* built with RTLNET_WITH_NETWORK */
@@ -63,6 +67,7 @@
 
 /* CLK_STATUS bits. */
 #define NXV_CLK_MMCM_LOCKED     0x00000001u
+#define NXV_CLK_DDR_CALIB       0x00000002u   /* DDR3 controller init_calib_complete (synchronized) */
 #define NXV_CLK_ALIVE_SHIFT     8u            /* [12:8] clock i measured nonzero */
 
 /* Clock measurement: CLK_MEAS[i] counts both edges of a divide-by-32 beacon of

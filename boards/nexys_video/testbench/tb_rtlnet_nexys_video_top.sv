@@ -14,6 +14,13 @@
 //   * PHY reset pin low after reset release, high POR_RESET_MS later.
 //   * Stub windows (MAC, MDIO, ECHO, PROTOCOL and a protocol leaf,
 //     CLASSIFIER): OKAY and ID 0; an unmapped address: DECERR.
+//   * DDR3 path (RTLNET_DDR_SIM: the controller is rtlnet_ddr_sim): the ui_clk reset releases,
+//     init_calib_complete is low right after reset release and CLK_STATUS bit 1 reads 1 later;
+//     the arbiter window (0x44A0_4000) reads ID "ARBT", VERSION, CAPS (1 master, 16-byte beat),
+//     idle STATUS and zero counters; an unmapped address next to it gives DECERR.
+//   * DDR3 data path through u_ddr_cdc, the arbiter and the memory model, driven by the stub's
+//     ddr_write / ddr_read (one beat) and ddr_write_burst / ddr_read_burst (4 beats): data
+//     compare, a partial-strobe write, arbiter AW_BURSTS 3 and ERRORS 0.
 //   * UART: sim stub transmit reaches uart_rx_out, bench transmit on uart_tx_in
 //     reaches the sim stub receiver.
 //   * CPU RESET button: asserts every domain, SCRATCH and uptime restart.
@@ -22,8 +29,10 @@
 // (10 us) so the uptime, clock windows and PHY timer run in simulation.
 // Ends with one anchored verdict line from rtlnet_tb_pkg::tb_verdict.
 // Language: SystemVerilog-2012 (simulation only).
-// Revision: 10-22-2026
+// Revision: 11-09-2026
 //   * 10-22-2026: initial version.
+//   * 11-09-2026: DDR3 calibration status, arbiter window, VERSION 11-09-2026.
+//   * 11-09-2026: DDR3 data path test through the cpu_clk to ui_clk bridge.
 // -----------------------------------------------------------------------------
 `timescale 1ns / 1ps
 
@@ -64,6 +73,20 @@ module tb_rtlnet_nexys_video_top;
   wire        eth_rst_b;
   logic       eth_int_b = 1'b1;
   logic       eth_pme_b = 1'b0;
+  wire  [15:0] ddr3_dq;
+  wire  [1:0]  ddr3_dqs_n;
+  wire  [1:0]  ddr3_dqs_p;
+  wire  [14:0] ddr3_addr;
+  wire  [2:0]  ddr3_ba;
+  wire         ddr3_ras_n;
+  wire         ddr3_cas_n;
+  wire         ddr3_we_n;
+  wire         ddr3_reset_n;
+  wire  [0:0]  ddr3_ck_p;
+  wire  [0:0]  ddr3_ck_n;
+  wire  [0:0]  ddr3_cke;
+  wire  [1:0]  ddr3_dm;
+  wire  [0:0]  ddr3_odt;
 
   pullup (eth_mdio);
 
@@ -98,7 +121,21 @@ module tb_rtlnet_nexys_video_top;
     .eth_mdio    (eth_mdio),
     .eth_rst_b   (eth_rst_b),
     .eth_int_b   (eth_int_b),
-    .eth_pme_b   (eth_pme_b)
+    .eth_pme_b   (eth_pme_b),
+    .ddr3_dq     (ddr3_dq),
+    .ddr3_dqs_n  (ddr3_dqs_n),
+    .ddr3_dqs_p  (ddr3_dqs_p),
+    .ddr3_addr   (ddr3_addr),
+    .ddr3_ba     (ddr3_ba),
+    .ddr3_ras_n  (ddr3_ras_n),
+    .ddr3_cas_n  (ddr3_cas_n),
+    .ddr3_we_n   (ddr3_we_n),
+    .ddr3_reset_n(ddr3_reset_n),
+    .ddr3_ck_p   (ddr3_ck_p),
+    .ddr3_ck_n   (ddr3_ck_n),
+    .ddr3_cke    (ddr3_cke),
+    .ddr3_dm     (ddr3_dm),
+    .ddr3_odt    (ddr3_odt)
   );
 
   // Register helpers through the sim stub.
@@ -172,6 +209,9 @@ module tb_rtlnet_nexys_video_top;
     bit          ok;
     real         f_mhz[5];
     string       names[5];
+    logic [127:0] wd [4];
+    logic [127:0] rdd [4];
+    logic [127:0] d128;
 
     f_mhz[0] = 125.0; names[0] = "clk125";
     f_mhz[1] = 125.0; names[1] = "clk125_90";
@@ -185,10 +225,11 @@ module tb_rtlnet_nexys_video_top;
     dut.u_cpu.wait_reset_release();
     tb_check(led[0] === 1'b1, "led[0] shows MMCM lock");
     tb_check(eth_rst_b === 1'b0, "PHY held in reset right after reset release");
+    tb_check(dut.ddr_calib === 1'b0, "DDR3 not calibrated right after reset release");
 
     // Identity.
     check_reg(WIN + 32'h000, 32'h4E58_5644, "ID");
-    check_reg(WIN + 32'h004, 32'h1022_2026, "VERSION");
+    check_reg(WIN + 32'h004, 32'h1109_2026, "VERSION");
     check_reg(WIN + 32'h008, 32'h0508_0800, "CAPS");
     check_reg(WIN + 32'h00C, BUILD_ID, "BUILD_ID");
     check_reg(WIN + 32'h010, 32'h0000_0001, "BUILD_DIRTY");
@@ -234,7 +275,8 @@ module tb_rtlnet_nexys_video_top;
 
     // Clock status and measurements (two windows have completed by now).
     rd(WIN + 32'h020, d, r);
-    tb_check(d == 32'h0000_1F01, $sformatf("CLK_STATUS 0x%08x, expected 0x00001F01", d));
+    tb_check(d == 32'h0000_1F03, $sformatf("CLK_STATUS 0x%08x, expected 0x00001F03 (lock, DDR3 calibrated, five clocks alive)", d));
+    tb_check(dut.ddr_resetn === 1'b1 && dut.ddr_calib === 1'b1, "ui_clk reset released and DDR3 calibrated");
     for (int i = 0; i < 5; i++) begin
       int want;
       want = meas_expect(f_mhz[i]);
@@ -265,10 +307,44 @@ module tb_rtlnet_nexys_video_top;
     check_reg(WIN + 32'h1_0000, 32'h0, "PROTOCOL window stub ID");
     check_reg(WIN + 32'h1_5000, 32'h0, "UDP socket leaf (protocol window) stub ID");
     check_reg(WIN + 32'h2_0000, 32'h0, "CLASSIFIER window stub ID");
+
+    // Arbiter window: identity, build configuration, idle status, zero counters.
+    check_reg(WIN + 32'h0_4000, 32'h4152_4254, "ARBITER ID");
+    check_reg(WIN + 32'h0_4004, 32'h1109_2026, "ARBITER VERSION");
+    check_reg(WIN + 32'h0_4008, 32'h0108_1101, "ARBITER CAPS (1 master, 16-byte beat, ID_W 1, 8 outstanding, HP mask 1)");
+    check_reg(WIN + 32'h0_4010, 32'h0000_0000, "ARBITER STATUS idle");
+    check_reg(WIN + 32'h0_4100, 32'h0000_0000, "ARBITER master 0 AW_BURSTS");
+    check_reg(WIN + 32'h0_4110, 32'h0000_0000, "ARBITER master 0 ERRORS");
+    wr(WIN + 32'h0_400C, 32'h0001_0000, 4'hF, r);
+    tb_check(r == RESP_OKAY, "ARBITER CNT_CLEAR write OKAY");
+
+    // DDR3 data path (cpu_clk master -> u_ddr_cdc -> u_arb -> memory model).
+    dut.u_cpu.ddr_write(32'h8000_0100, 128'h0123_4567_89AB_CDEF_FEDC_BA98_7654_3210, 16'hFFFF, r);
+    tb_check(r == 2'b00, $sformatf("DDR3 write resp %b", r));
+    dut.u_cpu.ddr_read(32'h8000_0100, d128, r);
+    tb_check(r == 2'b00 && d128 === 128'h0123_4567_89AB_CDEF_FEDC_BA98_7654_3210,
+             $sformatf("DDR3 read back 0x%032x resp %b", d128, r));
+    dut.u_cpu.ddr_write(32'h8000_0100, 128'hFFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF, 16'h000F, r);
+    dut.u_cpu.ddr_read(32'h8000_0100, d128, r);
+    tb_check(r == 2'b00 && d128 === 128'h0123_4567_89AB_CDEF_FEDC_BA98_FFFF_FFFF,
+             $sformatf("DDR3 partial-strobe write: 0x%032x", d128));
+    wd[0] = 128'h1111_1111_1111_1111_1111_1111_1111_1111;
+    wd[1] = 128'h2222_2222_2222_2222_2222_2222_2222_2222;
+    wd[2] = 128'h3333_3333_3333_3333_3333_3333_3333_3333;
+    wd[3] = 128'h4444_4444_4444_4444_4444_4444_4444_4444;
+    dut.u_cpu.ddr_write_burst(32'h8000_0200, 4, wd, 16'hFFFF, r);
+    tb_check(r == 2'b00, $sformatf("DDR3 4-beat write resp %b", r));
+    dut.u_cpu.ddr_read_burst(32'h8000_0200, 4, rdd, r);
+    tb_check(r == 2'b00 && rdd[0] === wd[0] && rdd[1] === wd[1] && rdd[2] === wd[2] && rdd[3] === wd[3],
+             "DDR3 4-beat read back");
+    tb_check(dut.u_cpu.ddr_timeouts == 0, "DDR3 transactions without timeout");
+    check_reg(WIN + 32'h0_4100, 32'h0000_0003, "ARBITER master 0 AW_BURSTS after the DDR3 writes");
+    check_reg(WIN + 32'h0_4110, 32'h0000_0000, "ARBITER master 0 ERRORS after the DDR3 traffic");
+
     wr(WIN + 32'h0_1004, 32'hDEAD_BEEF, 4'hF, r);
     tb_check(r == RESP_OKAY, "stub write OKAY");
-    rd(WIN + 32'h0_4000, d, r);
-    tb_check(r == RESP_DECERR && d == 32'h0, $sformatf("unmapped 0x44A04000: resp %b data 0x%08x, expected DECERR 0", r, d));
+    rd(WIN + 32'h0_5000, d, r);
+    tb_check(r == RESP_DECERR && d == 32'h0, $sformatf("unmapped 0x44A05000: resp %b data 0x%08x, expected DECERR 0", r, d));
     wr(WIN + 32'h3_0000, 32'h1, 4'hF, r);
     tb_check(r == RESP_DECERR, "unmapped write DECERR");
 
@@ -295,6 +371,7 @@ module tb_rtlnet_nexys_video_top;
     tb_check(dut.cpu_resetn_sync === 1'b0 && dut.axis_resetn === 1'b0 && dut.proto_resetn === 1'b0 &&
              dut.clk125_resetn === 1'b0 && dut.clk200_resetn === 1'b0, "button asserts every domain reset");
     tb_check(eth_rst_b === 1'b0, "button resets the PHY power-on timer");
+    tb_check(dut.ddr_resetn === 1'b0 && dut.ddr_calib === 1'b0, "button asserts the ui_clk reset and drops DDR3 calibration");
     cpu_resetn = 1'b1;
     dut.u_cpu.wait_reset_release();
     check_reg(WIN + 32'h024, 32'h0, "SCRATCH after reset");

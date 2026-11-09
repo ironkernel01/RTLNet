@@ -10,7 +10,9 @@
 #     directory. Outputs go to boards/nexys_video/build/.
 #   * Steps: create the block design rtlnet_cpu (microblaze/
 #     hdl/rtlnet_cpu_bd.tcl) under build/bd, generate output products with
-#     global synthesis, read the RTL through filelists, read the XDC,
+#     global synthesis, generate the DDR3 controller IP rtlnet_ddr_mig from
+#     cores/rtlnet_ddr/ip/rtlnet_ddr_mig.prj under build/ip (nothing generated
+#     is kept in the repository), read the RTL through filelists, read the XDC,
 #     synth_design (top rtlnet_nexys_video_top, xc7a200tsbg484-1, generics
 #     BUILD_ID and BUILD_DIRTY, define RTLNET_WITH_NETWORK only for the
 #     network build), scripts/rtlnet_constrain_cdc.tcl, opt/place/phys_opt/
@@ -26,7 +28,7 @@
 #       21 utilization above 80 %   22 check_timing: unclocked or
 #                                      unconstrained endpoints, loops
 #       23 user asynchronous reset endpoints or latches outside the named
-#          exceptions (rtlnet_reset_sync, vendor block design)
+#          exceptions (rtlnet_reset_sync, vendor block design, vendor DDR3 IP)
 #       24 critical warnings during implementation
 #       27 report_cdc Critical/Warning finding, or a methodology finding
 #          (Warning or worse) without a waiver in this script
@@ -38,9 +40,14 @@
 # Usage: vivado -mode batch -source build_bitstream.tcl -tclargs [network 0|1]
 #          [build_id <8 hex>] [dirty 0|1]   (pairs as "name value" or name=value)
 #   Normally run through boards/nexys_video/scripts/build.ps1.
-# Revision: 10-22-2026
+# Revision: 11-09-2026
 #   * 10-22-2026: initial version.
 #   * 10-22-2026: XSA export (write_hw_platform -fixed).
+#   * 11-09-2026: Explore directives and a post-route phys_opt_design while WNS is negative (MicroBlaze V caches).
+#   * 11-09-2026: u_ddr_cdc (rtlnet_axi_cdc, five packet FIFOs): expected fifo instances +5 in both builds; ASYNC_REG on the MIG
+#     reset synchronizers (CDC-8); methodology waivers for the vendor MIG (LUTAR-1, PDRC-190, XDCB-5), each with required targets.
+#   * 11-09-2026: DDR3 controller IP generated from the MIG project; expected rtlnet_axil_cdc instances +1 (the
+#     arbiter's register crossing) in both builds.
 # -----------------------------------------------------------------------------
 
 # Script-relative roots (survive tree moves; no dependence on the caller's cwd).
@@ -94,7 +101,7 @@ puts "rtlnet_build: repo $REPO"
 puts "rtlnet_build: build_id $BUILD_ID_HEX dirty $opt(dirty) network $NETWORK part $PART"
 
 file mkdir $BUILD_DIR
-file delete -force $RPT_DIR [file join $BUILD_DIR bd]
+file delete -force $RPT_DIR [file join $BUILD_DIR bd] [file join $BUILD_DIR ip]
 file mkdir $RPT_DIR
 
 # ---------------------------------------------------------------------------
@@ -142,6 +149,14 @@ if {[catch {
 } err]} { nv_exit 12 "block design: $err" }
 
 # ---------------------------------------------------------------------------
+# DDR3 controller IP (MIG, generated from the committed project file).
+# ---------------------------------------------------------------------------
+if {[catch {
+  source [file join $REPO cores rtlnet_ddr ip rtlnet_ddr_mig.tcl]
+  rtlnet_ddr_mig_create [file join $BUILD_DIR ip]
+} err]} { nv_exit 12 "DDR3 controller IP: $err" }
+
+# ---------------------------------------------------------------------------
 # RTL and constraints.
 # ---------------------------------------------------------------------------
 read_filelist $REPO cores/rtlnet_common/hdl/rtlnet_common.f
@@ -174,8 +189,8 @@ write_checkpoint -force [file join $BUILD_DIR post_synth.dcp]
 # FIFOs u_mac/u_rx_fifo, u_mac/u_tx_fifo, u_protocol/u_ingress_fifo,
 # u_protocol/u_egress_fifo and the socket layer's u_rx_fifo, u_tx_fifo and
 # u_tx_desc_fifo, and the CPU network path queues u_protocol/u_cpu_rx_fifo and
-# u_protocol/u_cpu_tx_fifo, plus the checksum offload's u_protocol/g_cpu.g_offload.u_cpu_offload/u_tx/u_tx_fifo (fifo 10); register crossings of the MAC, the protocol wrapper
-# and the UDP echo, plus the CPU-path classifier's and the checksum offload's u_axil_cdc (axil_cdc 5); Gray counters u_mac/u_tx_count_sync and the
+# u_protocol/u_cpu_tx_fifo, plus the checksum offload's u_protocol/g_cpu.g_offload.u_cpu_offload/u_tx/u_tx_fifo, and the DDR3 bridge u_ddr_cdc's five FIFOs u_aw/w/b/ar/r_fifo (fifo 15); register crossings of the MAC, the protocol wrapper
+# and the UDP echo, plus the CPU-path classifier's and the checksum offload's u_axil_cdc and the DDR3 arbiter's (axil_cdc 6); Gray counters u_mac/u_tx_count_sync and the
 # wrapper's four ingress/egress counter crossings and its CPU transmit reject
 # counter u_cnt_cpu_reject_sync (gray 6). A change of these
 # counts fails the build until the expectation is reviewed and updated here.
@@ -184,10 +199,29 @@ if {$NETWORK} {
   if {![file exists $rgmii_xdc]} { nv_exit 11 "XDC not found: $rgmii_xdc" }
   if {[catch {read_xdc $rgmii_xdc} err]} { nv_exit 13 "RGMII constraints: $err" }
   set ::rtlnet_cdc_required {sync reset gray fifo axil_cdc}
-  set ::rtlnet_cdc_expect   {fifo 10 axil_cdc 5 gray 6}
+  set ::rtlnet_cdc_expect   {fifo 15 axil_cdc 6 gray 6}
 } else {
-  set ::rtlnet_cdc_required {sync reset}
-  set ::rtlnet_cdc_expect   {fifo 0 axil_cdc 0 gray 0}
+  set ::rtlnet_cdc_required {sync reset axil_cdc fifo}
+  set ::rtlnet_cdc_expect   {fifo 5 axil_cdc 1 gray 0}
+}
+# CDC-8 (asynchronous reset synchronized with missing ASYNC_REG): the AMD memory controller IP
+# (u_ddr/g_amd.u_ddr/u_mig) synchronizes the reset into its reference-clock and divided-clock domains
+# with FDPE shift chains (12 and 15 stages) that carry no ASYNC_REG property. The property is set here on
+# the first two stages of each chain, u_iodelay_ctrl/rst_ref_sync_r_reg[0][0..1] and
+# u_ddr3_infrastructure/rstdiv0_sync_r_reg[0..1] (the asynchronously preset first stage, CDC-8, and the
+# stage that samples it). ASYNC_REG on the whole chain makes PDRC-190 flag a chain the placer cannot
+# pack into one slice. A missing target fails the build.
+set mig_re_list {
+  {^u_ddr/g_amd\.u_ddr/u_mig/u_rtlnet_ddr_mig_mig/u_iodelay_ctrl/rst_ref_sync_r_reg\[0\]\[[01]\]$}
+  {^u_ddr/g_amd\.u_ddr/u_mig/u_rtlnet_ddr_mig_mig/u_ddr3_infrastructure/rstdiv0_sync_r_reg\[[01]\]$}
+}
+set mig_fdpe [get_cells -quiet -hierarchical -filter {REF_NAME == FDPE}]
+foreach re $mig_re_list {
+  set cells {}
+  foreach c $mig_fdpe { if {[regexp -- $re $c]} { lappend cells $c } }
+  if {[llength $cells] == 0} { nv_exit 13 "MIG ASYNC_REG target missing: $re" }
+  set_property ASYNC_REG TRUE $cells
+  puts "rtlnet_build: ASYNC_REG set on [llength $cells] MIG reset synchronizer cells ($re)"
 }
 set ::rtlnet_cdc_report [file join $RPT_DIR cdc_instances.txt]
 if {[catch {source [file join $REPO scripts rtlnet_constrain_cdc.tcl]} err]} { nv_exit 13 "CDC constraints: $err" }
@@ -195,10 +229,20 @@ if {[catch {source [file join $REPO scripts rtlnet_constrain_cdc.tcl]} err]} { n
 # ---------------------------------------------------------------------------
 # Implementation.
 # ---------------------------------------------------------------------------
+# Timing-driven directives: the MicroBlaze V with its caches has a 8-level control path
+# (stall into the pipeline reset) that the default flow misses by a few hundred ps.
 if {[catch {opt_design} err]}   { nv_exit 25 "opt_design: $err" }
-if {[catch {place_design} err]} { nv_exit 26 "place_design: $err" }
-if {[catch {phys_opt_design} err]} { nv_exit 26 "phys_opt_design: $err" }
-if {[catch {route_design} err]} { nv_exit 30 "route_design: $err" }
+if {[catch {place_design -directive Explore} err]} { nv_exit 26 "place_design: $err" }
+if {[catch {phys_opt_design -directive AggressiveExplore} err]} { nv_exit 26 "phys_opt_design: $err" }
+if {[catch {route_design -directive Explore} err]} { nv_exit 30 "route_design: $err" }
+# Post-route physical optimization, only while setup slack is negative.
+set wns_pr [get_property SLACK [lindex [get_timing_paths -setup -max_paths 1 -nworst 1] 0]]
+puts "rtlnet_build: post-route WNS $wns_pr ns"
+if {$wns_pr ne "" && $wns_pr < 0} {
+  if {[catch {phys_opt_design -directive AggressiveExplore} err]} { nv_exit 30 "post-route phys_opt_design: $err" }
+  set wns_pr [get_property SLACK [lindex [get_timing_paths -setup -max_paths 1 -nworst 1] 0]]
+  puts "rtlnet_build: post-route phys_opt WNS $wns_pr ns"
+}
 write_checkpoint -force [file join $BUILD_DIR post_route.dcp]
 
 # ---------------------------------------------------------------------------
@@ -280,12 +324,13 @@ puts "rtlnet_build: utilization [join $util_summary {, }]"
 
 # ---------------------------------------------------------------------------
 # Gate: asynchronous clear/preset endpoints and latches. Named exceptions:
-# rtlnet_reset_sync instances (u_rst_*) and the vendor block design inside
-# the CPU core (u_cpu/u_bd).
+# rtlnet_reset_sync instances (u_rst_*), the vendor block design inside the
+# CPU core (u_cpu/u_bd) and the vendor DDR3 controller IP (u_ddr/g_amd.u_ddr/u_mig).
 # ---------------------------------------------------------------------------
 set latches [get_cells -quiet -hierarchical -filter {PRIMITIVE_SUBGROUP == latch || REF_NAME =~ LD*}]
 set n_async_rs 0
 set n_async_bd 0
+set n_async_mig 0
 set bad_async {}
 foreach c [get_cells -quiet -hierarchical -filter {REF_NAME == FDCE || REF_NAME == FDPE}] {
   set p [get_pins -quiet $c/CLR]
@@ -297,9 +342,12 @@ foreach c [get_cells -quiet -hierarchical -filter {REF_NAME == FDCE || REF_NAME 
   if {$parent ne ""} { set pref "[get_property REF_NAME $parent] [get_property ORIG_REF_NAME $parent]" }
   if {[regexp {/pipe_reg\[[0-9]+\]$} $c] && [regexp {(^| )rtlnet_reset_sync} $pref]} { incr n_async_rs; continue }
   if {[string match "u_cpu/u_bd/*" $c]} { incr n_async_bd; continue }
+  # The AMD memory controller IP (instance u_ddr/g_amd.u_ddr/u_mig) is vendor code with its own
+  # FDCE/FDPE reset structure (infrastructure reset synchronizers); only that instance is excluded.
+  if {[string match "u_ddr/g_amd.u_ddr/u_mig/*" $c]} { incr n_async_mig; continue }
   lappend bad_async $c
 }
-puts "rtlnet_build: asynchronous reset endpoints: rtlnet_reset_sync $n_async_rs, vendor block design $n_async_bd, other [llength $bad_async]; latches [llength $latches]"
+puts "rtlnet_build: asynchronous reset endpoints: rtlnet_reset_sync $n_async_rs, vendor block design $n_async_bd, vendor memory controller $n_async_mig, other [llength $bad_async]; latches [llength $latches]"
 if {[llength $latches] > 0} { nv_exit 23 "latches: [lrange $latches 0 9]" }
 if {[llength $bad_async] > 0} { nv_exit 23 "user asynchronous reset endpoints: [lrange $bad_async 0 9]" }
 
@@ -338,8 +386,24 @@ proc nv_waive_reset_and {desc} {
   }
   return 1
 }
-# Waivers: {rule test rationale}; test is a regexp on the description, or
-# "proc:<name>" for a Tcl test procedure.
+# Waiver test for LUTAR-1 in the vendor MIG: the LUT is u_iodelay_ctrl/rstdiv2_sync_r[11]_i_1 and every
+# asynchronous pin it drives is a PRE pin of an rstdiv0_sync_r1_reg_rep cell of u_ddr3_infrastructure.
+proc nv_waive_mig_lutar {desc} {
+  set m {u_ddr/g_amd\.u_ddr/u_mig/u_rtlnet_ddr_mig_mig}
+  set lut_re {/u_iodelay_ctrl/rstdiv2_sync_r\[11\]_i_1, }
+  if {![regexp "^LUT cell ${m}${lut_re}" $desc]} { return 0 }
+  set pins [regexp -all -inline {\S+/(?:CLR|PRE)\M} $desc]
+  if {[llength $pins] == 0} { return 0 }
+  foreach p $pins {
+    if {![regexp "^$m/u_ddr3_infrastructure/rstdiv0_sync_r1_reg_rep(__\[0-9\]+)?/PRE\$" [string trimright $p ",."]]} { return 0 }
+  }
+  return 1
+}
+# Waivers: {rule test rationale ?required?}; test is a regexp on the description, or
+# "proc:<name>" for a Tcl test procedure. A waiver with a required list names the targets that
+# must each match (the first capture group of a regexp test is the target key, "match" for a proc
+# or a test without a capture group); a required target that matched no finding fails the build
+# (stale waiver or changed IP).
 set meth_waivers {
   {LUTAR-1 {^LUT cell u_cpu/u_bd/\S+, with 2 or more inputs, drives asynchronous preset/clear pin\(s\) u_cpu/u_bd/}
            {vendor MDM JTAG control logic inside the MicroBlaze block design}}
@@ -349,7 +413,17 @@ set meth_waivers {
            {report_cdc (gated above: no Critical/Warning) shows every crossing synchronized; the asynchronous groups are the MDM BSCAN clocks of the vendor IP}}
   {TIMING-47 {^A False Path timing constraint is set between synchronous clocks rgmii_rxc_v and rgmii_rxc }
            {RGMII same-edge capture: the opposite-edge setup and same-edge hold pairs of the DDR input describe no capture (rtlnet_nexys_video_rgmii.xdc, MAC documentation section 6)}}
+  {LUTAR-1 proc:nv_waive_mig_lutar
+           {AMD MIG IP u_ddr/g_amd.u_ddr/u_mig: vendor-generated reset logic, LUT u_iodelay_ctrl/rstdiv2_sync_r[11]_i_1 drives the PRE pins of the replicated rstdiv0_sync_r1_reg_rep cells of u_ddr3_infrastructure (reset synchronizer, no user logic)}
+           {match}}
+  {PDRC-190 {^The FDRE cell u_ddr/g_amd\.u_ddr/u_mig/u_rtlnet_ddr_mig_mig/temp_mon_enabled\.u_tempmon/device_temp_sync_r5_reg\[([0-9]|1[01])\] in site }
+            {AMD MIG IP u_ddr/g_amd.u_ddr/u_mig: vendor-generated temperature monitor, cells temp_mon_enabled.u_tempmon/device_temp_sync_r5_reg[0..11] (XADC temperature synchronizer); the placement is fixed by the vendor IP}
+            {0 1 2 3 4 5 6 7 8 9 10 11}}
+  {XDCB-5 {^The option '-to : \[get_pins -hier -include_replicated_objects -filter \{NAME =~ \*temp_mon_enabled\.u_tempmon/device_temp_sync_r1_reg\[\*\]/D\}\]' of constraint 'set_max_delay' }
+          {AMD MIG IP u_ddr/g_amd.u_ddr/u_mig: the vendor-generated temperature monitor constraint (set_max_delay to temp_mon_enabled.u_tempmon/device_temp_sync_r1_reg[*]/D) uses a hierarchical pin query; it is vendor IP constraint text}
+          {match}}
 }
+array set meth_seen {}
 set meth_bad {}
 foreach v [get_methodology_violations -quiet] {
   set rule [get_property CHECK $v]
@@ -357,21 +431,43 @@ foreach v [get_methodology_violations -quiet] {
   set desc [string trim [get_property DESCRIPTION $v]]
   if {$sev eq "Advisory"} continue
   set hit ""
+  set hitidx -1
+  set hitkey match
+  set wi -1
   foreach w $meth_waivers {
-    lassign $w wr wtest wwhy
+    incr wi
+    lassign $w wr wtest wwhy wreq
     if {$wr ne $rule} continue
+    set key match
     if {[string match "proc:*" $wtest]} {
       set ok [[string range $wtest 5 end] $desc]
     } else {
-      set ok [regexp -- $wtest $desc]
+      set ok [regexp -- $wtest $desc -> key1]
+      if {$ok && [info exists key1] && $key1 ne ""} { set key $key1 }
+      unset -nocomplain key1
     }
-    if {$ok} { set hit $wwhy; break }
+    if {$ok} { set hit $wwhy; set hitidx $wi; set hitkey $key; break }
   }
   if {$hit ne ""} {
+    set meth_seen($hitidx,$hitkey) 1
     puts "rtlnet_build: waived $rule ($sev): $hit"
   } else {
     lappend meth_bad "$rule ($sev)"
     puts "rtlnet_build: UNWAIVED $rule ($sev): [string range $desc 0 300]"
+  }
+}
+# Required waiver targets: a stale waiver or a changed IP fails the build.
+set wi -1
+foreach w $meth_waivers {
+  incr wi
+  lassign $w wr wtest wwhy wreq
+  foreach k $wreq {
+    if {![info exists meth_seen($wi,$k)]} { lappend meth_bad "required waiver target missing: $wr $k" }
+  }
+  if {[llength $wreq] > 0} {
+    set n 0
+    foreach k $wreq { if {[info exists meth_seen($wi,$k)]} { incr n } }
+    puts "rtlnet_build: required waiver $wr: $n of [llength $wreq] targets matched"
   }
 }
 if {[llength $meth_bad] > 0} { nv_exit 27 "methodology findings without waiver: [join $meth_bad {, }]" }

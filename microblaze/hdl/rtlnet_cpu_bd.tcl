@@ -7,9 +7,11 @@
 #     in-memory) project with the part set. The procedure creates the design
 #     under <bd_dir>, validates and saves it, and returns the .bd file path.
 #   * Contents: MicroBlaze V (microblaze_riscv 1.0, RV32IMC with Zicsr, Zba,
-#     Zbb and Zbs, performance pipeline, little endian, no MMU, no caches, no
-#     FPU, no atomics, no bus exceptions, debug enabled, ILMB, DLMB and the
-#     AXI data port M_AXI_DP, reset vector 0x0), 512 KiB LMB block RAM at
+#     Zbb and Zbs, performance pipeline, little endian, no MMU, no FPU, no
+#     atomics, no bus exceptions, debug enabled, ILMB, DLMB, the AXI data port
+#     M_AXI_DP and the cache ports M_AXI_IC / M_AXI_DC, reset vector 0x0;
+#     8 KiB instruction cache and 8 KiB write-through data cache, both covering
+#     only 0x8000_0000-0x9FFF_FFFF), 512 KiB LMB block RAM at
 #     0x0000_0000 for instructions and data, MDM RISC-V (mdm_riscv 1.0, serial
 #     JTAG debug interface, no JTAG UART and no AXI slave), AXI UART Lite
 #     115200 8N1, AXI Timer, AXI INTC, the exported AXI4-Lite master
@@ -19,6 +21,13 @@
 #     network, MM2S), 64-bit tdata with tkeep, and a 128 KiB AXI block RAM
 #     (DMA buffers, lwIP pools and heap) shared by the MicroBlaze data side and
 #     both DMA channels.
+#   * DDR3 path: M_AXI_IC (128-bit, full 16-byte line per beat) and M_AXI_DC
+#     (32-bit, 4-beat line fill, write-through stores) join in the SmartConnect
+#     sc_ddr; its master M00_AXI is the exported 128-bit AXI4 port M_AXI_DDR on
+#     the clock clk (cpu_clk, 100 MHz) with the CPU reset; the clock crossing to the
+#     memory controller is outside the block design (rtlnet_axi_cdc in the board
+#     top). The interface has no ID signals. Cache lines of 16 bytes
+#     never cross a 4 KiB boundary.
 #   * Interconnect: axi_periph (MicroBlaze M_AXI_DP, 6 masters: UART, timer,
 #     INTC, RTLNet window, DMA registers, memory path) and axi_mem
 #     (3 slaves: the memory path from axi_periph, DMA MM2S, DMA S2MM; one
@@ -37,6 +46,7 @@
 #       0x4120_0000   64 KiB  AXI INTC
 #       0x41C0_0000   64 KiB  AXI Timer
 #       0x44A0_0000    1 MiB  M_AXI_RTLNET (RTLNet register window)
+#       0x8000_0000  512 MiB  M_AXI_DDR (DDR3, cached, instruction and data)
 #       0xC000_0000  128 KiB  AXI BRAM (MicroBlaze data side and DMA)
 #   * Cell names are part of the build interface: the MMI written by
 #     write_mem_info names microblaze_0 and the lmb_bram cell; updatemem uses
@@ -51,6 +61,8 @@
 #     DMA interrupts on INTC inputs 10 and 11.
 #   * 11-09-2026: processor MicroBlaze V (microblaze_riscv) and mdm_riscv; cell
 #     names, address map, interrupt numbering and exported ports unchanged.
+#   * 11-09-2026: caches (8 KiB I, 8 KiB write-through D over 0x8000_0000-0x9FFF_FFFF), SmartConnect sc_ddr,
+#     exported M_AXI_DDR (128-bit) on clk, one clock and the CPU reset only.
 #   * 11-09-2026: JTAG UART removed (C_USE_UART 0, no MDM AXI slave, 0x4140_0000
 #     unmapped); axi_periph has 6 masters; microblaze_riscv dict one CONFIG per line.
 # Clocks: clk (cpu_clk 100 MHz) for every cell.
@@ -68,6 +80,12 @@ namespace eval rtlnet_cpu_bd {
   variable TIMER_BASE     0x41C00000
   variable AXI_BRAM_BASE  0xC0000000
   variable AXI_BRAM_SIZE  128K
+  variable DDR_BASE       0x80000000
+  variable DDR_SIZE       512M
+  # Cacheable window (inclusive high address, 64-bit property format).
+  variable CACHE_BASE     0x0000000080000000
+  variable CACHE_HIGH     0x000000009FFFFFFF
+  variable CACHE_BYTES    8192
   # DMA length register width: 2^14 - 1 = 16383 bytes per simple transfer,
   # above the 1518-byte frame and the 2 KiB buffer.
   variable DMA_LEN_W      14
@@ -112,8 +130,17 @@ proc rtlnet_cpu_bd_create {bd_dir} {
     CONFIG.FREQ_HZ         $CPU_CLK_HZ] $p_rx
   set p_tx [create_bd_intf_port -mode Master -vlnv xilinx.com:interface:axis_rtl:1.0 M_AXIS_ETH]
   set_property CONFIG.FREQ_HZ $CPU_CLK_HZ $p_tx
-  set_property CONFIG.ASSOCIATED_BUSIF M_AXI_RTLNET:S_AXIS_ETH:M_AXIS_ETH $p_clk
+  set_property CONFIG.ASSOCIATED_BUSIF M_AXI_RTLNET:S_AXIS_ETH:M_AXIS_ETH:M_AXI_DDR $p_clk
   set_property CONFIG.ASSOCIATED_RESET resetn $p_clk
+  # DDR3 path: the 128-bit AXI4 master on clk (no ID signals, 32-bit address,
+  # region unused).
+  set p_ddr [create_bd_intf_port -mode Master -vlnv xilinx.com:interface:aximm_rtl:1.0 M_AXI_DDR]
+  set_property -dict [list \
+    CONFIG.PROTOCOL   AXI4 \
+    CONFIG.ADDR_WIDTH 32 \
+    CONFIG.DATA_WIDTH 128 \
+    CONFIG.HAS_REGION 0 \
+    CONFIG.FREQ_HZ    $CPU_CLK_HZ] $p_ddr
 
   # ---------------------------------------------------------------------------
   # Processor: MicroBlaze V (RV32), microcontroller-class configuration.
@@ -133,8 +160,19 @@ proc rtlnet_cpu_bd_create {bd_dir} {
     CONFIG.C_USE_BARREL              1 \
     CONFIG.C_USE_FPU                 0 \
     CONFIG.C_USE_MMU                 0 \
-    CONFIG.C_USE_ICACHE              0 \
-    CONFIG.C_USE_DCACHE              0 \
+    CONFIG.C_USE_ICACHE              1 \
+    CONFIG.C_USE_DCACHE              1 \
+    CONFIG.C_ICACHE_BYTE_SIZE        $::rtlnet_cpu_bd::CACHE_BYTES \
+    CONFIG.C_DCACHE_BYTE_SIZE        $::rtlnet_cpu_bd::CACHE_BYTES \
+    CONFIG.C_ICACHE_BASEADDR         $::rtlnet_cpu_bd::CACHE_BASE \
+    CONFIG.C_ICACHE_HIGHADDR         $::rtlnet_cpu_bd::CACHE_HIGH \
+    CONFIG.C_DCACHE_BASEADDR         $::rtlnet_cpu_bd::CACHE_BASE \
+    CONFIG.C_DCACHE_HIGHADDR         $::rtlnet_cpu_bd::CACHE_HIGH \
+    CONFIG.C_ICACHE_LINE_LEN         4 \
+    CONFIG.C_DCACHE_LINE_LEN         4 \
+    CONFIG.C_ICACHE_DATA_WIDTH       1 \
+    CONFIG.C_DCACHE_DATA_WIDTH       1 \
+    CONFIG.C_DCACHE_USE_WRITEBACK    0 \
     CONFIG.C_USE_BRANCH_TARGET_CACHE 0 \
     CONFIG.C_DEBUG_ENABLED           1 \
     CONFIG.C_D_AXI                   1 \
@@ -144,6 +182,11 @@ proc rtlnet_cpu_bd_create {bd_dir} {
     CONFIG.C_USE_INTERRUPT           1 \
     CONFIG.C_M_AXI_D_BUS_EXCEPTION   0 \
     CONFIG.C_BASE_VECTORS            0x0000000000000000] $mb
+
+  # DDR3 path interconnect: instruction and data cache masters (clk) to one
+  # master (clk); the SmartConnect converts 32 -> 128 bits.
+  set scd [create_bd_cell -type ip -vlnv xilinx.com:ip:smartconnect:1.0 sc_ddr]
+  set_property -dict [list CONFIG.NUM_SI 2 CONFIG.NUM_MI 1 CONFIG.NUM_CLKS 1] $scd
 
   # Local memory: two LMB buses, two BRAM interface controllers, one true
   # dual-port block RAM (port A instruction side, port B data side).
@@ -261,6 +304,9 @@ proc rtlnet_cpu_bd_create {bd_dir} {
   connect_bd_intf_net [get_bd_intf_pins axi_dma_0/M_AXI_MM2S] [get_bd_intf_pins axi_mem/S01_AXI]
   connect_bd_intf_net [get_bd_intf_pins axi_dma_0/M_AXI_S2MM] [get_bd_intf_pins axi_mem/S02_AXI]
   connect_bd_intf_net [get_bd_intf_pins axi_mem/M00_AXI] [get_bd_intf_pins axi_bram_ctrl_0/S_AXI]
+  connect_bd_intf_net [get_bd_intf_pins microblaze_0/M_AXI_IC] [get_bd_intf_pins sc_ddr/S00_AXI]
+  connect_bd_intf_net [get_bd_intf_pins microblaze_0/M_AXI_DC] [get_bd_intf_pins sc_ddr/S01_AXI]
+  connect_bd_intf_net [get_bd_intf_pins sc_ddr/M00_AXI] [get_bd_intf_ports M_AXI_DDR]
   connect_bd_intf_net [get_bd_intf_pins axi_bram_ctrl_0/BRAM_PORTA] [get_bd_intf_pins axi_bram/BRAM_PORTA]
   connect_bd_intf_net [get_bd_intf_ports S_AXIS_ETH] [get_bd_intf_pins axi_dma_0/S_AXIS_S2MM]
   connect_bd_intf_net [get_bd_intf_pins axi_dma_0/M_AXIS_MM2S] [get_bd_intf_ports M_AXIS_ETH]
@@ -277,7 +323,7 @@ proc rtlnet_cpu_bd_create {bd_dir} {
     axi_periph/ACLK axi_periph/S00_ACLK axi_periph/M00_ACLK axi_periph/M01_ACLK \
     axi_periph/M02_ACLK axi_periph/M03_ACLK axi_periph/M04_ACLK axi_periph/M05_ACLK \
     axi_mem/ACLK axi_mem/S00_ACLK axi_mem/S01_ACLK axi_mem/S02_ACLK axi_mem/M00_ACLK \
-    rst_cpu/slowest_sync_clk]
+    rst_cpu/slowest_sync_clk sc_ddr/aclk]
   foreach p $clk_pins { connect_bd_net [get_bd_ports clk] [get_bd_pins $p] }
   set intc_pclk [get_bd_pins -quiet axi_intc_0/processor_clk]
   if {$intc_pclk ne ""} { connect_bd_net [get_bd_ports clk] $intc_pclk }
@@ -287,6 +333,7 @@ proc rtlnet_cpu_bd_create {bd_dir} {
   # ---------------------------------------------------------------------------
   connect_bd_net [get_bd_ports resetn] [get_bd_pins rst_cpu/ext_reset_in]
   connect_bd_net [get_bd_pins const_one/dout] [get_bd_pins rst_cpu/dcm_locked]
+  connect_bd_net [get_bd_pins rst_cpu/peripheral_aresetn] [get_bd_pins sc_ddr/aresetn]
   connect_bd_net [get_bd_pins mdm_0/Debug_SYS_Rst] [get_bd_pins rst_cpu/mb_debug_sys_rst]
   connect_bd_net [get_bd_pins rst_cpu/mb_reset] [get_bd_pins microblaze_0/Reset]
   set intc_prst [get_bd_pins -quiet axi_intc_0/processor_rst]
@@ -334,6 +381,10 @@ proc rtlnet_cpu_bd_create {bd_dir} {
     [get_bd_addr_segs axi_timer_0/S_AXI/Reg] -force
   assign_bd_address -offset $::rtlnet_cpu_bd::RTLNET_BASE -range $::rtlnet_cpu_bd::RTLNET_RANGE \
     -target_address_space $dspace [get_bd_addr_segs M_AXI_RTLNET/Reg] -force
+  foreach sp [list $dspace $ispace] {
+    assign_bd_address -offset $::rtlnet_cpu_bd::DDR_BASE -range $::rtlnet_cpu_bd::DDR_SIZE \
+      -target_address_space $sp [get_bd_addr_segs M_AXI_DDR/Reg] -force
+  }
   foreach sp [list $dspace [get_bd_addr_spaces axi_dma_0/Data_MM2S] [get_bd_addr_spaces axi_dma_0/Data_S2MM]] {
     assign_bd_address -offset $::rtlnet_cpu_bd::AXI_BRAM_BASE -range $::rtlnet_cpu_bd::AXI_BRAM_SIZE \
       -target_address_space $sp [get_bd_addr_segs axi_bram_ctrl_0/S_AXI/Mem0] -force

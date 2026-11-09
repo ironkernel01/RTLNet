@@ -61,6 +61,8 @@ Revision: 11-09-2026
     project copy src/lwip/rtlnet_lwiperf.c instead of the install's lwiperf.c.
   * 11-09-2026: MicroBlaze V: RISC-V toolchain and flags from the BSP, RISC-V linker template.
   * 11-09-2026: link with --no-warn-rwx-segments (one RWX LMB segment is intended).
+  * 11-09-2026: DDR3: the rtlnet_axi_arbiter driver and src/rtlnet_ddrtest.c in the firmware and the harness; the
+    linker script is unchanged (the DDR3 window is not linked: the firmware uses it only through the memory test).
 -------------------------------------------------------------------------------
 #>
 param(
@@ -105,14 +107,15 @@ function Fwd([string]$p) { return ($p -replace '\\', '/') }
 # Core drivers (cores/<core>/driver): the only code that touches each core.
 $drvCores = @('rtlnet_eth_mac', 'rtlnet_mdio', 'rtlnet_eth_protocol', 'rtlnet_arp', 'rtlnet_icmp',
               'rtlnet_dhcp', 'rtlnet_iperf', 'rtlnet_udp_socket', 'rtlnet_udp_echo', 'rtlnet_classifier',
-              'rtlnet_tcp_offload')
+              'rtlnet_tcp_offload', 'rtlnet_axi_arbiter')
 $drvSrcs = @(
     'cores/rtlnet_eth_mac/driver/rtlnet_eth_mac.c', 'cores/rtlnet_mdio/driver/rtlnet_mdio.c',
     'cores/rtlnet_mdio/driver/rtlnet_phy_rtl8211e.c', 'cores/rtlnet_eth_protocol/driver/rtlnet_eth_protocol.c',
     'cores/rtlnet_arp/driver/rtlnet_arp.c', 'cores/rtlnet_icmp/driver/rtlnet_icmp.c',
     'cores/rtlnet_dhcp/driver/rtlnet_dhcp.c', 'cores/rtlnet_iperf/driver/rtlnet_iperf.c',
     'cores/rtlnet_udp_socket/driver/rtlnet_udp_socket.c', 'cores/rtlnet_udp_echo/driver/rtlnet_udp_echo.c',
-    'cores/rtlnet_classifier/driver/rtlnet_classifier.c', 'cores/rtlnet_tcp_offload/driver/rtlnet_tcp_offload.c'
+    'cores/rtlnet_classifier/driver/rtlnet_classifier.c', 'cores/rtlnet_tcp_offload/driver/rtlnet_tcp_offload.c',
+    'cores/rtlnet_axi_arbiter/driver/rtlnet_axi_arbiter.c'
 ) | Where-Object { Test-Path -LiteralPath (Join-Path $Repo $_) }
 $inc = @(
     "-I$Fw/src", "-I$Fw/src/lwip", "-I$Fw/cli",
@@ -214,11 +217,11 @@ MEMORY
     $sysInc  = @('-isystem', $bspInc, "-specs=$bspSpec")
     # -O2 on the frame path (netif, lwIP glue, TCP echo, lwIP), -Os elsewhere (CLI, drivers).
     $cflags  = $common + @('-g', '-ffunction-sections', '-fdata-sections')
-    $fastSrc = @('rtlnet_lwip_netif', 'rtlnet_lwip', 'rtlnet_tcp_echo', 'rtlnet_tcp_iperf', 'rtlnet_lwiperf', 'rtlnet_offload')
+    $fastSrc = @('rtlnet_lwip_netif', 'rtlnet_lwip', 'rtlnet_tcp_echo', 'rtlnet_tcp_iperf', 'rtlnet_lwiperf', 'rtlnet_offload', 'rtlnet_ddrtest')
     $objs = @()
     $fwSrcs = @(
         'src/main.c', 'src/rtlnet_platform.c', 'src/rtlnet_board.c', 'src/rtlnet_fmt.c', 'src/rtlnet_netmgr.c',
-        'src/rtlnet_cpupath.c', 'src/rtlnet_offload.c', 'src/lwip/rtlnet_lwip.c', 'src/lwip/rtlnet_lwip_netif.c', 'src/lwip/rtlnet_tcp_echo.c',
+        'src/rtlnet_cpupath.c', 'src/rtlnet_offload.c', 'src/rtlnet_ddrtest.c', 'src/lwip/rtlnet_lwip.c', 'src/lwip/rtlnet_lwip_netif.c', 'src/lwip/rtlnet_tcp_echo.c',
         'src/lwip/rtlnet_tcp_iperf.c', 'src/lwip/rtlnet_lwiperf.c',
         'cli/menu.c', 'cli/menu_table.c', 'cli/cli_commands.c'
     ) | ForEach-Object { "$Fw/$_" }
@@ -250,7 +253,7 @@ MEMORY
 # board layer against a register model; lwIP replaced by host/host_lwip_stub.c.
 if ($HostHarness -or $Demo) {
     $hsrcs = @('host/main.c', 'host/host_platform.c', 'host/host_lwip_stub.c', 'src/rtlnet_board.c', 'src/rtlnet_fmt.c',
-               'src/rtlnet_netmgr.c', 'src/rtlnet_cpupath.c', 'src/rtlnet_offload.c', 'cli/menu.c', 'cli/menu_table.c',
+               'src/rtlnet_netmgr.c', 'src/rtlnet_cpupath.c', 'src/rtlnet_offload.c', 'src/rtlnet_ddrtest.c', 'cli/menu.c', 'cli/menu_table.c',
                'cli/cli_commands.c') |
              ForEach-Object { "$Fw/$_" }
     $exe = Join-Path $Out 'menu.exe'

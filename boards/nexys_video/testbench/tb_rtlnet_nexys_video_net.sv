@@ -45,10 +45,11 @@
 // (filelist define, MAC documentation section 7).
 // Ends with one anchored verdict line from rtlnet_tb_pkg::tb_verdict.
 // Language: SystemVerilog-2012 (simulation only).
-// Revision: 10-22-2026
+// Revision: 11-09-2026
 //   * 10-22-2026: initial version.
 //   * 10-22-2026: CPU network path checks.
 //   * 10-22-2026: CPU-path classifier enabled: drop-all, configuration, broadcast limiting, unicast unaffected.
+//   * 11-09-2026: DDR3 pins of the board top connected (rtlnet_ddr_sim behind them).
 // -----------------------------------------------------------------------------
 `timescale 1ns / 1ps
 
@@ -99,6 +100,20 @@ module tb_rtlnet_nexys_video_net;
   wire        eth_mdc;
   wire        eth_mdio;
   wire        eth_rst_b;
+  wire  [15:0] ddr3_dq;
+  wire  [1:0]  ddr3_dqs_n;
+  wire  [1:0]  ddr3_dqs_p;
+  wire  [14:0] ddr3_addr;
+  wire  [2:0]  ddr3_ba;
+  wire         ddr3_ras_n;
+  wire         ddr3_cas_n;
+  wire         ddr3_we_n;
+  wire         ddr3_reset_n;
+  wire  [0:0]  ddr3_ck_p;
+  wire  [0:0]  ddr3_ck_n;
+  wire  [0:0]  ddr3_cke;
+  wire  [1:0]  ddr3_dm;
+  wire  [0:0]  ddr3_odt;
   wire        phy_link_up;
   wire  [1:0] phy_link_speed;
   wire        phy_rxdly_on;
@@ -139,7 +154,21 @@ module tb_rtlnet_nexys_video_net;
     .eth_mdio    (eth_mdio),
     .eth_rst_b   (eth_rst_b),
     .eth_int_b   (1'b1),
-    .eth_pme_b   (1'b1)
+    .eth_pme_b   (1'b1),
+    .ddr3_dq     (ddr3_dq),
+    .ddr3_dqs_n  (ddr3_dqs_n),
+    .ddr3_dqs_p  (ddr3_dqs_p),
+    .ddr3_addr   (ddr3_addr),
+    .ddr3_ba     (ddr3_ba),
+    .ddr3_ras_n  (ddr3_ras_n),
+    .ddr3_cas_n  (ddr3_cas_n),
+    .ddr3_we_n   (ddr3_we_n),
+    .ddr3_reset_n(ddr3_reset_n),
+    .ddr3_ck_p   (ddr3_ck_p),
+    .ddr3_ck_n   (ddr3_ck_n),
+    .ddr3_cke    (ddr3_cke),
+    .ddr3_dm     (ddr3_dm),
+    .ddr3_odt    (ddr3_odt)
   );
 
   // RTL8211E model: Nexys Video straps (PHYAD 1, no clock delays), short
