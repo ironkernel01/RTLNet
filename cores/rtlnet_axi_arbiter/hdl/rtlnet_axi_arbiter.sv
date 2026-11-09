@@ -20,7 +20,8 @@
 //   * Burst legality, checked on each granted AW and AR: burst INCR, size equal
 //     to the full data width (any size up to the full width for a master whose
 //     NARROW_MASK bit is set, such as a write-through CPU cache), no 4 KiB
-//     boundary crossing computed from the burst's own size. A master whose
+//     boundary crossing computed from the burst's own size, from the start address
+//     aligned down to that size (an unaligned INCR start is legal). A master whose
 //     WRAP_MASK bit is set may also issue a WRAP burst of 2, 4, 8 or 16 beats
 //     at an address aligned to the size (a cache line fill, critical word first);
 //     it is forwarded unchanged and the memory controller applies the wrap. A
@@ -52,6 +53,7 @@
 //   * 11-09-2026: initial version.
 //   * 11-09-2026: NARROW_MASK parameter, narrow transfers for selected masters.
 //   * 11-09-2026: WRAP_MASK parameter (legal WRAP bursts), sticky first-illegal-burst capture registers.
+//   * 11-09-2026: 4 KiB rule measured from the size-aligned start (unaligned INCR start is legal).
 // Clocks: clk (arbiter, datapath, register file); s_axi_aclk (AXI4-Lite slave
 //   side of the register crossing only).
 // -----------------------------------------------------------------------------
@@ -275,14 +277,20 @@ module rtlnet_axi_arbiter #(
   //     WRAP of 2, 4, 8 or 16 beats at an address aligned to its size;
   //   * size: a full-width master must use the full-width size; a narrow master
   //     (NARROW_MASK) may use any size up to the full width;
-  //   * 4 KiB: addr[11:0] + (len + 1) * bytes > 4096, bytes per beat from the
-  //     burst's own size. Not applied to a WRAP: a legal WRAP container is at most
-  //     256 bytes and aligned to its own size, so it cannot cross 4 KiB.
+  //   * 4 KiB (INCR): aligned_start + (len + 1) * bytes > 4096, bytes per beat from the
+  //     burst's own size and aligned_start = addr[11:0] rounded down to the size. AXI
+  //     (IHI 0022, burst address: the first beat may be unaligned, later beats are
+  //     aligned to the transfer size) puts the bytes of an INCR burst between the
+  //     aligned start and the end of its last beat, so an unaligned start does not add
+  //     to the span: size 2, len 0 at 0xFFD is one legal beat (lanes by WSTRB).
+  //     Not applied to a WRAP: a legal WRAP container is at most 256 bytes and
+  //     aligned to its own size, so it cannot cross 4 KiB.
   function automatic logic [2:0] burst_fail(input logic [11:0] addr_low, input logic [7:0] len,
                                             input logic [2:0] size, input logic [1:0] burst,
                                             input logic narrow, input logic wrap_ok);
     logic [SPAN_W-1:0] bytes;
     logic [SPAN_W-1:0] span;
+    logic [11:0]       start_aligned;
     logic              size_ok;
     logic              is_wrap;
     logic              wrap_len_ok;
@@ -290,7 +298,8 @@ module rtlnet_axi_arbiter #(
     logic              wrap_legal;
     logic [2:0]        f;
     bytes       = (SPAN_W'(len) + SPAN_W'(LEN_BIAS)) << size;
-    span        = SPAN_W'(addr_low) + bytes;
+    start_aligned = addr_low & ~((12'd1 << size) - 12'd1);
+    span        = SPAN_W'(start_aligned) + bytes;
     size_ok     = narrow ? (size <= 3'(SIZE_FULL)) : (size == 3'(SIZE_FULL));
     is_wrap     = (burst == BURST_WRAP);
     wrap_len_ok = (len == 8'd1) || (len == 8'd3) || (len == 8'd7) || (len == 8'd15);

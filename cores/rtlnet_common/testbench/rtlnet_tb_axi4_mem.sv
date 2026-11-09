@@ -40,6 +40,7 @@
 //   * 11-09-2026: initial version.
 //   * 11-09-2026: size-aware beat addresses and 4 KiB check for CHECK_FULL_WIDTH = 0.
 //   * 11-09-2026: ALLOW_WRAP, WRAP burst addressing.
+//   * 11-09-2026: 4 KiB check from the size-aligned start (unaligned INCR start is legal).
 // Clocks: clk.
 // -----------------------------------------------------------------------------
 `timescale 1ns / 1ps
@@ -215,7 +216,8 @@ module rtlnet_tb_axi4_mem #(
                              input bit [7:0] len, input bit [2:0] size, input bit [1:0] burst);
     int span;
     bit wrap_ok;
-    span = int'(a[11:0]) + ((int'(len) + 1) << size);
+    // AXI: an INCR burst spans from the size-aligned start to the end of its last beat.
+    span = int'(a[11:0] >> size << size) + ((int'(len) + 1) << size);
     wrap_ok = ALLOW_WRAP && (burst == BURST_WRAP) && (len == 8'd1 || len == 8'd3 || len == 8'd7 || len == 8'd15) &&
               ((a & ((ADDR_W'(1) << size) - ADDR_W'(1))) == '0);
     if (burst != BURST_WRAP) begin

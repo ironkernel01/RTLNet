@@ -686,6 +686,50 @@ The UDP loss and the lower rates of the DDR3 image come with the dropped stores 
 
 Regression: `scripts/rtlnet_regression.ps1` (`phase0_wrap_regression.txt`): `RTLNET_REGRESSION: 100 passed, 0 failed`.
 
+#### Phase 0 close-out: unaligned INCR starts (11-09-2026)
+
+Change: `rtlnet_axi_arbiter` `burst_fail()` measures the 4 KiB rule of an INCR burst from the start address rounded down to the burst's size (AXI: the first beat may start
+unaligned, later beats are aligned), so a size-2 single beat at 0xFFD is legal. The bench memory model `rtlnet_tb_axi4_mem` had the same unaligned span in its 4 KiB check and now uses the
+aligned start (its beat addresses and strobe merge already handled an unaligned first beat). The arbiter bench adds random unaligned INCR starts for every master and directed accepts
+(size 2 len 0 at 0xFFD and 0xFFF, len 3 at 0xFF1, size 4 len 0 at 0xFF1) and rejects (size 2 len 1 at 0xFFD, size 4 len 1 at 0xFF1) with data and strobe checks; restoring the old span fails
+the bench (62232 and 58967 fails). Arbiter synthesis: `rtlnet_synth_check: PASS rtlnet_axi_arbiter`, 0 critical warnings. Regression: `RTLNET_REGRESSION: 100 passed, 0 failed`
+(`phase0_unaligned_regression.txt`).
+
+Build (`build.ps1 -Network`, `phase0_unaligned_build.txt`): `rtlnet_cdc: PASS` (`fifo 15 axil_cdc 6 gray 6`), `RTLNET_BUILD: PASS`.
+
+| Network build | LUT | FF | BRAM tiles | WNS / WHS / WPWS (ns) | Utilization |
+|---|---|---|---|---|---|
+| before (stage 3, `phase0_wrap_build.txt`) | 32605 | 42358 | 239.5 | 0.071 / 0.049 / 0.000 | 24.37 % |
+| after (aligned-start 4 KiB rule) | 32600 (-5) | 42345 (-13) | 239.5 | 0.103 / 0.008 / 0.000 | 24.36 % |
+
+Board (lock held; JTAG, COM3, 1000 Mb/s, `-Nic Wi-Fi -Speed 1000`, 192.168.68.68):
+
+| Step | Result | Log |
+|---|---|---|
+| `program.ps1`, `build.ps1 -Ddr` firmware, `jtag_load_elf.ps1` | PASS, banner "DDR3 image" | `phase0_unaligned_program.txt`, `phase0_unaligned_fw_ddr.txt`, `phase0_unaligned_load_ddr.txt` |
+| `enable`, `clear counters`, `show ddr` | `errors 0`, `First illegal : none captured` | `phase0_unaligned_show_ddr_3.txt` |
+| DDR3 image, `cli_test.ps1` | `CLI_TEST: PASS 30/30 (3 skipped: not counted as passed)` | `phase0_unaligned_cli_ddr.txt` |
+| DDR3 image, `net_test.ps1` | `NET_TEST: PASS 25/25` on the second run (the first run failed only `iperf -u -R` at 900 Mb/s, 40750 of 401242 lost; log `phase0_unaligned_net_ddr_run1_fail.txt`) | `phase0_unaligned_net_ddr.txt` |
+| DDR3 image, `tcp_test.ps1` | `TCP_TEST: PASS 8/8`, both TCP echo tests pass (the zero bytes are gone) | `phase0_unaligned_tcp_ddr.txt` |
+| DDR3 image, `show ddr` after the tests | arbiter `errors 0`, illegal-burst flag clear, `First illegal : none captured` | `phase0_unaligned_show_ddr_2.txt` |
+| `program.ps1`, release image | PASS | `phase0_unaligned_program_release.txt` |
+| release image, `cli_test.ps1` | `CLI_TEST: PASS 33/33` | `phase0_unaligned_cli_release.txt` |
+| release image, `net_test.ps1` | `NET_TEST: PASS 25/25` | `phase0_unaligned_net_release.txt` |
+| release image, `tcp_test.ps1` | `TCP_TEST: PASS 8/8` on the second run (the first run failed the first echo connection with a connect timeout, as in an earlier run after programming; log `phase0_unaligned_tcp_release_run1_fail.txt`) | `phase0_unaligned_tcp_release.txt` |
+
+The board stays in the release (LMB) state.
+
+| Rate (Mbit/s) | DDR3 image | LMB (release) image |
+|---|---|---|
+| UDP `-u` 900M, PC to board | 476 (0 lost) | 293 (0 lost) |
+| UDP `-u -R`, board to PC | 944 (0 lost) | 944 (1 of 401242 lost) |
+| TCP iperf PC to board | 49.4 | 65.1 |
+| TCP iperf `-R` / `-r` / `-d` board to PC | 42.0 / 39.3 / 32.3 | 94.2 / 88.1 / 85.6 |
+| Together: TCP iperf / UDP iperf | 45.2 / 20.9 | 59.0 / 20.9 |
+
+The DDR3 image gives about 25 to 55 % lower TCP rates than the LMB image (code and data in DDR3 behind 8 KiB caches); the release firmware stays in the LMB. Phase 0 is complete: the DDR3-linked ELF loads over
+JTAG, runs the console, `net_test` and `tcp_test` with 0 arbiter errors, and the release image passes all three tests.
+
 ## 7. Network integration (done 10-22-2026) and what remains
 
 Integrated: `u_mac`, `u_mdio`, `u_protocol` (every leaf, the CPU network path and its classifier), `u_echo` under

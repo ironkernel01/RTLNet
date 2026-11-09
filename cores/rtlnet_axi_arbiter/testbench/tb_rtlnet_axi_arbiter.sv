@@ -35,6 +35,11 @@
 //      sizes for a narrow master) with an INCR read-back of the container; directed illegal WRAPs rejected
 //      with SLVERR (len 0, len 2 = 3 beats, misaligned start, and a legal-form WRAP from a master not in the
 //      mask); the WRAP register.
+//   9. Unaligned INCR starts (AXI: the span runs from the size-aligned start): random 30 % of the INCR
+//      bursts start inside their first transfer (first-beat strobes limited to the upper lanes), directed
+//      accepts (size 2 len 0 at 0xFFD and 0xFFF, len 3 at 0xFF1, full size len 0 at the last word + 1) with
+//      the data and strobes checked by write, same-byte read and full-width read of the words, and rejects
+//      (size 2 len 1 at 0xFFD, full size len 1 at the last word + 1).
 //   8. First-illegal-burst capture registers (CAP_INFO, CAP_ADDR, CAP_ADDR_HI): cleared state, the first
 //      illegal burst of each kind captured with every field and the failed rule, a second illegal burst does
 //      not overwrite it, STATUS.ERR clear and CTRL.CNT_CLEAR clear it, reset clears it.
@@ -49,6 +54,7 @@
 //   * 11-09-2026: TB_NARROW (NARROW_MASK): narrow legal traffic with strobes, directed narrow
 //     cases, narrow burst crossing 4 KiB, NARROW register.
 //   * 11-09-2026: TB_WRAP (WRAP_MASK): legal and illegal WRAP bursts, WRAP register, capture registers.
+//   * 11-09-2026: unaligned INCR starts, random and directed; 4 KiB rule from the size-aligned start.
 // Run: powershell -File scripts/rtlnet_run_sim.ps1 -Bench tb_rtlnet_axi_arbiter
 //        -Filelist cores/rtlnet_axi_arbiter/testbench/tb_rtlnet_axi_arbiter.f
 // -----------------------------------------------------------------------------
@@ -368,19 +374,21 @@ module tb_rtlnet_axi_arbiter;
     return beat_addr(d, b) >> SIZEF;
   endfunction
 
-  // Byte lanes a beat drives: all of them for a full-size beat, else the
-  // size-aligned window at the beat address.
+  // Byte lanes a beat drives: the lanes from the beat address (unaligned only on the first beat of
+  // an INCR burst) to the end of its size-aligned transfer; all of them for an aligned full-size beat.
   function automatic bit [BYTES-1:0] lane_mask(input desc_t d, input int b);
     bit [BYTES-1:0] m;
     int             nb;
     int             off;
-    if (int'(d.size) >= SIZEF) begin
+    int             aoff;
+    if (int'(d.size) > SIZEF) begin
       m = '1;
     end else begin
-      nb  = 1 << d.size;
-      off = int'(beat_addr(d, b) % BYTES);
-      m   = '0;
-      for (int l = 0; l < nb; l++) m[(off + l) % BYTES] = 1'b1;
+      nb   = 1 << d.size;
+      off  = int'(beat_addr(d, b) % BYTES);
+      aoff = off / nb * nb;
+      m    = '0;
+      for (int l = off; l < aoff + nb; l++) m[l] = 1'b1;
     end
     return m;
   endfunction
@@ -624,6 +632,9 @@ module tb_rtlnet_axi_arbiter;
           d.burst = 2'b10;
           a = pg + (AW'(rnd(PAGE >> sz)) << sz);
         end
+        // Unaligned INCR start, 30 % of the INCR bursts: a start inside the first transfer. The size-aligned
+        // start, and so the 4 KiB result, does not change; the first beat drives only the upper lanes.
+        if (d.burst == 2'b01 && pct(30)) a = a + AW'(rnd(1 << d.size));
       end
       KIND_FIXED: begin
         d.burst = 2'b00;
@@ -730,6 +741,47 @@ module tb_rtlnet_axi_arbiter;
     return d;
   endfunction
 
+  // Unaligned INCR burst (directed): size sz (clamped to the full width), len + 1 beats, start at byte offset off
+  // of page 14 + (tag % 2) of the master's own region. legal = 0 builds the kind that the arbiter must reject.
+  function automatic desc_t build_unal_desc(input int g, input bit wr, input int sz, input int len, input int off,
+                                            input bit legal, input int smode, input int tag);
+    desc_t d;
+    d.g      = g;
+    d.kind   = legal ? KIND_LEGAL : ((sz < SIZEF) ? KIND_NX4K : KIND_X4K);
+    d.is_wr  = wr;
+    d.id     = rnd(IDS);
+    d.smode  = smode;
+    d.beat   = 0;
+    d.size   = 3'((sz < SIZEF) ? sz : SIZEF);
+    d.burst  = 2'b01;
+    d.serial = 0;
+    d.len    = len;
+    d.addr   = AW'(g * OWN_SIZE + (14 + (tag % 2)) * PAGE + off);
+    return d;
+  endfunction
+
+  // INCR full-width read of every word an INCR burst touches (the strobe check: lanes the write did not drive
+  // keep their earlier value in the reference).
+  function automatic desc_t build_word_read(input desc_t w);
+    desc_t       d;
+    bit [AW-1:0] first;
+    bit [AW-1:0] last;
+    first = w.addr & ~AW'(BYTES - 1);
+    last  = beat_addr(w, w.len) & ~AW'(BYTES - 1);
+    d.g      = w.g;
+    d.kind   = KIND_LEGAL;
+    d.is_wr  = 1'b0;
+    d.id     = rnd(IDS);
+    d.smode  = 0;
+    d.beat   = 0;
+    d.size   = 3'(SIZEF);
+    d.burst  = 2'b01;
+    d.serial = 0;
+    d.addr   = first;
+    d.len    = int'((last - first) / BYTES);
+    return d;
+  endfunction
+
   // INCR full-width read of every word of the container of a WRAP burst.
   function automatic desc_t build_container_read(input desc_t w);
     desc_t       d;
@@ -766,7 +818,7 @@ module tb_rtlnet_axi_arbiter;
     wrap_legal = WRAPM[d.g] && (d.burst == 2'b10) && (d.len == 1 || d.len == 3 || d.len == 7 || d.len == 15) && aligned;
     f[0] = !((d.burst == 2'b01) || wrap_legal);
     f[1] = NARM[d.g] ? (int'(d.size) > SIZEF) : (int'(d.size) != SIZEF);
-    span = int'(d.addr[11:0]) + ((d.len + 1) << d.size);
+    span = int'(d.addr[11:0] >> d.size << d.size) + ((d.len + 1) << d.size);   // AXI: from the size-aligned start
     f[2] = (d.burst != 2'b10) && (span > PAGE);
     return f;
   endfunction
@@ -1366,6 +1418,65 @@ module tb_rtlnet_axi_arbiter;
     end
   endtask
 
+  // Directed unaligned INCR starts. Accepted (each write with smode 0 and 1, then a read of the same bytes and a
+  // full-width read of the words): a narrow master at size 2 len 0 at 0xFFD and 0xFFF, len 3 at 0xFF1 (aligned
+  // start 0xFF0, ends exactly at 0x1000); every master at the full size len 0 at the last word + 1 and len 1 at
+  // the word before it + 1. Rejected: size 2 len 1 at 0xFFD (aligned start 0xFFC + 8 > 4096, narrow masters) and
+  // the full size len 1 at the last word + 1 (every master). Returns the number of rejected bursts issued.
+  task automatic directed_unaligned(output int n_ill);
+    int    tag;
+    desc_t w;
+    n_ill = 0;
+    tag   = 0;
+    for (int g = 0; g < NM; g++) begin
+      for (int sm = 0; sm < 2; sm++) begin
+        if (NARM[g] && SIZEF >= 2) begin
+          w = build_unal_desc(g, 1'b1, 2, 0, PAGE - 3, 1'b1, sm, tag);
+          inject_q.push_back(w);
+          inject_q.push_back(build_unal_desc(g, 1'b0, 2, 0, PAGE - 3, 1'b1, sm, tag));
+          inject_q.push_back(build_word_read(w));
+          tag++;
+          w = build_unal_desc(g, 1'b1, 2, 0, PAGE - 1, 1'b1, sm, tag);
+          inject_q.push_back(w);
+          inject_q.push_back(build_unal_desc(g, 1'b0, 2, 0, PAGE - 1, 1'b1, sm, tag));
+          inject_q.push_back(build_word_read(w));
+          tag++;
+          w = build_unal_desc(g, 1'b1, 2, 3, PAGE - 15, 1'b1, sm, tag);
+          inject_q.push_back(w);
+          inject_q.push_back(build_unal_desc(g, 1'b0, 2, 3, PAGE - 15, 1'b1, sm, tag));
+          inject_q.push_back(build_word_read(w));
+          tag++;
+        end
+        w = build_unal_desc(g, 1'b1, SIZEF, 0, PAGE - BYTES + 1, 1'b1, sm, tag);
+        inject_q.push_back(w);
+        inject_q.push_back(build_unal_desc(g, 1'b0, SIZEF, 0, PAGE - BYTES + 1, 1'b1, sm, tag));
+        inject_q.push_back(build_word_read(w));
+        tag++;
+        w = build_unal_desc(g, 1'b1, SIZEF, 1, PAGE - 2 * BYTES + 1, 1'b1, sm, tag);
+        inject_q.push_back(w);
+        inject_q.push_back(build_unal_desc(g, 1'b0, SIZEF, 1, PAGE - 2 * BYTES + 1, 1'b1, sm, tag));
+        inject_q.push_back(build_word_read(w));
+        tag++;
+        run = 1'b1;
+        wait_idle($sformatf("directed unaligned INCR master %0d", g));
+      end
+      for (int dir = 0; dir < 2; dir++) begin
+        if (NARM[g] && SIZEF >= 2) begin
+          inject_q.push_back(build_unal_desc(g, 1'b1, 2, 0, PAGE - 3, 1'b1, 0, tag));
+          inject_q.push_back(build_unal_desc(g, (dir == 0), 2, 1, PAGE - 3, 1'b0, 0, tag));
+          inject_q.push_back(build_unal_desc(g, 1'b0, 2, 0, PAGE - 3, 1'b1, 0, tag));
+          n_ill++;
+        end
+        inject_q.push_back(build_unal_desc(g, 1'b1, SIZEF, 0, PAGE - BYTES + 1, 1'b1, 0, tag));
+        inject_q.push_back(build_unal_desc(g, (dir == 0), SIZEF, 1, PAGE - BYTES + 1, 1'b0, 0, tag));
+        inject_q.push_back(build_unal_desc(g, 1'b0, SIZEF, 0, PAGE - BYTES + 1, 1'b1, 0, tag));
+        n_ill++;
+        run = 1'b1;
+        wait_idle($sformatf("directed unaligned INCR rejected master %0d dir %0d", g, dir));
+      end
+    end
+  endtask
+
   // Directed illegal WRAPs, read and write, each between legal bursts of the same master: a master in WRAP_MASK
   // with len 0, len 2 and a misaligned start; a master not in the mask with a WRAP of the legal form.
   // Returns the number of illegal bursts issued.
@@ -1488,6 +1599,7 @@ module tb_rtlnet_axi_arbiter;
     int          cs;
     int          n_dir;
     int          n_wrap_ill;
+    int          n_unal_ill;
 
     #100;
     arstn = 1'b1;
@@ -1637,6 +1749,9 @@ module tb_rtlnet_axi_arbiter;
         end
       end
     end
+    // Unaligned INCR starts: the accepted ones reach the memory model, the rejected ones do not.
+    directed_unaligned(n_unal_ill);
+    n_dir += n_unal_ill;
     tb_check(tot_ill - errs_before == n_dir, $sformatf("%0d directed illegal bursts issued, %0d counted", n_dir,
                                                        tot_ill - errs_before));
     check_counters("after directed illegal bursts");
