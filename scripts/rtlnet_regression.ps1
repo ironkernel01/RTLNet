@@ -6,8 +6,12 @@ Purpose: run every bench listed in scripts/rtlnet_regression.txt and in each
   boards/<board>/testbench (same line format) through
   rtlnet_run_sim.ps1, sequentially (one Active-HDL seat), and fail if any
   bench fails.
+  A line may carry the token sim=verilator (run through rtlnet_run_verilator.ps1 instead of Active-HDL) and
+  threads=N (Verilator --threads N). A line whose second field is script:<path> runs that host script with the
+  remaining fields as arguments and passes on exit code 0 (decoder harness, driver host test).
 Usage: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rtlnet_regression.ps1 [-Match <regex>]
-Revision: 10-22-2026
+Revision: 11-09-2026
+  * 11-09-2026: sim=verilator and threads=N tokens (rtlnet_run_verilator.ps1).
   * 10-22-2026: initial version.
 -------------------------------------------------------------------------------
 #>
@@ -15,6 +19,7 @@ param([string]$Match = '.')
 $ErrorActionPreference = 'Stop'
 $Repo   = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $Runner = Join-Path $PSScriptRoot 'rtlnet_run_sim.ps1'
+$VlRunner = Join-Path $PSScriptRoot 'rtlnet_run_verilator.ps1'
 $list   = @(Get-Content -LiteralPath (Join-Path $PSScriptRoot 'rtlnet_regression.txt'))
 foreach ($f in (Get-ChildItem -Path (Join-Path $Repo 'cores'), (Join-Path $Repo 'microblaze'), (Join-Path $Repo 'boards') -Recurse -Filter regression.txt -ErrorAction SilentlyContinue | Sort-Object FullName)) {
     $list += Get-Content -LiteralPath $f.FullName
@@ -26,9 +31,21 @@ foreach ($raw in $list) {
     $tok = $line -split '\s+'
     $bench = $tok[0]; $fl = $tok[1]
     if ("$bench $line" -notmatch $Match) { continue }
-    $runArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $Runner, '-Bench', $bench, '-Filelist', $fl)
+    if ($fl -like 'script:*') {
+        # A host script entry (decoder harness, driver test): <name> script:<path> [arguments...]; passes on exit code 0.
+        $scriptPath = $fl.Substring(7)
+        $scriptArgs = @(); if ($tok.Count -gt 2) { $scriptArgs = $tok[2..($tok.Count - 1)] }
+        $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Repo $scriptPath) @scriptArgs
+        $out | Select-Object -Last 1 | Write-Output
+        if ($LASTEXITCODE -eq 0) { $pass++ } else { $fail++; $failed += $line }
+        continue
+    }
+    $useVl = ($tok -contains 'sim=verilator')
+    $runArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $(if ($useVl) { $VlRunner } else { $Runner }), '-Bench', $bench, '-Filelist', $fl)
     foreach ($t in $tok[2..($tok.Count - 1)]) {
         if (-not $t) { continue }
+        if ($t -eq 'sim=verilator') { continue }
+        if ($t -like 'threads=*')   { $runArgs += @('-Threads', ($t.Substring(8))); continue }
         if ($t -like 'defines=*')      { $runArgs += @('-Defines', ($t.Substring(8))) }
         elseif ($t -like 'plusargs=*') { $runArgs += @('-PlusArgs', ($t.Substring(9))) }
         elseif ($t -eq 'expectfail')   { $runArgs += '-ExpectFail' }

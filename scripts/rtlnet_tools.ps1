@@ -29,9 +29,26 @@ Overview:
     RvBin is the RISC-V GNU toolchain bin folder of the install
     (<Root>/gnu/riscv/nt/bin, riscv64-unknown-elf-*); the install root
     found through RTLNET_XILINX moves it with the rest of the install.
+  * Resolve-RtlnetHostCxx -> host g++ next to the resolved gcc (or
+    $env:RTLNET_HOST_CXX), for the OpenH264 decoder build.
+  * Resolve-RtlnetFfmpeg -> object Ffmpeg, Ffprobe (or throws): $env:RTLNET_FFMPEG
+    (ffmpeg.exe, or the folder holding it), ffmpeg on PATH, the winget package
+    folder %LOCALAPPDATA%/Microsoft/WinGet/Packages/Gyan.FFmpeg*/ffmpeg-*/bin.
+  * Resolve-RtlnetVlc -> vlc.exe or $null: $env:RTLNET_VLC, vlc.exe on PATH,
+    <Program Files>/VideoLAN/VLC/vlc.exe.
+  * Get-RtlnetToolDir <name> -> %LOCALAPPDATA%/RTLNet/tools/<name> (created);
+    $env:RTLNET_TOOLS_DIR replaces the %LOCALAPPDATA%/RTLNet/tools root.
+  * Resolve-RtlnetLdecod / Resolve-RtlnetH264dec -> the JM ldecod and OpenH264
+    h264dec executables built by cores/rtlnet_h264_enc/testbench/h264_build_decoders.ps1:
+    $env:RTLNET_LDECOD / $env:RTLNET_H264DEC, else the tool directory; $null when
+    not built.
+  * Resolve-RtlnetVerilator -> object Root, Bash of the MSYS2 install holding ucrt64/bin/verilator
+    ($env:RTLNET_MSYS2 or <drive>/msys64); run it as Bash -lc with MSYSTEM=UCRT64.
+  * Python scripts run as: python -I <script>.
 Revision: 11-09-2026
   * 11-06-2026: initial version (discovery replaces the fixed 2025.2 paths).
   * 11-09-2026: RvBin member (RISC-V toolchain for the MicroBlaze V firmware).
+  * 11-09-2026: ffmpeg/ffprobe, VLC, g++, decoder-build resolvers (H.264 encoder harness).
 -------------------------------------------------------------------------------
 #>
 
@@ -144,4 +161,84 @@ function Resolve-RtlnetIperf {
     $sib = Join-Path $PSScriptRoot '..\..\tools\iperf\iperf.exe'
     if (Test-Path -LiteralPath $sib) { return (Resolve-Path -LiteralPath $sib).Path }
     return $null
+}
+
+function Resolve-RtlnetHostCxx {
+    if ($env:RTLNET_HOST_CXX) { return $env:RTLNET_HOST_CXX }
+    $cc = Resolve-RtlnetHostCc
+    $cxx = Join-Path (Split-Path -Parent $cc) 'g++.exe'
+    if (Test-Path -LiteralPath $cxx) { return (ConvertTo-RtlnetFwd $cxx) }
+    $onPath = Get-Command g++.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($onPath) { return $onPath.Source }
+    throw 'no host C++ compiler found: set RTLNET_HOST_CXX to g++.exe or put g++ on PATH'
+}
+
+function Resolve-RtlnetFfmpeg {
+    $dirs = @()
+    if ($env:RTLNET_FFMPEG) {
+        $e = $env:RTLNET_FFMPEG
+        if ($e -match '\.exe$') { $dirs += (Split-Path -Parent $e) } else { $dirs += $e }
+    }
+    $onPath = Get-Command ffmpeg.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($onPath) { $dirs += (Split-Path -Parent $onPath.Source) }
+    $pk = Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\Packages'
+    foreach ($d in @(Get-ChildItem -LiteralPath $pk -Directory -Filter 'Gyan.FFmpeg*' -ErrorAction SilentlyContinue)) {
+        foreach ($v in @(Get-ChildItem -LiteralPath $d.FullName -Directory -Filter 'ffmpeg-*' -ErrorAction SilentlyContinue |
+                         Sort-Object Name -Descending)) { $dirs += (Join-Path $v.FullName 'bin') }
+    }
+    foreach ($d in $dirs) {
+        if ((Test-Path -LiteralPath (Join-Path $d 'ffmpeg.exe')) -and (Test-Path -LiteralPath (Join-Path $d 'ffprobe.exe'))) {
+            return [pscustomobject]@{ Ffmpeg = (ConvertTo-RtlnetFwd (Join-Path $d 'ffmpeg.exe'));
+                                      Ffprobe = (ConvertTo-RtlnetFwd (Join-Path $d 'ffprobe.exe')) }
+        }
+    }
+    throw 'no ffmpeg/ffprobe found: set RTLNET_FFMPEG to ffmpeg.exe (or its folder) or put ffmpeg on PATH'
+}
+
+function Resolve-RtlnetVlc {
+    if ($env:RTLNET_VLC) { return $env:RTLNET_VLC }
+    $onPath = Get-Command vlc.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($onPath) { return $onPath.Source }
+    foreach ($pf in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) {
+        if (-not $pf) { continue }
+        $v = Join-Path $pf 'VideoLAN\VLC\vlc.exe'
+        if (Test-Path -LiteralPath $v) { return (ConvertTo-RtlnetFwd $v) }
+    }
+    return $null
+}
+
+function Get-RtlnetToolDir([string]$name) {
+    $root = if ($env:RTLNET_TOOLS_DIR) { $env:RTLNET_TOOLS_DIR } else { Join-Path $env:LOCALAPPDATA 'RTLNet\tools' }
+    $d = Join-Path $root $name
+    New-Item -ItemType Directory -Force -Path $d | Out-Null
+    return (ConvertTo-RtlnetFwd $d)
+}
+
+function Resolve-RtlnetLdecod {
+    if ($env:RTLNET_LDECOD) { return $env:RTLNET_LDECOD }
+    $exe = Join-Path (Get-RtlnetToolDir 'jm') 'bin/ldecod.exe'
+    if (Test-Path -LiteralPath $exe) { return (ConvertTo-RtlnetFwd $exe) }
+    return $null
+}
+
+function Resolve-RtlnetH264dec {
+    if ($env:RTLNET_H264DEC) { return $env:RTLNET_H264DEC }
+    $exe = Join-Path (Get-RtlnetToolDir 'openh264') 'bin/h264dec.exe'
+    if (Test-Path -LiteralPath $exe) { return (ConvertTo-RtlnetFwd $exe) }
+    return $null
+}
+
+function Resolve-RtlnetVerilator {
+    $roots = @()
+    if ($env:RTLNET_MSYS2) { $roots += $env:RTLNET_MSYS2 }
+    foreach ($d in Get-RtlnetDriveRoots) { $roots += (Join-Path $d 'msys64') }
+    foreach ($r in $roots) {
+        $bash = Join-Path $r 'usr\bin\bash.exe'
+        $vl = Join-Path $r 'ucrt64\bin\verilator'
+        if ((Test-Path -LiteralPath $bash) -and (Test-Path -LiteralPath $vl)) {
+            return [pscustomobject]@{ Root = (ConvertTo-RtlnetFwd $r); Bash = (ConvertTo-RtlnetFwd $bash) }
+        }
+        if ($env:RTLNET_MSYS2 -and ($r -eq $env:RTLNET_MSYS2)) { throw "RTLNET_MSYS2=$r holds no ucrt64/bin/verilator" }
+    }
+    throw 'no MSYS2 Verilator found: install verilator in MSYS2 UCRT64 or set RTLNET_MSYS2 to the MSYS2 root'
 }
