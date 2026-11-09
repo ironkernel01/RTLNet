@@ -43,6 +43,9 @@
  *
  * This header holds constants, signatures and contract prose; the .c files
  * hold the per-function commentary.
+ *
+ * Revision: 11-09-2026
+ *   * 11-09-2026: RTLNET_FW_IMAGE ("LMB" release image, "DDR3" development image of build.ps1 -Ddr).
  */
 #ifndef RTLNET_PLATFORM_H
 #define RTLNET_PLATFORM_H
@@ -99,6 +102,13 @@
 /* Firmware identity. */
 #define RTLNET_FW_NAME              "rtlnet-fw"
 #define RTLNET_FW_VERSION           "11-09-2026"
+/* Memory the image is linked into: "LMB" (release, build.ps1) or "DDR3" (development, build.ps1 -Ddr, which defines
+ * RTLNET_FW_IMAGE_DDR; the image is loaded over JTAG). */
+#ifdef RTLNET_FW_IMAGE_DDR
+#define RTLNET_FW_IMAGE             "DDR3"
+#else
+#define RTLNET_FW_IMAGE             "LMB"
+#endif
 
 /* Free-running tick (AXI Timer 0 at cpu_clk). */
 #define RTLNET_PLAT_TICKS_PER_US    (RTLNET_PLAT_CPU_CLK_HZ / 1000000u)

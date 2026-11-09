@@ -664,11 +664,50 @@ loop): storm limiter seen 3998, passed 1003, dropped 2995 (limit 10 per 100 ms h
 PASS at 22.5 to 23.2 Mbit/s (17 Mbit/s before the offload), CPU FIFO drops 35 of 9022 frames (2 before: the echo
 runs faster and fills the 32 KiB FIFO more often; TCP retransmits, no run failed), offload counters clean.
 
+### 9.12 DDR3 link variant (development image, 11-09-2026)
+
+`microblaze/firmware/build.ps1 -Ddr` links the same sources for the DDR3 window and writes `build/firmware_ddr.elf`
+(linker script `lscript_ddr.ld`, map `firmware_ddr.map`, objects in `obj_ddr/`); `build/firmware.elf`, the release image
+merged into the bitstream, is not touched.
+
+| Part | Release image | DDR3 image |
+|---|---|---|
+| `.text`, `.rodata`, `.data`, `.bss`, heap (2 KiB), stack (8 KiB) | LMB, `0x0000_0000` (512 KiB) | DDR3, `0x8000_0000`, region 64 MiB (the other 448 MiB stay free for frame buffers) |
+| `.axi_bram` (DMA buffers, lwIP heap) | `0xC000_0000`, NOLOAD | same |
+| Size (text / data / bss) | 118472 / 1128 / 267792 bytes | 116146 / 1128 / 263688 bytes |
+| Boot banner | `rtlnet-fw 11-09-2026, LMB image` | `rtlnet-fw 11-09-2026, DDR3 image` |
+
+- The image defines `RTLNET_FW_IMAGE_DDR`; `rtlnet_platform.h` turns it into `RTLNET_FW_IMAGE` ("LMB" or "DDR3"), which
+  the banner of `cli_start` prints.
+- `ddr test` is refused in the DDR3 image (`% ddr test is not available in the DDR3 image`): the test writes from
+  `0x8000_0000` and would overwrite the running code.
+- Trap vector: the BSP `_boot` (the first code of the image, `.text.init` at `0x8000_0000`) writes `mtvec` with
+  `_trap_handler`, which lives in the DDR3 image, so traps of the running image reach the DDR3 handler. The reset vector at
+  `0x0` stays the release image in the LMB: a hardware reset boots the release image; the DDR3 image starts only through the
+  debugger (`rwr pc <entry>`, `con` in `jtag_load_elf.tcl`).
+- `.bss` clear: `_start` (BSP crt0) clears `__bss_start .. _end` with plain stores before `main`. In DDR3 this needs a
+  usable controller. The ELF is loaded over JTAG after the release image has booted, so calibration is done (CLK_STATUS bit 1);
+  `jtag_load_elf.tcl` also waits for that bit, with a bounded timeout, before `dow` (assumption: no DDR3 image is started
+  while the controller is uncalibrated).
+- Execution from DDR3 needs a 32-bit program counter. The MicroBlaze V IP propagates `C_PC_WIDTH` 19 from the 512 KiB
+  ILMB when `C_I_AXI` is 0, so a jump to `0x8000_0000` wraps to `0x0` and the hart runs the LMB image
+  (observed: `rwr pc 0x80000000` then `stp` stepped from `0x0`; the banner of the "DDR3" run was the release banner). The
+  block design sets `C_PC_WIDTH` 32 in every build.
+
+JTAG sequence (`jtag_load_elf.ps1 [-Elf <elf>] [-Image Auto|LMB|DDR3]`): stop, sentinel word in free DDR3, `rst -system -stop`,
+wait for CLK_STATUS bit 1, clear the arbiter status and counters, `dow`, read back the first, middle and last word of
+every loaded segment against the file, `rwr pc <entry>`, `con`. `rst -system` resets the processor and the AXI
+peripherals through the debug module's reset, not the DDR3 controller (its `sys_rstn` is the board reset): the sentinel
+survives and calibration is still set 2 ms after the reset on every run. The arbiter's registers are not reset either, so
+the script clears them.
+
 ## 10. Build and test commands
 
 ```
 powershell -NoProfile -ExecutionPolicy Bypass -File boards/nexys_video/scripts/build.ps1 [-Network] [-Program] [-Test]
 powershell -NoProfile -ExecutionPolicy Bypass -File microblaze/firmware/build.ps1 [-Xsa <xsa>] [-Bsp] [-Demo]
+powershell -NoProfile -ExecutionPolicy Bypass -File microblaze/firmware/build.ps1 -Ddr
+powershell -NoProfile -ExecutionPolicy Bypass -File boards/nexys_video/scripts/jtag_load_elf.ps1 [-Elf <elf>] [-Image Auto|LMB|DDR3]
 powershell -NoProfile -ExecutionPolicy Bypass -File microblaze/firmware/build.ps1 -NoFirmware -LwipTest
 python microblaze/firmware/test/iperf_header_capture.py --port 5101 --run "plain=-t 2" --run "R=-t 2 -R"
 python microblaze/firmware/test/iperf_board_emulator.py --port 5001 --run "R=-t 3 -R" --run "r=-t 3 -r -L 5301"
@@ -735,3 +774,4 @@ Details: `boards/nexys_video/documentation/rtlnet_nexys_video.md` sections 6.3 a
 | 11-09-2026 | Processor changed from the classic MicroBlaze 11.0 to MicroBlaze V (RV32IMC, Zicsr, Zba/Zbb/Zbs, no caches) with `mdm_riscv`; RISC-V toolchain, BSP flags check and linker template; `Xil_ExceptionDisable()` in the platform layer; measurements in `boards/nexys_video/documentation/rtlnet_nexys_video.md` section 6.7 |
 | 11-09-2026 | JTAG UART of the MDM removed (CDC gate passes); address 0x4140_0000 unmapped; `axi_periph` has 6 masters; JTAG load of an ELF with `boards/nexys_video/scripts/jtag_load_elf.ps1` |
 | 11-09-2026 | Phase 0 stage 1: 8 KiB instruction and 8 KiB write-through data caches over `0x8000_0000..0x9FFF_FFFF`, SmartConnect `sc_ddr` (one clock, `cpu_clk`), exported 128-bit `M_AXI_DDR` on `clk`; the board top crosses it to `ui_clk` in `rtlnet_axi_cdc`; results in `boards/nexys_video/documentation/rtlnet_nexys_video.md` section 6.8 |
+| 11-09-2026 | Phase 0 stage 2: `build.ps1 -Ddr` (DDR3-linked development image, banner names the image), `jtag_load_elf` waits for DDR3 calibration and verifies the download, block design `C_PC_WIDTH` 32 (section 9.12) |

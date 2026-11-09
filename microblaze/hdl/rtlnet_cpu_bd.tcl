@@ -65,6 +65,7 @@
 #     exported M_AXI_DDR (128-bit) on clk, one clock and the CPU reset only.
 #   * 11-09-2026: JTAG UART removed (C_USE_UART 0, no MDM AXI slave, 0x4140_0000
 #     unmapped); axi_periph has 6 masters; microblaze_riscv dict one CONFIG per line.
+#   * 11-09-2026: C_PC_WIDTH 32 (the propagated 19 bits confine execution to the LMB).
 # Clocks: clk (cpu_clk 100 MHz) for every cell.
 # -----------------------------------------------------------------------------
 
@@ -182,6 +183,10 @@ proc rtlnet_cpu_bd_create {bd_dir} {
     CONFIG.C_USE_INTERRUPT           1 \
     CONFIG.C_M_AXI_D_BUS_EXCEPTION   0 \
     CONFIG.C_BASE_VECTORS            0x0000000000000000] $mb
+  # Program counter width 32: the IP propagates 19 bits from the 512 KiB ILMB (C_I_AXI 0), which wraps a jump
+  # to 0x8000_0000 to 0x0 and confines execution to the LMB. 32 bits let the CPU execute from the cached DDR3
+  # window (development flow: a DDR3-linked ELF loaded over JTAG).
+  set_property CONFIG.C_PC_WIDTH 32 $mb
 
   # DDR3 path interconnect: instruction and data cache masters (clk) to one
   # master (clk); the SmartConnect converts 32 -> 128 bits.

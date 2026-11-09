@@ -47,6 +47,7 @@
  *  10-22-2026  MenuBuilder AI / Steve Spano    Network commands on the core drivers; phy, clear, iperf, advertise, duplex, mac-address
  *  10-22-2026  MenuBuilder AI / Steve Spano    CPU network path: show tcp, show cpu-path, tcp echo, storm-control, classifier
  *  11-09-2026  MenuBuilder AI / Steve Spano    DDR3: show ddr, ddr test; clear counters clears the DDR3 arbiter
+ *  11-09-2026  MenuBuilder AI / Steve Spano    Boot banner names the image (LMB or DDR3)
  * ===========================================================================
  */
 #include "cli_commands.h"
@@ -446,7 +447,7 @@ void cli_start(void)
 
     cli_config_defaults();
     board_id_text(id, idt);
-    fmt_printf("\n\nRTLNet Nexys Video -- %s %s\n", RTLNET_FW_NAME, RTLNET_FW_VERSION);
+    fmt_printf("\n\nRTLNet Nexys Video -- %s %s, %s image\n", RTLNET_FW_NAME, RTLNET_FW_VERSION, RTLNET_FW_IMAGE);
     fmt_printf("Board %s, build %08x%s. Type ? for help.\n\n", idt, (unsigned)board_sys_read(NXV_SYS_BUILD_ID),
                (board_sys_read(NXV_SYS_BUILD_DIRTY) & 1u) ? " (dirty)" : "");
     (void)Menu_Init(&io);
@@ -3152,6 +3153,11 @@ int cli_ddr_test(const MenuCommandContext *ctx)
     uint32_t mib = CLI_DDR_DEFAULT_MIB;
     ddrtest_result_t r;
     static const char *const phase_name[] = { "none", "data bus", "address bus", "random fill" };
+#ifdef RTLNET_FW_IMAGE_DDR
+    /* The DDR3 image runs from the first bytes of the tested window: the test would overwrite the running code. */
+    fmt_printf("%% ddr test is not available in the DDR3 image (it runs from the tested region)\n");
+    return -1;
+#endif
     if (ctx->argc > 0 && (cli_parse_u32(ctx->argv[0], &mib) != 0 || mib < 1u || mib > CLI_DDR_MAX_MIB)) {
         return cli_bad_value("size in MiB (1..512)", ctx->argv[0]);
     }

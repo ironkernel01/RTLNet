@@ -38,7 +38,7 @@
 #     timing summary, CDC (report_cdc -details), methodology, DRC,
 #     check_timing, clock networks, clock interaction, failing paths.
 # Usage: vivado -mode batch -source build_bitstream.tcl -tclargs [network 0|1]
-#          [build_id <8 hex>] [dirty 0|1]   (pairs as "name value" or name=value)
+#          [build_id <8 hex>] [dirty 0|1] [tag <name>]   (pairs as "name value" or name=value)
 #   Normally run through boards/nexys_video/scripts/build.ps1.
 # Revision: 11-09-2026
 #   * 10-22-2026: initial version.
@@ -46,6 +46,8 @@
 #   * 11-09-2026: Explore directives and a post-route phys_opt_design while WNS is negative (MicroBlaze V caches).
 #   * 11-09-2026: u_ddr_cdc (rtlnet_axi_cdc, five packet FIFOs): expected fifo instances +5 in both builds; ASYNC_REG on the MIG
 #     reset synchronizers (CDC-8); methodology waivers for the vendor MIG (LUTAR-1, PDRC-190, XDCB-5), each with required targets.
+#   * 11-09-2026: block design C_PC_WIDTH 32 (execution from DDR3); no change to the gates.
+#   * 11-09-2026: tag argument: outputs in build/<tag>/ (variant builds do not overwrite the network image).
 #   * 11-09-2026: DDR3 controller IP generated from the MIG project; expected rtlnet_axil_cdc instances +1 (the
 #     arbiter's register crossing) in both builds.
 # -----------------------------------------------------------------------------
@@ -74,15 +76,23 @@ proc nv_exit {code msg} {
 set opt(network)  0
 set opt(build_id) ""
 set opt(dirty)    ""
+set opt(tag)      ""
 set toks {}
 foreach a $argv { foreach t [split $a ",="] { if {$t ne ""} { lappend toks $t } } }
-if {[llength $toks] % 2 != 0} { puts "usage: \[network 0|1\] \[build_id XXXXXXXX\] \[dirty 0|1\]"; exit 99 }
+if {[llength $toks] % 2 != 0} { puts "usage: \[network 0|1\] \[build_id XXXXXXXX\] \[dirty 0|1\] \[tag name\]"; exit 99 }
 foreach {k v} $toks {
   set k [string tolower $k]
   if {![info exists opt($k)]} { puts "rtlnet_build: unknown argument '$k'"; exit 99 }
   set opt($k) $v
 }
 if {$opt(network) ni {0 1}} { puts "rtlnet_build: network must be 0 or 1"; exit 99 }
+# tag <name>: every output goes to build/<name>/ instead of build/, so a variant build (for example the
+# cpu-only gate build, tag cpu) leaves the network image rtlnet_nexys_video.{bit,mmi,xsa} untouched.
+if {$opt(tag) ne ""} {
+  if {![regexp {^[A-Za-z0-9_]{1,16}$} $opt(tag)]} { puts "rtlnet_build: bad tag '$opt(tag)'"; exit 99 }
+  set BUILD_DIR [file join $BOARD_DIR build $opt(tag)]
+  set RPT_DIR   [file join $BUILD_DIR reports]
+}
 
 # Build identity from git unless given.
 if {$opt(build_id) eq ""} {

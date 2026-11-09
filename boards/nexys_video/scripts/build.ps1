@@ -22,10 +22,14 @@ Overview:
     code (the Vivado gate codes are listed in build_bitstream.tcl).
 Usage:
   powershell -NoProfile -ExecutionPolicy Bypass -File boards/nexys_video/scripts/build.ps1 `
-    [-Network] [-SkipFirmware] [-Program] [-Test] [-Port COM3]
-Revision: 10-22-2026
+    [-Network] [-SkipFirmware] [-Program] [-Test] [-Port COM3] [-Tag <name>]
+  * -Tag <name>: variant gate build. Only the bitstream step runs, with every output (log, reports, hardware
+    bitstream, MMI, XSA, build_info.txt) in build/<name>/; the network image build/rtlnet_nexys_video.{bit,mmi,xsa}
+    and the firmware build are untouched. Example: -Tag cpu (the cpu-only variant, no -Network).
+Revision: 11-09-2026
   * 10-22-2026: initial version.
   * 10-22-2026: bitstream before firmware (the BSP comes from the XSA).
+  * 11-09-2026: -Tag: variant build into build/<name>/.
 -------------------------------------------------------------------------------
 #>
 param(
@@ -33,7 +37,8 @@ param(
     [switch]$SkipFirmware,
     [switch]$Program,
     [switch]$Test,
-    [string]$Port = 'COM3'
+    [string]$Port = 'COM3',
+    [string]$Tag = ''
 )
 $ErrorActionPreference = 'Stop'
 $Board = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
@@ -51,12 +56,25 @@ function Step([string]$name, [scriptblock]$body) {
 }
 
 $net = $(if ($Network) { '1' } else { '0' })
+$tclArgs = "network,$net"
+if ($Tag) {
+    if ($Program -or $Test) { Write-Output 'RTLNET_BUILD: FAIL -Tag builds are not programmed (no firmware merge)'; exit 99 }
+    $Build = Join-Path $Build $Tag
+    New-Item -ItemType Directory -Force -Path $Build | Out-Null
+    $tclArgs = "network,$net,tag,$Tag"
+}
 Step 'bitstream' {
     & (Join-Path $Repo 'scripts\rtlnet_vivado.ps1') -Tcl (Join-Path $PSScriptRoot 'build_bitstream.tcl') `
-        -Log (Join-Path $Build 'build_bitstream.log') -TclArgs "network,$net"
+        -Log (Join-Path $Build 'build_bitstream.log') -TclArgs $tclArgs
 }
 Get-Content -LiteralPath (Join-Path $Build 'build_bitstream.log') | Where-Object { $_ -match '^(rtlnet_build|rtlnet_cdc):' } |
     ForEach-Object { Write-Output "  $_" }
+if ($Tag) {
+    Write-Output '--- build_info.txt'
+    Get-Content -LiteralPath (Join-Path $Build 'build_info.txt') | ForEach-Object { Write-Output "  $_" }
+    Write-Output "RTLNET_BUILD: PASS $(Join-Path $Build 'rtlnet_nexys_video_hw.bit') (variant $Tag, no firmware)"
+    exit 0
+}
 if (-not $SkipFirmware) {
     Step 'firmware' { powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Repo 'microblaze\firmware\build.ps1') -Demo `
         -Xsa (Join-Path $Build 'rtlnet_nexys_video.xsa') }

@@ -48,11 +48,23 @@ Overview:
     the BSP even when it is up to date. -Xsa: another hardware export. -Define:
     extra -D macros for the firmware and lwIP compilation (the zero-copy options of
     src/lwip/lwipopts.h: RTLNET_NETIF_ZERO_COPY_RX=0, RTLNET_NETIF_ZERO_COPY_TX=0).
+  * -Ddr: the development image. The same sources link for the DDR3 window: .text, .rodata, .data, .bss,
+    heap and stack at 0x8000_0000 (64 MiB region, the rest of the 512 MiB stays free for frame buffers),
+    .axi_bram at 0xC000_0000 NOLOAD as in the release image, nothing in the LMB. Output build/firmware_ddr.elf
+    (linker script lscript_ddr.ld, map firmware_ddr.map, objects in obj_ddr/); build/firmware.elf (the release
+    image merged into the bitstream) is not touched. The image defines RTLNET_FW_IMAGE_DDR: the boot banner reads
+    "DDR3 image". Load it with boards/nexys_video/scripts/jtag_load_elf.ps1 (it waits for DDR3 calibration).
+    Assumptions: (1) the release image has booted and calibrated the DDR3 controller before the ELF is loaded
+    (CLK_STATUS bit 1; jtag_load_elf.tcl waits for it): the BSP start-up (_boot, then _start) clears .bss from
+    __bss_start to _end with plain stores, which needs a working DDR3 window; (2) the reset vector at 0x0 stays
+    the release image in the LMB, so a hardware reset boots the release image, and the DDR3 image starts only
+    through the debugger (PC = ELF entry); (3) the trap vector is set by the image's own _boot (csrw mtvec,
+    _trap_handler), which lives in the DDR3 image, so traps of the running image reach the DDR3 handler.
   * Exit code 0 only when every requested step succeeded; prints
     RTLNET_FW: PASS <elf>.
 Usage:
   powershell -NoProfile -ExecutionPolicy Bypass -File microblaze/firmware/build.ps1 `
-    [-Xsa <xsa>] [-Bsp] [-HostHarness] [-Demo] [-LwipTest] [-NetifTest] [-NoFirmware] [-Define NAME=VALUE,...]
+    [-Xsa <xsa>] [-Bsp] [-Ddr] [-HostHarness] [-Demo] [-LwipTest] [-NetifTest] [-NoFirmware] [-Define NAME=VALUE,...]
 Revision: 11-09-2026
   * 10-22-2026: initial version.
   * 10-22-2026: generated standalone BSP, lwIP, BSP linker conventions;
@@ -63,11 +75,13 @@ Revision: 11-09-2026
   * 11-09-2026: link with --no-warn-rwx-segments (one RWX LMB segment is intended).
   * 11-09-2026: DDR3: the rtlnet_axi_arbiter driver and src/rtlnet_ddrtest.c in the firmware and the harness; the
     linker script is unchanged (the DDR3 window is not linked: the firmware uses it only through the memory test).
+  * 11-09-2026: -Ddr: development image linked into DDR3 (build/firmware_ddr.elf); boot banner names the image.
 -------------------------------------------------------------------------------
 #>
 param(
     [string]$Xsa = '',
     [switch]$Bsp,
+    [switch]$Ddr,
     [switch]$HostHarness,
     [switch]$Demo,
     [switch]$LwipTest,
@@ -180,18 +194,33 @@ if (-not $NoFirmware) {
     }
     # -DSDT: the BSP drivers are built for the system-device-tree flow (base-address APIs).
     $mbflags = $hw + @('-DSDT')
+    if ($Ddr) { $mbflags += '-DRTLNET_FW_IMAGE_DDR' }
 
     # 3. Linker script from the install template.
     $ld = Get-Content -LiteralPath $LdTmpl -Raw
-    $memory = @"
+    # Release: everything in the 512 KiB LMB. -Ddr: everything in the first 64 MiB of the DDR3 window
+    # (0x8000_0000, 512 MiB); the LMB is not in the memory list, so nothing can land there.
+    if ($Ddr) {
+        $mem = 'ddr3'
+        $memory = @"
+MEMORY
+{
+   ddr3 : ORIGIN = 0x80000000, LENGTH = 0x4000000
+   axi_bram : ORIGIN = 0xC0000000, LENGTH = 0x20000
+}
+"@
+    } else {
+        $mem = 'lmb_bram'
+        $memory = @"
 MEMORY
 {
    lmb_bram : ORIGIN = 0x0, LENGTH = 0x80000
    axi_bram : ORIGIN = 0xC0000000, LENGTH = 0x20000
 }
 "@
+    }
     $ld = $ld.Replace('@STACK_SIZE@', '0x2000').Replace('@HEAP_SIZE@', '0x800').Replace('@MEMORY_SECTION@', $memory)
-    $ld = $ld.Replace('@CODE@', 'lmb_bram').Replace('@DATA@', 'lmb_bram')
+    $ld = $ld.Replace('@CODE@', $mem).Replace('@DATA@', $mem)
     $axi = @"
 /* RTLNet: DMA frame buffers in the AXI BRAM (rtlnet_lwip_netif.c), never loaded. */
 .axi_bram (NOLOAD) : {
@@ -206,11 +235,12 @@ MEMORY
     # _end stays where the template puts it (end of the LMB image): the RISC-V start-up clears
     # memory from the start of .bss to _end, so _end must not lie past the AXI BRAM section.
     $ld = [regex]::Replace($ld, '(?m)^_end = \.;', ('_end = .;' + "`n`n" + $axi).Replace('$', '$$'))
-    $ldFile = Join-Path $Out 'lscript.ld'
+    $sfx = $(if ($Ddr) { '_ddr' } else { '' })
+    $ldFile = Join-Path $Out "lscript$sfx.ld"
     Set-Content -LiteralPath $ldFile -Value $ld -Encoding ascii
 
     # 4. Compile.
-    $objDir = Join-Path $Out 'obj'
+    $objDir = Join-Path $Out "obj$sfx"
     if (Test-Path -LiteralPath $objDir) { Remove-Item -Recurse -Force -LiteralPath $objDir }
     New-Item -ItemType Directory -Force -Path $objDir | Out-Null
     $lwipInc = @("-I$Fw/src/lwip", '-isystem', "$LwipDir/src/include", '-isystem', "$LwipDir/contrib/ports/xilinx/include")
@@ -241,8 +271,8 @@ MEMORY
 
     # 5. Link with the BSP start-up and libraries. One LMB holds code and data, so the single RWX
     # segment is intended: --no-warn-rwx-segments silences the linker warning about it.
-    $elf = Join-Path $Out 'firmware.elf'
-    Invoke-Step $MbGcc ($mbflags + @("-specs=$bspSpec", "-T$ldFile", '-Wl,--gc-sections', '-Wl,--no-warn-rwx-segments', "-Wl,-Map=$Out/firmware.map",
+    $elf = Join-Path $Out "firmware$sfx.elf"
+    Invoke-Step $MbGcc ($mbflags + @("-specs=$bspSpec", "-T$ldFile", '-Wl,--gc-sections', '-Wl,--no-warn-rwx-segments', "-Wl,-Map=$Out/firmware$sfx.map",
         "-L$bspLib", '-o', $elf) + $objs + @('-Wl,--start-group', '-lxil', '-lxilstandalone', '-lxiltimer', '-lgcc', '-lc',
         '-Wl,--end-group'))
     & $MbSize $elf

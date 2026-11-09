@@ -97,13 +97,13 @@ hardware.
 
 ## 5. Build flow and gates
 
-`powershell -File boards/nexys_video/scripts/build.ps1 [-Network] [-Program] [-Test]` runs
+`powershell -File boards/nexys_video/scripts/build.ps1 [-Network] [-Program] [-Test] [-Tag <name>]` runs
 `build_bitstream.tcl` (which also writes the hardware export `rtlnet_nexys_video.xsa`), then the firmware
 build on a BSP generated from that XSA (with the CLI table check and the harness demo,
 `microblaze/documentation/rtlnet_cpu_microblaze.md` section 5), through
 `scripts/rtlnet_vivado.ps1`, and `merge_elf.ps1`. Outputs in `boards/nexys_video/build/`:
 `rtlnet_nexys_video.bit` (to program), `rtlnet_nexys_video_hw.bit` (no firmware),
-`rtlnet_nexys_video.mmi`, `build_info.txt`, `post_synth.dcp`, `post_route.dcp`, `reports/`.
+`rtlnet_nexys_video.mmi`, `build_info.txt`, `post_synth.dcp`, `post_route.dcp`, `reports/`. With `-Tag <name>` only the bitstream step runs and every output goes to `build/<name>/` (for example `-Tag cpu` for the CPU-only gate build), so the network image files stay as they are.
 
 Exit codes of `build_bitstream.tcl`: 99 arguments, 11 missing file, 12 block design, 10 synthesis
 error or critical warning, 13 CDC constraint script, 25/26 opt/place, 30 route, 20 timing (setup WNS,
@@ -547,6 +547,62 @@ Board benches: `rtlnet_regression.ps1`, `RTLNET_REGRESSION` summary in `phase0_d
 `ddr_write`/`ddr_read` tasks (single beat, partial strobe, 4-beat burst). Transcripts: `phase0_ddr_cli.txt`, `phase0_ddr_net.txt`,
 `phase0_ddr_tcp.txt`, `phase0_ddr_program.txt`.
 
+### 6.9 Phase 0 stage 2: JTAG development flow, DDR3 image and 32-bit program counter (11-09-2026)
+
+Changes: `build.ps1 -Ddr` and `jtag_load_elf` (`microblaze/documentation/rtlnet_cpu_microblaze.md` section 9.12); the block design sets
+`C_PC_WIDTH` 32; `build.ps1 -Tag <name>` writes a variant build into `build/<name>/` without touching the network image.
+
+Finding: `C_PC_WIDTH` was 19 (propagated from the 512 KiB ILMB, `C_I_AXI` 0), so the first load of `firmware_ddr.elf` ran
+the LMB release image (a jump to `0x8000_0000` wrapped to `0x0`; the banner had no DDR3 line). With 32 the DDR3 image runs.
+
+Cost of the 32-bit program counter (same sources otherwise; stage 1 values from section 6.8):
+
+| Build | LUT | FF | BRAM tiles | WNS / WHS / WPWS (ns) |
+|---|---|---|---|---|
+| Network, 19-bit PC (stage 1) | 32353 | 41937 | 239.5 | 0.221 / 0.051 / 0.000 |
+| Network, 32-bit PC (`phase0_dev_net_build.txt`, 924 s) | 32521 (+168) | 42307 (+370) | 239.5 | 0.152 / 0.008 / 0.000 |
+| CPU-only, 19-bit PC | 16015 | 16414 | 174 | 0.052 / 0.008 / 0.000 |
+| CPU-only, 32-bit PC (`build.ps1 -Tag cpu`, `phase0_dev_cpu_build.txt`, 684 s) | 16158 (+143) | 16747 (+333) | 174 | 0.196 / 0.010 / 0.000 |
+
+Both 32-bit builds print `RTLNET_BUILD: PASS` with 0 failing endpoints, utilization 24.31 % (network) and 11.97 % to 12.08 % (CPU-only), no unwaived
+methodology finding. CDC gates: network `fifo 15 axil_cdc 6 gray 6`, CPU-only `fifo 5 axil_cdc 1 gray 0` (`rtlnet_cdc: PASS`, counts as expected). The
+CPU-only build used `-Tag cpu`; `git status` shows the network files changed only by the network rebuild.
+
+Board (JTAG, COM3, 1000 Mb/s, PC on Wi-Fi: `-Nic Wi-Fi -Speed 1000`, DHCP lease 192.168.68.68, mask 255.255.252.0, router 192.168.68.1):
+
+| Step | Result | Log |
+|---|---|---|
+| `program.ps1` | PASS | `phase0_dev_program.txt` |
+| `jtag_load_elf.ps1 -Elf firmware_ddr.elf` | `JTAG_LOAD_ELF: PASS`, banner "DDR3 image", download verified, calibrated 2 ms after the reset | `phase0_dev_load_ddr.txt` |
+| DDR3 image, `cli_test.ps1` | FAIL 5/33: `ddr test` x3 refused by design; `show ddr` x2 report the illegal-burst flag SET (below); 28 other checks pass | `phase0_dev_cli_ddr.txt` |
+| DDR3 image, `net_test.ps1` | PASS 25/25 | `phase0_dev_net_ddr.txt` |
+| DDR3 image, `tcp_test.ps1 -Board 192.168.68.68` | FAIL 2/8: both TCP echo tests return zero bytes inside a payload (`echo differs at offset 989 (sent 0x6E, got 0x00)`); the four iperf runs and UDP pass | `phase0_dev_tcp_ddr.txt` |
+| Release LMB ELF through the same script | `JTAG_LOAD_ELF: PASS`, banner "LMB image" | `phase0_dev_load_lmb.txt` |
+| LMB image, `cli_test.ps1` | PASS 33/33 | `phase0_dev_cli_lmb.txt` |
+| LMB image, `net_test.ps1` | PASS 25/25 | `phase0_dev_net_lmb.txt` |
+| LMB image, `tcp_test.ps1` | PASS 8/8 (a first run failed the first echo connection with a connect timeout; the second run passed all 8) | `phase0_dev_tcp_lmb.txt` |
+| `program.ps1`, then `cli_test.ps1` (release state) | PASS, PASS 33/33 | `phase0_dev_program_final.txt`, `phase0_dev_cli_final.txt` |
+
+| Rate (Mbit/s) | DDR3 image | LMB image |
+|---|---|---|
+| UDP `-u` 900M, PC to board (0 lost) | 438 | 467 |
+| UDP `-u -R`, board to PC (0 lost) | 944 | 943 |
+| TCP iperf PC to board | 50.6 | 65.1 (59.2 in the first run) |
+| TCP iperf `-R` / `-r` / `-d` board to PC | 45.5 / 41.3 / 34.2 | 96.7 / 94.3 / 86.4 |
+| Together: TCP iperf / UDP iperf | 50.3 / 20.9 | 60.6 / 20.9 |
+
+`rst -system` does not reset the MIG: a sentinel word written to DDR3 before the reset reads back unchanged after it and
+CLK_STATUS bit 1 is already set (`phase0_dev_load_ddr.txt`). The DDR3 arbiter's registers survive too, so the script clears its status and counters.
+
+Open finding in the DDR3 image: the arbiter answers illegal bursts of master 0 (the CPU caches) with SLVERR while the image runs. The counter
+stays 0 while the firmware idles, and grows with console activity: 12 errors per `show version`, repeatable, never when the code runs from
+the LMB (`ddr test` then reports `errors 0`). The sticky flag sets, and zero bytes in the TCP echo payload fit write bursts that the arbiter
+discards. A `debug read` of DDR3 words at line offsets 0, 4 and 0x14 returns the right data, so reads are not the cause. Candidates: the burst
+type or size the CPU's write-through data cache or the SmartConnect emits for sub-word or unaligned stores (the `ddr test` uses word stores only,
+and stage 1 tested sub-word stores only in simulation). The next step is a hardware probe or a bench of the SmartConnect plus arbiter with byte and
+halfword stores; the release (LMB) flow is not affected.
+
+
 ## 7. Network integration (done 10-22-2026) and what remains
 
 Integrated: `u_mac`, `u_mdio`, `u_protocol` (every leaf, the CPU network path and its classifier), `u_echo` under
@@ -578,3 +634,4 @@ Open:
 | 11-09-2026 | Phase 0a: MicroBlaze V replaces the classic MicroBlaze in the block design; hardware results of section 6.7 |
 | 11-09-2026 | Phase 0a follow-up: JTAG UART removed (CDC gate passes unmodified), JTAG load of an ELF into MicroBlaze V (`jtag_load_elf.ps1`), new measurements in section 6.7 |
 | 11-09-2026 | Phase 0 stage 1: DDR3 (`rtlnet_ddr`, `rtlnet_axi_arbiter`, bridge `u_ddr_cdc`), MicroBlaze V caches; build gates (MIG ASYNC_REG, three required MIG waivers, fifo 15 / CPU-only 5); results in section 6.8 |
+| 11-09-2026 | Phase 0 stage 2: `C_PC_WIDTH` 32, `build.ps1 -Tag` variant builds, `jtag_load_elf` with calibration wait, download check and `-Image`, DDR3 image (`build.ps1 -Ddr`); CPU-only counts `fifo 5 axil_cdc 1 gray 0` built and passing; results and the open arbiter finding in section 6.9 |
