@@ -30,7 +30,8 @@ Usage:
   Options: -Tag <name> (separate work dir per configuration), -Defines A,B=1,
     -PlusArgs INJECT_FAILURE,SEED=5, -ExpectFail, -TimeoutSeconds 3600,
     -Waves (write .sim/<bench>/waves.asdb with +access +r).
-Revision: 10-22-2026
+Revision: 11-09-2026
+  * 11-09-2026: rtlnet_tools.ps1 is loaded before the first resolver call.
   * 10-22-2026: initial version.
 -------------------------------------------------------------------------------
 #>
@@ -53,9 +54,9 @@ $Defines  = @($Defines  | ForEach-Object { $_ -split ',' } | Where-Object { $_ -
 $PlusArgs = @($PlusArgs | ForEach-Object { $_ -split ',' } | Where-Object { $_ -ne '' })
 
 $Repo     = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+. (Join-Path $PSScriptRoot 'rtlnet_tools.ps1')
 $AldecBin = Resolve-RtlnetAldec
 $Vsimsa   = Join-Path $AldecBin 'vsimsa.exe'
-. (Join-Path $PSScriptRoot 'rtlnet_tools.ps1')
 $Xil      = Resolve-RtlnetXilinx
 $Vivado   = $Xil.Vivado
 $SimRoot  = Join-Path $Repo '.sim'
