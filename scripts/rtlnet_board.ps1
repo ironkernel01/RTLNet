@@ -9,18 +9,23 @@ Usage:
   powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rtlnet_board.ps1 release
   * take: takes or reuses the lock (exit 3 when another session holds it).
   * show: prints the lock and its state (fresh or stale); exit 0.
-  * release: removes the lock when it belongs to session rtlnet.
+  * release: removes the lock when it belongs to this session.
+  * -Session <name>: session name for take and release; default
+    $env:RTLNET_BOARD_SESSION, else 'rtlnet'.
 Revision: 11-09-2026
   * 11-09-2026: initial version.
+  * 11-09-2026: -Session parameter.
 -------------------------------------------------------------------------------
 #>
 param(
     [Parameter(Mandatory = $true, Position = 0)][ValidateSet('take', 'release', 'show')][string]$Command,
     [string]$Purpose = 'rtlnet board session',
-    [int]$Minutes = 60
+    [int]$Minutes = 60,
+    [string]$Session = ''
 )
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'rtlnet_board_lock.ps1')
+if ($Session) { $script:RtlnetSession = $Session }
 switch ($Command) {
     'take'    { Enter-RtlnetBoardLock -Purpose $Purpose -ExpectedMinutes $Minutes }
     'release' { Exit-RtlnetBoardLock }

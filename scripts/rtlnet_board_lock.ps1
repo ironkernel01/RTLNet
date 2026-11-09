@@ -19,21 +19,25 @@ Overview:
     minutes. A stale lock is taken and a line says so.
   * A live, unexpired lock of another session ends the script at once with exit
     code 3 and a message naming holder, purpose and start; the script never
-    waits and never takes the lock over. A lock of session "rtlnet" is reused
-    and its start time refreshed.
+    waits and never takes the lock over. A lock of the caller's own session is
+    reused and its start time refreshed.
+  * Session name: $env:RTLNET_BOARD_SESSION when set, else 'rtlnet'. A caller
+    may also set $script:RtlnetSession after dot-sourcing (rtlnet_board.ps1
+    -Session does this).
   * The file is created atomically (FileMode CreateNew); after removing a
     stale lock the create is retried once.
 Functions:
   * Enter-RtlnetBoardLock -Purpose <text> [-ExpectedMinutes 60]
-  * Exit-RtlnetBoardLock     removes the lock when it belongs to session rtlnet
+  * Exit-RtlnetBoardLock     removes the lock when it belongs to this session
   * Get-RtlnetBoardLock      object (session, purpose, start, expected_minutes,
                              pid, host, State fresh|stale, Reason, Path) or $null
 Revision: 11-09-2026
   * 11-09-2026: initial version.
+  * 11-09-2026: RTLNET_BOARD_SESSION environment variable for the session name.
 -------------------------------------------------------------------------------
 #>
 
-$script:RtlnetSession = 'rtlnet'
+$script:RtlnetSession = if ($env:RTLNET_BOARD_SESSION) { $env:RTLNET_BOARD_SESSION } else { 'rtlnet' }
 $script:StaleGraceMinutes = 30
 
 function Get-RtlnetBoardLockPath {
