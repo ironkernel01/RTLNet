@@ -1,0 +1,15 @@
+# rtlnet_axi_cdc regression: <bench> <filelist> [tag] [defines=A,B] [plusargs=X,Y] [expectfail]
+# Defines: TB_DW data width, TB_AW address width, TB_IDW ID width, TB_SPER/TB_MPER s_clk/m_clk period in ps, TB_MAXB
+# MAX_BURST_BEATS, TB_FKB W/R FIFO kilobytes, TB_GAP 1 = random ready/valid gaps, TB_N transactions per direction,
+# TB_BIG 1 = 256-beat bursts.
+tb_rtlnet_axi_cdc   cores/rtlnet_axi_cdc/testbench/tb_rtlnet_axi_cdc.f  dw128_100_100  defines=TB_DW=128,TB_SPER=10000,TB_MPER=10000,TB_GAP=1
+tb_rtlnet_axi_cdc   cores/rtlnet_axi_cdc/testbench/tb_rtlnet_axi_cdc.f  dw128_100_100_nogap  defines=TB_DW=128,TB_SPER=10000,TB_MPER=10000,TB_GAP=0
+tb_rtlnet_axi_cdc   cores/rtlnet_axi_cdc/testbench/tb_rtlnet_axi_cdc.f  dw128_150_100  defines=TB_DW=128,TB_SPER=6666,TB_MPER=10000,TB_GAP=1
+tb_rtlnet_axi_cdc   cores/rtlnet_axi_cdc/testbench/tb_rtlnet_axi_cdc.f  dw128_100_150  defines=TB_DW=128,TB_SPER=10000,TB_MPER=6666,TB_GAP=1
+tb_rtlnet_axi_cdc   cores/rtlnet_axi_cdc/testbench/tb_rtlnet_axi_cdc.f  dw128_33_200   defines=TB_DW=128,TB_SPER=30000,TB_MPER=5000,TB_GAP=1
+tb_rtlnet_axi_cdc   cores/rtlnet_axi_cdc/testbench/tb_rtlnet_axi_cdc.f  dw128_big_150_100  defines=TB_DW=128,TB_SPER=6666,TB_MPER=10000,TB_GAP=1,TB_MAXB=256,TB_FKB=8,TB_BIG=1,TB_N=1000
+tb_rtlnet_axi_cdc   cores/rtlnet_axi_cdc/testbench/tb_rtlnet_axi_cdc.f  dw32_100_100   defines=TB_DW=32,TB_IDW=4,TB_SPER=10000,TB_MPER=10000,TB_GAP=1
+tb_rtlnet_axi_cdc   cores/rtlnet_axi_cdc/testbench/tb_rtlnet_axi_cdc.f  dw32_150_100   defines=TB_DW=32,TB_IDW=4,TB_SPER=6666,TB_MPER=10000,TB_GAP=1
+tb_rtlnet_axi_cdc   cores/rtlnet_axi_cdc/testbench/tb_rtlnet_axi_cdc.f  dw32_33_200_aw64   defines=TB_DW=32,TB_AW=64,TB_IDW=3,TB_SPER=30000,TB_MPER=5000,TB_GAP=1
+tb_rtlnet_axi_cdc   cores/rtlnet_axi_cdc/testbench/tb_rtlnet_axi_cdc.f  dw32_100_150   defines=TB_DW=32,TB_IDW=4,TB_SPER=10000,TB_MPER=6666,TB_GAP=1
+tb_rtlnet_axi_cdc   cores/rtlnet_axi_cdc/testbench/tb_rtlnet_axi_cdc.f  neg   defines=TB_DW=128,TB_SPER=10000,TB_MPER=10000,TB_GAP=1  plusargs=INJECT_FAILURE  expectfail
