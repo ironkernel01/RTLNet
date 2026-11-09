@@ -1,0 +1,10 @@
+# rtlnet_axi_arbiter regression: <bench> <filelist> [tag] [defines=A,B] [plusargs=X,Y] [expectfail]
+# Defines: TB_NM masters, TB_DW data width, TB_HP high-priority mask, TB_LAT memory read latency (clocks),
+# TB_GAP 1 = random ready/valid gaps on the memory model and the masters.
+tb_rtlnet_axi_arbiter   cores/rtlnet_axi_arbiter/testbench/tb_rtlnet_axi_arbiter.f  nm3_dw128_lat0   defines=TB_NM=3,TB_DW=128,TB_HP=1,TB_LAT=0,TB_GAP=0
+tb_rtlnet_axi_arbiter   cores/rtlnet_axi_arbiter/testbench/tb_rtlnet_axi_arbiter.f  nm3_dw128_lat20  defines=TB_NM=3,TB_DW=128,TB_HP=1,TB_LAT=20,TB_GAP=1
+tb_rtlnet_axi_arbiter   cores/rtlnet_axi_arbiter/testbench/tb_rtlnet_axi_arbiter.f  nm1_dw128_lat20  defines=TB_NM=1,TB_DW=128,TB_HP=1,TB_LAT=20,TB_GAP=1
+tb_rtlnet_axi_arbiter   cores/rtlnet_axi_arbiter/testbench/tb_rtlnet_axi_arbiter.f  nm5_dw64_lat0    defines=TB_NM=5,TB_DW=64,TB_HP=9,TB_LAT=0,TB_GAP=1
+tb_rtlnet_axi_arbiter   cores/rtlnet_axi_arbiter/testbench/tb_rtlnet_axi_arbiter.f  nm5_dw128_lat20  defines=TB_NM=5,TB_DW=128,TB_HP=9,TB_LAT=20,TB_GAP=0
+tb_rtlnet_axi_arbiter   cores/rtlnet_axi_arbiter/testbench/tb_rtlnet_axi_arbiter.f  nm3_dw64_lat20   defines=TB_NM=3,TB_DW=64,TB_HP=1,TB_LAT=20,TB_GAP=1
+tb_rtlnet_axi_arbiter   cores/rtlnet_axi_arbiter/testbench/tb_rtlnet_axi_arbiter.f  neg              defines=TB_NM=3,TB_DW=128,TB_HP=1,TB_LAT=0,TB_GAP=0,TB_SIZE=5  plusargs=INJECT_FAILURE  expectfail
