@@ -8,7 +8,7 @@ Overview:
   * Dot-source it, then call the resolver(s) the script needs:
       . (Join-Path <repo>/scripts 'rtlnet_tools.ps1')
       $x = Resolve-RtlnetXilinx    # throws when no install is found
-  * Resolve-RtlnetXilinx -> object Root, Vivado, Vitis, MbBin, Version
+  * Resolve-RtlnetXilinx -> object Root, Vivado, Vitis, MbBin, RvBin, Version
     (forward slashes). Search order, first hit wins:
       1. $env:RTLNET_XILINX (install root, e.g. <drive>/AMDDesignTools/2026.1)
       2. $env:XILINX_VIVADO (set by the install's settings64 script)
@@ -26,8 +26,12 @@ Overview:
     install (<root>/tps/mingw/<ver>/win64.o/nt/bin).
   * Resolve-RtlnetIperf -> iperf 2 executable or $null: $env:RTLNET_IPERF,
     iperf.exe on PATH, <repo>/../tools/iperf/iperf.exe.
-Revision: 11-06-2026
+    RvBin is the RISC-V GNU toolchain bin folder of the install
+    (<Root>/gnu/riscv/nt/bin, riscv64-unknown-elf-*); the install root
+    found through RTLNET_XILINX moves it with the rest of the install.
+Revision: 11-09-2026
   * 11-06-2026: initial version (discovery replaces the fixed 2025.2 paths).
+  * 11-09-2026: RvBin member (RISC-V toolchain for the MicroBlaze V firmware).
 -------------------------------------------------------------------------------
 #>
 
@@ -53,6 +57,7 @@ function New-RtlnetXilinx([string]$root, [string]$source) {
         Vivado  = "$root/Vivado"
         Vitis   = "$root/Vitis"
         MbBin   = "$root/gnu/microblaze/nt/bin"
+        RvBin   = "$root/gnu/riscv/nt/bin"
         Version = Split-Path -Leaf $root
         Source  = $source
     }

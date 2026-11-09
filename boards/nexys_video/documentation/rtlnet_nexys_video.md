@@ -3,10 +3,10 @@
 | Item | Value |
 |---|---|
 | Board | Digilent Nexys Video, XC7A200T-1SBG484C, Realtek RTL8211E-VL |
-| Document revision | 10-22-2026 |
+| Document revision | 11-09-2026 |
 | Top | `boards/nexys_video/hdl/rtlnet_nexys_video_top.sv` (`rtlnet_nexys_video_top`) |
 | Builds | network (`build.ps1 -Network`, `RTLNET_WITH_NETWORK`: MAC, MDIO, protocol wrapper with ARP/ICMP/DHCP/iperf/UDP socket leaves, CPU network path with its classifier, UDP echo) and CPU-only (default); both built, timing met, on hardware |
-| Tools | Vivado 2026.1, MicroBlaze GCC 13.4, Active-HDL 11.1 |
+| Tools | Vivado 2026.1, GNU GCC 13.4 (RISC-V, MicroBlaze V), Active-HDL 11.1 |
 | Firmware | one image for both builds (`microblaze/firmware`, standalone BSP generated from the build's XSA, lwIP TCP echo on the CPU network path); absent cores are probed and reported "not present in this build" |
 
 ## 1. Files
@@ -418,6 +418,78 @@ and dropped 2995 of 3998 (limit holds), ping 14/14, 8/8 echo runs PASS at 22.5 t
 (94.9 Mbit/s TCP goodput in one direction, 120 Mbit/s sum with `-d`) and the receive zero-copy leaves the CPU 65 %
 idle at that rate (35 % busy, against 81 % copying). Zero-copy transmit costs throughput (`-R` 90.4 Mbit/s) and is off.
 
+### 6.7 Phase 0a: MicroBlaze V in place of the classic MicroBlaze (11-09-2026)
+
+The processor of the block design is MicroBlaze V (`microblaze_riscv` 1.0: RV32IMC, Zicsr, Zba/Zbb/Zbs, performance
+pipeline, no caches, debug through `mdm_riscv` 1.0, serial JTAG interface, without the JTAG UART); address map, interrupt numbering,
+exported ports and the 100 MHz clock are unchanged, except that the unused MDM register window 0x4140_0000 no longer
+exists (`microblaze/documentation/rtlnet_cpu_microblaze.md`). Network
+build, Vivado 2026.1, `build.ps1 -Network` flow (bitstream, XSA, firmware, updatemem). Both images were measured on the
+same board (JTAG, COM3) with the PC on its Wi-Fi adapter (192.168.68.84) and the board on the router at 1000 Mb/s by
+DHCP (192.168.68.68); no wired PC adapter was connected, so the iperf rates carry Wi-Fi variation. The baseline is the
+classic image built 11-08-2026 (commit 9a7a69dc). The MicroBlaze V column comes from the plain `build.ps1 -Network`
+run (repository scripts unchanged, `RTLNET_BUILD: PASS`, CDC gate passed); transcripts are
+`boards/nexys_video/build/phase0a_fix_*.txt`.
+
+| Check | Classic MicroBlaze 11.0 | MicroBlaze V |
+|---|---|---|
+| Post-route WNS / WHS / WPWS | 0.064 / 0.022 / 0.264 ns | 0.221 / 0.025 / 0.264 ns |
+| LUT / FF / BRAM tiles / DSP | 21727 / 31197 / 228.5 / 5 | 22762 / 31553 / 228.5 / 6 |
+| Firmware text / data / bss (bytes) | 162356 / 2104 / 238280 | 112502 / 1128 / 263688 |
+| `show interfaces` | `eth0 is up, 1000 Mb/s full duplex` | `eth0 is up, 1000 Mb/s full duplex` |
+| `cli_test.ps1 -Port COM3` | `CLI_TEST: PASS 28/28` | `CLI_TEST: PASS 28/28` |
+| `net_test.ps1 -Port COM3 -Nic Wi-Fi -Speed 1000` | `NET_TEST: PASS 25/25` | `NET_TEST: PASS 25/25` |
+| UDP iperf `-u -b 900M`, PC to board / board to PC | 461 Mbit/s, 0/203645 lost / 944 Mbit/s, 2/401242 lost | 412 Mbit/s, 0/174955 lost / 944 Mbit/s, 0/401242 lost |
+| `tcp_test.ps1 -Board 192.168.68.68` | `TCP_TEST: PASS 8/8` | `TCP_TEST: PASS 8/8` |
+| TCP iperf PC to board (Mbit/s) | 67.5 | 68.5 |
+| TCP iperf `-R` / `-r` / `-d` board to PC (Mbit/s) | 98.0 / 95.2 / 88.0 | 97.7 / 94.1 / 86.9 |
+| Together: echo, TCP iperf, UDP iperf | echo PASS, 63.2, 20.9 Mbit/s 0/17836 lost | echo PASS, 63.4, 20.9 Mbit/s 0/17820 lost |
+
+Board benches (`rtlnet_regression.ps1 -Match "nexys_video|microblaze"`): 6 passed, 0 failed, among them
+`tb_rtlnet_nexys_video_net` at 10, 100 and 1000 Mb/s (`TEST PASS ... checks=141`) and
+`tb_rtlnet_nexys_video_top` (`checks=74`); the benches use `rtlnet_microblaze_sim_stub`, never the processor.
+Firmware host tests: `build.ps1 -Demo` `TEST PASS: menu_demo checks=364`; `-NetifTest` `NETIF_HOST: PASS` for all four
+zero-copy combinations (checks 64, 110, 62, 112).
+
+Points that differ from the classic image:
+
+1. The first MicroBlaze V build stopped at the CDC gate of `build_bitstream.tcl` with `CDC-15 Warning x8` (exit 27, log
+   `phase0a_mbv_build_bitstream_cdcfail.log.txt`): the JTAG UART FIFOs of `mdm_riscv`
+   (`MDM_Core_I1/JTAG_CONTROL_I/Use_UART.TX_FIFO_I` and `RX_FIFO_I` to `tdo_reg`) cross between the BSCAN clock and
+   `clk`. Nothing in the firmware uses the JTAG UART (the console is `axi_uartlite_0`), so the block design sets
+   `mdm_0` `C_USE_UART` 0 and drops its AXI slave, its `axi_periph` master port and its address segment
+   (0x4140_0000); `axi_periph` has 6 masters. The unmodified gate and waiver script now pass on the plain
+   `build.ps1 -Network` build.
+2. `write_mem_info` labels the MicroBlaze V processor `Big` in the MMI; updatemem places the ELF words identically for
+   `Big` and `Little` (the two output bitstreams differ only in their header), and `merge_elf.ps1` accepts both.
+3. The RISC-V start-up code clears memory from the start of `.bss` to `_end`, so the linker script keeps `_end` at
+   the end of the LMB image and places `.axi_bram` after it; with `_end` behind the AXI BRAM section the start-up code clears about
+   3 GB of address space and the image never prints.
+4. MicroBlaze V halts when its first AXI read follows the reset within a few clocks (a hand-written 3-instruction probe
+   hung; the same probe with a delay of about 20 clocks ran; the BSP start-up code reaches its first AXI access after many more clocks, so the firmware is not affected).
+5. XSDB of Vitis 2026.1 names the MicroBlaze V debug module `RISC-V at USER2` with the child target `Hart #0`, not
+   `MicroBlaze #0`. The hart is a second-level target behind the BSCAN-to-JTAG bridge of `mdm_riscv` and appears one to
+   two seconds after `connect`; a plain `targets` right after `connect` lists only `BSCAN JTAG at USER2`, which looked
+   like a missing processor. No hardware change is needed (`C_DEBUG_INTERFACE` stays serial, `C_JTAG_CHAIN` 2 = USER2).
+   `targets -set -nocase -filter {name =~ "Hart*"} -timeout 15` waits for the hart. Proof on the programmed image:
+   `connect`, that `targets` line, `targets` (lists `1 xc7a200t`, `2 BSCAN JTAG at USER2`, `3 RISC-V at USER2`,
+   `4* Hart #0 (Running)`), `stop`, `rrd pc` (`pc: 00003bb0`), `rrd a0`, `rst -system -stop`, `dow firmware.elf` into the LMB,
+   `con`; the console then prints the banner, `CPU path: DMA ok ... lwIP up` and the `rtlnet>` prompt, DHCP binds and
+   the link comes up at 1000 Mb/s. The reset before `dow` is needed: a running image continued from a plain
+   `stop`/`dow`/`con` sits in its trap handler on the stale peripheral state and prints nothing. The sequence is
+   `boards/nexys_video/scripts/jtag_load_elf.tcl`, started by `jtag_load_elf.ps1 -Elf <elf> -Port COM3`
+   (`JTAG_LOAD_ELF: PASS`).
+6. The build log holds 393 warnings (baseline 391), 0 critical warnings; the `mdm_riscv` constraint file
+   contributes `Vivado_Tcl 4-919` warnings (waivers on empty object lists).
+7. The linker warning about one RWX segment is silenced with `-Wl,--no-warn-rwx-segments` (one LMB holds code and data).
+   The `.bss` of 263688 bytes is the lwIP pools and buffers (`memp_memory_PBUF_POOL_base` 99 KB, `ram_heap` 64 KB,
+   `g_parsed` 35 KB, `g_rx_buf` 32 KB): the same symbols and sizes as in the tracked classic ELF of commit 8794331
+   (`.bss` 263364 bytes), so the move to MicroBlaze V adds 324 bytes of `.bss`, not 25 KB; the 238280 bytes of the
+   baseline column belong to an earlier firmware configuration.
+8. `build.ps1 -LwipTest` stops in the host compile of `test/lwiperf_loopback/lwiperf_loopback_test.c` line 101
+   (`timespec_get`, `TIME_UTC` undeclared): the host gcc of the install is MinGW-w64 9.5.0 (msvcrt), whose C runtime has
+   no C11 `timespec_get`. The test file and the host toolchain are unchanged by the port, so the failure does not come from it.
+
 ## 7. Network integration (done 10-22-2026) and what remains
 
 Integrated: `u_mac`, `u_mdio`, `u_protocol` (every leaf, the CPU network path and its classifier), `u_echo` under
@@ -446,3 +518,5 @@ Open:
 | 10-22-2026 | `microblaze/` folder; CPU core with AXI DMA, AXI BRAM, 512 KiB LMB; XSA export; BSP-based firmware with lwIP; CPU-only hardware checkpoint (section 6.3) |
 | 10-22-2026 | Checksum offload (`rtlnet_tcp_offload`) enabled in the network build (`CPU_TCP_OFFLOAD_ENABLE` 1, window 0x44A1_9000), CDC expectation `fifo 10 axil_cdc 5 gray 6`, MM2S data realignment engine in the block design, firmware zero-copy options, `show offload` step in `cli_test.ps1`, `offload_bench.ps1`; build and hardware results of section 6.6 (default: zero-copy receive on, transmit off) |
 | 10-22-2026 | CPU-path classifier enabled in the network build (`CPU_CLASSIFIER_ENABLE` 1), CDC expectation `axil_cdc 4`, firmware on the classifier driver, bench checks for drop-all and broadcast limiting, hardware results of section 6.5; open items refreshed |
+| 11-09-2026 | Phase 0a: MicroBlaze V replaces the classic MicroBlaze in the block design; hardware results of section 6.7 |
+| 11-09-2026 | Phase 0a follow-up: JTAG UART removed (CDC gate passes unmodified), JTAG load of an ELF into MicroBlaze V (`jtag_load_elf.ps1`), new measurements in section 6.7 |

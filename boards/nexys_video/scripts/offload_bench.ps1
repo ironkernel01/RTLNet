@@ -22,14 +22,14 @@ Overview:
     exit code 0 only on PASS.
 Usage:
   powershell -NoProfile -ExecutionPolicy Bypass -File boards/nexys_video/scripts/offload_bench.ps1 `
-    [-Port COM4] [-Board 192.169.1.199] [-Seconds 10] [-Runs 2] [-Label zc-both] [-Iperf <iperf.exe>]
+    [-Port COM3] [-Board 192.169.1.199] [-Seconds 10] [-Runs 2] [-Label zc-both] [-Iperf <iperf.exe>]
 Revision: 10-22-2026
   * 10-22-2026: initial version.
   * 10-22-2026: modes plain, -R, -d, plain + UDP 20M concurrent; one table row per offload state.
 -------------------------------------------------------------------------------
 #>
 param(
-    [string]$Port = 'COM4',
+    [string]$Port = 'COM3',
     [string]$Board = '192.169.1.199',
     [int]$Seconds = 10,
     [int]$Runs = 2,

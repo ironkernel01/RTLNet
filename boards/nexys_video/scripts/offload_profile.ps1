@@ -13,13 +13,13 @@ Overview:
     has a profile (the image was built with the profile).
 Usage:
   powershell -NoProfile -ExecutionPolicy Bypass -File boards/nexys_video/scripts/offload_profile.ps1 `
-    [-Port COM4] [-Board 192.169.1.199] [-Seconds 10] [-Label prof] [-Iperf <iperf.exe>]
+    [-Port COM3] [-Board 192.169.1.199] [-Seconds 10] [-Label prof] [-Iperf <iperf.exe>]
 Revision: 10-22-2026
   * 10-22-2026: initial version.
 -------------------------------------------------------------------------------
 #>
 param(
-    [string]$Port = 'COM4',
+    [string]$Port = 'COM3',
     [string]$Board = '192.169.1.199',
     [int]$Seconds = 10,
     [string]$Label = 'prof',

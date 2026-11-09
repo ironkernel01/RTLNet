@@ -4,7 +4,7 @@
 //   section 15.6) around the MicroBlaze block design `rtlnet_cpu`
 //   (microblaze/hdl/rtlnet_cpu_bd.tcl).
 // Overview:
-//   * The block design holds MicroBlaze, 512 KiB LMB BRAM, MDM, UART Lite
+//   * The block design holds MicroBlaze V (RV32), 512 KiB LMB BRAM, MDM, UART Lite
 //     (115200 8N1), AXI Timer, AXI INTC, the AXI DMA with its 128 KiB AXI
 //     BRAM and the interconnects; its exported AXI4-Lite master M_AXI_RTLNET
 //     (0x44A0_0000, 1 MiB) is this core's m_axi_* register master, full
@@ -25,9 +25,10 @@
 //     this exact port list; the board top does not change. The bus-functional
 //     model rtlnet_microblaze_sim_stub.sv (top of microblaze/) has the same ports.
 // Language: SystemVerilog-2012.
-// Revision: 10-22-2026
+// Revision: 11-09-2026
 //   * 10-22-2026: initial version.
 //   * 10-22-2026: m_axis_eth_* / s_axis_eth_* frame streams (AXI DMA).
+//   * 11-09-2026: processor MicroBlaze V in the block design; ports unchanged.
 // Clocks: clk (cpu_clk 100 MHz) only; resetn synchronous to clk, active low.
 // -----------------------------------------------------------------------------
 module rtlnet_cpu_microblaze (

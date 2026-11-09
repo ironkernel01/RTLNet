@@ -1,7 +1,7 @@
 <#
 -------------------------------------------------------------------------------
 File: build.ps1
-Purpose: build the RTLNet MicroBlaze firmware in one command from a clean
+Purpose: build the RTLNet MicroBlaze V firmware in one command from a clean
   checkout: standalone BSP generated from the hardware export (XSA) by the
   Vitis tools of the AMD install, lwIP and the RTLNet core drivers compiled in
   place, the firmware linked into build/firmware.elf; and the CLI desktop
@@ -10,14 +10,14 @@ Overview:
   1. cli/check_menu.py: the generated CLI tables match cli/cli_commands.txt.
   2. BSP (skipped when build/ws is newer than the XSA, or with -NoFirmware):
      `vitis -s bsp/rtlnet_bsp.py <xsa> build/ws` creates the platform
-     component from the XSA (standalone OS on microblaze_0, console
+     component from the XSA (standalone OS on the MicroBlaze V microblaze_0, console
      axi_uartlite_0) and builds it: build/ws/plt/microblaze_0/dom/bsp/{include,
      lib} (libxil.a, libxilstandalone.a, libxiltimer.a), Xilinx.spec.
      Vivado/bin goes on PATH first (the Vitis server runs sdtgen and lopper
      from there).
-  3. Linker script build/lscript.ld generated from the install's MicroBlaze
-     template (Vitis/data/embeddedsw/scripts/linker_files/lscript_mb.ld.in):
-     vectors, code, data, heap and stack in the LMB BRAM, plus the NOLOAD
+  3. Linker script build/lscript.ld generated from the install's MicroBlaze V
+     template (Vitis/data/embeddedsw/scripts/linker_files/lscript_mb_riscv.ld.in):
+     boot code at address 0, code, data, heap and stack in the LMB BRAM, plus the NOLOAD
      section .axi_bram in the AXI BRAM for the DMA frame buffers.
   4. Compile: firmware (src, cli) and the RTLNet core drivers
      (cores/<core>/driver, in place) with -std=c11 -Wall -Wextra -Werror
@@ -27,6 +27,9 @@ Overview:
      src/lwip/rtlnet_lwiperf.c (a modified copy of the install's lwiperf.c, the
      one exception to "nothing is copied from the install"); the install's
      apps/lwiperf/lwiperf.c is not compiled.
+  * Compiler: the RISC-V GNU toolchain of the install (riscv64-unknown-elf-gcc,
+    Resolve-RtlnetXilinx .RvBin) with the -march/-mabi of the BSP (cflags.yaml);
+    the script requires an rv32 -march with the M, C and Zicsr extensions.
   5. Link with the BSP start-up (crt0/crtinit through Xilinx.spec) and
      libraries; print the section sizes.
   * -HostHarness: also build build/menu.exe (stdin/stdout harness, register
@@ -50,12 +53,14 @@ Overview:
 Usage:
   powershell -NoProfile -ExecutionPolicy Bypass -File microblaze/firmware/build.ps1 `
     [-Xsa <xsa>] [-Bsp] [-HostHarness] [-Demo] [-LwipTest] [-NetifTest] [-NoFirmware] [-Define NAME=VALUE,...]
-Revision: 10-22-2026
+Revision: 11-09-2026
   * 10-22-2026: initial version.
   * 10-22-2026: generated standalone BSP, lwIP, BSP linker conventions;
     hand-written start-up, UART, timer and string files removed.
   * 10-22-2026: lwIP glue and applications in src/lwip; iperf server from the
     project copy src/lwip/rtlnet_lwiperf.c instead of the install's lwiperf.c.
+  * 11-09-2026: MicroBlaze V: RISC-V toolchain and flags from the BSP, RISC-V linker template.
+  * 11-09-2026: link with --no-warn-rwx-segments (one RWX LMB segment is intended).
 -------------------------------------------------------------------------------
 #>
 param(
@@ -79,13 +84,13 @@ $Xilinx  = (Resolve-RtlnetXilinx).Root
 # Host gcc (desktop harnesses); its bin on PATH for the MinGW runtime DLLs of the built tests.
 $HostCc  = try { Resolve-RtlnetHostCc } catch { 'gcc' }
 if ($HostCc -ne 'gcc') { $env:PATH = (Split-Path -Parent $HostCc) + ';' + $env:PATH }
-$MbBin   = "$Xilinx/gnu/microblaze/nt/bin"
-$MbGcc   = Join-Path $MbBin 'mb-gcc.exe'
-$MbSize  = Join-Path $MbBin 'mb-size.exe'
+$RvBin   = (Resolve-RtlnetXilinx).RvBin
+$MbGcc   = Join-Path $RvBin 'riscv64-unknown-elf-gcc.exe'
+$MbSize  = Join-Path $RvBin 'riscv64-unknown-elf-size.exe'
 $Vitis   = "$Xilinx/Vitis/bin/vitis.bat"
 $Esw     = "$Xilinx/Vitis/data/embeddedsw"
 $LwipDir = "$Esw/ThirdParty/sw_services/lwip220_v1_3/src/lwip-2.2.0"
-$LdTmpl  = "$Esw/scripts/linker_files/lscript_mb.ld.in"
+$LdTmpl  = "$Esw/scripts/linker_files/lscript_mb_riscv.ld.in"
 if (-not $Xsa) { $Xsa = Join-Path $Repo 'boards\nexys_video\build\rtlnet_nexys_video.xsa' }
 $Ws      = Join-Path $Out 'ws'
 $BspDir  = Join-Path $Ws 'plt\microblaze_0\dom\bsp'
@@ -137,7 +142,7 @@ if (-not $NoFirmware) {
              ((Get-Content -LiteralPath $marker -Raw).Trim() -eq (Get-FileHash -Algorithm SHA256 -LiteralPath $Xsa).Hash)
     if ($Bsp -or -not $fresh) {
         # Windows tools of the BSP build fail on object paths above about 250 characters.
-        $deepest = (Fwd $BspDir) + '/libsrc/build_configs/gen_bsp/libsrc/standalone/src/CMakeFiles/xilstandalone.dir/microblaze/microblaze_interrupt_handler.c.obj.d'
+        $deepest = (Fwd $BspDir) + '/libsrc/build_configs/gen_bsp/libsrc/standalone/src/CMakeFiles/xilstandalone.dir/riscv/riscv_invalidate_icache_range.S.obj.d'
         if ($deepest.Length -gt 250) { throw "BSP path too long ($($deepest.Length) characters): build from a checkout with a shorter path" }
         if (Test-Path -LiteralPath $Ws) { Remove-Item -Recurse -Force -LiteralPath $Ws }
         if (Test-Path -LiteralPath $marker) { Remove-Item -Force -LiteralPath $marker }
@@ -163,21 +168,26 @@ if (-not $NoFirmware) {
     # Compiler flags of the processor configuration, as the BSP was built.
     $cf = Get-Content -LiteralPath (Join-Path $BspDir 'cflags.yaml') -Raw
     $hw = ([regex]::Match($cf, 'cflags:\s*([^\r\n]*(?:\r?\n\s+[^\r\n:]+)*)')).Groups[1].Value -split '\s+' | Where-Object { $_ -ne '' }
-    if (-not ($hw -contains '-mcpu=v11.0')) { throw "unexpected BSP cflags: $hw" }
+    # The processor is MicroBlaze V: rv32 with M and C (the BSP's -march names the extensions of the
+    # CPU configuration, e.g. rv32imcb_zicsr_zifencei) and the ilp32 ABI.
+    $march = ($hw | Where-Object { $_ -like '-march=*' } | Select-Object -First 1)
+    $mabi  = ($hw | Where-Object { $_ -like '-mabi=*' } | Select-Object -First 1)
+    if (-not $march -or $march -notmatch '^-march=rv32i[a-z]*m[a-z]*c' -or $march -notmatch 'zicsr' -or $mabi -ne '-mabi=ilp32') {
+        throw "unexpected BSP cflags (expected rv32 with M, C, Zicsr and ilp32): $hw"
+    }
     # -DSDT: the BSP drivers are built for the system-device-tree flow (base-address APIs).
-    $mbflags = ($hw | Where-Object { $_ -ne '-mno-xl-soft-div' }) + @('-mno-xl-soft-div', '-DSDT')
+    $mbflags = $hw + @('-DSDT')
 
     # 3. Linker script from the install template.
     $ld = Get-Content -LiteralPath $LdTmpl -Raw
     $memory = @"
 MEMORY
 {
-   lmb_bram : ORIGIN = 0x50, LENGTH = 0x7FFB0
+   lmb_bram : ORIGIN = 0x0, LENGTH = 0x80000
    axi_bram : ORIGIN = 0xC0000000, LENGTH = 0x20000
 }
 "@
     $ld = $ld.Replace('@STACK_SIZE@', '0x2000').Replace('@HEAP_SIZE@', '0x800').Replace('@MEMORY_SECTION@', $memory)
-    $ld = $ld.Replace('@V_RESET@', '0x0').Replace('@V_EXCEPTION@', '0x8').Replace('@V_INTERRUPT@', '0x10').Replace('@V_HWEXCEPTION@', '0x20')
     $ld = $ld.Replace('@CODE@', 'lmb_bram').Replace('@DATA@', 'lmb_bram')
     $axi = @"
 /* RTLNet: DMA frame buffers in the AXI BRAM (rtlnet_lwip_netif.c), never loaded. */
@@ -188,11 +198,11 @@ MEMORY
    *(.axi_bram.*)
    __axi_bram_end = .;
 } > axi_bram
-
-_end = .;
 "@
     if ($ld -notmatch '(?m)^_end = \.;') { throw "linker template changed: no '_end = .;' line" }
-    $ld = [regex]::Replace($ld, '(?m)^_end = \.;', $axi.Replace('$', '$$'))
+    # _end stays where the template puts it (end of the LMB image): the RISC-V start-up clears
+    # memory from the start of .bss to _end, so _end must not lie past the AXI BRAM section.
+    $ld = [regex]::Replace($ld, '(?m)^_end = \.;', ('_end = .;' + "`n`n" + $axi).Replace('$', '$$'))
     $ldFile = Join-Path $Out 'lscript.ld'
     Set-Content -LiteralPath $ldFile -Value $ld -Encoding ascii
 
@@ -226,9 +236,10 @@ _end = .;
         $objs += $o
     }
 
-    # 5. Link with the BSP start-up and libraries.
+    # 5. Link with the BSP start-up and libraries. One LMB holds code and data, so the single RWX
+    # segment is intended: --no-warn-rwx-segments silences the linker warning about it.
     $elf = Join-Path $Out 'firmware.elf'
-    Invoke-Step $MbGcc ($mbflags + @("-specs=$bspSpec", "-T$ldFile", '-Wl,--gc-sections', "-Wl,-Map=$Out/firmware.map",
+    Invoke-Step $MbGcc ($mbflags + @("-specs=$bspSpec", "-T$ldFile", '-Wl,--gc-sections', '-Wl,--no-warn-rwx-segments', "-Wl,-Map=$Out/firmware.map",
         "-L$bspLib", '-o', $elf) + $objs + @('-Wl,--start-group', '-lxil', '-lxilstandalone', '-lxiltimer', '-lgcc', '-lc',
         '-Wl,--end-group'))
     & $MbSize $elf

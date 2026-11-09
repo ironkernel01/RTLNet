@@ -22,13 +22,13 @@ Overview:
     host checks listed separately) or "NET_TEST: FAIL f/n"; exit 0 on PASS.
 Usage:
   powershell -NoProfile -ExecutionPolicy Bypass -File boards/nexys_video/scripts/net_test.ps1 `
-    [-Port COM4] [-Nic Ethernet] [-Speed 100]
+    [-Port COM3] [-Nic Ethernet] [-Speed 100]
 Revision: 10-22-2026
   * 10-22-2026: initial version; iperf at 90 % line rate both ways, -Iperf.
 -------------------------------------------------------------------------------
 #>
 param(
-    [string]$Port = 'COM4',
+    [string]$Port = 'COM3',
     [string]$Nic = 'Ethernet',
     [int]$Speed = 100,
     [string]$Iperf = ''

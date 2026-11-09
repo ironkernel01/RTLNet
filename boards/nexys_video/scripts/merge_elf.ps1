@@ -8,19 +8,24 @@ Overview:
     build/rtlnet_nexys_video.mmi from build_bitstream.tcl, and
     microblaze/firmware/build/firmware.elf.
   * Verifies the MMI before use: one processor, InstPath
-    u_cpu/u_bd/rtlnet_cpu_i/microblaze_0, little endian, an LMB address space
+    u_cpu/u_bd/rtlnet_cpu_i/microblaze_0, an LMB address space
     of 0..524287 (512 KiB) with 128 RAMB36 bit lanes (other address spaces,
     the AXI BRAM, may follow); and that the ELF exists and
     is newer than nothing stale (prints size, time and SHA-256 of each file).
+  * Endianness: write_mem_info labels the MicroBlaze V processor `Big` although
+    MicroBlaze V and its firmware are little endian; updatemem places the ELF
+    words identically for either label (verified: the output bitstreams match),
+    so the check accepts Little and Big.
   * Runs updatemem -force -meminfo <mmi> -data <elf> -bit <bit>
     -proc <InstPath> -out build/rtlnet_nexys_video.bit; exit code 0 only when
     updatemem succeeded and the output exists.
 Usage:
   powershell -NoProfile -ExecutionPolicy Bypass -File boards/nexys_video/scripts/merge_elf.ps1 `
     [-Elf <elf>] [-Mmi <mmi>] [-Bit <bit>] [-Out <bit>]
-Revision: 10-22-2026
+Revision: 11-09-2026
   * 10-22-2026: initial version.
   * 10-22-2026: 512 KiB LMB (128 RAMB36); further address spaces allowed.
+  * 11-09-2026: MicroBlaze V: MMI endianness label Big accepted.
 -------------------------------------------------------------------------------
 #>
 param(
@@ -57,7 +62,8 @@ $procs = @($x.MemInfo.Processor)
 if ($procs.Count -ne 1) { Fail "MMI lists $($procs.Count) processors, expected 1" }
 $proc = $procs[0].InstPath
 if ($proc -ne $ExpectProc) { Fail "MMI processor '$proc', expected '$ExpectProc'" }
-if ($procs[0].Endianness -ne 'Little') { Fail "MMI endianness '$($procs[0].Endianness)', expected Little" }
+$endian = $procs[0].Endianness
+if ($endian -notin @('Little', 'Big')) { Fail "MMI endianness '$endian', expected Little or Big" }
 $spaces = @($procs[0].AddressSpace)
 $space = @($spaces | Where-Object { [int64]$_.Begin -eq 0 })[0]
 if (-not $space -or [int64]$space.End -ne 524287) { Fail "MMI has no LMB address space 0..524287" }

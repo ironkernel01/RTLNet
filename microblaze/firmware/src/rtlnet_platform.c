@@ -25,8 +25,7 @@
 
 #include "rtlnet_board.h"
 
-#include "mb_interface.h"   /* microblaze_disable_interrupts */
-#include "xil_exception.h"  /* Xil_ExceptionInit, Xil_ExceptionRegisterHandler, Xil_ExceptionEnable */
+#include "xil_exception.h"  /* Xil_ExceptionInit, Xil_ExceptionRegisterHandler, Xil_ExceptionEnable, Xil_ExceptionDisable */
 #include "xintc.h"          /* XIntc */
 #include "xstatus.h"        /* XST_SUCCESS */
 #include "xtmrctr.h"        /* XTmrCtr */
@@ -120,7 +119,7 @@ void plat_init(void)
     int st_tmr;
     int st_intc = XST_FAILURE;
 
-    microblaze_disable_interrupts();
+    Xil_ExceptionDisable();
     g_rx_head = 0u;
     g_rx_tail = 0u;
     g_ms = 0u;
@@ -309,12 +308,12 @@ uint32_t plat_led_state(void)
 void plat_reload(void)
 {
     plat_delay_ms(PLAT_UART_DRAIN_MS);
-    microblaze_disable_interrupts();
+    Xil_ExceptionDisable();
     if (g_tick_irq) {
         XTmrCtr_Stop(&g_tmr, PLAT_TMR_TICK);
         XIntc_Stop(&g_intc);
     }
-    __asm__ volatile ("brai 0x0" ::: "memory");
+    __asm__ volatile ("jr zero" ::: "memory");
     for (;;) {
     }
 }

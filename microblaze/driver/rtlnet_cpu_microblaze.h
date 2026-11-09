@@ -22,6 +22,10 @@
  * 8-bit first port shifts every later source by 7).
  *
  * This header holds constants and contract prose only.
+ *
+ * Revision: 11-09-2026
+ *   * 11-09-2026: MicroBlaze V; classic vector slots replaced by the reset
+ *     vector (traps use mtvec).
  */
 #ifndef RTLNET_CPU_MICROBLAZE_H
 #define RTLNET_CPU_MICROBLAZE_H
@@ -35,18 +39,15 @@
 #define RTLNET_CPU_AXI_BRAM_BASE    0xC0000000u
 #define RTLNET_CPU_AXI_BRAM_SIZE    0x00020000u
 
-/* MicroBlaze vectors (C_BASE_VECTORS = 0), each slot 8 bytes (imm + brai). */
+/* MicroBlaze V reset vector (C_BASE_VECTORS = 0). Exceptions and interrupts
+ * enter through mtvec, which the BSP start-up code sets; the firmware
+ * registers its handlers with Xil_ExceptionRegisterHandler(). */
 #define RTLNET_CPU_VEC_RESET        0x00000000u
-#define RTLNET_CPU_VEC_USER_EXC     0x00000008u
-#define RTLNET_CPU_VEC_INTERRUPT    0x00000010u
-#define RTLNET_CPU_VEC_BREAK        0x00000018u
-#define RTLNET_CPU_VEC_HW_EXC       0x00000020u
 
 /* AXI4-Lite peripherals of the block design (M_AXI_DP). */
 #define RTLNET_CPU_DMA_BASE         0x40400000u   /* AXI DMA, simple mode, MM2S + S2MM */
 #define RTLNET_CPU_UART_BASE        0x40600000u   /* AXI UART Lite, 115200 8N1 */
 #define RTLNET_CPU_INTC_BASE        0x41200000u   /* AXI INTC */
-#define RTLNET_CPU_MDM_BASE         0x41400000u   /* MDM JTAG UART */
 #define RTLNET_CPU_TIMER_BASE       0x41C00000u   /* AXI Timer (timer 0 = tick) */
 
 /* Exported register master M_AXI_RTLNET: the board's RTLNet window. */

@@ -6,10 +6,12 @@
 #   * Defines `rtlnet_cpu_bd_create <bd_dir>`; the caller has an open (or
 #     in-memory) project with the part set. The procedure creates the design
 #     under <bd_dir>, validates and saves it, and returns the .bd file path.
-#   * Contents: classic MicroBlaze 11.0 (32-bit, little endian, no MMU, no
-#     caches, no FPU, barrel shifter, hardware multiplier and divider, pattern
-#     compare, debug enabled), 512 KiB LMB block RAM at 0x0000_0000 for
-#     instructions and data, MDM (JTAG debug, JTAG UART), AXI UART Lite
+#   * Contents: MicroBlaze V (microblaze_riscv 1.0, RV32IMC with Zicsr, Zba,
+#     Zbb and Zbs, performance pipeline, little endian, no MMU, no caches, no
+#     FPU, no atomics, no bus exceptions, debug enabled, ILMB, DLMB and the
+#     AXI data port M_AXI_DP, reset vector 0x0), 512 KiB LMB block RAM at
+#     0x0000_0000 for instructions and data, MDM RISC-V (mdm_riscv 1.0, serial
+#     JTAG debug interface, no JTAG UART and no AXI slave), AXI UART Lite
 #     115200 8N1, AXI Timer, AXI INTC, the exported AXI4-Lite master
 #     M_AXI_RTLNET (0x44A0_0000, 1 MiB), and the CPU network path: an AXI DMA
 #     in simple (direct register) mode between the exported streams
@@ -17,8 +19,8 @@
 #     network, MM2S), 64-bit tdata with tkeep, and a 128 KiB AXI block RAM
 #     (DMA buffers, lwIP pools and heap) shared by the MicroBlaze data side and
 #     both DMA channels.
-#   * Interconnect: axi_periph (MicroBlaze M_AXI_DP, 7 masters: UART, timer,
-#     INTC, MDM, RTLNet window, DMA registers, memory path) and axi_mem
+#   * Interconnect: axi_periph (MicroBlaze M_AXI_DP, 6 masters: UART, timer,
+#     INTC, RTLNet window, DMA registers, memory path) and axi_mem
 #     (3 slaves: the memory path from axi_periph, DMA MM2S, DMA S2MM; one
 #     master: the AXI BRAM controller, 64-bit).
 #   * Clock and reset come from outside: port `clk` (cpu_clk, 100 MHz from the
@@ -33,7 +35,6 @@
 #       0x4040_0000   64 KiB  AXI DMA registers
 #       0x4060_0000   64 KiB  AXI UART Lite
 #       0x4120_0000   64 KiB  AXI INTC
-#       0x4140_0000    4 KiB  MDM (JTAG UART registers)
 #       0x41C0_0000   64 KiB  AXI Timer
 #       0x44A0_0000    1 MiB  M_AXI_RTLNET (RTLNet register window)
 #       0xC000_0000  128 KiB  AXI BRAM (MicroBlaze data side and DMA)
@@ -43,11 +44,15 @@
 #     (microblaze/firmware/build.ps1) names microblaze_0 and finds the DMA,
 #     UART, timer and INTC by their XSA instance names.
 # Language: Vivado Tcl (2026.1).
-# Revision: 10-22-2026
+# Revision: 11-09-2026
 #   * 10-22-2026: initial version.
 #   * 10-22-2026: LMB 512 KiB (code, data, stack, lwIP); AXI DMA (simple mode, 64-bit streams) with the
 #     exported S_AXIS_ETH / M_AXIS_ETH, 128 KiB AXI BRAM, axi_mem interconnect,
 #     DMA interrupts on INTC inputs 10 and 11.
+#   * 11-09-2026: processor MicroBlaze V (microblaze_riscv) and mdm_riscv; cell
+#     names, address map, interrupt numbering and exported ports unchanged.
+#   * 11-09-2026: JTAG UART removed (C_USE_UART 0, no MDM AXI slave, 0x4140_0000
+#     unmapped); axi_periph has 6 masters; microblaze_riscv dict one CONFIG per line.
 # Clocks: clk (cpu_clk 100 MHz) for every cell.
 # -----------------------------------------------------------------------------
 
@@ -60,7 +65,6 @@ namespace eval rtlnet_cpu_bd {
   variable DMA_BASE       0x40400000
   variable UART_BASE      0x40600000
   variable INTC_BASE      0x41200000
-  variable MDM_BASE       0x41400000
   variable TIMER_BASE     0x41C00000
   variable AXI_BRAM_BASE  0xC0000000
   variable AXI_BRAM_SIZE  128K
@@ -112,31 +116,34 @@ proc rtlnet_cpu_bd_create {bd_dir} {
   set_property CONFIG.ASSOCIATED_RESET resetn $p_clk
 
   # ---------------------------------------------------------------------------
-  # Processor: classic MicroBlaze, microcontroller-class configuration.
-  # C_AREA_OPTIMIZED 0 = 5-stage pipeline. Bus exceptions stay disabled, so a
+  # Processor: MicroBlaze V (RV32), microcontroller-class configuration.
+  # C_OPTIMIZATION 0 = PERFORMANCE pipeline. Bus exceptions stay disabled, so a
   # DECERR from an unmapped RTLNet address reads as data and never traps.
+  # C_USE_INTERRUPT 1 = NORMAL (external interrupt through the machine
+  # trap vector); the BSP routes it to the AXI INTC handler.
   # ---------------------------------------------------------------------------
-  set mb [create_bd_cell -type ip -vlnv xilinx.com:ip:microblaze:11.0 microblaze_0]
+  set mb [create_bd_cell -type ip -vlnv xilinx.com:ip:microblaze_riscv:1.0 microblaze_0]
   set_property -dict [list \
-    CONFIG.C_AREA_OPTIMIZED        0 \
-    CONFIG.C_USE_BARREL            1 \
-    CONFIG.C_USE_HW_MUL            1 \
-    CONFIG.C_USE_DIV               1 \
-    CONFIG.C_USE_PCMP_INSTR        1 \
-    CONFIG.C_USE_FPU               0 \
-    CONFIG.C_USE_MMU               0 \
-    CONFIG.C_USE_ICACHE            0 \
-    CONFIG.C_USE_DCACHE            0 \
+    CONFIG.C_OPTIMIZATION            0 \
+    CONFIG.C_USE_MULDIV              1 \
+    CONFIG.C_USE_COMPRESSION         1 \
+    CONFIG.C_USE_BITMAN_A            1 \
+    CONFIG.C_USE_BITMAN_B            1 \
+    CONFIG.C_USE_BITMAN_S            1 \
+    CONFIG.C_USE_BARREL              1 \
+    CONFIG.C_USE_FPU                 0 \
+    CONFIG.C_USE_MMU                 0 \
+    CONFIG.C_USE_ICACHE              0 \
+    CONFIG.C_USE_DCACHE              0 \
     CONFIG.C_USE_BRANCH_TARGET_CACHE 0 \
-    CONFIG.C_DEBUG_ENABLED         1 \
-    CONFIG.C_D_AXI                 1 \
-    CONFIG.C_D_LMB                 1 \
-    CONFIG.C_I_LMB                 1 \
-    CONFIG.C_I_AXI                 0 \
-    CONFIG.C_USE_INTERRUPT         1 \
-    CONFIG.C_USE_MSR_INSTR         1 \
-    CONFIG.C_M_AXI_D_BUS_EXCEPTION 0 \
-    CONFIG.C_BASE_VECTORS          0x00000000] $mb
+    CONFIG.C_DEBUG_ENABLED           1 \
+    CONFIG.C_D_AXI                   1 \
+    CONFIG.C_D_LMB                   1 \
+    CONFIG.C_I_LMB                   1 \
+    CONFIG.C_I_AXI                   0 \
+    CONFIG.C_USE_INTERRUPT           1 \
+    CONFIG.C_M_AXI_D_BUS_EXCEPTION   0 \
+    CONFIG.C_BASE_VECTORS            0x0000000000000000] $mb
 
   # Local memory: two LMB buses, two BRAM interface controllers, one true
   # dual-port block RAM (port A instruction side, port B data side).
@@ -153,9 +160,11 @@ proc rtlnet_cpu_bd_create {bd_dir} {
     CONFIG.Enable_B        Use_ENB_Pin \
     CONFIG.Use_RSTB_Pin    true] $bram
 
-  # Debug module: one MicroBlaze debug port, JTAG UART enabled (AXI slave).
-  set mdm [create_bd_cell -type ip -vlnv xilinx.com:ip:mdm:3.2 mdm_0]
-  set_property -dict [list CONFIG.C_MB_DBG_PORTS 1 CONFIG.C_USE_UART 1] $mdm
+  # Debug module: MicroBlaze V debug module, one debug port, serial (JTAG)
+  # debug interface. No JTAG UART (C_USE_UART 0): the console is axi_uartlite_0,
+  # and the UART FIFOs of the MDM would put CDC-15 crossings in the CDC gate.
+  set mdm [create_bd_cell -type ip -vlnv xilinx.com:ip:mdm_riscv:1.0 mdm_0]
+  set_property -dict [list CONFIG.C_MB_DBG_PORTS 1 CONFIG.C_USE_UART 0] $mdm
 
   # Console UART: 115200 baud, 8 data bits, no parity, 1 stop bit.
   set uart [create_bd_cell -type ip -vlnv xilinx.com:ip:axi_uartlite:2.0 axi_uartlite_0]
@@ -216,9 +225,9 @@ proc rtlnet_cpu_bd_create {bd_dir} {
     CONFIG.Memory_Type    Single_Port_RAM \
     CONFIG.use_bram_block BRAM_Controller] $dbram
 
-  # Peripheral interconnect: MicroBlaze M_AXI_DP to seven slaves.
+  # Peripheral interconnect: MicroBlaze M_AXI_DP to six slaves.
   set ic [create_bd_cell -type ip -vlnv xilinx.com:ip:axi_interconnect:2.1 axi_periph]
-  set_property -dict [list CONFIG.NUM_SI 1 CONFIG.NUM_MI 7] $ic
+  set_property -dict [list CONFIG.NUM_SI 1 CONFIG.NUM_MI 6] $ic
 
   # Memory interconnect: CPU memory path and both DMA channels to the AXI
   # BRAM controller (width conversion 32 -> 64 for the CPU path inside).
@@ -246,10 +255,9 @@ proc rtlnet_cpu_bd_create {bd_dir} {
   connect_bd_intf_net [get_bd_intf_pins axi_periph/M00_AXI] [get_bd_intf_pins axi_uartlite_0/S_AXI]
   connect_bd_intf_net [get_bd_intf_pins axi_periph/M01_AXI] [get_bd_intf_pins axi_timer_0/S_AXI]
   connect_bd_intf_net [get_bd_intf_pins axi_periph/M02_AXI] [get_bd_intf_pins axi_intc_0/s_axi]
-  connect_bd_intf_net [get_bd_intf_pins axi_periph/M03_AXI] [get_bd_intf_pins mdm_0/S_AXI]
-  connect_bd_intf_net [get_bd_intf_pins axi_periph/M04_AXI] [get_bd_intf_ports M_AXI_RTLNET]
-  connect_bd_intf_net [get_bd_intf_pins axi_periph/M05_AXI] [get_bd_intf_pins axi_dma_0/S_AXI_LITE]
-  connect_bd_intf_net [get_bd_intf_pins axi_periph/M06_AXI] [get_bd_intf_pins axi_mem/S00_AXI]
+  connect_bd_intf_net [get_bd_intf_pins axi_periph/M03_AXI] [get_bd_intf_ports M_AXI_RTLNET]
+  connect_bd_intf_net [get_bd_intf_pins axi_periph/M04_AXI] [get_bd_intf_pins axi_dma_0/S_AXI_LITE]
+  connect_bd_intf_net [get_bd_intf_pins axi_periph/M05_AXI] [get_bd_intf_pins axi_mem/S00_AXI]
   connect_bd_intf_net [get_bd_intf_pins axi_dma_0/M_AXI_MM2S] [get_bd_intf_pins axi_mem/S01_AXI]
   connect_bd_intf_net [get_bd_intf_pins axi_dma_0/M_AXI_S2MM] [get_bd_intf_pins axi_mem/S02_AXI]
   connect_bd_intf_net [get_bd_intf_pins axi_mem/M00_AXI] [get_bd_intf_pins axi_bram_ctrl_0/S_AXI]
@@ -263,12 +271,11 @@ proc rtlnet_cpu_bd_create {bd_dir} {
   set clk_pins [list \
     microblaze_0/Clk ilmb_v10/LMB_Clk dlmb_v10/LMB_Clk \
     ilmb_bram_if_cntlr/LMB_Clk dlmb_bram_if_cntlr/LMB_Clk \
-    mdm_0/S_AXI_ACLK axi_uartlite_0/s_axi_aclk axi_timer_0/s_axi_aclk axi_intc_0/s_axi_aclk \
+    axi_uartlite_0/s_axi_aclk axi_timer_0/s_axi_aclk axi_intc_0/s_axi_aclk \
     axi_dma_0/s_axi_lite_aclk axi_dma_0/m_axi_mm2s_aclk axi_dma_0/m_axi_s2mm_aclk \
     axi_bram_ctrl_0/s_axi_aclk \
     axi_periph/ACLK axi_periph/S00_ACLK axi_periph/M00_ACLK axi_periph/M01_ACLK \
     axi_periph/M02_ACLK axi_periph/M03_ACLK axi_periph/M04_ACLK axi_periph/M05_ACLK \
-    axi_periph/M06_ACLK \
     axi_mem/ACLK axi_mem/S00_ACLK axi_mem/S01_ACLK axi_mem/S02_ACLK axi_mem/M00_ACLK \
     rst_cpu/slowest_sync_clk]
   foreach p $clk_pins { connect_bd_net [get_bd_ports clk] [get_bd_pins $p] }
@@ -290,10 +297,10 @@ proc rtlnet_cpu_bd_create {bd_dir} {
   connect_bd_net [get_bd_pins rst_cpu/interconnect_aresetn] [get_bd_pins axi_periph/ARESETN]
   connect_bd_net [get_bd_pins rst_cpu/interconnect_aresetn] [get_bd_pins axi_mem/ARESETN]
   set prst_pins [list \
-    mdm_0/S_AXI_ARESETN axi_uartlite_0/s_axi_aresetn axi_timer_0/s_axi_aresetn axi_intc_0/s_axi_aresetn \
+    axi_uartlite_0/s_axi_aresetn axi_timer_0/s_axi_aresetn axi_intc_0/s_axi_aresetn \
     axi_dma_0/axi_resetn axi_bram_ctrl_0/s_axi_aresetn \
     axi_periph/S00_ARESETN axi_periph/M00_ARESETN axi_periph/M01_ARESETN axi_periph/M02_ARESETN \
-    axi_periph/M03_ARESETN axi_periph/M04_ARESETN axi_periph/M05_ARESETN axi_periph/M06_ARESETN \
+    axi_periph/M03_ARESETN axi_periph/M04_ARESETN axi_periph/M05_ARESETN \
     axi_mem/S00_ARESETN axi_mem/S01_ARESETN axi_mem/S02_ARESETN axi_mem/M00_ARESETN]
   foreach p $prst_pins { connect_bd_net [get_bd_pins rst_cpu/peripheral_aresetn] [get_bd_pins $p] }
 
@@ -323,8 +330,6 @@ proc rtlnet_cpu_bd_create {bd_dir} {
     [get_bd_addr_segs axi_uartlite_0/S_AXI/Reg] -force
   assign_bd_address -offset $::rtlnet_cpu_bd::INTC_BASE -range 64K -target_address_space $dspace \
     [get_bd_addr_segs axi_intc_0/S_AXI/Reg] -force
-  assign_bd_address -offset $::rtlnet_cpu_bd::MDM_BASE -range 4K -target_address_space $dspace \
-    [get_bd_addr_segs mdm_0/S_AXI/Reg] -force
   assign_bd_address -offset $::rtlnet_cpu_bd::TIMER_BASE -range 64K -target_address_space $dspace \
     [get_bd_addr_segs axi_timer_0/S_AXI/Reg] -force
   assign_bd_address -offset $::rtlnet_cpu_bd::RTLNET_BASE -range $::rtlnet_cpu_bd::RTLNET_RANGE \

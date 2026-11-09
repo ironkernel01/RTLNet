@@ -22,7 +22,7 @@ Overview:
     code (the Vivado gate codes are listed in build_bitstream.tcl).
 Usage:
   powershell -NoProfile -ExecutionPolicy Bypass -File boards/nexys_video/scripts/build.ps1 `
-    [-Network] [-SkipFirmware] [-Program] [-Test] [-Port COM4]
+    [-Network] [-SkipFirmware] [-Program] [-Test] [-Port COM3]
 Revision: 10-22-2026
   * 10-22-2026: initial version.
   * 10-22-2026: bitstream before firmware (the BSP comes from the XSA).
@@ -33,7 +33,7 @@ param(
     [switch]$SkipFirmware,
     [switch]$Program,
     [switch]$Test,
-    [string]$Port = 'COM4'
+    [string]$Port = 'COM3'
 )
 $ErrorActionPreference = 'Stop'
 $Board = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path

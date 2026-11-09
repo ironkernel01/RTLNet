@@ -3,7 +3,7 @@
 | Item | Value |
 |---|---|
 | Product line | IronKernel RTLNet |
-| Document revision | 10-22-2026 |
+| Document revision | 11-09-2026 |
 | First target | Digilent Nexys Video (Artix-7 XC7A200T-1SBG484C, Realtek RTL8211E RGMII PHY) |
 | Toolchain | Vivado 2026.1 (synthesis, implementation), Aldec Active-HDL 11.1 (simulation), MicroBlaze GCC 13.4 |
 | Languages | SystemVerilog-2012 for all RTL and benches (`.sv`), C11 for drivers and firmware |
@@ -215,7 +215,7 @@ Protocol sub-map (offset inside 0x1_0000):
 | 0x9000 | `rtlnet_tcp_offload` (CPU path, section 14; `0x44A1_9000`, `u_cpu_offload`, `CPU_TCP_OFFLOAD_ENABLE`; reads 0 when not built) |
 
 Other MicroBlaze peripherals sit in the block design's own map (LMB BRAM `0x0000_0000` 128 KiB, UART Lite
-`0x4060_0000`, interrupt controller `0x4120_0000`, MDM `0x4140_0000`, Timer `0x41C0_0000`). The single source of
+`0x4060_0000`, interrupt controller `0x4120_0000`, Timer `0x41C0_0000`). The single source of
 these addresses for firmware is `microblaze/driver/rtlnet_cpu_microblaze.h`.
 
 ---
@@ -703,3 +703,4 @@ and between the DMA MM2S stream and `u_cpu_tx_fifo` (TX).
 | 10-22-2026 | Broadcast storm limiter on the CPU path (default 10 frames / 100 ms) |
 | 10-22-2026 | `rtlnet_tcp_offload`: checksum insert on the CPU TX stream, check with trailer on the CPU RX stream (core built; sub-map slot 0x9000 planned) |
 | 10-22-2026 | `rtlnet_tcp_offload` integrated in the protocol wrapper's CPU path (`u_cpu_offload`, window 0x9000, `CPU_CAPS` bits 16..18); default `TX_BUF_KB` 8; firmware discovery, `rtlnet_offload_apply`, receive trailer policy, zero-copy options; AXI DMA realignment engine on MM2S |
+| 11-09-2026 | MicroBlaze V block design without the JTAG UART: the MDM address 0x4140_0000 is unmapped |

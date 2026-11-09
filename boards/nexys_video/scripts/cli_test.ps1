@@ -6,7 +6,7 @@ Purpose: hardware test of the RTLNet Nexys Video console: talk to the
   8N1), run a fixed command sequence, check the answers and print a PASS/FAIL
   summary plus the transcript.
 Overview:
-  * Opens the port (default COM4); a busy or missing port is a FAIL with the
+  * Opens the port (default COM3); a busy or missing port is a FAIL with the
     exception text.
   * Synchronizes: Ctrl-C, CR, then waits for a prompt; from privileged or a
     configuration mode it returns to user exec (Ctrl-Z, disable).
@@ -27,14 +27,14 @@ Overview:
     and prints it; the last line is "CLI_TEST: PASS <n>/<n>" or
     "CLI_TEST: FAIL <failed>/<n>"; exit code 0 only on PASS.
 Usage:
-  powershell -NoProfile -ExecutionPolicy Bypass -File boards/nexys_video/scripts/cli_test.ps1 [-Port COM4] [-Baud 115200]
+  powershell -NoProfile -ExecutionPolicy Bypass -File boards/nexys_video/scripts/cli_test.ps1 [-Port COM3] [-Baud 115200]
 Revision: 10-22-2026
   * 10-22-2026: initial version.
   * 10-22-2026: CPU network path steps (BSP-based firmware).
 -------------------------------------------------------------------------------
 #>
 param(
-    [string]$Port = 'COM4',
+    [string]$Port = 'COM3',
     [int]$Baud = 115200,
     [int]$StepTimeoutMs = 5000,
     [string]$Transcript = ''

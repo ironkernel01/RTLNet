@@ -1,9 +1,9 @@
-# rtlnet_cpu_microblaze — RTLNet CPU core (MicroBlaze) and its firmware
+# rtlnet_cpu_microblaze — RTLNet CPU core (MicroBlaze V) and its firmware
 
 | Item | Value |
 |---|---|
 | Core | `rtlnet_cpu_microblaze` (folder `microblaze/`) |
-| Document revision | 10-22-2026 |
+| Document revision | 11-09-2026 |
 | Language | SystemVerilog-2012 wrapper; Vivado Tcl block design; C11 firmware |
 | Technology | AMD 7-series (the one AMD-only block of RTLNet, architecture section 3) |
 | Port contract | architecture section 15.6 |
@@ -45,18 +45,18 @@ not use them). The frame streams are in `clk`; the protocol wrapper's CPU FIFOs 
 
 | Cell | IP | Configuration |
 |---|---|---|
-| `microblaze_0` | MicroBlaze 11.0 (classic) | 32-bit, little endian (`C_ENDIANNESS` 1), 5-stage pipeline (`C_AREA_OPTIMIZED` 0), no MMU, **no caches**, no FPU, **no branch target cache** (kept off: no measured need, and it is not free in LUTs and timing), barrel shifter, 32-bit hardware multiplier (`C_USE_HW_MUL` 1), hardware divider, pattern compare, MSR instructions, interrupt input (normal mode), debug enabled, D-AXI on, I-AXI off, `C_BASE_VECTORS` 0, bus exceptions off (a DECERR reads as data) |
+| `microblaze_0` | MicroBlaze V 1.0 (`microblaze_riscv`) | RV32, little endian, RV32I with M (hardware multiply, standard divider, `C_USE_MULDIV` 1), C (compressed, `C_USE_COMPRESSION` 1), Zicsr, Zba/Zbb/Zbs (`C_USE_BITMAN_A/_B/_S` 1), barrel shifter (performance), performance pipeline (`C_OPTIMIZATION` 0), no MMU, **no caches**, no FPU, no atomics, **no branch target cache** (kept off: no measured need, and it is not free in LUTs and timing), misaligned-access exceptions on (the BSP handles them transparently), interrupt input (normal), debug enabled (serial JTAG interface), D-AXI (`M_AXI_DP`) on, I-AXI off, ILMB and DLMB, `C_BASE_VECTORS` 0 (reset vector 0x0), bus exceptions off (a DECERR reads as data) |
 | `ilmb_v10`, `dlmb_v10` | LMB 3.0 | instruction and data local memory buses |
 | `ilmb_bram_if_cntlr`, `dlmb_bram_if_cntlr` | LMB BRAM controller 4.0 | no ECC |
 | `lmb_bram` | Block Memory Generator 8.4 | true dual port, BRAM controller mode; **512 KiB = 128 RAMB36** (code, data, stack, heap, lwIP) |
-| `mdm_0` | MDM 3.2 | one debug port, JTAG UART on (AXI slave) |
+| `mdm_0` | MDM RISC-V 1.0 (`mdm_riscv`) | MicroBlaze V debug module: one debug port, serial JTAG debug interface, no JTAG UART (`C_USE_UART` 0; the console is `axi_uartlite_0`), no AXI slave |
 | `axi_uartlite_0` | AXI UART Lite 2.0 | 115200 baud, 8 data bits, no parity (1 stop bit) |
 | `axi_timer_0` | AXI Timer 2.0 | two 32-bit counters: counter 0 free running (ticks, delays), counter 1 the 1 ms interrupt |
 | `axi_intc_0` | AXI INTC 4.1 | 12 inputs from `irq_concat`; kinds detected from the sources (level; UART edge) |
 | `irq_concat` | inline concat 1.0 | `{dma_s2mm, dma_mm2s, uart, timer, irq[7:0]}` |
 | `axi_dma_0` | AXI DMA 7.1 | simple (direct register) mode, no scatter-gather, 64-bit memory side and 64-bit streams, realignment engine on MM2S only (transmit buffers at any byte address) and none on S2MM, `c_sg_length_width` 14 (16383-byte transfers), bursts 16 |
 | `axi_bram_ctrl_0` + `axi_bram` | AXI BRAM controller 4.1 + Block Memory Generator 8.4 | AXI4, 64-bit, single port; **128 KiB = 32 RAMB36**, the DMA frame buffers |
-| `axi_periph` | AXI Interconnect 2.1 | 1 slave (M_AXI_DP), 7 masters: UART, timer, INTC, MDM, `M_AXI_RTLNET`, DMA registers, memory path |
+| `axi_periph` | AXI Interconnect 2.1 | 1 slave (M_AXI_DP), 6 masters: UART, timer, INTC, `M_AXI_RTLNET`, DMA registers, memory path |
 | `axi_mem` | AXI Interconnect 2.1 | 3 slaves (memory path from `axi_periph`, DMA MM2S, DMA S2MM), 1 master (AXI BRAM controller); 32 -> 64-bit conversion for the CPU path |
 | `rst_cpu` | Processor System Reset 5.0 | `ext_reset_in` = port `resetn` (active low), `mb_debug_sys_rst` from the MDM; `dcm_locked` tied 1 |
 | `const_one` | inline constant 1.0 | `dcm_locked` tie |
@@ -73,13 +73,12 @@ XC7A200T's 365.
 | 0x4040_0000 | 64 KiB | AXI DMA registers (MM2S 0x00, S2MM 0x30) |
 | 0x4060_0000 | 64 KiB | AXI UART Lite (console) |
 | 0x4120_0000 | 64 KiB | AXI INTC |
-| 0x4140_0000 | 4 KiB | MDM (JTAG UART) |
 | 0x41C0_0000 | 64 KiB | AXI Timer |
 | 0x44A0_0000 | 1 MiB | `M_AXI_RTLNET` (RTLNet register window, decoded by the board top) |
 | 0xC000_0000 | 128 KiB | AXI BRAM: DMA frame buffers (MicroBlaze data side and both DMA channels) |
 
-Interrupt inputs: 0..7 = `irq[7:0]`, 8 = timer, 9 = UART, 10 = DMA MM2S, 11 = DMA S2MM. Vectors (BSP
-start-up `crt0`): reset 0x00, user exception 0x08, interrupt 0x10, hardware exception 0x20. The single
+Interrupt inputs: 0..7 = `irq[7:0]`, 8 = timer, 9 = UART, 10 = DMA MM2S, 11 = DMA S2MM. Reset vector 0x0 (`C_BASE_VECTORS`); exceptions and
+interrupts enter through `mtvec`, which the BSP start-up code sets. The single
 definition for software is `driver/rtlnet_cpu_microblaze.h`; the BSP's generated `xparameters.h` carries the
 same base addresses. Its `XPAR_FABRIC_*` interrupt numbers count the `irq_concat` *ports* (timer 1, DMA 3/4)
 instead of the INTC input bits; the firmware uses the header's numbering, which matches the hardware
@@ -87,7 +86,7 @@ instead of the INTC input bits; the firmware uses the header's numbering, which 
 
 Names other flows depend on: the MMI written by `write_mem_info` names the processor
 `u_cpu/u_bd/rtlnet_cpu_i/microblaze_0` (board instance `u_cpu`), the path `updatemem -proc` takes; the
-MMI lists two address spaces (LMB 0..524287 with 128 RAMB36 lanes, AXI BRAM 0xC000_0000..0xC001_FFFF);
+MMI lists two address spaces (LMB 0..524287 with 128 RAMB36 lanes, AXI BRAM 0xC000_0000..0xC001_FFFF); `write_mem_info` labels the MicroBlaze V processor `Big` although it is little endian, and updatemem places the ELF words identically for either label, so `merge_elf.ps1` accepts both;
 the firmware places nothing loadable in the AXI BRAM, so updatemem fills the LMB only.
 
 ## 5. Hardware export and BSP
@@ -124,12 +123,18 @@ too deep.
 
 ## 6. Firmware toolchain contract
 
-`mb-gcc` 13.4 (`<install>/gnu/microblaze/nt/bin`, located by `scripts/rtlnet_tools.ps1`), processor flags taken from the BSP's
-`cflags.yaml` (`-mxl-barrel-shift -mlittle-endian -mxl-pattern-compare -mno-xl-soft-mul -mcpu=v11.0`) plus
-`-mno-xl-soft-div -DSDT`; `-specs=Xilinx.spec`; the linker script `build/lscript.ld` is generated from the
-install's template `Vitis/data/embeddedsw/scripts/linker_files/lscript_mb.ld.in` (vectors at 0x0/0x8/0x10/0x20,
-code and data in the LMB region from 0x50, 8 KiB stack, 2 KiB heap) plus the NOLOAD section `.axi_bram`
-in the AXI BRAM region. Libraries: `-lxil -lxilstandalone -lxiltimer -lgcc -lc` in one group.
+`riscv64-unknown-elf-gcc` 13.4 (`<install>/gnu/riscv/nt/bin`, the `RvBin` member of `scripts/rtlnet_tools.ps1`), processor flags
+taken from the BSP's `cflags.yaml` (`-march=rv32imcb_zicsr_zifencei -mabi=ilp32`; the `b` stands for Zba, Zbb and
+Zbs of the CPU configuration) plus `-DSDT`; `-specs=Xilinx.spec`. `build.ps1` stops when the BSP's `-march` is not rv32 with
+M, C and Zicsr or the ABI is not ilp32. The linker script `build/lscript.ld` is generated from the install's template
+`Vitis/data/embeddedsw/scripts/linker_files/lscript_mb_riscv.ld.in`: the boot code `.text.init` at address 0 (the reset
+vector), code and data in the LMB region 0..0x7FFFF, 8 KiB stack, 2 KiB heap, plus the NOLOAD section `.axi_bram` in
+the AXI BRAM region. `_end` stays at the end of the LMB image: the start-up code clears memory from the start of `.bss` to
+`_end`, so `_end` must not lie in the AXI BRAM region. Libraries: `-lxil -lxilstandalone -lxiltimer -lgcc -lc` in one group.
+
+Portable BSP calls only: interrupts are masked with `Xil_ExceptionDisable()`, the INTC handler is registered with
+`Xil_ExceptionRegisterHandler(XIL_EXCEPTION_ID_INT, ...)`. The soft restart in `plat_reload` jumps to address 0 with `jr zero`.
+Misaligned loads and stores trap into the BSP's handler, which emulates them.
 
 ## 7. Simulation stand-in
 
@@ -725,3 +730,5 @@ Details: `boards/nexys_video/documentation/rtlnet_nexys_video.md` sections 6.3 a
 | 10-22-2026 | AXI DMA data realignment engine on MM2S (zero-copy transmit); checksum offload in the firmware (feature discovery, `rtlnet_offload_apply`, receive trailer, zero-copy options, `show offload`, `offload` command, desktop netif test) |
 | 10-22-2026 | Classifier driver integrated: `rtlnet_cpupath.c` on the real driver API (context, `RTLNET_CLS_ACT_*`), boot call `rtlnet_classifier_config_bcast_storm(10, 100)`, MAC mask removed and EtherType entries 0..7 (range pairs) in the CLI, harness register model of the classifier; the sim stub classifier task follows the driver register map |
 | 10-22-2026 | TCP throughput tuning: netif TX/RX copies as 32-bit AXI accesses, optional CPU profile (`RTLNET_NETIF_PROFILE`), `TCP_SND_BUF` 24 x MSS, `TCP_WND` 8 x MSS, 32-bit lwIP checksum, memory resized (section 9.10) |
+| 11-09-2026 | Processor changed from the classic MicroBlaze 11.0 to MicroBlaze V (RV32IMC, Zicsr, Zba/Zbb/Zbs, no caches) with `mdm_riscv`; RISC-V toolchain, BSP flags check and linker template; `Xil_ExceptionDisable()` in the platform layer; measurements in `boards/nexys_video/documentation/rtlnet_nexys_video.md` section 6.7 |
+| 11-09-2026 | JTAG UART of the MDM removed (CDC gate passes); address 0x4140_0000 unmapped; `axi_periph` has 6 masters; JTAG load of an ELF with `boards/nexys_video/scripts/jtag_load_elf.ps1` |

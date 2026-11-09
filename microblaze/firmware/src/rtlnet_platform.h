@@ -14,7 +14,6 @@
  *   0x4040_0000   64 KiB  AXI DMA (CPU network path, simple mode)  CPU core
  *   0x4060_0000   64 KiB  AXI UART Lite (console, 115200 8N1)      CPU core
  *   0x4120_0000   64 KiB  AXI INTC                                 CPU core
- *   0x4140_0000    4 KiB  MDM JTAG UART                            CPU core
  *   0x41C0_0000   64 KiB  AXI Timer                                CPU core
  *   0x44A0_0000    1 MiB  RTLNet window (M_AXI_RTLNET), below:     board top
  *     0x44A0_0000   4 KiB  SYS board system registers "NXVD"
@@ -55,7 +54,6 @@
 #define RTLNET_PLAT_DMA_BASE        RTLNET_CPU_DMA_BASE
 #define RTLNET_PLAT_UART_BASE       RTLNET_CPU_UART_BASE
 #define RTLNET_PLAT_INTC_BASE       RTLNET_CPU_INTC_BASE
-#define RTLNET_PLAT_MDM_BASE        RTLNET_CPU_MDM_BASE
 #define RTLNET_PLAT_TIMER_BASE      RTLNET_CPU_TIMER_BASE
 #define RTLNET_PLAT_CPU_CLK_HZ      RTLNET_CPU_CLK_HZ
 
