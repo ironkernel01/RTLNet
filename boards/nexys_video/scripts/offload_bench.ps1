@@ -23,9 +23,10 @@ Overview:
 Usage:
   powershell -NoProfile -ExecutionPolicy Bypass -File boards/nexys_video/scripts/offload_bench.ps1 `
     [-Port COM3] [-Board 192.169.1.199] [-Seconds 10] [-Runs 2] [-Label zc-both] [-Iperf <iperf.exe>]
-Revision: 10-22-2026
+Revision: 11-09-2026
   * 10-22-2026: initial version.
   * 10-22-2026: modes plain, -R, -d, plain + UDP 20M concurrent; one table row per offload state.
+  * 11-09-2026: takes the machine-wide board lock (rtlnet_board_lock.ps1) before touching the board.
 -------------------------------------------------------------------------------
 #>
 param(
@@ -37,6 +38,8 @@ param(
     [string]$Iperf = ''
 )
 $ErrorActionPreference = 'Continue'
+. (Join-Path $PSScriptRoot '..\..\..\scripts\rtlnet_board_lock.ps1')
+Enter-RtlnetBoardLock -Purpose 'offload bench' -ExpectedMinutes 60
 $Repo   = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..')).Path
 . (Join-Path $Repo 'scripts\rtlnet_tools.ps1')
 $Python = Resolve-RtlnetPython

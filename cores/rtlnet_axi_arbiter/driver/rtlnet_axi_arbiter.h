@@ -18,9 +18,13 @@
  * to the memory controller, illegal bursts answered with SLVERR, and clocks
  * spent waiting for a grant). An illegal burst (not INCR, not full-width, or
  * crossing a 4 KiB boundary; a master in NARROW_MASK may use any size up to the
- * full width, the boundary check then uses the burst's own size) sets the sticky STATUS.ERR flag, which stays set
+ * full width, the boundary check then uses the burst's own size; a master in
+ * WRAP_MASK may also issue a WRAP burst of 2, 4, 8 or 16 beats at an address
+ * aligned to the size, and any other WRAP is illegal) sets the sticky STATUS.ERR flag, which stays set
  * until software clears it by writing 1 to it; the core's err_irq output is the
- * level of that flag.
+ * level of that flag. The first illegal burst after a clear is also held in the
+ * read-only capture registers (direction, master, address, len, size, burst type and
+ * the failed rule), until STATUS.ERR or the counters are cleared.
  *
  * This header holds the register map, the types and the function rules;
  * rtlnet_axi_arbiter.c holds the per-function commentary.
@@ -32,12 +36,33 @@
 
 #define RTLNET_ARB_ID_VALUE               0x41524254u   /* "ARBT" */
 #define RTLNET_ARB_VERSION_VALUE          0x11092026u
-/* Revision 11-09-2026: NARROW register and narrow_mask in the caps struct. */
+/* Revision 11-09-2026: NARROW register and narrow_mask in the caps struct; WRAP register, wrap_mask, illegal-burst capture. */
 
 /* Registers (ID, VERSION, CAPS at RTLNET_REG_* of rtlnet_mmio.h). */
 #define RTLNET_ARB_REG_CTRL               0x00Cu   /* WO command bits, reads 0 */
 #define RTLNET_ARB_REG_STATUS             0x010u   /* RO flags, ERR write-1-to-clear */
 #define RTLNET_ARB_REG_NARROW             0x014u   /* RO, [7:0] NARROW_MASK: masters allowed narrow transfers */
+#define RTLNET_ARB_REG_WRAP               0x018u   /* RO, [7:0] WRAP_MASK: masters allowed legal WRAP bursts */
+#define RTLNET_ARB_REG_CAP_INFO           0x040u   /* RO, first illegal burst, fields below; 0 when none captured */
+#define RTLNET_ARB_REG_CAP_ADDR           0x044u   /* RO, captured address [31:0] */
+#define RTLNET_ARB_REG_CAP_ADDR_HI        0x048u   /* RO, captured address [63:32] (0 for a 32-bit address bus) */
+
+/* CAP_INFO fields. Cleared by STATUS.ERR (write 1) or CTRL.CNT_CLEAR; set by the first illegal burst after that. */
+#define RTLNET_ARB_CAP_VALID              (1u << 0)     /* a burst is captured */
+#define RTLNET_ARB_CAP_IS_READ            (1u << 1)     /* 0: AW (write), 1: AR (read) */
+#define RTLNET_ARB_CAP_MASTER_SHIFT       2u            /* [4:2] master index */
+#define RTLNET_ARB_CAP_MASTER_MASK        0x7u
+#define RTLNET_ARB_CAP_SIZE_SHIFT         5u            /* [7:5] AxSIZE */
+#define RTLNET_ARB_CAP_SIZE_MASK          0x7u
+#define RTLNET_ARB_CAP_LEN_SHIFT          8u            /* [15:8] AxLEN */
+#define RTLNET_ARB_CAP_LEN_MASK           0xFFu
+#define RTLNET_ARB_CAP_BURST_SHIFT        16u           /* [17:16] AxBURST (0 FIXED, 1 INCR, 2 WRAP) */
+#define RTLNET_ARB_CAP_BURST_MASK         0x3u
+#define RTLNET_ARB_CAP_FAIL_SHIFT         18u           /* [20:18] failed rules, see RTLNET_ARB_FAIL_* */
+#define RTLNET_ARB_CAP_FAIL_MASK          0x7u
+#define RTLNET_ARB_FAIL_BURST             0x1u          /* burst type (not INCR, or a WRAP that is not allowed) */
+#define RTLNET_ARB_FAIL_SIZE              0x2u          /* size not allowed for the master */
+#define RTLNET_ARB_FAIL_4K                0x4u          /* crosses a 4 KiB boundary */
 
 /* CAPS fields. */
 #define RTLNET_ARB_CAPS_MASTERS_MASK      0x0000000Fu   /* [3:0] NUM_MASTERS */
@@ -76,6 +101,7 @@ typedef struct {
     uint32_t max_outstanding;
     uint32_t high_prio_mask;
     uint32_t narrow_mask;   /* masters whose bursts may use sizes below the full width */
+    uint32_t wrap_mask;     /* masters whose WRAP bursts (2, 4, 8, 16 beats, aligned) are legal */
 } rtlnet_axi_arbiter_caps_t;
 
 typedef struct {
@@ -93,6 +119,18 @@ typedef struct {
     int rd_busy;
 } rtlnet_axi_arbiter_status_t;
 
+typedef struct {
+    int      valid;     /* an illegal burst is captured */
+    int      is_read;   /* 0: write (AW), 1: read (AR) */
+    uint32_t master;
+    uint32_t size;      /* AxSIZE, bytes per beat = 1 << size */
+    uint32_t len;       /* AxLEN, beats = len + 1 */
+    uint32_t burst;     /* AxBURST */
+    uint32_t fail;      /* RTLNET_ARB_FAIL_* bits */
+    uint32_t addr_lo;
+    uint32_t addr_hi;
+} rtlnet_axi_arbiter_capture_t;
+
 /* Return 0 on success, -1 on a bad argument, a missing core or a master index
  * at or above the core's NUM_MASTERS. */
 int rtlnet_axi_arbiter_probe(uintptr_t base, rtlnet_axi_arbiter_caps_t *caps);
@@ -100,5 +138,8 @@ int rtlnet_axi_arbiter_read_counters(uintptr_t base, uint32_t master, rtlnet_axi
 void rtlnet_axi_arbiter_clear(uintptr_t base);
 int rtlnet_axi_arbiter_err_status(uintptr_t base, rtlnet_axi_arbiter_status_t *st);
 void rtlnet_axi_arbiter_err_clear(uintptr_t base);
+/* Read the first-illegal-burst capture; valid is 0 and every other field 0 when nothing is captured.
+ * Return 0 on success, -1 on NULL cap. The capture clears with err_clear or clear. */
+int rtlnet_axi_arbiter_read_capture(uintptr_t base, rtlnet_axi_arbiter_capture_t *cap);
 
 #endif /* RTLNET_AXI_ARBITER_H */

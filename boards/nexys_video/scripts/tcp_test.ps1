@@ -26,9 +26,10 @@ Overview:
 Usage:
   powershell -NoProfile -ExecutionPolicy Bypass -File boards/nexys_video/scripts/tcp_test.ps1 `
     [-Board 192.169.1.199] [-Seconds 10] [-UdpRate 20M] [-Iperf <iperf.exe>]
-Revision: 10-22-2026
+Revision: 11-09-2026
   * 10-22-2026: initial version.
   * 10-22-2026: -R, -r and -d are gates with throughput (rtlnet_lwiperf).
+  * 11-09-2026: takes the machine-wide board lock (rtlnet_board_lock.ps1) before touching the board.
 -------------------------------------------------------------------------------
 #>
 param(
@@ -40,6 +41,8 @@ param(
 # Native tools write to stderr (iperf errors); PowerShell 5.1 turns that into
 # error records under 2>&1, so the script continues and checks the text.
 $ErrorActionPreference = 'Continue'
+. (Join-Path $PSScriptRoot '..\..\..\scripts\rtlnet_board_lock.ps1')
+Enter-RtlnetBoardLock -Purpose 'tcp test' -ExpectedMinutes 60
 $Repo   = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..')).Path
 . (Join-Path $Repo 'scripts\rtlnet_tools.ps1')
 $Python = Resolve-RtlnetPython

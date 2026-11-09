@@ -27,6 +27,7 @@ Usage:
     bitstream, MMI, XSA, build_info.txt) in build/<name>/; the network image build/rtlnet_nexys_video.{bit,mmi,xsa}
     and the firmware build are untouched. Example: -Tag cpu (the cpu-only variant, no -Network).
 Revision: 11-09-2026
+  * 11-09-2026: -Program and -Test take the machine-wide board lock first (rtlnet_board_lock.ps1).
   * 10-22-2026: initial version.
   * 10-22-2026: bitstream before firmware (the BSP comes from the XSA).
   * 11-09-2026: -Tag: variant build into build/<name>/.
@@ -45,6 +46,10 @@ $Board = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $Repo  = (Resolve-Path (Join-Path $Board '..\..')).Path
 $Build = Join-Path $Board 'build'
 New-Item -ItemType Directory -Force -Path $Build | Out-Null
+if ($Program -or $Test) {
+    . (Join-Path $Repo 'scripts\rtlnet_board_lock.ps1')
+    Enter-RtlnetBoardLock -Purpose 'build, program and test' -ExpectedMinutes 60
+}
 
 function Step([string]$name, [scriptblock]$body) {
     Write-Output "=== $name"

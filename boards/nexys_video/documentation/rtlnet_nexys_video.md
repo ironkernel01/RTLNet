@@ -26,6 +26,7 @@
 | `scripts/program.ps1`, `scripts/program.tcl` | JTAG programming (hw_server, `program_hw_devices`) |
 | `scripts/cli_test.ps1` | console test over the USB-UART (COM4), either build |
 | `scripts/net_test.ps1` | hardware network test: board side over the CLI, host side from the PC NIC when it is up |
+| `../../scripts/rtlnet_board.ps1`, `../../scripts/rtlnet_board_lock.ps1` | machine-wide board lock shared with the other session that uses the board (section 5.3) |
 | `scripts/tcp_test.ps1` | hardware test of the CPU network path: lwIP TCP echo, TCP iperf (rtlnet_lwiperf: PC -> board, `-R`, `-r`, `-d`), both together with the RTL UDP iperf |
 | `testbench/tb_rtlnet_nexys_video_top.sv` (+ `.f`) | CPU-only board bench with the MicroBlaze simulation stub |
 | `testbench/tb_rtlnet_nexys_video_net.sv` (+ `.f`) | network board bench: sim stub + RTL8211E model, ARP / ICMP / UDP echo / DHCP at 10/100/1000 |
@@ -175,6 +176,29 @@ path, prints `%LINK: eth0 up, <speed> Mb/s <duplex> duplex`, and starts DHCP whe
 no lease is held; link down clears LINK_UP and prints `%LINK: eth0 down`; DHCP lease changes print
 `%DHCP: bound ...` / `%DHCP: lease lost`. LEDs: led[2] link, led[3] DHCP lease (the `led` command can
 override them until the next event).
+
+### 5.3 Board lock
+
+The board and its `hw_server` are shared with another Claude session (project Commodore64). Every script that touches
+the board (`program.ps1`, `jtag_load_elf.ps1`, `cli_test.ps1`, `net_test.ps1`, `tcp_test.ps1`, `offload_bench.ps1`,
+`offload_profile.ps1`, and `build.ps1` with `-Program` or `-Test`) calls `Enter-RtlnetBoardLock` first
+(`scripts/rtlnet_board_lock.ps1`, default 60 minutes). The lock is the file `%LOCALAPPDATA%\IronKernel\nexys_video.lock`
+with the JSON fields `session` ("rtlnet"), `purpose`, `start` (ISO time), `expected_minutes`, `pid` and `host`.
+
+- A board session spans several runs (program, load, tests), so the lock is not delete-on-close and the scripts never
+  release it. `pid` is the nearest long-lived ancestor of the script (first `claude*`, `node` or `Code` process up the
+  parent chain; else the parent of the PowerShell process), not the short-lived script.
+- A lock is stale when its `pid` no longer exists or the time is past `start + expected_minutes + 30` minutes. A script
+  that takes a stale lock prints `RTLNET_BOARD_LOCK: taking stale lock of session ...`.
+- A live, unexpired lock of another session ends the script at once with exit code 3 and a line naming holder, purpose
+  and start. The scripts never wait and never take the lock over. A lock of session "rtlnet" is reused and its start
+  time refreshed. The file is created with `FileMode.CreateNew` (atomic), retried once after removing a stale lock.
+- Command line: `rtlnet_board.ps1 take -Purpose "<text>" -Minutes <n>`, `rtlnet_board.ps1 show`, `rtlnet_board.ps1 release`
+  (removes the lock only when it belongs to "rtlnet"). A board session ends with `release`.
+- Test: `build/board_lock_test.txt` runs the four negative paths against a fake lock file (`$env:RTLNET_BOARD_LOCK`
+  overrides the path for tests only): foreign live pid refused (and `program.ps1` refuses before it starts Vivado), foreign
+  dead pid taken as stale, expired lock taken as stale, own session reused with its start refreshed; plus a lock inside the
+  30 minute grace refused, and `release` leaving a foreign lock alone. Last line `LOCK TEST PASS`.
 
 ## 6. Results
 
@@ -594,7 +618,7 @@ Board (JTAG, COM3, 1000 Mb/s, PC on Wi-Fi: `-Nic Wi-Fi -Speed 1000`, DHCP lease 
 `rst -system` does not reset the MIG: a sentinel word written to DDR3 before the reset reads back unchanged after it and
 CLK_STATUS bit 1 is already set (`phase0_dev_load_ddr.txt`). The DDR3 arbiter's registers survive too, so the script clears its status and counters.
 
-Open finding in the DDR3 image: the arbiter answers illegal bursts of master 0 (the CPU caches) with SLVERR while the image runs. The counter
+Open finding in the DDR3 image (before the WRAP change below): the arbiter answers illegal bursts of master 0 (the CPU caches) with SLVERR while the image runs. The counter
 stays 0 while the firmware idles, and grows with console activity: 12 errors per `show version`, repeatable, never when the code runs from
 the LMB (`ddr test` then reports `errors 0`). The sticky flag sets, and zero bytes in the TCP echo payload fit write bursts that the arbiter
 discards. A `debug read` of DDR3 words at line offsets 0, 4 and 0x14 returns the right data, so reads are not the cause. Candidates: the burst
@@ -602,6 +626,65 @@ type or size the CPU's write-through data cache or the SmartConnect emits for su
 and stage 1 tested sub-word stores only in simulation). The next step is a hardware probe or a bench of the SmartConnect plus arbiter with byte and
 halfword stores; the release (LMB) flow is not affected.
 
+
+#### Phase 0 stage 3: WRAP bursts and the illegal-burst capture (11-09-2026)
+
+Changes: `rtlnet_axi_arbiter` gets `WRAP_MASK` (legal WRAP of 2, 4, 8, 16 beats at a size-aligned address, forwarded unchanged) and a sticky capture of the first
+illegal burst (`CAP_INFO`, `CAP_ADDR`, `CAP_ADDR_HI`; `cores/rtlnet_axi_arbiter/documentation/rtlnet_axi_arbiter.md` sections 3.1, 4, 7); the board top sets
+`WRAP_MASK` 1 for the CPU master; `show ddr` prints the wrap mask and the capture; `show version` prints an `Image` line (LMB or DDR3) and `cli_test.ps1` skips the three `ddr test` steps
+in the DDR3 image (listed as skipped, not counted as passed). The arbiter bench has 4 new regression entries (11 configurations and 2 negative controls),
+all existing entries pass. The generated MIG supports WRAP (arbiter document section 7.1).
+
+Build (`build.ps1 -Network`, `phase0_wrap_build.txt`, 998 s bitstream): `rtlnet_cdc: PASS` (`fifo 15 axil_cdc 6 gray 6`), 0 failing endpoints, `RTLNET_BUILD: PASS`.
+
+| Network build | LUT | FF | BRAM tiles | WNS / WHS / WPWS (ns) | Utilization |
+|---|---|---|---|---|---|
+| before (32-bit PC, `phase0_dev_net_build.txt`) | 32521 | 42307 | 239.5 | 0.152 / 0.008 / 0.000 | 24.31 % |
+| after (`WRAP_MASK`, capture) | 32605 (+84) | 42358 (+51) | 239.5 | 0.071 / 0.049 / 0.000 | 24.37 % |
+
+Board (lock held; JTAG, COM3, 1000 Mb/s, `-Nic Wi-Fi -Speed 1000`, 192.168.68.68):
+
+| Step | Result | Log |
+|---|---|---|
+| `program.ps1` | PASS | `phase0_wrap_program.txt` |
+| `jtag_load_elf.ps1 -Elf firmware_ddr.elf` | `JTAG_LOAD_ELF: PASS`, banner "DDR3 image" | `phase0_wrap_load_ddr.txt` |
+| `show ddr` right after the load | `errors 0`, `First illegal : none captured` (the load script clears status and counters) | `phase0_wrap_show_ddr_1.txt` |
+| DDR3 image, `cli_test.ps1` | `CLI_TEST: FAIL 2/30 (3 skipped: not counted as passed)`: the two `show ddr` steps see the illegal-burst flag set (`errors 3`) | `phase0_wrap_cli_ddr.txt` |
+| DDR3 image, `net_test.ps1` | `NET_TEST: PASS 25/25` | `phase0_wrap_net_ddr.txt` |
+| DDR3 image, `tcp_test.ps1` | `TCP_TEST: FAIL 2/8`: both TCP echo tests return a zero byte inside a payload (`size 5840: echo differs at offset 3073 (sent 0x79, got 0x00)`); four iperf runs and UDP pass | `phase0_wrap_tcp_ddr.txt` |
+| DDR3 image, `show ddr` after the tests | `errors 96`, flag set, capture unchanged | `phase0_wrap_show_ddr_2.txt` |
+| `program.ps1`, release image | PASS | `phase0_wrap_program_release.txt` |
+| release image, `cli_test.ps1` | `CLI_TEST: PASS 33/33` | `phase0_wrap_cli_release.txt` |
+| release image, `net_test.ps1` | `NET_TEST: PASS 25/25` | `phase0_wrap_net_release.txt` |
+| release image, `tcp_test.ps1` | `TCP_TEST: PASS 8/8` | `phase0_wrap_tcp_release.txt` |
+
+Found cause. (1) The 12 illegal bursts per `show version` were WRAP bursts: after the change `clear counters` and two `show version` leave `errors 0` and an empty capture
+(`phase0_wrap_show_ddr_3.txt`). (2) Errors remain: the first capture after the `cli_test` run reads (printed by `show ddr`)
+
+```
+First illegal   : write (AW) master 0 addr 0x000000000001CFFD len 0 size 2 burst 1 (INCR) failed: 4KiB
+```
+
+that is `CAP_INFO` = valid, write, master 0, `AxSIZE` 2, `AxLEN` 0, INCR, failed rule 4 KiB only; `CAP_ADDR` 0x0001CFFD (offset in the 512 MiB window; CPU address 0x8001CFFD),
+`CAP_ADDR_HI` 0. It is one 32-bit-size beat at a byte address ending in 01 at page offset 0xFFD (a sub-word store from the write-through data cache). The beat holds bytes 0xFFD..0xFFF, so it is a legal AXI
+burst, but the arbiter evaluates `addr[11:0] + (len + 1) * bytes` from the unaligned address (0xFFD + 4 > 4096) and answers SLVERR, so the store is dropped. The rule has to use the
+size-aligned start address (beat addresses after the first are aligned). The same error repeats for other sub-word stores at page offsets 0xFFD to 0xFFF of a size-2 burst; only the first illegal burst is captured, so the
+other 95 of the 96 errors after `tcp_test` are not individually identified. The zero bytes in the TCP echo payload are consistent with dropped sub-word stores but are not proven to have this
+cause. No further fix was made in this revision (the capture identified the rule; the change is a one-line size-aligned address in `burst_fail` and a bench case).
+
+Rates (Mbit/s, this run):
+
+| Rate (Mbit/s) | DDR3 image | LMB (release) image |
+|---|---|---|
+| UDP `-u` 900M, PC to board | 392.0 (15 of 173023 lost) | 408.0 (0 lost) |
+| UDP `-u -R`, board to PC | 943.0 (13 of 401242 lost) | 944.0 (0 lost) |
+| TCP iperf PC to board | 50.6 | 60.9 |
+| TCP iperf `-R` / `-r` / `-d` board to PC | 42.6 / 38.1 / 32.2 | 90.9 / 84.6 / 69.6 |
+| Together: TCP iperf / UDP iperf | 50.7 / 20.9 | 58.0 / 20.9 |
+
+The UDP loss and the lower rates of the DDR3 image come with the dropped stores and the slower DDR3 code path; the lost datagrams are not attributed.
+
+Regression: `scripts/rtlnet_regression.ps1` (`phase0_wrap_regression.txt`): `RTLNET_REGRESSION: 100 passed, 0 failed`.
 
 ## 7. Network integration (done 10-22-2026) and what remains
 
@@ -634,4 +717,5 @@ Open:
 | 11-09-2026 | Phase 0a: MicroBlaze V replaces the classic MicroBlaze in the block design; hardware results of section 6.7 |
 | 11-09-2026 | Phase 0a follow-up: JTAG UART removed (CDC gate passes unmodified), JTAG load of an ELF into MicroBlaze V (`jtag_load_elf.ps1`), new measurements in section 6.7 |
 | 11-09-2026 | Phase 0 stage 1: DDR3 (`rtlnet_ddr`, `rtlnet_axi_arbiter`, bridge `u_ddr_cdc`), MicroBlaze V caches; build gates (MIG ASYNC_REG, three required MIG waivers, fifo 15 / CPU-only 5); results in section 6.8 |
+| 11-09-2026 | Phase 0 stage 3: arbiter `WRAP_MASK` and illegal-burst capture, board top `WRAP_MASK` 1, `show ddr` capture, machine-wide board lock (section 5.3), `cli_test` skips `ddr test` in the DDR3 image; results in section 6.9 |
 | 11-09-2026 | Phase 0 stage 2: `C_PC_WIDTH` 32, `build.ps1 -Tag` variant builds, `jtag_load_elf` with calibration wait, download check and `-Image`, DDR3 image (`build.ps1 -Ddr`); CPU-only counts `fifo 5 axil_cdc 1 gray 0` built and passing; results and the open arbiter finding in section 6.9 |

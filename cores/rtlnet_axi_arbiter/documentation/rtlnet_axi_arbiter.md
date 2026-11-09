@@ -7,12 +7,13 @@
 | Language | SystemVerilog-2012 (RTL, benches), C11 (driver) |
 | Position | between the DMA masters and the CPU caches and the memory-controller AXI port (`documentation/gige.md` sections 5.1, 6, 7) |
 | Register map revision | `VERSION` = `0x11092026`, `ID` = `0x41524254` ("ARBT") |
-| Verification | Active-HDL 11.1: `tb_rtlnet_axi_arbiter` (8 configurations + negative control); host driver test |
-| Synthesis | Vivado 2026.1 out of context, xc7a200tsbg484-1: PASS, 0 critical warnings; 1374 LUT, 1042 FF, 0 BRAM (3 masters, 128-bit, no narrow master) |
+| Verification | Active-HDL 11.1: `tb_rtlnet_axi_arbiter` (11 configurations + 2 negative controls); host driver test |
+| Synthesis | Vivado 2026.1 out of context, xc7a200tsbg484-1: PASS, 0 critical warnings; 1477 LUT, 1096 FF, 0 BRAM (3 masters, 128-bit, no narrow or WRAP master) |
 
 The arbiter shares the one AXI4 port of the DDR3 controller between up to eight masters. Arbitration is per transaction
-and separate for writes and reads. A burst the memory controller cannot execute (not INCR, not full width unless the master is in `NARROW_MASK`, crossing a
-4 KiB boundary) is never forwarded: the arbiter answers it with SLVERR and counts it.
+and separate for writes and reads. A burst the memory controller cannot execute (not INCR unless the master is in `WRAP_MASK` and the burst is a legal WRAP, not full width unless the master is in
+`NARROW_MASK`, crossing a 4 KiB boundary) is never forwarded: the arbiter answers it with SLVERR, counts it and captures the first one
+(direction, master, address, len, size, burst type, failed rule) in read-only registers.
 
 Contents: 1 interface, 2 arbitration, 3 burst rules and error responses, 4 registers, 5 clocks and crossings,
 6 resources, 7 verification, 8 integration guide, 9 limitations.
@@ -50,6 +51,7 @@ All data ports are packed vectors, master `i` at `[i*W +: W]`, on one clock.
 | `ID_W` | 4 | master-side ID width, 1..15; the memory-side ID is `ID_W + IDX_W` bits |
 | `HIGH_PRIO_MASK` | `'b1` | masters that win over the round-robin group |
 | `NARROW_MASK` | `'0` | masters whose bursts may use any `AxSIZE` up to the full width (a write-through CPU cache issues 32-bit stores); the other masters must use the full width |
+| `WRAP_MASK` | `'0` | masters whose WRAP bursts of 2, 4, 8 or 16 beats at a size-aligned address are legal (the CPU caches fill a line critical word first); for every other master a WRAP is illegal |
 | `MAX_OUTSTANDING` | 8 | bursts in flight per direction, whole arbiter, 1..255 |
 
 `IDX_W` = `$clog2(NUM_MASTERS)`, at least 1; the master index is in the upper ID bits.
@@ -91,13 +93,19 @@ Checked on every granted AW and AR:
 
 | Rule | Legal value |
 |---|---|
-| burst | INCR (`2'b01`) |
+| burst | INCR (`2'b01`); for a master in `WRAP_MASK` also WRAP (`2'b10`) with `len + 1` of 2, 4, 8 or 16 beats and a start address aligned to `2^AxSIZE` |
 | size | master not in `NARROW_MASK`: `log2(DATA_W/8)`, a full-width beat; master in `NARROW_MASK`: any `AxSIZE` from 0 up to `log2(DATA_W/8)` |
-| 4 KiB boundary | `addr[11:0] + (len + 1) * 2^AxSIZE <= 4096`, with the burst's own size (full-width masters: `2^AxSIZE` = `DATA_W/8`) |
+| 4 KiB boundary | INCR: `addr[11:0] + (len + 1) * 2^AxSIZE <= 4096`, with the burst's own size (full-width masters: `2^AxSIZE` = `DATA_W/8`). Not applied to a WRAP: a legal WRAP container is at most 16 beats * 16 bytes = 256 bytes, a power of two aligned to its own size, so it lies inside one 4 KiB page and the rule cannot be violated |
 
 A narrow transfer is forwarded unchanged (size, strobes, address); the memory controller places the data on the byte
 lanes of the beat address. Narrow single beats and bursts from a write-through data cache take this path. Without the
 mask bit such a store is answered SLVERR and dropped.
+
+A legal WRAP is forwarded unchanged (address, len, size, burst type); the memory controller wraps the beat address inside the
+`len + 1` beat container. The size rule applies to a WRAP as to an INCR burst (full width unless the master is in `NARROW_MASK`).
+A WRAP stays illegal for a master outside `WRAP_MASK`, with `len` 0 (one beat), `len` 2 (three beats) or any other length
+that is not 1, 3, 7 or 15, and at a start address not aligned to the size. The failed-rule flags of the capture report a bad WRAP
+as a burst-type failure.
 
 An illegal burst is not forwarded. The arbiter takes the AW (AR) and answers it itself:
 
@@ -108,7 +116,14 @@ An illegal burst is not forwarded. The arbiter takes the AW (AR) and answers it 
 The answer is delivered after every earlier forwarded transaction of that master in the same direction has been
 answered. Until then the master's further AW (AR) are not arbitrated, so same-ID order holds and no forwarded response of
 that master can collide with the answer. Each illegal burst counts once in the master's `ERRORS`, sets the sticky
-`STATUS.ERR` and drives `err_irq` high. In simulation a `$error` reports the master index, address, len, size and burst.
+`STATUS.ERR` and drives `err_irq` high. In simulation a `$error` reports the master index, address, len, size, burst and the failed-rule flags.
+
+### 3.1 First-illegal-burst capture
+
+The first illegal AW or AR after a clear is held in `CAP_INFO`, `CAP_ADDR` and `CAP_ADDR_HI` until `STATUS.ERR` is cleared
+(write 1) or `CTRL.CNT_CLEAR` is written. Later illegal bursts are counted in `ERRORS` and do not overwrite the capture.
+An illegal burst in the clock of a clear is captured as the first of the next period. When an illegal AW and AR are granted
+in one clock the AW is captured (the AR is counted). `AxCACHE` is not captured: the arbiter has no `AxCACHE` input (it drives a constant on the memory side).
 
 Overflow of every queue and counter is gated in logic; a simulation check reports an attempt.
 
@@ -128,6 +143,10 @@ answered OKAY and ignored). Undefined offsets read 0 and ignore writes.
 | 0x00C | `CTRL` | WO | 0 | `[16]` CNT_CLEAR (self-clearing, reads 0; clears every counter, not `STATUS.ERR`) |
 | 0x010 | `STATUS` | RO, ERR W1C | 0 | `[0]` ERR sticky, write 1 to clear (a new error in the same clock keeps it set); `[1]` write in flight; `[2]` read in flight |
 | 0x014 | `NARROW` | RO | build | `[7:0]` NARROW_MASK (the `CAPS` word has no free bits; undefined bits read 0) |
+| 0x018 | `WRAP` | RO | build | `[7:0]` WRAP_MASK |
+| 0x040 | `CAP_INFO` | RO | 0 | first illegal burst: `[0]` valid, `[1]` direction (0 AW write, 1 AR read), `[4:2]` master, `[7:5]` AxSIZE, `[15:8]` AxLEN, `[17:16]` AxBURST (0 FIXED, 1 INCR, 2 WRAP), `[20:18]` failed rules: bit 18 burst type, bit 19 size, bit 20 4 KiB (several may be set); 0 when nothing is captured; cleared by `STATUS.ERR` (W1C) or `CTRL.CNT_CLEAR` |
+| 0x044 | `CAP_ADDR` | RO | 0 | captured address `[31:0]` |
+| 0x048 | `CAP_ADDR_HI` | RO | 0 | captured address `[63:32]` (0 for a 32-bit address bus) |
 
 Per master `n` at `0x100 + 0x20 * n` (`n` below NUM_MASTERS; other windows read 0):
 
@@ -141,7 +160,9 @@ Per master `n` at `0x100 + 0x20 * n` (`n` below NUM_MASTERS; other windows read 
 | +0x14 | `WAIT_CYCLES` | clocks with `awvalid` or `arvalid` high and not granted |
 
 "Write in flight" and "read in flight" are set from the grant of a burst (forwarded or illegal) until its response is
-delivered. Driver: `rtlnet_axi_arbiter_probe`, `_read_counters`, `_clear`, `_err_status`, `_err_clear`.
+delivered. Driver: `rtlnet_axi_arbiter_probe`, `_read_counters`, `_clear`, `_err_status`, `_err_clear`, `_read_capture`.
+The firmware command `show ddr` prints the wrap mask and the capture (`First illegal   : none captured`, or direction, master,
+address, len, size, burst and the failed rules).
 
 ---
 
@@ -183,7 +204,7 @@ region is written only in a fill phase).
 
 | Group | Proves |
 |---|---|
-| registers | ID, VERSION, CAPS and NARROW for the configuration, reset values, undefined offsets and the window above NUM_MASTERS read 0, read-only registers ignore writes, a partial write to CTRL does nothing |
+| registers | ID, VERSION, CAPS, NARROW and WRAP for the configuration, capture registers 0 after reset, reset values, undefined offsets and the window above NUM_MASTERS read 0, read-only registers ignore writes, a partial write to CTRL does nothing |
 | data integrity | at least 2400 legal bursts per configuration (len 0..255, boundary-ending and page-filling bursts, own and shared regions), zero read mismatches; saturated and with random gaps |
 | ID routing | every B and R reaches its master with the right ID, per-ID order |
 | W order | each W beat at the memory port equals the pattern of its own burst; AW, W and AR streams at the memory port equal the grant order |
@@ -192,6 +213,8 @@ region is written only in a fill phase).
 | limits | in flight per direction never above `MAX_OUTSTANDING`, at the master side and at the memory port |
 | narrow masters | the narrow configurations: 40 % of a narrow master's legal bursts use a size below the full width (size-aligned start, strobes limited to the active byte lanes, single beats and bursts, some ending exactly on the 4 KiB boundary by their own size); the reference memory and the memory model follow the burst's own size; directed narrow single beats and bursts; a narrow burst crossing 4 KiB by its own size is answered SLVERR (read and write) and never reaches the memory model; the `NARROW` register |
 | illegal bursts | FIXED, WRAP, narrow (for masters outside `NARROW_MASK`), 4 KiB crossing, read and write, each after 3 outstanding legal bursts of the same master and followed by 2; never reaches the memory model; SLVERR of the right length after the earlier answers; ERRORS, `STATUS.ERR` sticky, `err_irq`, write-1-to-clear (writing 0 to bit 0 does not clear); then 15 % random illegal bursts in the legal traffic of all masters |
+| WRAP (`TB_WRAP` configurations) | masters in `WRAP_MASK`: 25 % of their legal bursts are WRAP of 2, 4, 8 or 16 beats (full size; a narrow master also smaller sizes) in the random traffic, the reference memory and `rtlnet_tb_axi4_mem` (`ALLOW_WRAP`, default 0) both model the wrap addressing and the read data is checked beat by beat; directed: every length at every start offset (2 + 4 + 8 + 16 = 30 starts per size), WRAP write, WRAP read at another start and an INCR read of the whole container; directed illegal WRAPs, read and write, between legal bursts of the same master: len 0, len 2 (three beats), misaligned start (masters in the mask) and a WRAP of the legal form from a master outside the mask; SLVERR of the right length, `ERRORS`, never reaches the memory model; a WRAP from every master when `WRAP_MASK` is 0 (all other configurations, memory model `ALLOW_WRAP` 0) |
+| capture | CAP_INFO and CAP_ADDR empty after reset and after a clear; the first illegal burst of every kind (FIXED, WRAP legal-form outside the mask, narrow size, 4 KiB, narrow 4 KiB, WRAP len 0, len 2, misaligned), read and write, on rotating masters, with every field and the failed-rule flags against the bench's own rule model; a second illegal burst does not replace the first; `STATUS.ERR` write 1 and `CTRL.CNT_CLEAR` clear it; the registers ignore writes; reset clears it |
 | counters | all six counters of every master against the bench's own counts after each phase, CNT_CLEAR, `STATUS` in-flight bits |
 | reset | reset in the middle of traffic (bursts in flight), registers and `err_irq` back to 0, then clean traffic |
 
@@ -200,18 +223,26 @@ Results (11-09-2026), `tb_rtlnet_axi_arbiter` via `scripts/rtlnet_run_sim.ps1` (
 
 | Tag | Masters | Data | Latency, gaps | Result |
 |---|---|---|---|---|
-| `nm3_dw128_lat0` | 3 | 128 | 0, none | `TEST PASS: tb_rtlnet_axi_arbiter checks=321066` |
-| `nm3_dw128_lat20` | 3 | 128 | 20, random | `TEST PASS: tb_rtlnet_axi_arbiter checks=407074` |
-| `nm1_dw128_lat20` | 1 | 128 | 20, random | `TEST PASS: tb_rtlnet_axi_arbiter checks=347401` |
-| `nm5_dw64_lat0` | 5 (HP mask 0x09) | 64 | 0, random | `TEST PASS: tb_rtlnet_axi_arbiter checks=571462` |
-| `nm5_dw128_lat20` | 5 (HP mask 0x09) | 128 | 20, none | `TEST PASS: tb_rtlnet_axi_arbiter checks=365260` |
-| `nm3_dw64_lat20` | 3 | 64 | 20, random | `TEST PASS: tb_rtlnet_axi_arbiter checks=502231` |
-| `nm3_dw128_nar2` | 3 (master 1 narrow, `NARROW_MASK` 0x2) | 128 | 20, random | `TEST PASS: tb_rtlnet_axi_arbiter checks=438434` |
-| `nm1_dw128_nar1` | 1 (narrow, `NARROW_MASK` 0x1) | 128 | 0, none | `TEST PASS: tb_rtlnet_axi_arbiter checks=284380` |
-| `neg` | 3 | 128 | `+INJECT_FAILURE` | `TEST FAIL: tb_rtlnet_axi_arbiter fails=1 checks=30167` as required |
+| `nm3_dw128_lat0` | 3 | 128 | 0, none | `TEST PASS: tb_rtlnet_axi_arbiter checks=315041` |
+| `nm3_dw128_lat20` | 3 | 128 | 20, random | `TEST PASS: tb_rtlnet_axi_arbiter checks=437171` |
+| `nm1_dw128_lat20` | 1 | 128 | 20, random | `TEST PASS: tb_rtlnet_axi_arbiter checks=361874` |
+| `nm5_dw64_lat0` | 5 (HP mask 0x09) | 64 | 0, random | `TEST PASS: tb_rtlnet_axi_arbiter checks=571431` |
+| `nm5_dw128_lat20` | 5 (HP mask 0x09) | 128 | 20, none | `TEST PASS: tb_rtlnet_axi_arbiter checks=393715` |
+| `nm3_dw64_lat20` | 3 | 64 | 20, random | `TEST PASS: tb_rtlnet_axi_arbiter checks=497008` |
+| `nm3_dw128_nar2` | 3 (master 1 narrow, `NARROW_MASK` 0x2) | 128 | 20, random | `TEST PASS: tb_rtlnet_axi_arbiter checks=437307` |
+| `nm1_dw128_nar1` | 1 (narrow, `NARROW_MASK` 0x1) | 128 | 0, none | `TEST PASS: tb_rtlnet_axi_arbiter checks=292292` |
+| `nm3_dw128_wrap1` | 3 (master 0 in `WRAP_MASK`, masters 1 and 2 outside) | 128 | 20, random | `TEST PASS: tb_rtlnet_axi_arbiter checks=381422` (344 legal and 24 illegal WRAP bursts) |
+| `nm1_dw128_wrap1_nar1` | 1 (narrow and WRAP, the board configuration) | 128 | 0, random | `TEST PASS: tb_rtlnet_axi_arbiter checks=321590` (860 legal, 17 illegal) |
+| `nm3_dw64_wrap6_nar2` | 3 (masters 1 and 2 in `WRAP_MASK`, master 1 narrow) | 64 | 20, none | `TEST PASS: tb_rtlnet_axi_arbiter checks=350984` (819 legal, 29 illegal) |
+| `neg` | 3 | 128 | `+INJECT_FAILURE` | `TEST FAIL: tb_rtlnet_axi_arbiter fails=1 checks=34900` as required |
+| `neg_wrap` | 3 (master 0 in `WRAP_MASK`) | 128 | `+INJECT_FAILURE` | `TEST FAIL: tb_rtlnet_axi_arbiter fails=1 checks=42468` as required |
 
 Measured in the runs: in flight reaches `MAX_OUTSTANDING` (8) in both directions at the master side and at the memory
 port; the worst round-robin wait is 1 grant (3 masters), 2 grants (5 masters, limit 4).
+
+WRAP and capture mutations (`nm3_dw128_wrap1`, RTL restored afterwards, the unmutated run passes with checks=381422): WRAP accepted for a
+master outside `WRAP_MASK` (530 fails; first "AW at the memory port with no granted write behind it"), WRAP length check removed (1551 fails),
+WRAP alignment check removed (1342 fails), capture overwritten by every later illegal burst (2 fails: "stickiness: CAP_INFO keeps the first illegal burst").
 
 Mutations, each failing the bench (RTL restored afterwards); first the full-width set: B routed to master 0 (4405 fails), round-robin pointer
 frozen (master 2 waited 160 grants), high priority ignored (1668), 4 KiB check removed (1877), in-flight limit removed
@@ -219,17 +250,50 @@ frozen (master 2 waited 160 grants), high priority ignored (1668), 4 KiB check r
 illegal read one beat too long (953). Narrow set (`nm3_dw128_nar2` and `nm1_dw128_nar1`): 4 KiB check removed (1835 and 423 fails), 4 KiB check skipped for narrow masters only (1873 and 423), 4 KiB span computed with the full-width size (52019 fails in `nm3_dw128_nar2`).
 
 Driver: `testbench/test_rtlnet_axi_arbiter_driver.c` runs the driver against a register model (read-only header and
-counters, self-clearing CNT_CLEAR, write-1-to-clear ERR, undefined offsets 0):
-`DRIVER TEST PASS: rtlnet_axi_arbiter checks=15` (host gcc 10.0.0 from the AMD install,
+counters, self-clearing CNT_CLEAR, write-1-to-clear ERR, the capture registers, undefined offsets 0):
+`DRIVER TEST PASS: rtlnet_axi_arbiter checks=21` (host gcc 10.0.0 from the AMD install,
 `-std=c11 -Wall -Wextra -Werror`).
 
-Synthesis: `rtlnet_synth_check: PASS rtlnet_axi_arbiter`, 0 critical warnings.
+Synthesis: `rtlnet_synth_check: PASS rtlnet_axi_arbiter`, 0 critical warnings (defaults, 3 masters: 1477 LUT, 1096 FF; and the board
+configuration `NUM_MASTERS=1 NARROW_MASK=1 WRAP_MASK=1`: PASS, 0 critical warnings).
 
 The bench sets `dut.sim_quiet_illegal` so the illegal-burst report is a note and the log has no error lines; with
 `+ARB_SHOW_ERRORS` the report is the `$error` described in section 3 (checked once:
 `illegal write burst master 0 addr 0x42f0 len 1 size 4 burst 0`).
 
 Run: `powershell -File scripts/rtlnet_run_sim.ps1 -Bench tb_rtlnet_axi_arbiter -Filelist cores/rtlnet_axi_arbiter/testbench/tb_rtlnet_axi_arbiter.f -Tag <tag> -Defines <defines of the tag>`.
+
+---
+
+### 7.1 Memory-controller WRAP support
+
+The generated AMD MIG AXI slave (`boards/nexys_video/build/ip/rtlnet_ddr_mig/rtlnet_ddr_mig/user_design/rtl/axi/`, 7 series MIG v4.2) handles WRAP:
+
+- `mig_7series_v4_2_axi_mc_cmd_translator.v` decodes INCR and WRAP in parallel and selects by `axburst[1]` (`cmd_byte_addr`, `next_pending`, `ignore_begin`, `ignore_end`),
+  so WRAP (`2'b10`) reaches `mig_7series_v4_2_axi_mc_wrap_cmd.v`.
+- `axi_mc_wrap_cmd` forms each command address from the start address with the 4-bit beat-index field (`axaddr[C_AXSIZE+:4]`) replaced by a counter that
+  steps by `C_MC_BURST_LEN` and wraps under the mask `axlen[3:0]` (`int_addr_p = (int_addr_t & ~axlen) | (int_addr_t_inc & axlen)`). That is the AXI wrap
+  for `len + 1` of 2, 4, 8 and 16 beats, critical word first, at the full data width (`C_AXSIZE` is a static parameter, the beat size of the 128-bit port).
+- The same `len` and `size` rules therefore hold at the MIG as in the arbiter: lengths 1, 3, 7, 15, start aligned to the beat. A narrow WRAP is not part of the
+  memory-controller port (the arbiter forwards a narrow WRAP only for a master in both `NARROW_MASK` and `WRAP_MASK`, as the bench configurations `nm1_dw128_wrap1_nar1` and `nm3_dw64_wrap6_nar2` model; the board's
+  caches reach the MIG through the SmartConnect upsizer at full width).
+
+On the board the DDR3 image boots, runs and executes `show version` with 0 illegal bursts after the change (12 per `show version` before), and the instruction
+cache's critical-word-first line fills return correct code and data (the console and `net_test` pass from DDR3).
+
+### 7.2 Board, DDR3 image (11-09-2026)
+
+Board configuration `NUM_MASTERS` 1, `NARROW_MASK` 1, `WRAP_MASK` 1. Logs in `boards/nexys_video/build/phase0_wrap_*.txt`
+(`rtlnet_nexys_video.md` section 6.9). The first-illegal-burst capture identified the cause of the illegal bursts the DDR3 image produced:
+
+- 12 illegal bursts per `show version` before the change were WRAP line fills of the CPU caches (the hypothesis; the first capture of that run was
+  not taken, the proof is the effect): with `WRAP_MASK` 1, `clear counters` followed by two `show version` leaves `errors 0` and `First illegal : none captured`
+  (`phase0_wrap_show_ddr_3.txt`).
+- A second source remains. After `cli_test` the capture reads `First illegal : write (AW) master 0 addr 0x000000000001CFFD len 0 size 2 burst 1 (INCR) failed: 4KiB`
+  (`CAP_INFO` valid 1, direction AW, master 0, size 2, len 0, burst INCR, failed rules = 4 KiB only; `CAP_ADDR` 0x0001CFFD, `CAP_ADDR_HI` 0). The burst is a single
+  32-bit-size beat at a byte address with low bits `01` at page offset 0xFFD. Its first beat covers bytes 0xFFD..0xFFF inside the page, so it is legal AXI, but the
+  arbiter's 4 KiB rule computes `addr[11:0] + (len + 1) * 4` from the unaligned start address (0xFFD + 4 > 4096) and rejects it. The rule needs the size-aligned start
+  address (AXI beat addresses after the first are aligned). Not changed in this revision; see `rtlnet_nexys_video.md` section 6.9.
 
 ---
 
@@ -241,7 +305,9 @@ To attach a new master:
    Its index in the upper memory-side ID bits is its slice number.
 2. Issue only INCR bursts of full width (`AxSIZE` = `log2(DATA_W/8)`), none crossing a 4 KiB boundary. Split a longer
    transfer at the boundary in the DMA. A master that needs narrow transfers (a CPU cache) gets its bit in
-   `NARROW_MASK`; its bursts must still be INCR and not cross a 4 KiB boundary by their own size.
+   `NARROW_MASK`; its bursts must still be INCR (or a legal WRAP, below) and not cross a 4 KiB boundary by their own size.
+   A master that fills cache lines critical word first gets its bit in `WRAP_MASK`; its WRAP bursts must have 2, 4, 8 or 16 beats
+   and a size-aligned start. The memory controller must implement WRAP (the AMD MIG AXI slave does: section 7.1).
 3. Use any `ID_W`-bit IDs. Responses for one ID arrive in order; the master may keep several IDs outstanding.
 4. A master may raise `wvalid` before its AW is granted; it must hold valid and payload until ready, as AXI requires.
 5. Decide priority: set the master's bit in `HIGH_PRIO_MASK` only for a stream that must not wait (the capture writer);
@@ -256,8 +322,9 @@ The memory-controller wrapper connects to the `m_axi_*` ports; widths follow `ID
 
 ## 9. Limitations
 
-- INCR bursts only, full width except for masters in `NARROW_MASK`; no FIXED, WRAP, exclusive (lock) or QoS transfers.
-- Address alignment is not checked; the memory controller handles an unaligned start.
+- INCR bursts, and WRAP bursts for masters in `WRAP_MASK`; full width except for masters in `NARROW_MASK`; no FIXED, exclusive (lock) or QoS transfers.
+- Address alignment is checked for a WRAP only; the memory controller handles an unaligned INCR start.
+- The capture holds one burst (the first); `AxCACHE` is not captured.
 - A master with an unanswered illegal burst is not arbitrated in that direction until the answer is delivered.
 - Grants are one per clock and per direction; a legal grant needs the memory-side register free or accepted that clock.
 - A continuously requesting high-priority master can starve the round-robin group.

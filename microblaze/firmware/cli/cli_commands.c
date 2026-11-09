@@ -48,6 +48,8 @@
  *  10-22-2026  MenuBuilder AI / Steve Spano    CPU network path: show tcp, show cpu-path, tcp echo, storm-control, classifier
  *  11-09-2026  MenuBuilder AI / Steve Spano    DDR3: show ddr, ddr test; clear counters clears the DDR3 arbiter
  *  11-09-2026  MenuBuilder AI / Steve Spano    Boot banner names the image (LMB or DDR3)
+ *  11-09-2026  MenuBuilder AI / Steve Spano    show ddr: wrap mask and the arbiter's first-illegal-burst capture
+ *  11-09-2026  MenuBuilder AI / Steve Spano    show version: Image line (LMB or DDR3)
  * ===========================================================================
  */
 #include "cli_commands.h"
@@ -521,6 +523,7 @@ int cli_show_version(const MenuCommandContext *ctx)
                rtlnet_features()->rx_present ? "yes" : "no",
                rtlnet_features()->errors ? "  % discovery mismatch, see show offload" : "");
     fmt_printf("  Firmware        : %s %s, built %s %s\n", RTLNET_FW_NAME, RTLNET_FW_VERSION, __DATE__, __TIME__);
+    fmt_printf("  Image           : %s\n", RTLNET_FW_IMAGE);
     return (id == NXV_SYS_ID_VALUE) ? 0 : -1;
 }
 
@@ -3099,6 +3102,29 @@ static void cli_print_arb_master(uint32_t m)
 }
 
 /**
+ * @brief Print the arbiter's first-illegal-burst capture: nothing captured, or
+ *        the direction, master, address, len, size, burst type and failed rules.
+ * @return None.
+ */
+static void cli_print_arb_capture(void)
+{
+    static const char *const burst_name[] = { "FIXED", "INCR", "WRAP", "reserved" };
+    rtlnet_axi_arbiter_capture_t cap;
+    if (rtlnet_axi_arbiter_read_capture(RTLNET_PLAT_ARB_BASE, &cap) != 0) {
+        return;
+    }
+    if (!cap.valid) {
+        fmt_printf("  First illegal   : none captured\n");
+        return;
+    }
+    fmt_printf("  First illegal   : %s master %u addr 0x%08X%08X len %u size %u burst %u (%s) failed:%s%s%s\n",
+               cap.is_read ? "read (AR)" : "write (AW)", (unsigned)cap.master, (unsigned)cap.addr_hi,
+               (unsigned)cap.addr_lo, (unsigned)cap.len, (unsigned)cap.size, (unsigned)cap.burst,
+               burst_name[cap.burst & 3u], (cap.fail & RTLNET_ARB_FAIL_BURST) ? " burst-type" : "",
+               (cap.fail & RTLNET_ARB_FAIL_SIZE) ? " size" : "", (cap.fail & RTLNET_ARB_FAIL_4K) ? " 4KiB" : "");
+}
+
+/**
  * @brief SHOW DDR: DDR3 calibration, the cache setup, the arbiter's identity,
  *        configuration, error status and per-master counters.
  * @param ctx Unused.
@@ -3126,9 +3152,10 @@ int cli_show_ddr(const MenuCommandContext *ctx)
     fmt_printf("  Arbiter         : ID \"ARBT\" 0x%08X, version ", (unsigned)RTLNET_ARB_ID_VALUE);
     cli_print_datecode(RTLNET_ARB_VERSION_VALUE);
     fmt_printf(" at 0x%08X\n", (unsigned)RTLNET_PLAT_ARB_BASE);
-    fmt_printf("  Arbiter config  : %u master(s), %u-byte beats, ID width %u, %u outstanding, high-priority mask 0x%02X, narrow mask 0x%02X\n",
+    fmt_printf("  Arbiter config  : %u master(s), %u-byte beats, ID width %u, %u outstanding, high-priority mask 0x%02X, narrow mask 0x%02X, wrap mask 0x%02X\n",
                (unsigned)caps.num_masters, (unsigned)caps.bytes_per_beat, (unsigned)caps.id_w,
-               (unsigned)caps.max_outstanding, (unsigned)caps.high_prio_mask, (unsigned)caps.narrow_mask);
+               (unsigned)caps.max_outstanding, (unsigned)caps.high_prio_mask, (unsigned)caps.narrow_mask,
+               (unsigned)caps.wrap_mask);
     if (rtlnet_axi_arbiter_err_status(RTLNET_PLAT_ARB_BASE, &st) == 0) {
         fmt_printf("  Arbiter status  : illegal-burst flag %s, write in flight %u, read in flight %u\n",
                    st.err ? "SET (a burst was answered with SLVERR)" : "clear", (unsigned)st.wr_busy,
@@ -3137,6 +3164,7 @@ int cli_show_ddr(const MenuCommandContext *ctx)
     for (uint32_t m = 0; m < caps.num_masters; m++) {
         cli_print_arb_master(m);
     }
+    cli_print_arb_capture();
     return 0;
 }
 

@@ -11,12 +11,15 @@ Overview:
   * Exit code: the Tcl's (0 programmed with DONE high).
 Usage:
   powershell -NoProfile -ExecutionPolicy Bypass -File boards/nexys_video/scripts/program.ps1 [-Bit <file>]
-Revision: 10-22-2026
+Revision: 11-09-2026
   * 10-22-2026: initial version.
+  * 11-09-2026: takes the machine-wide board lock (rtlnet_board_lock.ps1) before touching the board.
 -------------------------------------------------------------------------------
 #>
 param([string]$Bit = '')
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot '..\..\..\scripts\rtlnet_board_lock.ps1')
+Enter-RtlnetBoardLock -Purpose 'program' -ExpectedMinutes 60
 $Board = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $Repo  = (Resolve-Path (Join-Path $Board '..\..')).Path
 if (-not $Bit) { $Bit = Join-Path $Board 'build\rtlnet_nexys_video.bit' }

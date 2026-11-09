@@ -31,7 +31,7 @@ static void decode_caps(uint32_t caps, rtlnet_axi_arbiter_caps_t *out)
  * rtlnet_axi_arbiter_probe -- identify the core and read its build parameters
  * Steps:
  *   1. Check ID and VERSION.
- *   2. Decode CAPS and read the NARROW register into caps when caps is not NULL.
+ *   2. Decode CAPS and read the NARROW and WRAP registers into caps when caps is not NULL.
  * Returns: 0 when present and matching, -1 otherwise.
  */
 int rtlnet_axi_arbiter_probe(uintptr_t base, rtlnet_axi_arbiter_caps_t *caps)
@@ -45,6 +45,7 @@ int rtlnet_axi_arbiter_probe(uintptr_t base, rtlnet_axi_arbiter_caps_t *caps)
     if (caps != NULL) {
         decode_caps(rtlnet_reg_read32(base, RTLNET_REG_CAPS), caps);
         caps->narrow_mask = rtlnet_reg_read32(base, RTLNET_ARB_REG_NARROW) & RTLNET_ARB_CAPS_HPMASK_MASK;
+        caps->wrap_mask   = rtlnet_reg_read32(base, RTLNET_ARB_REG_WRAP) & RTLNET_ARB_CAPS_HPMASK_MASK;
     }
     return 0;
 }
@@ -121,4 +122,31 @@ int rtlnet_axi_arbiter_err_status(uintptr_t base, rtlnet_axi_arbiter_status_t *s
 void rtlnet_axi_arbiter_err_clear(uintptr_t base)
 {
     rtlnet_reg_write32(base, RTLNET_ARB_REG_STATUS, RTLNET_ARB_STATUS_ERR);
+}
+
+/*
+ * rtlnet_axi_arbiter_read_capture -- read the first captured illegal burst
+ * Steps:
+ *   1. Validate the pointer.
+ *   2. Read CAP_INFO, CAP_ADDR and CAP_ADDR_HI and split the info word.
+ * Returns: 0 on success, -1 on NULL cap.
+ */
+int rtlnet_axi_arbiter_read_capture(uintptr_t base, rtlnet_axi_arbiter_capture_t *cap)
+{
+    uint32_t v;
+
+    if (cap == NULL) {
+        return -1;
+    }
+    v = rtlnet_reg_read32(base, RTLNET_ARB_REG_CAP_INFO);
+    cap->valid   = (v & RTLNET_ARB_CAP_VALID) != 0u;
+    cap->is_read = (v & RTLNET_ARB_CAP_IS_READ) != 0u;
+    cap->master  = (v >> RTLNET_ARB_CAP_MASTER_SHIFT) & RTLNET_ARB_CAP_MASTER_MASK;
+    cap->size    = (v >> RTLNET_ARB_CAP_SIZE_SHIFT) & RTLNET_ARB_CAP_SIZE_MASK;
+    cap->len     = (v >> RTLNET_ARB_CAP_LEN_SHIFT) & RTLNET_ARB_CAP_LEN_MASK;
+    cap->burst   = (v >> RTLNET_ARB_CAP_BURST_SHIFT) & RTLNET_ARB_CAP_BURST_MASK;
+    cap->fail    = (v >> RTLNET_ARB_CAP_FAIL_SHIFT) & RTLNET_ARB_CAP_FAIL_MASK;
+    cap->addr_lo = rtlnet_reg_read32(base, RTLNET_ARB_REG_CAP_ADDR);
+    cap->addr_hi = rtlnet_reg_read32(base, RTLNET_ARB_REG_CAP_ADDR_HI);
+    return 0;
 }

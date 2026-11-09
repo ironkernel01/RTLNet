@@ -20,14 +20,25 @@
 //   * Burst legality, checked on each granted AW and AR: burst INCR, size equal
 //     to the full data width (any size up to the full width for a master whose
 //     NARROW_MASK bit is set, such as a write-through CPU cache), no 4 KiB
-//     boundary crossing computed from the burst's own size. An illegal burst is
+//     boundary crossing computed from the burst's own size. A master whose
+//     WRAP_MASK bit is set may also issue a WRAP burst of 2, 4, 8 or 16 beats
+//     at an address aligned to the size (a cache line fill, critical word first);
+//     it is forwarded unchanged and the memory controller applies the wrap. A
+//     legal WRAP never crosses 4 KiB: its container is at most 16 beats * 16 bytes
+//     = 256 bytes, a power of two aligned to its own size, so the container lies
+//     inside one 4 KiB page; the 4 KiB rule therefore does not apply to a WRAP.
+//     Any other WRAP (master not in WRAP_MASK, length not 2/4/8/16, misaligned
+//     start) is illegal. An illegal burst is
 //     not forwarded. The arbiter answers it after every earlier transaction of
 //     that master in the same direction has completed: a write accepts and
 //     discards W beats up to WLAST and returns BRESP SLVERR; a read returns
 //     len + 1 beats with RRESP SLVERR, RDATA 0, RLAST on the last. Until the
 //     answer is delivered the master's further AW (AR) are not arbitrated, so
 //     same-ID order holds. Each illegal burst counts in the master's ERRORS
-//     register and sets the sticky STATUS.ERR (err_irq).
+//     register and sets the sticky STATUS.ERR (err_irq). The first illegal burst
+//     after a clear is also captured (direction, master, address, len, size,
+//     burst type and which rule failed) in read-only registers that hold it until
+//     CTRL.CNT_CLEAR or a STATUS.ERR clear.
 //   * Overflow and underflow of every queue and counter are gated in logic; a
 //     simulation check reports an attempt (fpga.md section 9).
 //   * Registers on s_axi_aclk behind rtlnet_axil_cdc and rtlnet_axil_slave
@@ -40,6 +51,7 @@
 // Revision: 11-09-2026
 //   * 11-09-2026: initial version.
 //   * 11-09-2026: NARROW_MASK parameter, narrow transfers for selected masters.
+//   * 11-09-2026: WRAP_MASK parameter (legal WRAP bursts), sticky first-illegal-burst capture registers.
 // Clocks: clk (arbiter, datapath, register file); s_axi_aclk (AXI4-Lite slave
 //   side of the register crossing only).
 // -----------------------------------------------------------------------------
@@ -50,6 +62,7 @@ module rtlnet_axi_arbiter #(
   parameter int                     ID_W            = 4,    // slave-side ID width; master side is ID_W + IDX_W
   parameter logic [NUM_MASTERS-1:0] HIGH_PRIO_MASK  = 'b1,  // masters that win over the round-robin group
   parameter logic [NUM_MASTERS-1:0] NARROW_MASK     = '0,   // masters that may issue sizes below the full width
+  parameter logic [NUM_MASTERS-1:0] WRAP_MASK       = '0,   // masters that may issue legal WRAP bursts
   parameter int                     MAX_OUTSTANDING = 8,    // per direction, whole arbiter
   // Derived, not for override: master-index bits and the master-side ID width.
   localparam int                    IDX_W           = (NUM_MASTERS > 1) ? $clog2(NUM_MASTERS) : 1,
@@ -191,6 +204,10 @@ module rtlnet_axi_arbiter #(
   localparam int SPAN_W         = 14;               // offset + burst bytes, at most 4095 + 4096
 
   localparam logic [1:0] BURST_INCR  = 2'b01;
+  localparam logic [1:0] BURST_WRAP  = 2'b10;
+  localparam int         FAIL_BURST  = 0;           // failed-rule bits: burst type (also a bad WRAP)
+  localparam int         FAIL_SIZE   = 1;           //   size
+  localparam int         FAIL_4K     = 2;           //   4 KiB boundary
   localparam logic [1:0] RESP_SLVERR = 2'b10;
   localparam int         LEN_BIAS    = 1;           // AxLEN counts beats minus one
 
@@ -253,20 +270,36 @@ module rtlnet_axi_arbiter #(
     return (int'(idx) == NUM_MASTERS - 1) ? '0 : IDX_W'(int'(idx) + 1);
   endfunction
 
-  // Legal burst: INCR, no 4 KiB boundary crossing (addr[11:0] + (len + 1) * bytes
-  // <= 4096, bytes per beat from the burst's own size). A full-width master must
-  // use the full-width size; a narrow master (NARROW_MASK) may use any size up
-  // to the full width.
-  function automatic logic burst_legal(input logic [11:0] addr_low, input logic [7:0] len,
-                                       input logic [2:0] size, input logic [1:0] burst,
-                                       input logic narrow);
+  // Failed-rule flags of a burst (all zero: legal), {4 KiB, size, burst type}.
+  //   * burst type: not INCR, unless the master may WRAP (wrap_ok) and the burst is a
+  //     WRAP of 2, 4, 8 or 16 beats at an address aligned to its size;
+  //   * size: a full-width master must use the full-width size; a narrow master
+  //     (NARROW_MASK) may use any size up to the full width;
+  //   * 4 KiB: addr[11:0] + (len + 1) * bytes > 4096, bytes per beat from the
+  //     burst's own size. Not applied to a WRAP: a legal WRAP container is at most
+  //     256 bytes and aligned to its own size, so it cannot cross 4 KiB.
+  function automatic logic [2:0] burst_fail(input logic [11:0] addr_low, input logic [7:0] len,
+                                            input logic [2:0] size, input logic [1:0] burst,
+                                            input logic narrow, input logic wrap_ok);
     logic [SPAN_W-1:0] bytes;
     logic [SPAN_W-1:0] span;
     logic              size_ok;
-    bytes   = (SPAN_W'(len) + SPAN_W'(LEN_BIAS)) << size;
-    span    = SPAN_W'(addr_low) + bytes;
-    size_ok = narrow ? (size <= 3'(SIZE_FULL)) : (size == 3'(SIZE_FULL));
-    return (burst == BURST_INCR) && size_ok && (span <= SPAN_W'(BOUNDARY_BYTES));
+    logic              is_wrap;
+    logic              wrap_len_ok;
+    logic              aligned;
+    logic              wrap_legal;
+    logic [2:0]        f;
+    bytes       = (SPAN_W'(len) + SPAN_W'(LEN_BIAS)) << size;
+    span        = SPAN_W'(addr_low) + bytes;
+    size_ok     = narrow ? (size <= 3'(SIZE_FULL)) : (size == 3'(SIZE_FULL));
+    is_wrap     = (burst == BURST_WRAP);
+    wrap_len_ok = (len == 8'd1) || (len == 8'd3) || (len == 8'd7) || (len == 8'd15);
+    aligned     = ((addr_low & ((12'd1 << size) - 12'd1)) == 12'd0);
+    wrap_legal  = wrap_ok && is_wrap && wrap_len_ok && aligned;
+    f[FAIL_BURST] = !((burst == BURST_INCR) || wrap_legal);
+    f[FAIL_SIZE]  = !size_ok;
+    f[FAIL_4K]    = !is_wrap && (span > SPAN_W'(BOUNDARY_BYTES));
+    return f;
   endfunction
 
   // ---------------------------------------------------------------------------
@@ -305,6 +338,15 @@ module rtlnet_axi_arbiter #(
   logic [NUM_MASTERS-1:0] ev_wait;
   logic                   wr_busy;
   logic                   rd_busy;
+  logic                   cap_ev;
+  logic                   cap_dir;
+  logic [IDX_W-1:0]       cap_idx;
+  logic [2:0]             cap_master;
+  logic [63:0]            cap_addr;
+  logic [7:0]             cap_len;
+  logic [2:0]             cap_size;
+  logic [1:0]             cap_burst;
+  logic [2:0]             cap_fail;
 
   // ---------------------------------------------------------------------------
   // Write path state
@@ -319,6 +361,7 @@ module rtlnet_axi_arbiter #(
   logic                   aw_fire_legal;
   logic                   aw_fire_ill;
   logic                   aw_legal;
+  logic [2:0]             aw_fail;
   logic [ID_W-1:0]        g_awid;
   logic [ADDR_W-1:0]      g_awaddr;
   logic [7:0]             g_awlen;
@@ -361,6 +404,7 @@ module rtlnet_axi_arbiter #(
   logic                   ar_fire_legal;
   logic                   ar_fire_ill;
   logic                   ar_legal;
+  logic [2:0]             ar_fail;
   logic [ID_W-1:0]        g_arid;
   logic [ADDR_W-1:0]      g_araddr;
   logic [7:0]             g_arlen;
@@ -460,7 +504,8 @@ module rtlnet_axi_arbiter #(
     .ID_W            (ID_W),
     .MAX_OUTSTANDING (MAX_OUTSTANDING),
     .HIGH_PRIO_MASK  (HIGH_PRIO_MASK),
-    .NARROW_MASK     (NARROW_MASK)
+    .NARROW_MASK     (NARROW_MASK),
+    .WRAP_MASK       (WRAP_MASK)
   ) u_regs (
     .clk         (clk),
     .resetn      (resetn),
@@ -479,8 +524,28 @@ module rtlnet_axi_arbiter #(
     .ev_wait     (ev_wait),
     .wr_busy     (wr_busy),
     .rd_busy     (rd_busy),
+    .cap_ev      (cap_ev),
+    .cap_dir     (cap_dir),
+    .cap_master  (cap_master),
+    .cap_addr    (cap_addr),
+    .cap_len     (cap_len),
+    .cap_size    (cap_size),
+    .cap_burst   (cap_burst),
+    .cap_fail    (cap_fail),
     .err_irq     (err_irq)
   );
+
+  // First-illegal-burst capture source: the illegal AW, else the illegal AR when
+  // both are granted in one clock (the AR is then counted but not captured).
+  assign cap_ev    = aw_fire_ill || ar_fire_ill;
+  assign cap_dir   = !aw_fire_ill;
+  assign cap_idx   = aw_fire_ill ? aw_idx : ar_idx;
+  assign cap_master = 3'(cap_idx);
+  assign cap_addr  = 64'(aw_fire_ill ? g_awaddr : g_araddr);
+  assign cap_len   = aw_fire_ill ? g_awlen : g_arlen;
+  assign cap_size  = aw_fire_ill ? g_awsize : g_arsize;
+  assign cap_burst = aw_fire_ill ? g_awburst : g_arburst;
+  assign cap_fail  = aw_fire_ill ? aw_fail : ar_fail;
 
   // ---------------------------------------------------------------------------
   // Constant master-side outputs
@@ -511,7 +576,9 @@ module rtlnet_axi_arbiter #(
   assign g_awlen   = s_awlen[aw_idx * 8 +: 8];
   assign g_awsize  = s_awsize[aw_idx * 3 +: 3];
   assign g_awburst = s_awburst[aw_idx * 2 +: 2];
-  assign aw_legal  = burst_legal(g_awaddr[BOUNDARY_BITS-1:0], g_awlen, g_awsize, g_awburst, NARROW_MASK[aw_idx]);
+  assign aw_fail   = burst_fail(g_awaddr[BOUNDARY_BITS-1:0], g_awlen, g_awsize, g_awburst, NARROW_MASK[aw_idx],
+                                WRAP_MASK[aw_idx]);
+  assign aw_legal  = (aw_fail == 3'b000);
 
   assign wq_full      = (wq_count == CNT_W'(MAX_OUTSTANDING));
   assign wq_nonempty  = (wq_count != '0);
@@ -698,7 +765,9 @@ module rtlnet_axi_arbiter #(
   assign g_arlen   = s_arlen[ar_idx * 8 +: 8];
   assign g_arsize  = s_arsize[ar_idx * 3 +: 3];
   assign g_arburst = s_arburst[ar_idx * 2 +: 2];
-  assign ar_legal  = burst_legal(g_araddr[BOUNDARY_BITS-1:0], g_arlen, g_arsize, g_arburst, NARROW_MASK[ar_idx]);
+  assign ar_fail   = burst_fail(g_araddr[BOUNDARY_BITS-1:0], g_arlen, g_arsize, g_arburst, NARROW_MASK[ar_idx],
+                                WRAP_MASK[ar_idx]);
+  assign ar_legal  = (ar_fail == 3'b000);
 
   assign ar_space      = (rd_inflight != CNT_W'(MAX_OUTSTANDING));
   assign ar_slot_free  = !m_axi_arvalid || m_axi_arready;
@@ -822,19 +891,19 @@ module rtlnet_axi_arbiter #(
     if (resetn === 1'b1) begin
       if (aw_fire_ill) begin
         if (sim_quiet_illegal)
-          $display("NOTE: rtlnet_axi_arbiter: illegal write burst master %0d addr 0x%0h len %0d size %0d burst %0d",
-                   aw_idx, g_awaddr, g_awlen, g_awsize, g_awburst);
+          $display("NOTE: rtlnet_axi_arbiter: illegal write burst master %0d addr 0x%0h len %0d size %0d burst %0d fail %b",
+                   aw_idx, g_awaddr, g_awlen, g_awsize, g_awburst, aw_fail);
         else
-          $error("rtlnet_axi_arbiter: illegal write burst master %0d addr 0x%0h len %0d size %0d burst %0d",
-                 aw_idx, g_awaddr, g_awlen, g_awsize, g_awburst);
+          $error("rtlnet_axi_arbiter: illegal write burst master %0d addr 0x%0h len %0d size %0d burst %0d fail %b",
+                 aw_idx, g_awaddr, g_awlen, g_awsize, g_awburst, aw_fail);
       end
       if (ar_fire_ill) begin
         if (sim_quiet_illegal)
-          $display("NOTE: rtlnet_axi_arbiter: illegal read burst master %0d addr 0x%0h len %0d size %0d burst %0d",
-                   ar_idx, g_araddr, g_arlen, g_arsize, g_arburst);
+          $display("NOTE: rtlnet_axi_arbiter: illegal read burst master %0d addr 0x%0h len %0d size %0d burst %0d fail %b",
+                   ar_idx, g_araddr, g_arlen, g_arsize, g_arburst, ar_fail);
         else
-          $error("rtlnet_axi_arbiter: illegal read burst master %0d addr 0x%0h len %0d size %0d burst %0d",
-                 ar_idx, g_araddr, g_arlen, g_arsize, g_arburst);
+          $error("rtlnet_axi_arbiter: illegal read burst master %0d addr 0x%0h len %0d size %0d burst %0d fail %b",
+                 ar_idx, g_araddr, g_arlen, g_arsize, g_arburst, ar_fail);
       end
       if (wq_push && wq_full)
         $error("rtlnet_axi_arbiter: W-order queue overflow");

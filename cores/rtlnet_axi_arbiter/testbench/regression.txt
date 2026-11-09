@@ -10,3 +10,7 @@ tb_rtlnet_axi_arbiter   cores/rtlnet_axi_arbiter/testbench/tb_rtlnet_axi_arbiter
 tb_rtlnet_axi_arbiter   cores/rtlnet_axi_arbiter/testbench/tb_rtlnet_axi_arbiter.f  nm3_dw128_nar2   defines=TB_NM=3,TB_DW=128,TB_HP=1,TB_NARROW=2,TB_LAT=20,TB_GAP=1
 tb_rtlnet_axi_arbiter   cores/rtlnet_axi_arbiter/testbench/tb_rtlnet_axi_arbiter.f  nm1_dw128_nar1   defines=TB_NM=1,TB_DW=128,TB_HP=1,TB_NARROW=1,TB_LAT=0,TB_GAP=0
 tb_rtlnet_axi_arbiter   cores/rtlnet_axi_arbiter/testbench/tb_rtlnet_axi_arbiter.f  neg            defines=TB_NM=3,TB_DW=128,TB_HP=1,TB_LAT=0,TB_GAP=0,TB_SIZE=5  plusargs=INJECT_FAILURE  expectfail
+tb_rtlnet_axi_arbiter   cores/rtlnet_axi_arbiter/testbench/tb_rtlnet_axi_arbiter.f  nm3_dw128_wrap1  defines=TB_NM=3,TB_DW=128,TB_HP=1,TB_WRAP=1,TB_LAT=20,TB_GAP=1
+tb_rtlnet_axi_arbiter   cores/rtlnet_axi_arbiter/testbench/tb_rtlnet_axi_arbiter.f  nm1_dw128_wrap1_nar1 defines=TB_NM=1,TB_DW=128,TB_HP=1,TB_NARROW=1,TB_WRAP=1,TB_LAT=0,TB_GAP=1
+tb_rtlnet_axi_arbiter   cores/rtlnet_axi_arbiter/testbench/tb_rtlnet_axi_arbiter.f  nm3_dw64_wrap6_nar2  defines=TB_NM=3,TB_DW=64,TB_HP=1,TB_NARROW=2,TB_WRAP=6,TB_LAT=20,TB_GAP=0
+tb_rtlnet_axi_arbiter   cores/rtlnet_axi_arbiter/testbench/tb_rtlnet_axi_arbiter.f  neg_wrap         defines=TB_NM=3,TB_DW=128,TB_HP=1,TB_WRAP=1,TB_LAT=0,TB_GAP=0,TB_SIZE=5  plusargs=INJECT_FAILURE  expectfail

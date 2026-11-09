@@ -12,11 +12,16 @@
 //   * STATUS.ERR is set by any ev_err_wr or ev_err_rd pulse and cleared by writing 1 to it; a
 //     new error in the clock of the clear keeps the flag set. err_irq is that
 //     flag, a flop output.
+//   * First-illegal-burst capture: the first illegal AW or AR after a clear is held in
+//     read-only registers (CAP_INFO, CAP_ADDR, CAP_ADDR_HI) until CTRL.CNT_CLEAR or
+//     a STATUS.ERR clear. The capture holds the first burst only (later ones do not
+//     overwrite it); an illegal burst in the clock of a clear starts the next capture.
 //   * Offsets are defined in driver/rtlnet_axi_arbiter.h and mirrored here.
 // Language: SystemVerilog-2012.
 // Revision: 11-09-2026
 //   * 11-09-2026: initial version.
 //   * 11-09-2026: read-only NARROW register (offset 0x014) reports NARROW_MASK.
+//   * 11-09-2026: read-only WRAP register (0x018) reports WRAP_MASK; capture registers 0x040 .. 0x048.
 // Clocks: clk (all logic).
 // -----------------------------------------------------------------------------
 module rtlnet_axi_arbiter_regs #(
@@ -25,7 +30,8 @@ module rtlnet_axi_arbiter_regs #(
   parameter int                       ID_W            = 4,
   parameter int                       MAX_OUTSTANDING = 8,
   parameter logic [NUM_MASTERS-1:0]   HIGH_PRIO_MASK  = 'b1,
-  parameter logic [NUM_MASTERS-1:0]   NARROW_MASK     = '0
+  parameter logic [NUM_MASTERS-1:0]   NARROW_MASK     = '0,
+  parameter logic [NUM_MASTERS-1:0]   WRAP_MASK       = '0
 )(
   // Arbiter data clock (the memory controller user clock) and its reset
   // (synchronous, active low).
@@ -59,6 +65,18 @@ module rtlnet_axi_arbiter_regs #(
   input  logic                   wr_busy,
   input  logic                   rd_busy,
 
+  // Illegal-burst capture, clk domain: cap_ev pulses in the clock an illegal AW or AR is
+  // answered, with that burst's direction (0 AW, 1 AR), master, address, len, size,
+  // burst type and failed-rule flags {4 KiB, size, burst type}.
+  input  logic                   cap_ev,
+  input  logic                   cap_dir,
+  input  logic [2:0]             cap_master,
+  input  logic [63:0]            cap_addr,
+  input  logic [7:0]             cap_len,
+  input  logic [2:0]             cap_size,
+  input  logic [1:0]             cap_burst,
+  input  logic [2:0]             cap_fail,
+
   // Error interrupt, clk domain: level, high while STATUS.ERR is set.
   output logic                   err_irq
 );
@@ -74,6 +92,10 @@ module rtlnet_axi_arbiter_regs #(
   localparam logic [11:0] REG_CTRL    = 12'h00C;
   localparam logic [11:0] REG_STATUS  = 12'h010;
   localparam logic [11:0] REG_NARROW   = 12'h014;  // read-only: NARROW_MASK in [7:0]
+  localparam logic [11:0] REG_WRAP     = 12'h018;  // read-only: WRAP_MASK in [7:0]
+  localparam logic [11:0] REG_CAP_INFO = 12'h040;  // read-only: first illegal burst, see the layout below
+  localparam logic [11:0] REG_CAP_ADDR = 12'h044;  // read-only: captured address [31:0]
+  localparam logic [11:0] REG_CAP_ADDRH = 12'h048; // read-only: captured address [63:32] (0 for a 32-bit address)
 
   localparam int CTRL_CNT_CLEAR_BIT = 16;
   localparam int STATUS_ERR_BIT     = 0;
@@ -106,6 +128,12 @@ module rtlnet_axi_arbiter_regs #(
   // NARROW register: [7:0] NARROW_MASK (masters that may issue narrow transfers).
   localparam logic [31:0] CORE_NARROW = 32'(NARROW_MASK);
 
+  // WRAP register: [7:0] WRAP_MASK (masters that may issue legal WRAP bursts).
+  localparam logic [31:0] CORE_WRAP = 32'(WRAP_MASK);
+
+  // CAP_INFO: [0] valid, [1] direction (0 AW, 1 AR), [4:2] master, [7:5] size, [15:8] len,
+  // [17:16] burst type, [18] failed burst-type rule, [19] failed size rule, [20] failed 4 KiB rule.
+
   // ---------------------------------------------------------------------------
   // State
   // ---------------------------------------------------------------------------
@@ -119,12 +147,23 @@ module rtlnet_axi_arbiter_regs #(
   logic [31:0] cnt_r     [NUM_MASTERS];
   logic [31:0] cnt_err   [NUM_MASTERS];
   logic [31:0] cnt_wait  [NUM_MASTERS];
+  logic        cap_clear;
+  logic        cap_valid;
+  logic        cap_dir_q;
+  logic [2:0]  cap_master_q;
+  logic [63:0] cap_addr_q;
+  logic [7:0]  cap_len_q;
+  logic [2:0]  cap_size_q;
+  logic [1:0]  cap_burst_q;
+  logic [2:0]  cap_fail_q;
+  logic [31:0] cap_info_word;
 
   logic [MASTER_SEL_W-1:0] rd_master;
   logic [31:0]             master_word;
 
   assign cnt_clear = reg_wr_en && (reg_wr_addr == REG_CTRL) && reg_wr_data[CTRL_CNT_CLEAR_BIT];
   assign err_clear = reg_wr_en && (reg_wr_addr == REG_STATUS) && reg_wr_data[STATUS_ERR_BIT];
+  assign cap_clear = cnt_clear || err_clear;
   assign err_irq   = status_err;
   assign rd_master = reg_rd_addr[MASTER_SEL_LSB +: MASTER_SEL_W];
 
@@ -145,6 +184,50 @@ module rtlnet_axi_arbiter_regs #(
     end else if (err_clear) begin
       status_err <= 1'b0;
     end
+  end
+
+  // First-illegal-burst capture: sticky until cleared; an event in the clock of a clear
+  // (or the first event after it) is captured.
+  always_ff @(posedge clk) begin
+    if (!resetn) begin
+      cap_valid    <= 1'b0;
+      cap_dir_q    <= 1'b0;
+      cap_master_q <= '0;
+      cap_addr_q   <= '0;
+      cap_len_q    <= '0;
+      cap_size_q   <= '0;
+      cap_burst_q  <= '0;
+      cap_fail_q   <= '0;
+    end else if (cap_ev && (!cap_valid || cap_clear)) begin
+      cap_valid    <= 1'b1;
+      cap_dir_q    <= cap_dir;
+      cap_master_q <= cap_master;
+      cap_addr_q   <= cap_addr;
+      cap_len_q    <= cap_len;
+      cap_size_q   <= cap_size;
+      cap_burst_q  <= cap_burst;
+      cap_fail_q   <= cap_fail;
+    end else if (cap_clear) begin
+      cap_valid    <= 1'b0;
+      cap_dir_q    <= 1'b0;
+      cap_master_q <= '0;
+      cap_addr_q   <= '0;
+      cap_len_q    <= '0;
+      cap_size_q   <= '0;
+      cap_burst_q  <= '0;
+      cap_fail_q   <= '0;
+    end
+  end
+
+  always_comb begin
+    cap_info_word        = '0;
+    cap_info_word[0]     = cap_valid;
+    cap_info_word[1]     = cap_dir_q;
+    cap_info_word[4:2]   = cap_master_q;
+    cap_info_word[7:5]   = cap_size_q;
+    cap_info_word[15:8]  = cap_len_q;
+    cap_info_word[17:16] = cap_burst_q;
+    cap_info_word[20:18] = cap_fail_q;
   end
 
   // Per-master counters: wrap at 32 bits, cleared by CTRL.CNT_CLEAR.
@@ -205,6 +288,10 @@ module rtlnet_axi_arbiter_regs #(
           REG_CTRL:    reg_rd_data <= '0;
           REG_STATUS:  reg_rd_data <= status_word;
           REG_NARROW:  reg_rd_data <= CORE_NARROW;
+          REG_WRAP:    reg_rd_data <= CORE_WRAP;
+          REG_CAP_INFO:  reg_rd_data <= cap_info_word;
+          REG_CAP_ADDR:  reg_rd_data <= cap_addr_q[31:0];
+          REG_CAP_ADDRH: reg_rd_data <= cap_addr_q[63:32];
           default:     reg_rd_data <= '0;
         endcase
       end

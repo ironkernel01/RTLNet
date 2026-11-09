@@ -23,8 +23,9 @@ Overview:
 Usage:
   powershell -NoProfile -ExecutionPolicy Bypass -File boards/nexys_video/scripts/net_test.ps1 `
     [-Port COM3] [-Nic Ethernet] [-Speed 100]
-Revision: 10-22-2026
+Revision: 11-09-2026
   * 10-22-2026: initial version; iperf at 90 % line rate both ways, -Iperf.
+  * 11-09-2026: takes the machine-wide board lock (rtlnet_board_lock.ps1) before touching the board.
 -------------------------------------------------------------------------------
 #>
 param(
@@ -34,6 +35,8 @@ param(
     [string]$Iperf = ''
 )
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot '..\..\..\scripts\rtlnet_board_lock.ps1')
+Enter-RtlnetBoardLock -Purpose 'net test' -ExpectedMinutes 60
 $Board = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $Repo  = (Resolve-Path (Join-Path $Board '..\..')).Path
 . (Join-Path $Repo 'scripts\rtlnet_tools.ps1')

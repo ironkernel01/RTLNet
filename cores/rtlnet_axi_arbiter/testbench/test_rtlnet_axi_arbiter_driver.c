@@ -25,6 +25,7 @@
 #define MODEL_MASTERS  3u
 #define MODEL_CAPS     0x01084103u   /* 3 masters, 16 bytes/beat, ID_W 4, 8 outstanding, mask 0x01 */
 #define MODEL_NARROW   0x02u         /* NARROW_MASK: master 1 may issue narrow transfers */
+#define MODEL_WRAP     0x01u         /* WRAP_MASK: master 0 may issue legal WRAP bursts */
 #define COUNTERS       6u
 
 static uint32_t g_id = RTLNET_ARB_ID_VALUE;
@@ -32,6 +33,9 @@ static uint32_t g_version = RTLNET_ARB_VERSION_VALUE;
 static uint32_t g_caps = MODEL_CAPS;
 static uint32_t g_status_err;
 static uint32_t g_status_busy;
+static uint32_t g_cap_info;
+static uint32_t g_cap_addr;
+static uint32_t g_cap_addr_hi;
 static uint32_t g_counter[MODEL_MASTERS][COUNTERS];
 static int      g_bad_access;
 static int      g_checks;
@@ -72,6 +76,18 @@ uint32_t rtlnet_host_reg_read32(uintptr_t addr)
     if (off == RTLNET_ARB_REG_NARROW) {
         return MODEL_NARROW;
     }
+    if (off == RTLNET_ARB_REG_WRAP) {
+        return MODEL_WRAP;
+    }
+    if (off == RTLNET_ARB_REG_CAP_INFO) {
+        return g_cap_info;
+    }
+    if (off == RTLNET_ARB_REG_CAP_ADDR) {
+        return g_cap_addr;
+    }
+    if (off == RTLNET_ARB_REG_CAP_ADDR_HI) {
+        return g_cap_addr_hi;
+    }
     if (off >= RTLNET_ARB_MASTER_BASE && off < RTLNET_ARB_MASTER_BASE + (RTLNET_ARB_MAX_MASTERS * RTLNET_ARB_MASTER_STRIDE)) {
         master = (off - RTLNET_ARB_MASTER_BASE) / RTLNET_ARB_MASTER_STRIDE;
         idx = ((off - RTLNET_ARB_MASTER_BASE) % RTLNET_ARB_MASTER_STRIDE) / 4u;
@@ -101,18 +117,26 @@ void rtlnet_host_reg_write32(uintptr_t addr, uint32_t value)
     if (off == RTLNET_ARB_REG_STATUS && (value & RTLNET_ARB_STATUS_ERR) != 0u) {
         g_status_err = 0u;
     }
+    if ((off == RTLNET_ARB_REG_CTRL && (value & RTLNET_ARB_CTRL_CNT_CLEAR) != 0u) ||
+        (off == RTLNET_ARB_REG_STATUS && (value & RTLNET_ARB_STATUS_ERR) != 0u)) {
+        g_cap_info    = 0u;
+        g_cap_addr    = 0u;
+        g_cap_addr_hi = 0u;
+    }
 }
 
 int main(void)
 {
     rtlnet_axi_arbiter_caps_t     caps;
+    rtlnet_axi_arbiter_capture_t  cap;
     rtlnet_axi_arbiter_counters_t c;
     rtlnet_axi_arbiter_status_t   st;
     const uintptr_t               b = TEST_BASE;
 
     check(rtlnet_axi_arbiter_probe(b, &caps) == 0, "probe succeeds");
     check(caps.num_masters == 3u && caps.bytes_per_beat == 16u && caps.id_w == 4u && caps.max_outstanding == 8u &&
-          caps.high_prio_mask == 1u && caps.narrow_mask == MODEL_NARROW, "CAPS and NARROW decoded");
+          caps.high_prio_mask == 1u && caps.narrow_mask == MODEL_NARROW && caps.wrap_mask == MODEL_WRAP,
+          "CAPS, NARROW and WRAP decoded");
     check(rtlnet_axi_arbiter_probe(b, NULL) == 0, "probe accepts a NULL caps");
     g_id = 0x12345678u;
     check(rtlnet_axi_arbiter_probe(b, &caps) == -1, "probe fails on a wrong ID");
@@ -145,6 +169,28 @@ int main(void)
     rtlnet_axi_arbiter_err_clear(b);
     check(rtlnet_axi_arbiter_err_status(b, &st) == 0 && st.err == 0 && st.wr_busy == 1 && st.rd_busy == 1,
           "err_clear clears only ERR");
+
+    /* Capture: empty, then a read of master 2 with len 3, size 4, WRAP, failed burst and size rules at 0x80000F04 (a
+     * 64-bit address 0x1_80000F04 exercises CAP_ADDR_HI). */
+    check(rtlnet_axi_arbiter_read_capture(b, &cap) == 0 && cap.valid == 0 && cap.addr_lo == 0u && cap.fail == 0u,
+          "capture empty");
+    g_cap_info = RTLNET_ARB_CAP_VALID | RTLNET_ARB_CAP_IS_READ | (2u << RTLNET_ARB_CAP_MASTER_SHIFT) |
+                 (4u << RTLNET_ARB_CAP_SIZE_SHIFT) | (3u << RTLNET_ARB_CAP_LEN_SHIFT) | (2u << RTLNET_ARB_CAP_BURST_SHIFT) |
+                 ((RTLNET_ARB_FAIL_BURST | RTLNET_ARB_FAIL_SIZE) << RTLNET_ARB_CAP_FAIL_SHIFT);
+    g_cap_addr    = 0x80000F04u;
+    g_cap_addr_hi = 1u;
+    check(rtlnet_axi_arbiter_read_capture(b, &cap) == 0 && cap.valid == 1 && cap.is_read == 1 && cap.master == 2u &&
+          cap.size == 4u && cap.len == 3u && cap.burst == 2u && cap.fail == (RTLNET_ARB_FAIL_BURST | RTLNET_ARB_FAIL_SIZE) &&
+          cap.addr_lo == 0x80000F04u && cap.addr_hi == 1u, "capture fields mapped");
+    g_cap_info = RTLNET_ARB_CAP_VALID | (RTLNET_ARB_FAIL_4K << RTLNET_ARB_CAP_FAIL_SHIFT);
+    check(rtlnet_axi_arbiter_read_capture(b, &cap) == 0 && cap.valid == 1 && cap.is_read == 0 && cap.master == 0u &&
+          cap.fail == RTLNET_ARB_FAIL_4K, "capture write direction and 4 KiB flag");
+    check(rtlnet_axi_arbiter_read_capture(b, NULL) == -1, "capture rejects NULL");
+    rtlnet_axi_arbiter_err_clear(b);
+    check(rtlnet_axi_arbiter_read_capture(b, &cap) == 0 && cap.valid == 0 && cap.addr_lo == 0u, "err_clear clears the capture");
+    g_cap_info = RTLNET_ARB_CAP_VALID;
+    rtlnet_axi_arbiter_clear(b);
+    check(rtlnet_axi_arbiter_read_capture(b, &cap) == 0 && cap.valid == 0, "clear clears the capture");
 
     check(!g_bad_access, "no access outside the window or misaligned");
     if (g_fails == 0) {

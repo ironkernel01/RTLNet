@@ -27,6 +27,7 @@ Usage:
 Revision: 11-09-2026
   * 11-09-2026: initial version.
   * 11-09-2026: -Image (banner check of the LMB and DDR3 images), -CalibTimeoutMs (DDR3 calibration wait of the Tcl).
+  * 11-09-2026: takes the machine-wide board lock (rtlnet_board_lock.ps1) before touching the board.
 -------------------------------------------------------------------------------
 #>
 param(
@@ -38,6 +39,8 @@ param(
     [int]$CalibTimeoutMs = 10000
 )
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot '..\..\..\scripts\rtlnet_board_lock.ps1')
+Enter-RtlnetBoardLock -Purpose 'jtag load' -ExpectedMinutes 60
 $Repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..')).Path
 . (Join-Path $Repo 'scripts\rtlnet_tools.ps1')
 if (-not $Elf) { $Elf = Join-Path $Repo 'microblaze\firmware\build\firmware.elf' }

@@ -23,6 +23,9 @@ Overview:
     MB/s printed; a bad size rejected; the arbiter counters and error flag after the tests), tcp echo port change and restore in
     configuration mode, show running-config (TCP echo, storm control,
     classifier lines), led 2 on + LEDS register read-back, led 2 off, disable.
+  * DDR3 image (banner "DDR3 image", or the Image line of show version): ddr test is refused there by design (the
+    image runs from the tested region), so its three steps are skipped. Skipped steps are listed as "skip", are
+    not counted as passed and appear in the last line: "CLI_TEST: PASS <n>/<n> (<k> skipped)".
   * Either bitstream: CPU-only (network cores and classifier absent, lwIP
     not started) or network (lwIP running on the wrapper's address).
   * Writes the transcript to boards/nexys_video/build/cli_test_transcript.txt
@@ -34,6 +37,9 @@ Revision: 11-09-2026
   * 10-22-2026: initial version.
   * 10-22-2026: CPU network path steps (BSP-based firmware).
   * 11-09-2026: register map 11-09-2026; DDR3 steps (show ddr, ddr test, bad size).
+  * 11-09-2026: takes the machine-wide board lock (rtlnet_board_lock.ps1) before touching the board.
+  * 11-09-2026: DDR3 image (banner "DDR3 image" or the show version Image line): the three ddr test steps are
+    skipped, reported as skipped and not counted as passed.
 -------------------------------------------------------------------------------
 #>
 param(
@@ -43,6 +49,8 @@ param(
     [string]$Transcript = ''
 )
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot '..\..\..\scripts\rtlnet_board_lock.ps1')
+Enter-RtlnetBoardLock -Purpose 'cli test' -ExpectedMinutes 60
 $Board = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 if (-not $Transcript) { $Transcript = Join-Path $Board 'build\cli_test_transcript.txt' }
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Transcript) | Out-Null
@@ -50,6 +58,11 @@ New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Transcript) | Out
 $PromptRe = '(rtlnet(\([a-z-]+\))?[>#])$'
 $script:log = New-Object System.Text.StringBuilder
 $script:results = @()
+$script:skipped = @()
+
+function Skip-Step([string]$name, [string]$why) {
+    $script:skipped += [pscustomobject]@{ Step = $name; Why = $why }
+}
 
 function Read-UntilPrompt($sp, [int]$timeoutMs) {
     $buf = ''
@@ -145,19 +158,27 @@ try {
     Send-Step $sp 'show classifier' "show classifier`r" @('mode pass-all', 'MAC 0\s+: dst ff:ff:ff:ff:ff:ff -> police 0') 'rtlnet#'
     Send-Step $sp 'show offload' "show offload`r" @('Checksum offload \(CPU path\)', 'Confirmed\s+: classifier (yes|no), offload TX (yes|no), offload RX (yes|no)',
         '(not present in this build|lwIP flags\s+: 0x[0-9A-F]{4})') 'rtlnet#'
+    # The image name: the boot banner (when this run saw it) or the Image line of show version.
+    $ddrImage = (($script:log.ToString() -replace "`r", '') -match '(DDR3 image|(?m)^\s*Image\s+: DDR3)')
     Send-Step $sp 'show ddr' "show ddr`r" @(
         'Calibration\s+: done', 'Arbiter\s+: ID "ARBT" 0x41524254, version 11-09-2026 at 0x44A04000',
         'Arbiter config\s+: 1 master\(s\), 16-byte beats, ID width 1, 8 outstanding', 'illegal-burst flag clear',
         'Master 0 \(CPU caches\): AW bursts \d+') 'rtlnet#'
-    Send-Step $sp 'ddr test (bad size)' "ddr test 513`r" @('% Invalid size in MiB \(1\.\.512\) "513"') 'rtlnet#'
-    Send-Step $sp 'ddr test (default)' "ddr test`r" @(
-        'DDR3 test: 16 MiB at 0x80000000', 'Data bus\s+: PASS', 'Address bus\s+: PASS \(22 address offsets\)',
-        'Random fill\s+: PASS \(16 MiB written and verified\)', 'Write\s+: \d+\.\d\d MB/s', 'Read\s+: \d+\.\d\d MB/s',
-        'Master 0 \(CPU caches\):.* errors 0,', 'DDR3 test PASS') 'rtlnet#' 120000
-    Send-Step $sp 'ddr test 64' "ddr test 64`r" @(
-        'DDR3 test: 64 MiB at 0x80000000', 'Data bus\s+: PASS', 'Address bus\s+: PASS \(24 address offsets\)',
-        'Random fill\s+: PASS \(64 MiB written and verified\)', 'Write\s+: \d+\.\d\d MB/s', 'Read\s+: \d+\.\d\d MB/s',
-        'Master 0 \(CPU caches\):.* errors 0,', 'DDR3 test PASS') 'rtlnet#' 300000
+    if ($ddrImage) {
+        Skip-Step 'ddr test (bad size)' 'DDR3 image refuses ddr test'
+        Skip-Step 'ddr test (default)' 'DDR3 image refuses ddr test'
+        Skip-Step 'ddr test 64' 'DDR3 image refuses ddr test'
+    } else {
+        Send-Step $sp 'ddr test (bad size)' "ddr test 513`r" @('% Invalid size in MiB \(1\.\.512\) "513"') 'rtlnet#'
+        Send-Step $sp 'ddr test (default)' "ddr test`r" @(
+            'DDR3 test: 16 MiB at 0x80000000', 'Data bus\s+: PASS', 'Address bus\s+: PASS \(22 address offsets\)',
+            'Random fill\s+: PASS \(16 MiB written and verified\)', 'Write\s+: \d+\.\d\d MB/s', 'Read\s+: \d+\.\d\d MB/s',
+            'Master 0 \(CPU caches\):.* errors 0,', 'DDR3 test PASS') 'rtlnet#' 120000
+        Send-Step $sp 'ddr test 64' "ddr test 64`r" @(
+            'DDR3 test: 64 MiB at 0x80000000', 'Data bus\s+: PASS', 'Address bus\s+: PASS \(24 address offsets\)',
+            'Random fill\s+: PASS \(64 MiB written and verified\)', 'Write\s+: \d+\.\d\d MB/s', 'Read\s+: \d+\.\d\d MB/s',
+            'Master 0 \(CPU caches\):.* errors 0,', 'DDR3 test PASS') 'rtlnet#' 300000
+    }
     Send-Step $sp 'show ddr (after)' "show ddr`r" @('Calibration\s+: done', 'illegal-burst flag clear',
         'Master 0 \(CPU caches\): AW bursts [1-9]\d*, AR bursts [1-9]\d*, W beats [1-9]\d*, R beats [1-9]\d*, errors 0,') 'rtlnet#'
     Send-Step $sp 'conf t (tcp)' "configure terminal`r" @() 'rtlnet(config)#'
@@ -185,11 +206,15 @@ Write-Output '----- results -----'
 foreach ($r in $script:results) {
     Write-Output ("  {0,-4} {1,-24} {2}" -f ($(if ($r.Ok) { 'ok' } else { 'FAIL' }), $r.Step, $r.Detail))
 }
+foreach ($s in $script:skipped) {
+    Write-Output ("  {0,-4} {1,-24} {2}" -f 'skip', $s.Step, $s.Why)
+}
+$skipNote = $(if ($script:skipped.Count -gt 0) { " ($($script:skipped.Count) skipped: not counted as passed)" } else { '' })
 $failed = @($script:results | Where-Object { -not $_.Ok }).Count
 $total = $script:results.Count
 if ($failed -eq 0 -and $total -gt 0) {
-    Write-Output "CLI_TEST: PASS $total/$total"
+    Write-Output "CLI_TEST: PASS $total/$total$skipNote"
     exit 0
 }
-Write-Output "CLI_TEST: FAIL $failed/$total"
+Write-Output "CLI_TEST: FAIL $failed/$total$skipNote"
 exit 1

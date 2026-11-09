@@ -14,8 +14,9 @@ Overview:
 Usage:
   powershell -NoProfile -ExecutionPolicy Bypass -File boards/nexys_video/scripts/offload_profile.ps1 `
     [-Port COM3] [-Board 192.169.1.199] [-Seconds 10] [-Label prof] [-Iperf <iperf.exe>]
-Revision: 10-22-2026
+Revision: 11-09-2026
   * 10-22-2026: initial version.
+  * 11-09-2026: takes the machine-wide board lock (rtlnet_board_lock.ps1) before touching the board.
 -------------------------------------------------------------------------------
 #>
 param(
@@ -26,6 +27,8 @@ param(
     [string]$Iperf = ''
 )
 $ErrorActionPreference = 'Continue'
+. (Join-Path $PSScriptRoot '..\..\..\scripts\rtlnet_board_lock.ps1')
+Enter-RtlnetBoardLock -Purpose 'offload profile' -ExpectedMinutes 60
 $Repo   = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..')).Path
 . (Join-Path $Repo 'scripts\rtlnet_tools.ps1')
 $Python = Resolve-RtlnetPython

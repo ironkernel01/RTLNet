@@ -60,6 +60,7 @@
 //     calibration status into the system registers.
 //   * 11-09-2026: u_ddr_cdc (rtlnet_axi_cdc) between the CPU DDR3 master (cpu_clk) and the arbiter (ui_clk).
 //   * 11-09-2026: the MIG ui reset is ANDed after the ui_clk reset chain (no LUT on the chain's asynchronous pin).
+//   * 11-09-2026: u_arb WRAP_MASK 1 (the CPU caches' WRAP line fills are legal).
 // Clocks: sysclk (100 MHz pin) -> MMCM (CLKOUT6 -> MIG PLL); clk125, clk125_90, clk200, axis_clk,
 //   proto_clk, cpu_clk as above; ui_clk (MIG user clock, 100 MHz, DDR3 AXI4 side); the MAC's
 //   receive clock is internal to it.
@@ -790,6 +791,7 @@ module rtlnet_nexys_video_top #(
     .ID_W            (ARB_ID_W),
     .HIGH_PRIO_MASK  (1'b1),
     .NARROW_MASK     (1'b1),   // the CPU's write-through data cache issues 32-bit stores
+    .WRAP_MASK       (1'b1),   // the CPU caches fill critical word first (WRAP bursts of 2..16 beats)
     .MAX_OUTSTANDING (8)
   ) u_arb (
     .clk           (ui_clk),

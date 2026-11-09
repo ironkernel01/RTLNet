@@ -29,16 +29,26 @@
 //      the 10 ns data clock): every counter of every master, CNT_CLEAR,
 //      STATUS in-flight bits.
 //   6. Reset in the middle of traffic, then clean traffic again.
+//   7. WRAP (TB_WRAP mask of masters in WRAP_MASK): legal WRAP bursts of 2, 4, 8, 16 beats mixed into the
+//      random traffic of those masters (data checked beat by beat through the wrap-aware bench model and the
+//      memory model), directed legal WRAP writes and reads at every start offset of every length (and narrow
+//      sizes for a narrow master) with an INCR read-back of the container; directed illegal WRAPs rejected
+//      with SLVERR (len 0, len 2 = 3 beats, misaligned start, and a legal-form WRAP from a master not in the
+//      mask); the WRAP register.
+//   8. First-illegal-burst capture registers (CAP_INFO, CAP_ADDR, CAP_ADDR_HI): cleared state, the first
+//      illegal burst of each kind captured with every field and the failed rule, a second illegal burst does
+//      not overwrite it, STATUS.ERR clear and CTRL.CNT_CLEAR clear it, reset clears it.
 // Configuration (defines, defaults in brackets): TB_NM masters [3], TB_DW data
 //   width [128], TB_HP high-priority mask [1], TB_LAT memory read latency in
 //   clocks [0], TB_GAP 1 for random ready/valid gaps on the memory model and
 //   the masters [0], TB_SIZE burst count scale in percent [100], TB_NARROW mask of
-//   masters that may issue narrow transfers [0].
+//   masters that may issue narrow transfers [0], TB_WRAP mask of masters in WRAP_MASK [0].
 // Language: SystemVerilog-2012 (simulation only).
 // Revision: 11-09-2026
 //   * 11-09-2026: initial version.
 //   * 11-09-2026: TB_NARROW (NARROW_MASK): narrow legal traffic with strobes, directed narrow
 //     cases, narrow burst crossing 4 KiB, NARROW register.
+//   * 11-09-2026: TB_WRAP (WRAP_MASK): legal and illegal WRAP bursts, WRAP register, capture registers.
 // Run: powershell -File scripts/rtlnet_run_sim.ps1 -Bench tb_rtlnet_axi_arbiter
 //        -Filelist cores/rtlnet_axi_arbiter/testbench/tb_rtlnet_axi_arbiter.f
 // -----------------------------------------------------------------------------
@@ -65,6 +75,9 @@
 `ifndef TB_NARROW
   `define TB_NARROW 0
 `endif
+`ifndef TB_WRAP
+  `define TB_WRAP 0
+`endif
 
 module tb_rtlnet_axi_arbiter;
 
@@ -83,6 +96,7 @@ module tb_rtlnet_axi_arbiter;
   localparam int SIZEF = $clog2(BYTES);
   localparam logic [NM-1:0] HPM = `TB_HP;
   localparam logic [NM-1:0] NARM = `TB_NARROW;
+  localparam logic [NM-1:0] WRAPM = `TB_WRAP;
   localparam int GAPS  = `TB_GAP;
   localparam int LAT   = `TB_LAT;
 
@@ -101,13 +115,17 @@ module tb_rtlnet_axi_arbiter;
   localparam int KIND_NARROW = 3;
   localparam int KIND_X4K    = 4;
   localparam int KIND_NX4K   = 5;     // narrow-size burst that crosses 4 KiB by its own size
+  localparam int KIND_WRAP0  = 6;     // WRAP of one beat (len 0), master in WRAP_MASK
+  localparam int KIND_WRAP2  = 7;     // WRAP of three beats (len 2), master in WRAP_MASK
+  localparam int KIND_WRAPMIS = 8;    // WRAP of legal length at a misaligned start, master in WRAP_MASK
 
   localparam int MODE_OWN   = 0;
   localparam int MODE_FILL  = 1;
   localparam int MODE_MIXED = 2;
 
   localparam logic [11:0] R_ID = 12'h000, R_VERSION = 12'h004, R_CAPS = 12'h008, R_CTRL = 12'h00C, R_STATUS = 12'h010,
-                      R_NARROW = 12'h014;
+                      R_NARROW = 12'h014, R_WRAP = 12'h018, R_CAP_INFO = 12'h040, R_CAP_ADDR = 12'h044,
+                      R_CAP_ADDRH = 12'h048;
   localparam logic [31:0] CTRL_CNT_CLEAR = 32'h0001_0000;
 
   // ---------------------------------------------------------------------------
@@ -179,7 +197,7 @@ module tb_rtlnet_axi_arbiter;
   logic        err_irq;
 
   rtlnet_axi_arbiter #(.NUM_MASTERS(NM), .ADDR_W(AW), .DATA_W(DW), .ID_W(IDW), .HIGH_PRIO_MASK(HPM),
-                       .NARROW_MASK(NARM), .MAX_OUTSTANDING(MAXO)) dut (
+                       .NARROW_MASK(NARM), .WRAP_MASK(WRAPM), .MAX_OUTSTANDING(MAXO)) dut (
     .clk(clk), .resetn(resetn), .s_axi_aclk(cpu_clk), .s_axi_aresetn(cpu_resetn),
     .s_awid(s_awid), .s_awaddr(s_awaddr), .s_awlen(s_awlen), .s_awsize(s_awsize), .s_awburst(s_awburst),
     .s_awvalid(s_awvalid), .s_awready(s_awready),
@@ -211,7 +229,7 @@ module tb_rtlnet_axi_arbiter;
 
   rtlnet_tb_axi4_mem #(.ADDR_W(AW), .DATA_W(DW), .ID_W(MIDW), .READ_LATENCY(LAT), .AW_READY_PCT(MEM_PCT),
                        .W_READY_PCT(MEM_PCT), .AR_READY_PCT(MEM_PCT), .B_VALID_PCT(MEM_PCT), .R_VALID_PCT(MEM_PCT),
-                       .SEED(7), .CHECK_FULL_WIDTH(NARM == '0)) u_mem (
+                       .SEED(7), .CHECK_FULL_WIDTH(NARM == '0), .ALLOW_WRAP(WRAPM != '0)) u_mem (
     .clk(clk), .resetn(resetn),
     .awid(m_awid), .awaddr(m_awaddr), .awlen(m_awlen), .awsize(m_awsize), .awburst(m_awburst),
     .awvalid(m_awvalid), .awready(m_awready),
@@ -311,11 +329,39 @@ module tb_rtlnet_axi_arbiter;
   endfunction
 
   // Size-aware beat geometry (a full-size beat reduces to the word at addr + b words).
+  // A WRAP burst wraps inside its (len + 1) * 2**size byte container, aligned to its own size.
   function automatic bit [AW-1:0] beat_addr(input desc_t d, input int b);
     bit [AW-1:0] a;
+    bit [AW-1:0] total;
+    bit [AW-1:0] lower;
     a = d.addr;
-    if (b > 0) a = (d.addr >> d.size << d.size) + (AW'(b) << d.size);
+    if (d.burst == 2'b10) begin
+      total = AW'(d.len + 1) << d.size;
+      lower = d.addr & ~(total - AW'(1));
+      a     = lower + (((d.addr >> d.size << d.size) - lower + (AW'(b) << d.size)) & (total - AW'(1)));
+    end else if (b > 0) begin
+      a = (d.addr >> d.size << d.size) + (AW'(b) << d.size);
+    end
     return a;
+  endfunction
+
+  // Lowest and highest word key a burst touches (a WRAP is not monotonic: scan its beats).
+  function automatic bit [AW-1:0] key_lo(input desc_t d);
+    bit [AW-1:0] r;
+    r = beat_addr(d, 0) >> SIZEF;
+    if (d.burst == 2'b10) begin
+      for (int b = 1; b <= d.len; b++) if ((beat_addr(d, b) >> SIZEF) < r) r = beat_addr(d, b) >> SIZEF;
+    end
+    return r;
+  endfunction
+
+  function automatic bit [AW-1:0] key_hi(input desc_t d);
+    bit [AW-1:0] r;
+    r = (d.burst == 2'b10) ? (beat_addr(d, 0) >> SIZEF) : (beat_addr(d, d.len) >> SIZEF);
+    if (d.burst == 2'b10) begin
+      for (int b = 1; b <= d.len; b++) if ((beat_addr(d, b) >> SIZEF) > r) r = beat_addr(d, b) >> SIZEF;
+    end
+    return r;
   endfunction
 
   function automatic bit [AW-1:0] beat_key(input desc_t d, input int b);
@@ -405,6 +451,8 @@ module tb_rtlnet_axi_arbiter;
   int tot_legal_wr   = 0;
   int tot_legal_rd   = 0;
   int tot_ill        = 0;
+  int tot_wrap_legal = 0;   // legal WRAP bursts granted
+  int tot_wrap_ill   = 0;   // illegal WRAP bursts answered
   int wr_if          = 0;
   int rd_if          = 0;
   int wr_if_max      = 0;
@@ -532,6 +580,8 @@ module tb_rtlnet_axi_arbiter;
     bit [AW-1:0] pg;
     // A narrow transfer is legal for a narrow master: that kind becomes FIXED there.
     if (kind == KIND_NARROW && NARM[g]) kind = KIND_FIXED;
+    // A WRAP of the legal form is legal for a master in WRAP_MASK: that kind becomes one of the illegal forms there.
+    if (kind == KIND_WRAP && WRAPM[g]) kind = KIND_WRAP0 + rnd(3);
     d.g     = g;
     d.kind  = kind;
     d.is_wr = wr;
@@ -558,6 +608,22 @@ module tb_rtlnet_axi_arbiter;
             a = pg + AW'(PAGE) - (AW'(l + 1) << sz);
           end
         end
+        // A master in WRAP_MASK issues legal WRAP bursts too: 25 % of its legal bursts, 2, 4, 8 or 16 beats,
+        // full size (a narrow master also smaller sizes), start aligned to the size anywhere in the page.
+        if (WRAPM[g] && pct(25)) begin
+          case (rnd(4))
+            0: l = 1;
+            1: l = 3;
+            2: l = 7;
+            default: l = 15;
+          endcase
+          sz = SIZEF;
+          if (NARM[g] && SIZEF > 0 && pct(40)) sz = rnd(SIZEF);
+          pg = a >> 12 << 12;
+          d.size  = 3'(sz);
+          d.burst = 2'b10;
+          a = pg + (AW'(rnd(PAGE >> sz)) << sz);
+        end
       end
       KIND_FIXED: begin
         d.burst = 2'b00;
@@ -567,6 +633,26 @@ module tb_rtlnet_axi_arbiter;
       KIND_WRAP: begin
         d.burst = 2'b10;
         a = AW'(page + rnd(PAGE / BYTES / 2) * BYTES);
+        case (rnd(4))
+          0: l = 1;
+          1: l = 3;
+          2: l = 7;
+          default: l = 15;
+        endcase
+      end
+      KIND_WRAP0: begin
+        d.burst = 2'b10;
+        a = AW'(page + rnd(PAGE / BYTES / 2) * BYTES);
+        l = 0;
+      end
+      KIND_WRAP2: begin
+        d.burst = 2'b10;
+        a = AW'(page + rnd(PAGE / BYTES / 2) * BYTES);
+        l = 2;
+      end
+      KIND_WRAPMIS: begin
+        d.burst = 2'b10;
+        a = AW'(page + rnd(PAGE / BYTES / 2) * BYTES + 1);
         case (rnd(4))
           0: l = 1;
           1: l = 3;
@@ -621,6 +707,70 @@ module tb_rtlnet_axi_arbiter;
     return d;
   endfunction
 
+  // Legal WRAP burst of len + 1 beats (2, 4, 8, 16), size sz, starting at beat start_beat of its container, in
+  // the master's own page 6 + (tag % 8); the container is placed at 3 container sizes into the page.
+  function automatic desc_t build_wrap_desc(input int g, input bit wr, input int len, input int sz, input int start_beat,
+                                            input int tag);
+    desc_t       d;
+    bit [AW-1:0] cont;
+    bit [AW-1:0] base;
+    d.g      = g;
+    d.kind   = KIND_LEGAL;
+    d.is_wr  = wr;
+    d.id     = rnd(IDS);
+    d.smode  = start_beat & 1;
+    d.beat   = 0;
+    d.size   = 3'(sz);
+    d.burst  = 2'b10;
+    d.serial = 0;
+    d.len    = len;
+    cont     = AW'(len + 1) << sz;
+    base     = AW'(g * OWN_SIZE + (6 + (tag % 8)) * PAGE) + cont * 3;
+    d.addr   = base + (AW'(start_beat) << sz);
+    return d;
+  endfunction
+
+  // INCR full-width read of every word of the container of a WRAP burst.
+  function automatic desc_t build_container_read(input desc_t w);
+    desc_t       d;
+    bit [AW-1:0] cont;
+    bit [AW-1:0] base;
+    bit [AW-1:0] first;
+    bit [AW-1:0] last;
+    cont  = AW'(w.len + 1) << w.size;
+    base  = w.addr & ~(cont - AW'(1));
+    first = base & ~AW'(BYTES - 1);
+    last  = (base + cont - AW'(1)) & ~AW'(BYTES - 1);
+    d.g      = w.g;
+    d.kind   = KIND_LEGAL;
+    d.is_wr  = 1'b0;
+    d.id     = rnd(IDS);
+    d.smode  = 0;
+    d.beat   = 0;
+    d.size   = 3'(SIZEF);
+    d.burst  = 2'b01;
+    d.serial = 0;
+    d.addr   = first;
+    d.len    = int'((last - first) / BYTES);
+    return d;
+  endfunction
+
+  // Failed-rule flags the arbiter must report for an illegal burst, {4 KiB, size, burst type}: the bench's
+  // own statement of the rules, not shared with the RTL.
+  function automatic bit [2:0] exp_fail(input desc_t d);
+    bit [2:0] f;
+    bit       aligned;
+    bit       wrap_legal;
+    int       span;
+    aligned    = ((d.addr & ((AW'(1) << d.size) - AW'(1))) == '0);
+    wrap_legal = WRAPM[d.g] && (d.burst == 2'b10) && (d.len == 1 || d.len == 3 || d.len == 7 || d.len == 15) && aligned;
+    f[0] = !((d.burst == 2'b01) || wrap_legal);
+    f[1] = NARM[d.g] ? (int'(d.size) > SIZEF) : (int'(d.size) != SIZEF);
+    span = int'(d.addr[11:0]) + ((d.len + 1) << d.size);
+    f[2] = (d.burst != 2'b10) && (span > PAGE);
+    return f;
+  endfunction
+
   // Directed case: earlier legal bursts, one illegal burst, later legal bursts,
   // all of one master and one direction.
   task automatic inject_case(input int g, input bit wr, input int kind, input int n_pre, input int n_post);
@@ -633,6 +783,10 @@ module tb_rtlnet_axi_arbiter;
   // Channel bookkeeping shared by the master models
   // ---------------------------------------------------------------------------
   task automatic note_aw_grant(input desc_t d);
+    if (d.burst == 2'b10) begin
+      if (d.kind == KIND_LEGAL) tot_wrap_legal++;
+      else                      tot_wrap_ill++;
+    end
     if (d.kind == KIND_LEGAL) begin
       exp_aw[d.g]++;
       tot_legal_wr++;
@@ -648,6 +802,10 @@ module tb_rtlnet_axi_arbiter;
   endtask
 
   task automatic note_ar_grant(input desc_t d);
+    if (d.burst == 2'b10) begin
+      if (d.kind == KIND_LEGAL) tot_wrap_legal++;
+      else                      tot_wrap_ill++;
+    end
     if (d.kind == KIND_LEGAL) begin
       exp_ar[d.g]++;
       tot_legal_rd++;
@@ -723,11 +881,11 @@ module tb_rtlnet_axi_arbiter;
       bit [AW-1:0] hi;
       bit [AW-1:0] blo;
       bit [AW-1:0] bhi;
-      lo = beat_key(d, 0);
-      hi = beat_key(d, d.len);
+      lo = key_lo(d);
+      hi = key_hi(d);
       for (int i = 0; i < busy.size(); i++) begin
-        blo = beat_key(busy[i], 0);
-        bhi = beat_key(busy[i], busy[i].len);
+        blo = key_lo(busy[i]);
+        bhi = key_hi(busy[i]);
         if (!(hi < blo || lo > bhi) && (d.is_wr || busy[i].is_wr)) return 1'b1;
       end
       return 1'b0;
@@ -1165,6 +1323,158 @@ module tb_rtlnet_axi_arbiter;
     p_gen    = on ? 50 : 100;
   endtask
 
+  // Directed legal WRAP traffic: every length and start offset, per master in WRAP_MASK (full size, a narrow master
+  // also byte and half-width sizes): WRAP write, WRAP read at another start, INCR read of the whole container.
+  task automatic directed_wrap_legal();
+    int lens [4];
+    int sizes [3];
+    int n_sizes;
+    int tag;
+    desc_t w;
+    int n_start;
+    lens[0] = 1; lens[1] = 3; lens[2] = 7; lens[3] = 15;
+    tag = 0;
+    for (int g = 0; g < NM; g++) begin
+      if (WRAPM[g]) begin
+        n_sizes = 1;
+        sizes[0] = SIZEF;
+        if (NARM[g] && SIZEF > 0) begin
+          sizes[1] = 0;
+          n_sizes  = 2;
+          if (SIZEF > 1) begin
+            sizes[2] = SIZEF - 1;
+            n_sizes  = 3;
+          end
+        end
+        for (int si = 0; si < n_sizes; si++) begin
+          for (int li = 0; li < 4; li++) begin
+            n_start = lens[li] + 1;
+            for (int s = 0; s < n_start; s++) begin
+              w = build_wrap_desc(g, 1'b1, lens[li], sizes[si], s, tag);
+              inject_q.push_back(w);
+              inject_q.push_back(build_wrap_desc(g, 1'b0, lens[li], sizes[si], (s * 3 + 1) % n_start, tag));
+              inject_q.push_back(build_container_read(w));
+              tag++;
+              run = 1'b1;
+              if ((s % 4) == 3) wait_idle("directed legal WRAP");
+            end
+            run = 1'b1;
+            wait_idle("directed legal WRAP");
+          end
+        end
+      end
+    end
+  endtask
+
+  // Directed illegal WRAPs, read and write, each between legal bursts of the same master: a master in WRAP_MASK
+  // with len 0, len 2 and a misaligned start; a master not in the mask with a WRAP of the legal form.
+  // Returns the number of illegal bursts issued.
+  task automatic directed_wrap_illegal(output int n_ill);
+    n_ill = 0;
+    for (int g = 0; g < NM; g++) begin
+      for (int dir = 0; dir < 2; dir++) begin
+        if (WRAPM[g]) begin
+          for (int k = KIND_WRAP0; k <= KIND_WRAPMIS; k++) begin
+            inject_case(g, (dir == 0), k, 2, 2);
+            run = 1'b1;
+            wait_idle($sformatf("illegal WRAP kind %0d master %0d dir %0d", k, g, dir));
+            n_ill++;
+          end
+        end else begin
+          inject_case(g, (dir == 0), KIND_WRAP, 2, 2);
+          run = 1'b1;
+          wait_idle($sformatf("illegal WRAP from master %0d outside WRAP_MASK dir %0d", g, dir));
+          n_ill++;
+        end
+      end
+    end
+  endtask
+
+  // One capture check: clear, no capture, one illegal burst, the capture holds exactly that burst.
+  task automatic capture_case(input desc_t d, input string what);
+    logic [31:0] info;
+    logic [31:0] want;
+    u_axi.wr(R_STATUS, 32'h1);
+    reg_expect(R_CAP_INFO, 32'h0, {what, ": CAP_INFO after STATUS.ERR clear"});
+    reg_expect(R_CAP_ADDR, 32'h0, {what, ": CAP_ADDR after STATUS.ERR clear"});
+    inject_q.push_back(d);
+    run = 1'b1;
+    wait_idle(what);
+    repeat (10) @(posedge clk);
+    want = '0;
+    want[0]     = 1'b1;
+    want[1]     = !d.is_wr;
+    want[4:2]   = 3'(d.g);
+    want[7:5]   = d.size;
+    want[15:8]  = 8'(d.len);
+    want[17:16] = d.burst;
+    want[20:18] = exp_fail(d);
+    tb_check(exp_fail(d) != 3'b000, {what, ": bench expects at least one failed rule"});
+    reg_expect(R_CAP_INFO, want, {what, ": CAP_INFO"});
+    reg_expect(R_CAP_ADDR, 32'(d.addr), {what, ": CAP_ADDR"});
+    reg_expect(R_CAP_ADDRH, 32'h0, {what, ": CAP_ADDR_HI"});
+  endtask
+
+  // Capture registers: each kind of illegal burst, read and write, on rotating masters; stickiness of the first;
+  // clears; ERRORS counters follow.
+  task automatic directed_capture();
+    desc_t d;
+    desc_t d2;
+    logic [31:0] info0;
+    logic [31:0] a0;
+    logic [31:0] v;
+    int    g;
+    int    n;
+    n = 0;
+    g = 0;
+    for (int dir = 0; dir < 2; dir++) begin
+      for (int k = KIND_FIXED; k <= KIND_WRAPMIS; k++) begin
+        d = build_desc(g, (dir == 0), k, MODE_OWN);
+        capture_case(d, $sformatf("capture kind %0d dir %0d master %0d", d.kind, dir, g));
+        n++;
+        g = (g + 1) % NM;
+      end
+    end
+    // Stickiness: the second illegal burst does not replace the first; STATUS.ERR clear and CNT_CLEAR clear it.
+    d  = build_desc(0, 1'b1, KIND_X4K, MODE_OWN);
+    d2 = build_desc((NM > 1) ? 1 : 0, 1'b0, KIND_FIXED, MODE_OWN);
+    capture_case(d, "stickiness first burst");
+    u_axi.rd(R_CAP_INFO, info0);
+    u_axi.rd(R_CAP_ADDR, a0);
+    inject_q.push_back(d2);
+    run = 1'b1;
+    wait_idle("stickiness second burst");
+    repeat (10) @(posedge clk);
+    reg_expect(R_CAP_INFO, info0, "stickiness: CAP_INFO keeps the first illegal burst");
+    reg_expect(R_CAP_ADDR, a0, "stickiness: CAP_ADDR keeps the first illegal burst");
+    u_axi.wr(R_STATUS, 32'h0000_0001);
+    reg_expect(R_CAP_INFO, 32'h0, "CAP_INFO cleared by STATUS.ERR");
+    inject_q.push_back(d2);
+    run = 1'b1;
+    wait_idle("capture before CNT_CLEAR");
+    repeat (10) @(posedge clk);
+    u_axi.rd(R_CAP_INFO, v);
+    tb_check(v[0] === 1'b1, "capture valid before CNT_CLEAR");
+    u_axi.wr(R_CTRL, CTRL_CNT_CLEAR);
+    zero_counts_only();
+    reg_expect(R_CAP_INFO, 32'h0, "CAP_INFO cleared by CTRL.CNT_CLEAR");
+    reg_expect(R_CAP_ADDR, 32'h0, "CAP_ADDR cleared by CTRL.CNT_CLEAR");
+    u_axi.wr(R_STATUS, 32'h0000_0001);
+    // Read-only: writes do not change it.
+    inject_q.push_back(d2);
+    run = 1'b1;
+    wait_idle("capture before write attempt");
+    repeat (10) @(posedge clk);
+    u_axi.rd(R_CAP_INFO, info0);
+    u_axi.wr(R_CAP_INFO, 32'hFFFF_FFFF);
+    u_axi.wr(R_CAP_ADDR, 32'hFFFF_FFFF);
+    u_axi.wr(R_CAP_ADDRH, 32'hFFFF_FFFF);
+    u_axi.wr(R_WRAP, 32'hFFFF_FFFF);
+    reg_expect(R_CAP_INFO, info0, "CAP_INFO after write attempt");
+    reg_expect(R_WRAP, 32'(WRAPM), "WRAP after write attempt");
+    u_axi.wr(R_STATUS, 32'h0000_0001);
+  endtask
+
   // ---------------------------------------------------------------------------
   // Test sequence
   // ---------------------------------------------------------------------------
@@ -1177,6 +1487,7 @@ module tb_rtlnet_axi_arbiter;
     int          polls;
     int          cs;
     int          n_dir;
+    int          n_wrap_ill;
 
     #100;
     arstn = 1'b1;
@@ -1189,6 +1500,10 @@ module tb_rtlnet_axi_arbiter;
     reg_expect(R_VERSION, 32'h1109_2026, "VERSION");
     reg_expect(R_CAPS,    {8'(HPM), 8'(MAXO), 4'(IDW), 8'(BYTES), 4'(NM)}, "CAPS");
     reg_expect(R_NARROW,  32'(NARM), "NARROW");
+    reg_expect(R_WRAP,    32'(WRAPM), "WRAP");
+    reg_expect(R_CAP_INFO, 32'h0, "CAP_INFO reset");
+    reg_expect(R_CAP_ADDR, 32'h0, "CAP_ADDR reset");
+    reg_expect(R_CAP_ADDRH, 32'h0, "CAP_ADDR_HI reset");
     reg_expect(R_CTRL,    32'h0, "CTRL reset");
     reg_expect(R_STATUS,  32'h0, "STATUS reset");
     tb_check(err_irq === 1'b0, "err_irq low after reset");
@@ -1344,6 +1659,25 @@ module tb_rtlnet_axi_arbiter;
     u_axi.wr(R_STATUS, 32'h1);
     check_counters("after the second illegal burst");
 
+    // Directed WRAP and capture phases (the capture phase runs in every configuration).
+    if (WRAPM != '0) begin
+      mon_en = 1'b1;
+      directed_wrap_legal();
+      mon_en = 1'b0;
+      check_counters("after directed legal WRAP");
+      check_memory_counts("after directed legal WRAP");
+    end
+    errs_before = tot_ill;
+    directed_wrap_illegal(n_wrap_ill);
+    tb_check(tot_ill - errs_before == n_wrap_ill, $sformatf("%0d directed illegal WRAPs issued, %0d counted", n_wrap_ill,
+                                                           tot_ill - errs_before));
+    check_counters("after directed illegal WRAP");
+    check_memory_counts("after directed illegal WRAP");
+    u_axi.wr(R_STATUS, 32'h1);
+    directed_capture();
+    check_counters("after the capture cases");
+    check_memory_counts("after the capture cases");
+
     // Random illegal bursts mixed into legal traffic of all masters (gapped).
     set_gaps(1'b1);
     mode_sel = MODE_MIXED; p_ill = 15; p_wr = 50;
@@ -1384,6 +1718,8 @@ module tb_rtlnet_axi_arbiter;
     reg_expect(R_STATUS, 32'h0, "STATUS after reset");
     tb_check(err_irq === 1'b0, "err_irq low after reset");
     reg_zero_check("after reset");
+    reg_expect(R_CAP_INFO, 32'h0, "CAP_INFO after reset");
+    reg_expect(R_WRAP, 32'(WRAPM), "WRAP after reset");
     reg_expect(R_ID, 32'h4152_4254, "ID after reset");
     // Clean traffic again, both gap settings.
     mon_en = 1'b1;
@@ -1403,7 +1739,10 @@ module tb_rtlnet_axi_arbiter;
              mem_wr_if_max, mem_rd_if_max);
     $display("BENCH_STATS: rr_wait_max_aw=%0d rr_wait_max_ar=%0d (limit %0d) hp_grants=%0d hp_contended=%0d rr_grants=%0d",
              rr_wait_max_aw, rr_wait_max_ar, NM - 1, hp_grants, hp_contended, rr_grants);
+    $display("BENCH_STATS: WRAPM=%0d legal_wrap_bursts=%0d illegal_wrap_bursts=%0d", int'(WRAPM), tot_wrap_legal, tot_wrap_ill);
     tb_check(wr_if_max <= MAXO && rd_if_max <= MAXO, "in-flight maxima within MAX_OUTSTANDING");
+    if (WRAPM != '0) tb_check(tot_wrap_legal >= 60, $sformatf("only %0d legal WRAP bursts exercised", tot_wrap_legal));
+    tb_check(tot_wrap_ill >= 4, $sformatf("only %0d illegal WRAP bursts exercised", tot_wrap_ill));
     tb_verdict(BENCH);
   end
 

@@ -25,6 +25,12 @@
 //     4 KiB check, the beat addresses and the byte strobes follow the burst's own
 //     size, a read returns the whole stored word); a W beat with no AW after
 //     reset is held, not an error.
+//   * WRAP bursts (ALLOW_WRAP = 1, default 0): a WRAP of 2, 4, 8 or 16 beats at an address
+//     aligned to the size is accepted and models the AXI wrap (the beat address wraps at
+//     the (len + 1) * 2**size byte container, which is aligned to its own size; critical
+//     word first); a WRAP with another length or a misaligned start is an error, and the
+//     4 KiB check does not apply to a legal WRAP. With ALLOW_WRAP = 0 a WRAP is an error
+//     (burst not INCR) as before.
 //   * Counters aw_count, ar_count, w_beats, r_beats count accepted bursts and
 //     beats. clear_memory() empties the storage; poke() and peek() access one
 //     word. resetn (synchronous, active low) clears every queue and flag, not
@@ -33,6 +39,7 @@
 // Revision: 11-09-2026
 //   * 11-09-2026: initial version.
 //   * 11-09-2026: size-aware beat addresses and 4 KiB check for CHECK_FULL_WIDTH = 0.
+//   * 11-09-2026: ALLOW_WRAP, WRAP burst addressing.
 // Clocks: clk.
 // -----------------------------------------------------------------------------
 `timescale 1ns / 1ps
@@ -49,7 +56,8 @@ module rtlnet_tb_axi4_mem #(
   parameter int R_VALID_PCT      = 100,   // probability per clock that the next R beat is presented
   parameter int QUEUE_DEPTH      = 16,
   parameter int SEED             = 1,
-  parameter bit CHECK_FULL_WIDTH = 1'b1
+  parameter bit CHECK_FULL_WIDTH = 1'b1,
+  parameter bit ALLOW_WRAP       = 1'b0   // accept legal WRAP bursts (2, 4, 8, 16 beats, aligned) and model the wrap
 )(
   input  logic                clk,
   input  logic                resetn,
@@ -95,12 +103,14 @@ module rtlnet_tb_axi4_mem #(
   localparam int SHIFT     = $clog2(STRB_W);
   localparam int PAGE      = 4096;
   localparam bit [1:0] BURST_INCR = 2'b01;
+  localparam bit [1:0] BURST_WRAP = 2'b10;
 
   typedef struct {
     bit [ID_W-1:0]   id;
     bit [ADDR_W-1:0] addr;
     int              len;
     bit [2:0]        size;
+    bit [1:0]        burst;
     longint          ready_at;
   } burst_t;
 
@@ -180,10 +190,22 @@ module rtlnet_tb_axi4_mem #(
 
   // Word key of beat n of a burst: the first beat uses the start address, later
   // beats the size-aligned address plus n transfers (a full-size burst: word + n).
-  function automatic bit [ADDR_W-1:0] beat_key(input bit [ADDR_W-1:0] a, input bit [2:0] size, input int n);
+  // A WRAP burst wraps inside its (len + 1) * 2**size byte container, aligned to its own size.
+  function automatic bit [ADDR_W-1:0] beat_key(input bit [ADDR_W-1:0] a, input bit [2:0] size, input int n,
+                                               input bit [1:0] burst, input int len);
     bit [ADDR_W-1:0] ba;
+    bit [ADDR_W-1:0] total;
+    bit [ADDR_W-1:0] lower;
+    bit [ADDR_W-1:0] off;
     ba = a;
-    if (n > 0) ba = (a >> size << size) + (ADDR_W'(n) << size);
+    if (burst == BURST_WRAP) begin
+      total = ADDR_W'(len + 1) << size;
+      lower = a & ~(total - ADDR_W'(1));
+      off   = ((a >> size << size) - lower + (ADDR_W'(n) << size)) & (total - ADDR_W'(1));
+      ba    = lower + off;
+    end else if (n > 0) begin
+      ba = (a >> size << size) + (ADDR_W'(n) << size);
+    end
     return ba >> SHIFT;
   endfunction
 
@@ -192,9 +214,14 @@ module rtlnet_tb_axi4_mem #(
   task automatic check_burst(input string chan, input bit [ID_W-1:0] id, input bit [ADDR_W-1:0] a,
                              input bit [7:0] len, input bit [2:0] size, input bit [1:0] burst);
     int span;
+    bit wrap_ok;
     span = int'(a[11:0]) + ((int'(len) + 1) << size);
-    tb_check(span <= PAGE, $sformatf("axi4_mem %s id %0d addr 0x%0h len %0d crosses a 4 KiB boundary", chan, id, a, len));
-    tb_check(burst == BURST_INCR, $sformatf("axi4_mem %s addr 0x%0h burst %0d is not INCR", chan, a, burst));
+    wrap_ok = ALLOW_WRAP && (burst == BURST_WRAP) && (len == 8'd1 || len == 8'd3 || len == 8'd7 || len == 8'd15) &&
+              ((a & ((ADDR_W'(1) << size) - ADDR_W'(1))) == '0);
+    if (burst != BURST_WRAP) begin
+      tb_check(span <= PAGE, $sformatf("axi4_mem %s id %0d addr 0x%0h len %0d crosses a 4 KiB boundary", chan, id, a, len));
+    end
+    tb_check(burst == BURST_INCR || wrap_ok, $sformatf("axi4_mem %s addr 0x%0h len %0d burst %0d is not INCR or a legal WRAP", chan, a, len, burst));
     if (CHECK_FULL_WIDTH) begin
       tb_check(int'(size) == SHIFT, $sformatf("axi4_mem %s addr 0x%0h size %0d is not full width %0d", chan, a, size, SHIFT));
     end else begin
@@ -256,7 +283,7 @@ module rtlnet_tb_axi4_mem #(
       if (awvalid === 1'b1 && awready === 1'b1) begin
         burst_t b;
         check_burst("AW", awid, awaddr, awlen, awsize, awburst);
-        b.id = awid; b.addr = awaddr; b.len = int'(awlen); b.size = awsize; b.ready_at = 0;
+        b.id = awid; b.addr = awaddr; b.len = int'(awlen); b.size = awsize; b.burst = awburst; b.ready_at = 0;
         aw_q.push_back(b);
         aw_count++;
       end
@@ -269,7 +296,7 @@ module rtlnet_tb_axi4_mem #(
       if (arvalid === 1'b1 && arready === 1'b1) begin
         burst_t b;
         check_burst("AR", arid, araddr, arlen, arsize, arburst);
-        b.id = arid; b.addr = araddr; b.len = int'(arlen); b.size = arsize; b.ready_at = cycle + READ_LATENCY;
+        b.id = arid; b.addr = araddr; b.len = int'(arlen); b.size = arsize; b.burst = arburst; b.ready_at = cycle + READ_LATENCY;
         ar_q.push_back(b);
         ar_count++;
       end
@@ -283,7 +310,7 @@ module rtlnet_tb_axi4_mem #(
         bit [DATA_W-1:0] nw;
         t = w_q.pop_front();
         h = aw_q[0];
-        k = beat_key(h.addr, h.size, w_idx);
+        k = beat_key(h.addr, h.size, w_idx, h.burst, h.len);
         old = mem.exists(k) ? mem[k] : '0;
         nw  = old;
         for (int l = 0; l < STRB_W; l++) begin
@@ -328,7 +355,7 @@ module rtlnet_tb_axi4_mem #(
         end
         if (r_active && chance(R_VALID_PCT)) begin
           bit [ADDR_W-1:0] k;
-          k = beat_key(r_cur.addr, r_cur.size, r_next);
+          k = beat_key(r_cur.addr, r_cur.size, r_next, r_cur.burst, r_cur.len);
           rvalid <= 1'b1;
           rid    <= r_cur.id;
           rdata  <= mem.exists(k) ? mem[k] : '0;
