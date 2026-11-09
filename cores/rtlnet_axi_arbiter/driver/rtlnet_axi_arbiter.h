@@ -17,7 +17,8 @@
  * eight masters. Each master has traffic counters (bursts and beats forwarded
  * to the memory controller, illegal bursts answered with SLVERR, and clocks
  * spent waiting for a grant). An illegal burst (not INCR, not full-width, or
- * crossing a 4 KiB boundary) sets the sticky STATUS.ERR flag, which stays set
+ * crossing a 4 KiB boundary; a master in NARROW_MASK may use any size up to the
+ * full width, the boundary check then uses the burst's own size) sets the sticky STATUS.ERR flag, which stays set
  * until software clears it by writing 1 to it; the core's err_irq output is the
  * level of that flag.
  *
@@ -31,10 +32,12 @@
 
 #define RTLNET_ARB_ID_VALUE               0x41524254u   /* "ARBT" */
 #define RTLNET_ARB_VERSION_VALUE          0x11092026u
+/* Revision 11-09-2026: NARROW register and narrow_mask in the caps struct. */
 
 /* Registers (ID, VERSION, CAPS at RTLNET_REG_* of rtlnet_mmio.h). */
 #define RTLNET_ARB_REG_CTRL               0x00Cu   /* WO command bits, reads 0 */
 #define RTLNET_ARB_REG_STATUS             0x010u   /* RO flags, ERR write-1-to-clear */
+#define RTLNET_ARB_REG_NARROW             0x014u   /* RO, [7:0] NARROW_MASK: masters allowed narrow transfers */
 
 /* CAPS fields. */
 #define RTLNET_ARB_CAPS_MASTERS_MASK      0x0000000Fu   /* [3:0] NUM_MASTERS */
@@ -72,6 +75,7 @@ typedef struct {
     uint32_t id_w;
     uint32_t max_outstanding;
     uint32_t high_prio_mask;
+    uint32_t narrow_mask;   /* masters whose bursts may use sizes below the full width */
 } rtlnet_axi_arbiter_caps_t;
 
 typedef struct {

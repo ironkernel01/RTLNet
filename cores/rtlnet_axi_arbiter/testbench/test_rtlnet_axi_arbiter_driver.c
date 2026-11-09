@@ -24,6 +24,7 @@
 #define TEST_WINDOW    0x1000u
 #define MODEL_MASTERS  3u
 #define MODEL_CAPS     0x01084103u   /* 3 masters, 16 bytes/beat, ID_W 4, 8 outstanding, mask 0x01 */
+#define MODEL_NARROW   0x02u         /* NARROW_MASK: master 1 may issue narrow transfers */
 #define COUNTERS       6u
 
 static uint32_t g_id = RTLNET_ARB_ID_VALUE;
@@ -68,6 +69,9 @@ uint32_t rtlnet_host_reg_read32(uintptr_t addr)
     if (off == RTLNET_ARB_REG_STATUS) {
         return g_status_err | g_status_busy;
     }
+    if (off == RTLNET_ARB_REG_NARROW) {
+        return MODEL_NARROW;
+    }
     if (off >= RTLNET_ARB_MASTER_BASE && off < RTLNET_ARB_MASTER_BASE + (RTLNET_ARB_MAX_MASTERS * RTLNET_ARB_MASTER_STRIDE)) {
         master = (off - RTLNET_ARB_MASTER_BASE) / RTLNET_ARB_MASTER_STRIDE;
         idx = ((off - RTLNET_ARB_MASTER_BASE) % RTLNET_ARB_MASTER_STRIDE) / 4u;
@@ -108,7 +112,7 @@ int main(void)
 
     check(rtlnet_axi_arbiter_probe(b, &caps) == 0, "probe succeeds");
     check(caps.num_masters == 3u && caps.bytes_per_beat == 16u && caps.id_w == 4u && caps.max_outstanding == 8u &&
-          caps.high_prio_mask == 1u, "CAPS decoded");
+          caps.high_prio_mask == 1u && caps.narrow_mask == MODEL_NARROW, "CAPS and NARROW decoded");
     check(rtlnet_axi_arbiter_probe(b, NULL) == 0, "probe accepts a NULL caps");
     g_id = 0x12345678u;
     check(rtlnet_axi_arbiter_probe(b, &caps) == -1, "probe fails on a wrong ID");

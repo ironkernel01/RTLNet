@@ -31,7 +31,7 @@ static void decode_caps(uint32_t caps, rtlnet_axi_arbiter_caps_t *out)
  * rtlnet_axi_arbiter_probe -- identify the core and read its build parameters
  * Steps:
  *   1. Check ID and VERSION.
- *   2. Decode CAPS into caps when caps is not NULL.
+ *   2. Decode CAPS and read the NARROW register into caps when caps is not NULL.
  * Returns: 0 when present and matching, -1 otherwise.
  */
 int rtlnet_axi_arbiter_probe(uintptr_t base, rtlnet_axi_arbiter_caps_t *caps)
@@ -44,6 +44,7 @@ int rtlnet_axi_arbiter_probe(uintptr_t base, rtlnet_axi_arbiter_caps_t *caps)
     }
     if (caps != NULL) {
         decode_caps(rtlnet_reg_read32(base, RTLNET_REG_CAPS), caps);
+        caps->narrow_mask = rtlnet_reg_read32(base, RTLNET_ARB_REG_NARROW) & RTLNET_ARB_CAPS_HPMASK_MASK;
     }
     return 0;
 }

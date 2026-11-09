@@ -18,7 +18,9 @@
 //   * Read path: independent AR arbitration with the same policy and limit; R
 //     beats are routed by the upper ID bits and returned with the original ID.
 //   * Burst legality, checked on each granted AW and AR: burst INCR, size equal
-//     to the full data width, no 4 KiB boundary crossing. An illegal burst is
+//     to the full data width (any size up to the full width for a master whose
+//     NARROW_MASK bit is set, such as a write-through CPU cache), no 4 KiB
+//     boundary crossing computed from the burst's own size. An illegal burst is
 //     not forwarded. The arbiter answers it after every earlier transaction of
 //     that master in the same direction has completed: a write accepts and
 //     discards W beats up to WLAST and returns BRESP SLVERR; a read returns
@@ -37,6 +39,7 @@
 // Language: SystemVerilog-2012.
 // Revision: 11-09-2026
 //   * 11-09-2026: initial version.
+//   * 11-09-2026: NARROW_MASK parameter, narrow transfers for selected masters.
 // Clocks: clk (arbiter, datapath, register file); s_axi_aclk (AXI4-Lite slave
 //   side of the register crossing only).
 // -----------------------------------------------------------------------------
@@ -46,6 +49,7 @@ module rtlnet_axi_arbiter #(
   parameter int                     DATA_W          = 128,  // 32, 64 or 128; beat = DATA_W/8 bytes
   parameter int                     ID_W            = 4,    // slave-side ID width; master side is ID_W + IDX_W
   parameter logic [NUM_MASTERS-1:0] HIGH_PRIO_MASK  = 'b1,  // masters that win over the round-robin group
+  parameter logic [NUM_MASTERS-1:0] NARROW_MASK     = '0,   // masters that may issue sizes below the full width
   parameter int                     MAX_OUTSTANDING = 8,    // per direction, whole arbiter
   // Derived, not for override: master-index bits and the master-side ID width.
   localparam int                    IDX_W           = (NUM_MASTERS > 1) ? $clog2(NUM_MASTERS) : 1,
@@ -249,15 +253,20 @@ module rtlnet_axi_arbiter #(
     return (int'(idx) == NUM_MASTERS - 1) ? '0 : IDX_W'(int'(idx) + 1);
   endfunction
 
-  // Legal burst: INCR, full-width size, no 4 KiB boundary crossing
-  // (addr[11:0] + (len + 1) * bytes <= 4096).
+  // Legal burst: INCR, no 4 KiB boundary crossing (addr[11:0] + (len + 1) * bytes
+  // <= 4096, bytes per beat from the burst's own size). A full-width master must
+  // use the full-width size; a narrow master (NARROW_MASK) may use any size up
+  // to the full width.
   function automatic logic burst_legal(input logic [11:0] addr_low, input logic [7:0] len,
-                                       input logic [2:0] size, input logic [1:0] burst);
+                                       input logic [2:0] size, input logic [1:0] burst,
+                                       input logic narrow);
     logic [SPAN_W-1:0] bytes;
     logic [SPAN_W-1:0] span;
-    bytes = (SPAN_W'(len) + SPAN_W'(LEN_BIAS)) << SIZE_FULL;
-    span  = SPAN_W'(addr_low) + bytes;
-    return (burst == BURST_INCR) && (size == 3'(SIZE_FULL)) && (span <= SPAN_W'(BOUNDARY_BYTES));
+    logic              size_ok;
+    bytes   = (SPAN_W'(len) + SPAN_W'(LEN_BIAS)) << size;
+    span    = SPAN_W'(addr_low) + bytes;
+    size_ok = narrow ? (size <= 3'(SIZE_FULL)) : (size == 3'(SIZE_FULL));
+    return (burst == BURST_INCR) && size_ok && (span <= SPAN_W'(BOUNDARY_BYTES));
   endfunction
 
   // ---------------------------------------------------------------------------
@@ -450,7 +459,8 @@ module rtlnet_axi_arbiter #(
     .DATA_W          (DATA_W),
     .ID_W            (ID_W),
     .MAX_OUTSTANDING (MAX_OUTSTANDING),
-    .HIGH_PRIO_MASK  (HIGH_PRIO_MASK)
+    .HIGH_PRIO_MASK  (HIGH_PRIO_MASK),
+    .NARROW_MASK     (NARROW_MASK)
   ) u_regs (
     .clk         (clk),
     .resetn      (resetn),
@@ -501,7 +511,7 @@ module rtlnet_axi_arbiter #(
   assign g_awlen   = s_awlen[aw_idx * 8 +: 8];
   assign g_awsize  = s_awsize[aw_idx * 3 +: 3];
   assign g_awburst = s_awburst[aw_idx * 2 +: 2];
-  assign aw_legal  = burst_legal(g_awaddr[BOUNDARY_BITS-1:0], g_awlen, g_awsize, g_awburst);
+  assign aw_legal  = burst_legal(g_awaddr[BOUNDARY_BITS-1:0], g_awlen, g_awsize, g_awburst, NARROW_MASK[aw_idx]);
 
   assign wq_full      = (wq_count == CNT_W'(MAX_OUTSTANDING));
   assign wq_nonempty  = (wq_count != '0);
@@ -688,7 +698,7 @@ module rtlnet_axi_arbiter #(
   assign g_arlen   = s_arlen[ar_idx * 8 +: 8];
   assign g_arsize  = s_arsize[ar_idx * 3 +: 3];
   assign g_arburst = s_arburst[ar_idx * 2 +: 2];
-  assign ar_legal  = burst_legal(g_araddr[BOUNDARY_BITS-1:0], g_arlen, g_arsize, g_arburst);
+  assign ar_legal  = burst_legal(g_araddr[BOUNDARY_BITS-1:0], g_arlen, g_arsize, g_arburst, NARROW_MASK[ar_idx]);
 
   assign ar_space      = (rd_inflight != CNT_W'(MAX_OUTSTANDING));
   assign ar_slot_free  = !m_axi_arvalid || m_axi_arready;

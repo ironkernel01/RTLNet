@@ -7,11 +7,11 @@
 | Language | SystemVerilog-2012 (RTL, benches), C11 (driver) |
 | Position | between the DMA masters and the CPU caches and the memory-controller AXI port (`documentation/gige.md` sections 5.1, 6, 7) |
 | Register map revision | `VERSION` = `0x11092026`, `ID` = `0x41524254` ("ARBT") |
-| Verification | Active-HDL 11.1: `tb_rtlnet_axi_arbiter` (6 configurations + negative control); host driver test |
-| Synthesis | Vivado 2026.1 out of context, xc7a200tsbg484-1: PASS, 0 critical warnings; 1365 LUT, 1047 FF, 0 BRAM (3 masters, 128-bit) |
+| Verification | Active-HDL 11.1: `tb_rtlnet_axi_arbiter` (8 configurations + negative control); host driver test |
+| Synthesis | Vivado 2026.1 out of context, xc7a200tsbg484-1: PASS, 0 critical warnings; 1374 LUT, 1042 FF, 0 BRAM (3 masters, 128-bit, no narrow master) |
 
 The arbiter shares the one AXI4 port of the DDR3 controller between up to eight masters. Arbitration is per transaction
-and separate for writes and reads. A burst the memory controller cannot execute (not INCR, not full width, crossing a
+and separate for writes and reads. A burst the memory controller cannot execute (not INCR, not full width unless the master is in `NARROW_MASK`, crossing a
 4 KiB boundary) is never forwarded: the arbiter answers it with SLVERR and counts it.
 
 Contents: 1 interface, 2 arbitration, 3 burst rules and error responses, 4 registers, 5 clocks and crossings,
@@ -49,6 +49,7 @@ All data ports are packed vectors, master `i` at `[i*W +: W]`, on one clock.
 | `DATA_W` | 128 | 32, 64 or 128 (`$fatal` otherwise); a beat is `DATA_W/8` bytes |
 | `ID_W` | 4 | master-side ID width, 1..15; the memory-side ID is `ID_W + IDX_W` bits |
 | `HIGH_PRIO_MASK` | `'b1` | masters that win over the round-robin group |
+| `NARROW_MASK` | `'0` | masters whose bursts may use any `AxSIZE` up to the full width (a write-through CPU cache issues 32-bit stores); the other masters must use the full width |
 | `MAX_OUTSTANDING` | 8 | bursts in flight per direction, whole arbiter, 1..255 |
 
 `IDX_W` = `$clog2(NUM_MASTERS)`, at least 1; the master index is in the upper ID bits.
@@ -91,8 +92,12 @@ Checked on every granted AW and AR:
 | Rule | Legal value |
 |---|---|
 | burst | INCR (`2'b01`) |
-| size | `log2(DATA_W/8)`, a full-width beat (the DDR3 controller has no narrow-burst support) |
-| 4 KiB boundary | `addr[11:0] + (len + 1) * (DATA_W/8) <= 4096` |
+| size | master not in `NARROW_MASK`: `log2(DATA_W/8)`, a full-width beat; master in `NARROW_MASK`: any `AxSIZE` from 0 up to `log2(DATA_W/8)` |
+| 4 KiB boundary | `addr[11:0] + (len + 1) * 2^AxSIZE <= 4096`, with the burst's own size (full-width masters: `2^AxSIZE` = `DATA_W/8`) |
+
+A narrow transfer is forwarded unchanged (size, strobes, address); the memory controller places the data on the byte
+lanes of the beat address. Narrow single beats and bursts from a write-through data cache take this path. Without the
+mask bit such a store is answered SLVERR and dropped.
 
 An illegal burst is not forwarded. The arbiter takes the AW (AR) and answers it itself:
 
@@ -122,6 +127,7 @@ answered OKAY and ignored). Undefined offsets read 0 and ignore writes.
 | 0x008 | `CAPS` | RO | build | `[3:0]` NUM_MASTERS, `[11:4]` DATA_W/8, `[15:12]` ID_W, `[23:16]` MAX_OUTSTANDING, `[31:24]` HIGH_PRIO_MASK |
 | 0x00C | `CTRL` | WO | 0 | `[16]` CNT_CLEAR (self-clearing, reads 0; clears every counter, not `STATUS.ERR`) |
 | 0x010 | `STATUS` | RO, ERR W1C | 0 | `[0]` ERR sticky, write 1 to clear (a new error in the same clock keeps it set); `[1]` write in flight; `[2]` read in flight |
+| 0x014 | `NARROW` | RO | build | `[7:0]` NARROW_MASK (the `CAPS` word has no free bits; undefined bits read 0) |
 
 Per master `n` at `0x100 + 0x20 * n` (`n` below NUM_MASTERS; other windows read 0):
 
@@ -177,14 +183,15 @@ region is written only in a fill phase).
 
 | Group | Proves |
 |---|---|
-| registers | ID, VERSION, CAPS for the configuration, reset values, undefined offsets and the window above NUM_MASTERS read 0, read-only registers ignore writes, a partial write to CTRL does nothing |
+| registers | ID, VERSION, CAPS and NARROW for the configuration, reset values, undefined offsets and the window above NUM_MASTERS read 0, read-only registers ignore writes, a partial write to CTRL does nothing |
 | data integrity | at least 2400 legal bursts per configuration (len 0..255, boundary-ending and page-filling bursts, own and shared regions), zero read mismatches; saturated and with random gaps |
 | ID routing | every B and R reaches its master with the right ID, per-ID order |
 | W order | each W beat at the memory port equals the pattern of its own burst; AW, W and AR streams at the memory port equal the grant order |
 | priority | a high-priority master is granted whenever it requests; the lowest high-priority index wins |
 | round robin | grants of other round-robin masters seen by a waiting master, at most `NUM_MASTERS - 1` |
 | limits | in flight per direction never above `MAX_OUTSTANDING`, at the master side and at the memory port |
-| illegal bursts | FIXED, WRAP, narrow, 4 KiB crossing, read and write, each after 3 outstanding legal bursts of the same master and followed by 2; never reaches the memory model; SLVERR of the right length after the earlier answers; ERRORS, `STATUS.ERR` sticky, `err_irq`, write-1-to-clear (writing 0 to bit 0 does not clear); then 15 % random illegal bursts in the legal traffic of all masters |
+| narrow masters | the narrow configurations: 40 % of a narrow master's legal bursts use a size below the full width (size-aligned start, strobes limited to the active byte lanes, single beats and bursts, some ending exactly on the 4 KiB boundary by their own size); the reference memory and the memory model follow the burst's own size; directed narrow single beats and bursts; a narrow burst crossing 4 KiB by its own size is answered SLVERR (read and write) and never reaches the memory model; the `NARROW` register |
+| illegal bursts | FIXED, WRAP, narrow (for masters outside `NARROW_MASK`), 4 KiB crossing, read and write, each after 3 outstanding legal bursts of the same master and followed by 2; never reaches the memory model; SLVERR of the right length after the earlier answers; ERRORS, `STATUS.ERR` sticky, `err_irq`, write-1-to-clear (writing 0 to bit 0 does not clear); then 15 % random illegal bursts in the legal traffic of all masters |
 | counters | all six counters of every master against the bench's own counts after each phase, CNT_CLEAR, `STATUS` in-flight bits |
 | reset | reset in the middle of traffic (bursts in flight), registers and `err_irq` back to 0, then clean traffic |
 
@@ -193,21 +200,23 @@ Results (11-09-2026), `tb_rtlnet_axi_arbiter` via `scripts/rtlnet_run_sim.ps1` (
 
 | Tag | Masters | Data | Latency, gaps | Result |
 |---|---|---|---|---|
-| `nm3_dw128_lat0` | 3 | 128 | 0, none | `TEST PASS: tb_rtlnet_axi_arbiter checks=304315` |
-| `nm3_dw128_lat20` | 3 | 128 | 20, random | `TEST PASS: tb_rtlnet_axi_arbiter checks=411390` |
-| `nm1_dw128_lat20` | 1 | 128 | 20, random | `TEST PASS: tb_rtlnet_axi_arbiter checks=374406` |
-| `nm5_dw64_lat0` | 5 (HP mask 0x09) | 64 | 0, random | `TEST PASS: tb_rtlnet_axi_arbiter checks=560358` |
-| `nm5_dw128_lat20` | 5 (HP mask 0x09) | 128 | 20, none | `TEST PASS: tb_rtlnet_axi_arbiter checks=350087` |
-| `nm3_dw64_lat20` | 3 | 64 | 20, random | `TEST PASS: tb_rtlnet_axi_arbiter checks=491061` |
-| `neg` | 3 | 128 | `+INJECT_FAILURE` | `TEST FAIL: tb_rtlnet_axi_arbiter fails=1 checks=26679` as required |
+| `nm3_dw128_lat0` | 3 | 128 | 0, none | `TEST PASS: tb_rtlnet_axi_arbiter checks=321066` |
+| `nm3_dw128_lat20` | 3 | 128 | 20, random | `TEST PASS: tb_rtlnet_axi_arbiter checks=407074` |
+| `nm1_dw128_lat20` | 1 | 128 | 20, random | `TEST PASS: tb_rtlnet_axi_arbiter checks=347401` |
+| `nm5_dw64_lat0` | 5 (HP mask 0x09) | 64 | 0, random | `TEST PASS: tb_rtlnet_axi_arbiter checks=571462` |
+| `nm5_dw128_lat20` | 5 (HP mask 0x09) | 128 | 20, none | `TEST PASS: tb_rtlnet_axi_arbiter checks=365260` |
+| `nm3_dw64_lat20` | 3 | 64 | 20, random | `TEST PASS: tb_rtlnet_axi_arbiter checks=502231` |
+| `nm3_dw128_nar2` | 3 (master 1 narrow, `NARROW_MASK` 0x2) | 128 | 20, random | `TEST PASS: tb_rtlnet_axi_arbiter checks=438434` |
+| `nm1_dw128_nar1` | 1 (narrow, `NARROW_MASK` 0x1) | 128 | 0, none | `TEST PASS: tb_rtlnet_axi_arbiter checks=284380` |
+| `neg` | 3 | 128 | `+INJECT_FAILURE` | `TEST FAIL: tb_rtlnet_axi_arbiter fails=1 checks=30167` as required |
 
 Measured in the runs: in flight reaches `MAX_OUTSTANDING` (8) in both directions at the master side and at the memory
 port; the worst round-robin wait is 1 grant (3 masters), 2 grants (5 masters, limit 4).
 
-Mutations, each failing the bench (RTL restored afterwards): B routed to master 0 (4405 fails), round-robin pointer
+Mutations, each failing the bench (RTL restored afterwards); first the full-width set: B routed to master 0 (4405 fails), round-robin pointer
 frozen (master 2 waited 160 grants), high priority ignored (1668), 4 KiB check removed (1877), in-flight limit removed
 (2443), W order taken from the second queue entry (10807), illegal answer before earlier writes complete (34),
-illegal read one beat too long (953).
+illegal read one beat too long (953). Narrow set (`nm3_dw128_nar2` and `nm1_dw128_nar1`): 4 KiB check removed (1835 and 423 fails), 4 KiB check skipped for narrow masters only (1873 and 423), 4 KiB span computed with the full-width size (52019 fails in `nm3_dw128_nar2`).
 
 Driver: `testbench/test_rtlnet_axi_arbiter_driver.c` runs the driver against a register model (read-only header and
 counters, self-clearing CNT_CLEAR, write-1-to-clear ERR, undefined offsets 0):
@@ -231,7 +240,8 @@ To attach a new master:
 1. Raise `NUM_MASTERS` (at most 8) and widen the packed vectors: the new master is the next slice of every `s_*` port.
    Its index in the upper memory-side ID bits is its slice number.
 2. Issue only INCR bursts of full width (`AxSIZE` = `log2(DATA_W/8)`), none crossing a 4 KiB boundary. Split a longer
-   transfer at the boundary in the DMA.
+   transfer at the boundary in the DMA. A master that needs narrow transfers (a CPU cache) gets its bit in
+   `NARROW_MASK`; its bursts must still be INCR and not cross a 4 KiB boundary by their own size.
 3. Use any `ID_W`-bit IDs. Responses for one ID arrive in order; the master may keep several IDs outstanding.
 4. A master may raise `wvalid` before its AW is granted; it must hold valid and payload until ready, as AXI requires.
 5. Decide priority: set the master's bit in `HIGH_PRIO_MASK` only for a stream that must not wait (the capture writer);
@@ -246,7 +256,7 @@ The memory-controller wrapper connects to the `m_axi_*` ports; widths follow `ID
 
 ## 9. Limitations
 
-- INCR full-width bursts only; no narrow, FIXED, WRAP, exclusive (lock) or QoS transfers.
+- INCR bursts only, full width except for masters in `NARROW_MASK`; no FIXED, WRAP, exclusive (lock) or QoS transfers.
 - Address alignment is not checked; the memory controller handles an unaligned start.
 - A master with an unanswered illegal burst is not arbitrated in that direction until the answer is delivered.
 - Grants are one per clock and per direction; a legal grant needs the memory-side register free or accepted that clock.

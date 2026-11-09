@@ -32,10 +32,13 @@
 // Configuration (defines, defaults in brackets): TB_NM masters [3], TB_DW data
 //   width [128], TB_HP high-priority mask [1], TB_LAT memory read latency in
 //   clocks [0], TB_GAP 1 for random ready/valid gaps on the memory model and
-//   the masters [0], TB_SIZE burst count scale in percent [100].
+//   the masters [0], TB_SIZE burst count scale in percent [100], TB_NARROW mask of
+//   masters that may issue narrow transfers [0].
 // Language: SystemVerilog-2012 (simulation only).
 // Revision: 11-09-2026
 //   * 11-09-2026: initial version.
+//   * 11-09-2026: TB_NARROW (NARROW_MASK): narrow legal traffic with strobes, directed narrow
+//     cases, narrow burst crossing 4 KiB, NARROW register.
 // Run: powershell -File scripts/rtlnet_run_sim.ps1 -Bench tb_rtlnet_axi_arbiter
 //        -Filelist cores/rtlnet_axi_arbiter/testbench/tb_rtlnet_axi_arbiter.f
 // -----------------------------------------------------------------------------
@@ -59,6 +62,9 @@
 `ifndef TB_SIZE
   `define TB_SIZE 100
 `endif
+`ifndef TB_NARROW
+  `define TB_NARROW 0
+`endif
 
 module tb_rtlnet_axi_arbiter;
 
@@ -76,6 +82,7 @@ module tb_rtlnet_axi_arbiter;
   localparam int BYTES = DW / 8;
   localparam int SIZEF = $clog2(BYTES);
   localparam logic [NM-1:0] HPM = `TB_HP;
+  localparam logic [NM-1:0] NARM = `TB_NARROW;
   localparam int GAPS  = `TB_GAP;
   localparam int LAT   = `TB_LAT;
 
@@ -93,12 +100,14 @@ module tb_rtlnet_axi_arbiter;
   localparam int KIND_WRAP   = 2;
   localparam int KIND_NARROW = 3;
   localparam int KIND_X4K    = 4;
+  localparam int KIND_NX4K   = 5;     // narrow-size burst that crosses 4 KiB by its own size
 
   localparam int MODE_OWN   = 0;
   localparam int MODE_FILL  = 1;
   localparam int MODE_MIXED = 2;
 
-  localparam logic [11:0] R_ID = 12'h000, R_VERSION = 12'h004, R_CAPS = 12'h008, R_CTRL = 12'h00C, R_STATUS = 12'h010;
+  localparam logic [11:0] R_ID = 12'h000, R_VERSION = 12'h004, R_CAPS = 12'h008, R_CTRL = 12'h00C, R_STATUS = 12'h010,
+                      R_NARROW = 12'h014;
   localparam logic [31:0] CTRL_CNT_CLEAR = 32'h0001_0000;
 
   // ---------------------------------------------------------------------------
@@ -170,7 +179,7 @@ module tb_rtlnet_axi_arbiter;
   logic        err_irq;
 
   rtlnet_axi_arbiter #(.NUM_MASTERS(NM), .ADDR_W(AW), .DATA_W(DW), .ID_W(IDW), .HIGH_PRIO_MASK(HPM),
-                       .MAX_OUTSTANDING(MAXO)) dut (
+                       .NARROW_MASK(NARM), .MAX_OUTSTANDING(MAXO)) dut (
     .clk(clk), .resetn(resetn), .s_axi_aclk(cpu_clk), .s_axi_aresetn(cpu_resetn),
     .s_awid(s_awid), .s_awaddr(s_awaddr), .s_awlen(s_awlen), .s_awsize(s_awsize), .s_awburst(s_awburst),
     .s_awvalid(s_awvalid), .s_awready(s_awready),
@@ -202,7 +211,7 @@ module tb_rtlnet_axi_arbiter;
 
   rtlnet_tb_axi4_mem #(.ADDR_W(AW), .DATA_W(DW), .ID_W(MIDW), .READ_LATENCY(LAT), .AW_READY_PCT(MEM_PCT),
                        .W_READY_PCT(MEM_PCT), .AR_READY_PCT(MEM_PCT), .B_VALID_PCT(MEM_PCT), .R_VALID_PCT(MEM_PCT),
-                       .SEED(7)) u_mem (
+                       .SEED(7), .CHECK_FULL_WIDTH(NARM == '0)) u_mem (
     .clk(clk), .resetn(resetn),
     .awid(m_awid), .awaddr(m_awaddr), .awlen(m_awlen), .awsize(m_awsize), .awburst(m_awburst),
     .awvalid(m_awvalid), .awready(m_awready),
@@ -301,6 +310,48 @@ module tb_rtlnet_axi_arbiter;
     return ref_mem.exists(k) ? ref_mem[k] : '0;
   endfunction
 
+  // Size-aware beat geometry (a full-size beat reduces to the word at addr + b words).
+  function automatic bit [AW-1:0] beat_addr(input desc_t d, input int b);
+    bit [AW-1:0] a;
+    a = d.addr;
+    if (b > 0) a = (d.addr >> d.size << d.size) + (AW'(b) << d.size);
+    return a;
+  endfunction
+
+  function automatic bit [AW-1:0] beat_key(input desc_t d, input int b);
+    return beat_addr(d, b) >> SIZEF;
+  endfunction
+
+  // Byte lanes a beat drives: all of them for a full-size beat, else the
+  // size-aligned window at the beat address.
+  function automatic bit [BYTES-1:0] lane_mask(input desc_t d, input int b);
+    bit [BYTES-1:0] m;
+    int             nb;
+    int             off;
+    if (int'(d.size) >= SIZEF) begin
+      m = '1;
+    end else begin
+      nb  = 1 << d.size;
+      off = int'(beat_addr(d, b) % BYTES);
+      m   = '0;
+      for (int l = 0; l < nb; l++) m[(off + l) % BYTES] = 1'b1;
+    end
+    return m;
+  endfunction
+
+  function automatic bit [BYTES-1:0] exp_strb(input desc_t d, input int b);
+    return pat_strb(d.g, d.serial, b, d.smode) & lane_mask(d, b);
+  endfunction
+
+  function automatic bit [DW-1:0] lane_bits(input desc_t d, input int b);
+    bit [BYTES-1:0] m;
+    bit [DW-1:0]    v;
+    m = lane_mask(d, b);
+    v = '0;
+    for (int l = 0; l < BYTES; l++) if (m[l]) v[l*8 +: 8] = 8'hFF;
+    return v;
+  endfunction
+
   // A write lands in the reference memory when its B arrives.
   task automatic ref_apply_write(input desc_t d);
     bit [AW-1:0] k;
@@ -308,10 +359,10 @@ module tb_rtlnet_axi_arbiter;
     bit [DW-1:0] nd;
     bit [BYTES-1:0] st;
     for (int b = 0; b <= d.len; b++) begin
-      k  = word_key(d.addr, b);
+      k  = beat_key(d, b);
       w  = ref_word(k);
       nd = pat_data(d.g, d.serial, b);
-      st = pat_strb(d.g, d.serial, b, d.smode);
+      st = exp_strb(d, b);
       for (int l = 0; l < BYTES; l++) begin
         if (st[l]) w[l*8 +: 8] = nd[l*8 +: 8];
       end
@@ -478,6 +529,9 @@ module tb_rtlnet_axi_arbiter;
     int          k;
     int          sz;
     int          page;
+    bit [AW-1:0] pg;
+    // A narrow transfer is legal for a narrow master: that kind becomes FIXED there.
+    if (kind == KIND_NARROW && NARM[g]) kind = KIND_FIXED;
     d.g     = g;
     d.kind  = kind;
     d.is_wr = wr;
@@ -491,6 +545,19 @@ module tb_rtlnet_axi_arbiter;
     case (kind)
       KIND_LEGAL: begin
         legal_range(g, wr, mode, a, l);
+        // A narrow master issues narrow bursts too: 40 % of its legal bursts, size
+        // 0 .. full - 1, size-aligned start. Part of them end exactly on the 4 KiB
+        // boundary by their own size, which a full-width calculation would reject.
+        if (NARM[g] && SIZEF > 0 && pct(40)) begin
+          sz = rnd(SIZEF);
+          d.size = 3'(sz);
+          pg = a >> 12 << 12;
+          a  = a >> sz << sz;
+          if (pct(30)) begin
+            if (l > 63) l = 63;
+            a = pg + AW'(PAGE) - (AW'(l + 1) << sz);
+          end
+        end
       end
       KIND_FIXED: begin
         d.burst = 2'b00;
@@ -513,6 +580,13 @@ module tb_rtlnet_axi_arbiter;
         a = AW'(page + (rnd(PAGE / BYTES / 2) * BYTES) + (rnd(BYTES) >> sz << sz));
         l = rnd(16);
       end
+      KIND_NX4K: begin
+        sz = (SIZEF > 0) ? rnd(SIZEF) : 0;
+        d.size = 3'(sz);
+        l  = 1 + rnd(15);
+        nb = 1 + rnd(l);
+        a  = AW'(page + PAGE - (nb << sz));
+      end
       default: begin   // KIND_X4K
         l  = 1 + rnd(15);
         nb = 1 + rnd(l);
@@ -521,6 +595,29 @@ module tb_rtlnet_axi_arbiter;
     endcase
     d.addr = a;
     d.len  = l;
+    return d;
+  endfunction
+
+  // Legal narrow burst: size sz (clamped below the full width), len + 1 beats,
+  // size-aligned start in the master's own region, either low in a page or
+  // ending exactly on the 4 KiB boundary by its own size.
+  function automatic desc_t build_narrow_desc(input int g, input bit wr, input int sz, input int len, input int at_end);
+    desc_t d;
+    int    s;
+    int    page;
+    s = (SIZEF > 0) ? ((sz < SIZEF) ? sz : SIZEF - 1) : 0;
+    d.g      = g;
+    d.kind   = KIND_LEGAL;
+    d.is_wr  = wr;
+    d.id     = rnd(IDS);
+    d.smode  = 1;
+    d.beat   = 0;
+    d.size   = 3'(s);
+    d.burst  = 2'b01;
+    d.serial = 0;
+    d.len    = len;
+    page     = g * OWN_SIZE + (3 + at_end) * PAGE;
+    d.addr   = (at_end != 0) ? AW'(page + PAGE - ((len + 1) << s)) : AW'(page + 16 * (1 + rnd(8)));
     return d;
   endfunction
 
@@ -626,11 +723,11 @@ module tb_rtlnet_axi_arbiter;
       bit [AW-1:0] hi;
       bit [AW-1:0] blo;
       bit [AW-1:0] bhi;
-      lo = word_key(d.addr, 0);
-      hi = word_key(d.addr, d.len);
+      lo = beat_key(d, 0);
+      hi = beat_key(d, d.len);
       for (int i = 0; i < busy.size(); i++) begin
-        blo = word_key(busy[i].addr, 0);
-        bhi = word_key(busy[i].addr, busy[i].len);
+        blo = beat_key(busy[i], 0);
+        bhi = beat_key(busy[i], busy[i].len);
         if (!(hi < blo || lo > bhi) && (d.is_wr || busy[i].is_wr)) return 1'b1;
       end
       return 1'b0;
@@ -662,7 +759,7 @@ module tb_rtlnet_axi_arbiter;
         end else if (bursts_left[G] > 0 && pct(p_gen)) begin
           bit wr;
           wr = pct(p_wr);
-          if (p_ill > 0 && pct(p_ill)) d = build_desc(G, wr, 1 + rnd(4), mode_sel);
+          if (p_ill > 0 && pct(p_ill)) d = build_desc(G, wr, 1 + rnd(5), mode_sel);
           else                         d = build_desc(G, wr, KIND_LEGAL, mode_sel);
           have = 1'b1;
         end
@@ -741,7 +838,7 @@ module tb_rtlnet_axi_arbiter;
           end
           if (w_have && pct(p_w)) begin
             w_data  <= pat_data(G, w_cur.serial, w_beat);
-            w_strb  <= (w_cur.kind == KIND_LEGAL) ? pat_strb(G, w_cur.serial, w_beat, w_cur.smode) : '1;
+            w_strb  <= (w_cur.kind == KIND_LEGAL) ? exp_strb(w_cur, w_beat) : '1;
             w_last  <= (w_beat == w_cur.len);
             w_valid <= 1'b1;
             w_pres   = 1'b1;
@@ -835,9 +932,9 @@ module tb_rtlnet_axi_arbiter;
             tb_check(s_rlast[G] === last_exp, $sformatf("master %0d: RLAST %0b on beat %0d of %0d (ID %0d)", G, s_rlast[G],
                                                         d.beat, d.len + 1, rid));
             if (d.kind == KIND_LEGAL) begin
-              want = ref_word(word_key(d.addr, d.beat));
+              want = ref_word(beat_key(d, d.beat)) & lane_bits(d, d.beat);
               tb_check(s_rresp[G*2 +: 2] === 2'b00, $sformatf("master %0d: legal read R resp %0d", G, s_rresp[G*2 +: 2]));
-              tb_check(s_rdata[G*DW +: DW] === want, $sformatf("master %0d: read data mismatch addr 0x%0h beat %0d got 0x%0h want 0x%0h",
+              tb_check((s_rdata[G*DW +: DW] & lane_bits(d, d.beat)) === want, $sformatf("master %0d: read data mismatch addr 0x%0h beat %0d got 0x%0h want 0x%0h",
                                                               G, d.addr, d.beat, s_rdata[G*DW +: DW], want));
               exp_r[G]++;
             end else begin
@@ -889,7 +986,7 @@ module tb_rtlnet_axi_arbiter;
           desc_t d;
           d = w_chk_q[0];
           tb_check(m_wdata === pat_data(d.g, d.serial, wm_beat) &&
-                   m_wstrb === pat_strb(d.g, d.serial, wm_beat, d.smode),
+                   m_wstrb === exp_strb(d, wm_beat),
                    $sformatf("W beat %0d at the memory port is not beat %0d of master %0d write serial %0d (interleave or misroute)",
                              wm_beat, wm_beat, d.g, d.serial));
           tb_check(m_wlast === (wm_beat == d.len), $sformatf("WLAST %0b on beat %0d of %0d at the memory port", m_wlast,
@@ -1079,6 +1176,7 @@ module tb_rtlnet_axi_arbiter;
     int          errs_before;
     int          polls;
     int          cs;
+    int          n_dir;
 
     #100;
     arstn = 1'b1;
@@ -1090,6 +1188,7 @@ module tb_rtlnet_axi_arbiter;
     reg_expect(R_ID,      32'h4152_4254, "ID");
     reg_expect(R_VERSION, 32'h1109_2026, "VERSION");
     reg_expect(R_CAPS,    {8'(HPM), 8'(MAXO), 4'(IDW), 8'(BYTES), 4'(NM)}, "CAPS");
+    reg_expect(R_NARROW,  32'(NARM), "NARROW");
     reg_expect(R_CTRL,    32'h0, "CTRL reset");
     reg_expect(R_STATUS,  32'h0, "STATUS reset");
     tb_check(err_irq === 1'b0, "err_irq low after reset");
@@ -1104,9 +1203,11 @@ module tb_rtlnet_axi_arbiter;
     u_axi.wr(R_ID,      32'hFFFF_FFFF);
     u_axi.wr(R_VERSION, 32'hFFFF_FFFF);
     u_axi.wr(R_CAPS,    32'hFFFF_FFFF);
+    u_axi.wr(R_NARROW,  32'hFFFF_FFFF);
     u_axi.wr(12'h100,   32'hFFFF_FFFF);
     reg_expect(R_ID,      32'h4152_4254, "ID after write attempt");
     reg_expect(R_VERSION, 32'h1109_2026, "VERSION after write attempt");
+    reg_expect(R_NARROW,  32'(NARM), "NARROW after write attempt");
     reg_expect(12'h100,   32'h0, "read-only counter after write attempt");
     u_axi.write32(R_CTRL, CTRL_CNT_CLEAR, 4'h3, resp);
     reg_expect(R_STATUS,  32'h0, "partial write to CTRL has no effect");
@@ -1171,11 +1272,22 @@ module tb_rtlnet_axi_arbiter;
     tb_check(err_irq === 1'b0, "err_irq low before the illegal cases");
     errs_before = tot_ill;
     cs = 0;
-    for (int kind = KIND_FIXED; kind <= KIND_X4K; kind++) begin
+    n_dir = 0;
+    for (int kind = KIND_FIXED; kind <= KIND_NX4K; kind++) begin
       for (int dir = 0; dir < 2; dir++) begin
         int g;
+        int tries;
         g = cs % NM;
+        // A narrow-size burst is legal for a narrow master: use a full-width one,
+        // and skip the kind when every master is narrow.
+        tries = 0;
+        while (kind == KIND_NARROW && NARM[g] && tries < NM) begin
+          g = (g + 1) % NM;
+          tries++;
+        end
+        if (kind == KIND_NARROW && NARM[g]) continue;
         cs++;
+        n_dir++;
         inject_case(g, (dir == 0), kind, 3, 2);
         run = 1'b1;
         wait_idle($sformatf("illegal case kind %0d dir %0d", kind, dir));
@@ -1187,7 +1299,31 @@ module tb_rtlnet_axi_arbiter;
         end
       end
     end
-    tb_check(tot_ill - errs_before == 8, "eight directed illegal bursts issued");
+    // Narrow masters only: a legal narrow single beat and burst with strobes, directed,
+    // then a narrow burst crossing 4 KiB by its own size (an error) and one that ends on
+    // the boundary by its own size (legal; a full-width span would cross).
+    if (NARM != '0) begin
+      for (int g = 0; g < NM; g++) begin
+        if (NARM[g]) begin
+          inject_q.push_back(build_narrow_desc(g, 1'b1, 0, 0, 0));
+          inject_q.push_back(build_narrow_desc(g, 1'b1, 1, 7, 0));
+          inject_q.push_back(build_narrow_desc(g, 1'b1, 2, 31, 1));
+          inject_q.push_back(build_narrow_desc(g, 1'b0, 0, 0, 0));
+          inject_q.push_back(build_narrow_desc(g, 1'b0, 1, 7, 0));
+          inject_q.push_back(build_narrow_desc(g, 1'b0, 2, 31, 1));
+          run = 1'b1;
+          wait_idle("directed narrow legal");
+          for (int dir = 0; dir < 2; dir++) begin
+            inject_case(g, (dir == 0), KIND_NX4K, 2, 2);
+            run = 1'b1;
+            wait_idle("directed narrow crossing 4 KiB");
+            n_dir++;
+          end
+        end
+      end
+    end
+    tb_check(tot_ill - errs_before == n_dir, $sformatf("%0d directed illegal bursts issued, %0d counted", n_dir,
+                                                       tot_ill - errs_before));
     check_counters("after directed illegal bursts");
     check_memory_counts("after directed illegal bursts");
     u_axi.rd(R_STATUS, d);
@@ -1211,7 +1347,7 @@ module tb_rtlnet_axi_arbiter;
     // Random illegal bursts mixed into legal traffic of all masters (gapped).
     set_gaps(1'b1);
     mode_sel = MODE_MIXED; p_ill = 15; p_wr = 50;
-    traffic(scaled(60), "mixed illegal");
+    traffic((scaled(60) < 24) ? 24 : scaled(60), "mixed illegal");   // enough bursts for illegal ones at 15 %
     p_ill = 0;
     check_counters("after mixed illegal traffic");
     check_memory_counts("after mixed illegal traffic");

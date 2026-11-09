@@ -16,6 +16,7 @@
 // Language: SystemVerilog-2012.
 // Revision: 11-09-2026
 //   * 11-09-2026: initial version.
+//   * 11-09-2026: read-only NARROW register (offset 0x014) reports NARROW_MASK.
 // Clocks: clk (all logic).
 // -----------------------------------------------------------------------------
 module rtlnet_axi_arbiter_regs #(
@@ -23,7 +24,8 @@ module rtlnet_axi_arbiter_regs #(
   parameter int                       DATA_W          = 128,
   parameter int                       ID_W            = 4,
   parameter int                       MAX_OUTSTANDING = 8,
-  parameter logic [NUM_MASTERS-1:0]   HIGH_PRIO_MASK  = 'b1
+  parameter logic [NUM_MASTERS-1:0]   HIGH_PRIO_MASK  = 'b1,
+  parameter logic [NUM_MASTERS-1:0]   NARROW_MASK     = '0
 )(
   // Arbiter data clock (the memory controller user clock) and its reset
   // (synchronous, active low).
@@ -71,6 +73,7 @@ module rtlnet_axi_arbiter_regs #(
   localparam logic [11:0] REG_CAPS    = 12'h008;
   localparam logic [11:0] REG_CTRL    = 12'h00C;
   localparam logic [11:0] REG_STATUS  = 12'h010;
+  localparam logic [11:0] REG_NARROW   = 12'h014;  // read-only: NARROW_MASK in [7:0]
 
   localparam int CTRL_CNT_CLEAR_BIT = 16;
   localparam int STATUS_ERR_BIT     = 0;
@@ -99,6 +102,9 @@ module rtlnet_axi_arbiter_regs #(
   localparam logic [31:0] CORE_CAPS =
       {CAPS_MASK_W'(HIGH_PRIO_MASK), CAPS_MAX_W'(MAX_OUTSTANDING), 4'(ID_W), CAPS_BYTES_W'(DATA_W / 8),
        4'(NUM_MASTERS)};
+
+  // NARROW register: [7:0] NARROW_MASK (masters that may issue narrow transfers).
+  localparam logic [31:0] CORE_NARROW = 32'(NARROW_MASK);
 
   // ---------------------------------------------------------------------------
   // State
@@ -198,6 +204,7 @@ module rtlnet_axi_arbiter_regs #(
           REG_CAPS:    reg_rd_data <= CORE_CAPS;
           REG_CTRL:    reg_rd_data <= '0;
           REG_STATUS:  reg_rd_data <= status_word;
+          REG_NARROW:  reg_rd_data <= CORE_NARROW;
           default:     reg_rd_data <= '0;
         endcase
       end

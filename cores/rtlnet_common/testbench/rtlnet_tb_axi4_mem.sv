@@ -21,7 +21,10 @@
 //     ready on AW, W and AR; WLAST on a beat other than the last or missing on
 //     the last; a burst that crosses a 4 KiB boundary; burst not INCR; size not
 //     the full data width (CHECK_FULL_WIDTH, the DDR3 controller has no narrow
-//     support); a W beat with no AW after reset is held, not an error.
+//     support; with CHECK_FULL_WIDTH = 0 any size up to the width passes, and the
+//     4 KiB check, the beat addresses and the byte strobes follow the burst's own
+//     size, a read returns the whole stored word); a W beat with no AW after
+//     reset is held, not an error.
 //   * Counters aw_count, ar_count, w_beats, r_beats count accepted bursts and
 //     beats. clear_memory() empties the storage; poke() and peek() access one
 //     word. resetn (synchronous, active low) clears every queue and flag, not
@@ -29,6 +32,7 @@
 // Language: SystemVerilog-2012 (simulation only).
 // Revision: 11-09-2026
 //   * 11-09-2026: initial version.
+//   * 11-09-2026: size-aware beat addresses and 4 KiB check for CHECK_FULL_WIDTH = 0.
 // Clocks: clk.
 // -----------------------------------------------------------------------------
 `timescale 1ns / 1ps
@@ -96,6 +100,7 @@ module rtlnet_tb_axi4_mem #(
     bit [ID_W-1:0]   id;
     bit [ADDR_W-1:0] addr;
     int              len;
+    bit [2:0]        size;
     longint          ready_at;
   } burst_t;
 
@@ -173,15 +178,27 @@ module rtlnet_tb_axi4_mem #(
     mem.delete();
   endtask
 
-  // Legality of a burst presented by the master side.
+  // Word key of beat n of a burst: the first beat uses the start address, later
+  // beats the size-aligned address plus n transfers (a full-size burst: word + n).
+  function automatic bit [ADDR_W-1:0] beat_key(input bit [ADDR_W-1:0] a, input bit [2:0] size, input int n);
+    bit [ADDR_W-1:0] ba;
+    ba = a;
+    if (n > 0) ba = (a >> size << size) + (ADDR_W'(n) << size);
+    return ba >> SHIFT;
+  endfunction
+
+  // Legality of a burst presented by the master side. The 4 KiB check uses the
+  // burst's own size; a narrow size passes only with CHECK_FULL_WIDTH = 0.
   task automatic check_burst(input string chan, input bit [ID_W-1:0] id, input bit [ADDR_W-1:0] a,
                              input bit [7:0] len, input bit [2:0] size, input bit [1:0] burst);
     int span;
-    span = int'(a[11:0]) + (int'(len) + 1) * STRB_W;
+    span = int'(a[11:0]) + ((int'(len) + 1) << size);
     tb_check(span <= PAGE, $sformatf("axi4_mem %s id %0d addr 0x%0h len %0d crosses a 4 KiB boundary", chan, id, a, len));
     tb_check(burst == BURST_INCR, $sformatf("axi4_mem %s addr 0x%0h burst %0d is not INCR", chan, a, burst));
     if (CHECK_FULL_WIDTH) begin
       tb_check(int'(size) == SHIFT, $sformatf("axi4_mem %s addr 0x%0h size %0d is not full width %0d", chan, a, size, SHIFT));
+    end else begin
+      tb_check(int'(size) <= SHIFT, $sformatf("axi4_mem %s addr 0x%0h size %0d exceeds the data width %0d", chan, a, size, SHIFT));
     end
   endtask
 
@@ -239,7 +256,7 @@ module rtlnet_tb_axi4_mem #(
       if (awvalid === 1'b1 && awready === 1'b1) begin
         burst_t b;
         check_burst("AW", awid, awaddr, awlen, awsize, awburst);
-        b.id = awid; b.addr = awaddr; b.len = int'(awlen); b.ready_at = 0;
+        b.id = awid; b.addr = awaddr; b.len = int'(awlen); b.size = awsize; b.ready_at = 0;
         aw_q.push_back(b);
         aw_count++;
       end
@@ -252,7 +269,7 @@ module rtlnet_tb_axi4_mem #(
       if (arvalid === 1'b1 && arready === 1'b1) begin
         burst_t b;
         check_burst("AR", arid, araddr, arlen, arsize, arburst);
-        b.id = arid; b.addr = araddr; b.len = int'(arlen); b.ready_at = cycle + READ_LATENCY;
+        b.id = arid; b.addr = araddr; b.len = int'(arlen); b.size = arsize; b.ready_at = cycle + READ_LATENCY;
         ar_q.push_back(b);
         ar_count++;
       end
@@ -266,7 +283,7 @@ module rtlnet_tb_axi4_mem #(
         bit [DATA_W-1:0] nw;
         t = w_q.pop_front();
         h = aw_q[0];
-        k = {{SHIFT{1'b0}}, word_key(h.addr)} + ADDR_W'(w_idx);
+        k = beat_key(h.addr, h.size, w_idx);
         old = mem.exists(k) ? mem[k] : '0;
         nw  = old;
         for (int l = 0; l < STRB_W; l++) begin
@@ -311,7 +328,7 @@ module rtlnet_tb_axi4_mem #(
         end
         if (r_active && chance(R_VALID_PCT)) begin
           bit [ADDR_W-1:0] k;
-          k = {{SHIFT{1'b0}}, word_key(r_cur.addr)} + ADDR_W'(r_next);
+          k = beat_key(r_cur.addr, r_cur.size, r_next);
           rvalid <= 1'b1;
           rid    <= r_cur.id;
           rdata  <= mem.exists(k) ? mem[k] : '0;
