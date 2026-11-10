@@ -51,7 +51,7 @@
 #define MENU_MAX_TOKEN_TEXT  24u   /* characters of one syntax token, NUL included */
 #define MENU_LINE_MAX        160u  /* characters of one input line */
 #define MENU_HISTORY_DEPTH   8u    /* remembered command lines */
-#define MENU_MAX_COMMANDS    96u   /* table entries plus built-ins */
+#define MENU_MAX_COMMANDS    128u  /* table entries plus built-ins */
 
 /* Command modes, network-switch style. The set is fixed by the input format
  * (MenuBuilder_hierarchical.md section 3); gen_menu.py maps the .txt mode

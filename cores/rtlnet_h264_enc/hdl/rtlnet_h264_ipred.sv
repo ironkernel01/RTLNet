@@ -17,7 +17,7 @@
 //   * With q_acc the segment's SAD against q_src is added to the accumulators of the legal modes: luma into sad_y,
 //     Cb and Cr together into sad_c (4 x 18 bits, mode m at [18*m +: 18]; an illegal mode stays 0). The accumulators
 //     are final 4 clocks after the last q_valid; dec_start may be given 3 clocks after the last q_valid (two idle clocks
-//     between) or later. dec_done pulses 4 clocks after dec_start.
+//     between) or later. dec_done pulses 5 clocks after dec_start.
 //   * Decision: total(m) = SAD(m) + cost(m) over the legal modes, ties go to the first of the order DC, V, H, Plane.
 //     Luma cost DC 0, V 16, H 16, Plane 32; chroma cost DC 0, H 16, V 16, Plane 32. dec_luma_mode / dec_chroma_mode
 //     carry the spec mode numbers (DC when nothing else is legal).
@@ -476,35 +476,49 @@ module rtlnet_h264_ipred (
   // ---------------------------------------------------------------------------
   // Decision: totals, then the first-best search in the order DC, V, H, Plane
   // ---------------------------------------------------------------------------
-  logic [1:0]  d_st;
+  logic [2:0]  d_st;
   logic [19:0] tot_y [4];
   logic [19:0] tot_c [4];
 
-  function automatic logic [1:0] pick_best(input logic [19:0] t0_, input logic [19:0] t1_, input logic [19:0] t2_,
-                                           input logic [19:0] t3_, input logic [3:0] leg, input logic [1:0] n0,
-                                           input logic [1:0] n1, input logic [1:0] n2, input logic [1:0] n3);
-    // Order of the candidates: n0 (DC, always legal), n1, n2, n3; t*_ are the totals indexed by candidate position.
-    logic [19:0] bt;
-    logic [1:0]  bm;
-    bt = t0_;
-    bm = n0;
-    if (leg[n1] && (t1_ < bt)) begin bt = t1_; bm = n1; end
-    if (leg[n2] && (t2_ < bt)) begin bt = t2_; bm = n2; end
-    if (leg[n3] && (t3_ < bt)) begin bt = t3_; bm = n3; end
-    return bm;
+  // Phase 2b-3 timing fix: the first-best search is two clocks. Clock 1 registers the six pairwise "t_a <= t_b" results of
+  // the candidate positions a < b; clock 2 picks the winner: the earliest legal candidate with the minimum total (ties go to
+  // the earlier position, the order DC, V, H, Plane), which is exactly the result of the serial "replace when strictly
+  // smaller" search. Position 0 (DC) is always legal.
+  function automatic logic [5:0] pair_le(input logic [19:0] t0_, input logic [19:0] t1_, input logic [19:0] t2_,
+                                         input logic [19:0] t3_);
+    // bit order: 01, 02, 03, 12, 13, 23
+    return {t2_ <= t3_, t1_ <= t3_, t1_ <= t2_, t0_ <= t3_, t0_ <= t2_, t0_ <= t1_};
   endfunction
+
+  function automatic logic [1:0] pick_best(input logic [5:0] le, input logic [3:0] leg, input logic [1:0] n0,
+                                           input logic [1:0] n1, input logic [1:0] n2, input logic [1:0] n3);
+    logic [3:0] lp;      // legal flags by candidate position
+    logic [2:0] win;      // candidate 3 wins when no earlier one does
+    lp = {leg[n3], leg[n2], leg[n1], 1'b1};
+    // candidate k wins when legal, strictly below every earlier legal one and not above any later legal one
+    win[0] = lp[0] && (!lp[1] || le[0]) && (!lp[2] || le[1]) && (!lp[3] || le[2]);
+    win[1] = lp[1] && (!lp[0] || !le[0]) && (!lp[2] || le[3]) && (!lp[3] || le[4]);
+    win[2] = lp[2] && (!lp[0] || !le[1]) && (!lp[1] || !le[3]) && (!lp[3] || le[5]);
+    if (win[0]) return n0;
+    if (win[1]) return n1;
+    if (win[2]) return n2;
+    return n3;
+  endfunction
+
+  logic [5:0] le_y;
+  logic [5:0] le_c;
 
   always_ff @(posedge clk) begin
     if (!resetn) begin
-      d_st <= 2'd0; dec_done <= 1'b0; dec_luma_mode <= 2'd2; dec_chroma_mode <= 2'd0;
+      d_st <= 3'd0; dec_done <= 1'b0; dec_luma_mode <= 2'd2; dec_chroma_mode <= 2'd0;
       for (int m = 0; m < 4; m++) begin
         tot_y[m] <= '0; tot_c[m] <= '0;
       end
     end else begin
       dec_done <= 1'b0;
       case (d_st)
-        2'd0: if (dec_start) d_st <= 2'd1;
-        2'd1: begin
+        3'd0: if (dec_start) d_st <= 3'd1;
+        3'd1: begin
           // Luma by spec number: V 0 (cost 16), H 1 (16), DC 2 (0), Plane 3 (32).
           tot_y[0] <= 20'(acc_y[0]) + 20'd16;
           tot_y[1] <= 20'(acc_y[1]) + 20'd16;
@@ -515,16 +529,21 @@ module rtlnet_h264_ipred (
           tot_c[1] <= 20'(acc_c[1]) + 20'd16;
           tot_c[2] <= 20'(acc_c[2]) + 20'd16;
           tot_c[3] <= 20'(acc_c[3]) + 20'd32;
-          d_st <= 2'd2;
+          d_st <= 3'd2;
         end
-        2'd2: begin
-          dec_luma_mode   <= pick_best(tot_y[2], tot_y[0], tot_y[1], tot_y[3], leg_y, 2'd2, 2'd0, 2'd1, 2'd3);
-          dec_chroma_mode <= pick_best(tot_c[0], tot_c[2], tot_c[1], tot_c[3], leg_c, 2'd0, 2'd2, 2'd1, 2'd3);
-          d_st <= 2'd3;
+        3'd2: begin
+          le_y <= pair_le(tot_y[2], tot_y[0], tot_y[1], tot_y[3]);
+          le_c <= pair_le(tot_c[0], tot_c[2], tot_c[1], tot_c[3]);
+          d_st <= 3'd3;
+        end
+        3'd3: begin
+          dec_luma_mode   <= pick_best(le_y, leg_y, 2'd2, 2'd0, 2'd1, 2'd3);
+          dec_chroma_mode <= pick_best(le_c, leg_c, 2'd0, 2'd2, 2'd1, 2'd3);
+          d_st <= 3'd4;
         end
         default: begin
           dec_done <= 1'b1;
-          d_st     <= 2'd0;
+          d_st     <= 3'd0;
         end
       endcase
     end

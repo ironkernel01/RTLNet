@@ -15,15 +15,15 @@
 // Language: SystemVerilog-2012.
 // Revision: 11-09-2026
 //   * 11-09-2026: initial version.
-// Clocks: clk (memory-controller user clock, 100 MHz).
+// Clocks: clk (memory-controller user clock, 90 MHz).
 // -----------------------------------------------------------------------------
 module rtlnet_csi2_rx_pattern #(
   parameter int WORDS_720       = 640,    // words per line, 1280 pixels
   parameter int WORDS_1080      = 960,    // words per line, 1920 pixels
   parameter int LINES_720       = 720,
   parameter int LINES_1080      = 1080,
-  parameter int LINE_PERIOD_720 = 4444,   // clocks from line start to line start
-  parameter int LINE_PERIOD_1080 = 2962
+  parameter int LINE_PERIOD_720 = 4000,   // clocks from line start to line start
+  parameter int LINE_PERIOD_1080 = 2666
 )(
   // Core clock and its reset (synchronous, active low).
   input  logic        clk,

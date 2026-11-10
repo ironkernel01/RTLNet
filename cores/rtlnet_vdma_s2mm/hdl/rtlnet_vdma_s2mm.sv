@@ -34,6 +34,7 @@
 //   register crossing only).
 // -----------------------------------------------------------------------------
 module rtlnet_vdma_s2mm #(
+  parameter bit    AXIL_SYNC = 1'b0,   // 1: s_axi_aclk is clk (register window without a clock crossing)
   parameter int    ADDR_W          = 29,        // DDR3 byte address bits
   parameter int    ID_W            = 1,
   parameter int    MAX_BURST_BEATS = 16,        // 1..16
@@ -161,7 +162,7 @@ module rtlnet_vdma_s2mm #(
   logic [31:0] reg_rd_data;
 
   // Register clock -> clk crossing of whole AXI4-Lite transactions.
-  rtlnet_axil_cdc #(.ADDR_W(12)) u_axil_cdc (
+  rtlnet_axil_cdc #(.ADDR_W(12), .SYNC(AXIL_SYNC)) u_axil_cdc (
     .s_clk         (s_axi_aclk),
     .s_resetn      (s_axi_aresetn),
     .s_axi_awaddr  (s_axi_awaddr),

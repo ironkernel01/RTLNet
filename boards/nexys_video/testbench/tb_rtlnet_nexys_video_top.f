@@ -11,6 +11,7 @@
 -f cores/rtlnet_csi2_rx/hdl/rtlnet_csi2_rx.f
 -f cores/rtlnet_vdma_s2mm/hdl/rtlnet_vdma_s2mm.f
 -f cores/rtlnet_framebuf/hdl/rtlnet_framebuf.f
+-f cores/rtlnet_h264_enc/hdl/rtlnet_h264_enc.f
 microblaze/rtlnet_microblaze_sim_stub.sv
 boards/nexys_video/hdl/rtlnet_nexys_video_clk_beacon.sv
 boards/nexys_video/hdl/rtlnet_nexys_video_sysregs.sv

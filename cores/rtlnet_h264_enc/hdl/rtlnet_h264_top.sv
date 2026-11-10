@@ -25,6 +25,7 @@
 //   crossing only).
 // -----------------------------------------------------------------------------
 module rtlnet_h264_top #(
+  parameter bit    AXIL_SYNC = 1'b0,   // 1: s_axi_aclk is clk (register window without a clock crossing)
   parameter int    NUM_ENGINES = 2,      // slice-band engines, 1..4 (two carry 1080p30 at 100 MHz)
   parameter int    MAX_MB_W    = 120,    // widest picture in macroblocks (1920 / 16)
   parameter int    MAX_MB_H    = 68,     // tallest picture in macroblocks (1088 / 16)
@@ -234,7 +235,7 @@ module rtlnet_h264_top #(
     end
   end
 
-  rtlnet_axil_cdc #(.ADDR_W(12)) u_axil_cdc (
+  rtlnet_axil_cdc #(.ADDR_W(12), .SYNC(AXIL_SYNC)) u_axil_cdc (
     .s_clk(s_axi_aclk), .s_resetn(s_axi_aresetn),
     .s_axi_awaddr(s_axi_awaddr), .s_axi_awvalid(s_axi_awvalid), .s_axi_awready(s_axi_awready),
     .s_axi_wdata(s_axi_wdata), .s_axi_wstrb(s_axi_wstrb), .s_axi_wvalid(s_axi_wvalid), .s_axi_wready(s_axi_wready),

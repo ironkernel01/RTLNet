@@ -14,6 +14,7 @@
 #include <string.h>   /* memset */
 
 #include "host_platform.h"
+#include "rtlnet_video_udp.h"
 #include "rtlnet_lwip.h"
 #include "rtlnet_offload.h"
 #include "rtlnet_lwip_netif.h"
@@ -244,4 +245,39 @@ const char *rtlnet_tcp_iperf_dir_name(int dir)
 {
     (void)dir;
     return "unknown";
+}
+
+/* Video UDP output, harness: the datagrams are counted and discarded. */
+static uint32_t g_vudp_sent;
+static int      g_vudp_open;
+
+int video_udp_open(uint32_t ip, uint16_t port)
+{
+    (void)ip;
+    (void)port;
+    g_vudp_open = 1;
+    return 0;
+}
+
+void video_udp_close(void)
+{
+    g_vudp_open = 0;
+}
+
+int video_udp_send(const uint8_t *data, uint32_t len)
+{
+    (void)data;
+    (void)len;
+    if (!g_vudp_open) {
+        return -1;
+    }
+    g_vudp_sent++;
+    return 0;
+}
+
+void video_udp_counters(uint32_t *sent, uint32_t *dropped, uint32_t *retries)
+{
+    *sent = g_vudp_sent;
+    *dropped = 0u;
+    *retries = 0u;
 }

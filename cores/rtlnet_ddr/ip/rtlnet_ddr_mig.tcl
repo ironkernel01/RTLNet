@@ -10,11 +10,11 @@
 #     synthesized with the top) and returns the .xci path. Nothing generated
 #     is committed: the build tree <ip_dir> is recreated by every build.
 #   * rtlnet_ddr_mig.prj is the Digilent Nexys Video MIG project (board files
-#     A.0 1.2: MT41K256M16, 2500 ps / 400 MHz, 4:1, 100 MHz input, 16-bit,
-#     AXI, 512 MiB, pins and timing unchanged) with four edits, documented in
+#     A.0 1.2: MT41K256M16, retimed to 2778 ps / 360 MHz, 4:1, 16-bit, input 100 MHz in the .prj (the wizard turns it into the 102.857 MHz the board feeds from u_mmcm2),
+#     AXI, 512 MiB, pins unchanged) with five edits, documented in
 #     documentation/rtlnet_ddr.md section 4: module name rtlnet_ddr_mig,
-#     system clock "No Buffer", AXI data width 128 bits, AXI ID width 2 (the
-#     arbiter's memory-side ID, ID_W 1 + IDX_W 1).
+#     system clock "No Buffer", AXI data width 128 bits, AXI ID width 4 (the
+#     arbiter memory-side ID, ID_W 2 + IDX_W 2, four masters), UI extra clocks disabled (UIExtraClocks 0, ui_addn_clk_* unused).
 #   * The IP ports are the interface of hdl/rtlnet_ddr_amd.sv.
 # Language: Vivado Tcl (2026.1).
 # Revision: 11-09-2026

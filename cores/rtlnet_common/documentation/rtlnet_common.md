@@ -87,8 +87,9 @@ constraint script bounds; instance names `u_*_fifo` are part of that interface.
 | `rtlnet_reset_sync` | reset release | false path to the CLR/PRE pins of `pipe_reg[*]` |
 | `rtlnet_pulse_sync` | events (toggle) | via its `rtlnet_sync` |
 | `rtlnet_gray_sync` | counters | `set_max_delay -datapath_only` + `set_bus_skew` of one source period, `gray_src_reg` to `gray_dst_ff_reg[0]` |
-| `rtlnet_packet_fifo` | frames | as above per Gray direction |
+| `rtlnet_packet_fifo` | frames | as above per Gray direction ; the FIFO RAM data path (RAM cells to the read data registers) `set_max_delay -datapath_only` of the read period (needed once the two clocks differ in frequency; equal periods had hidden the missing constraint) |
 | `rtlnet_axil_cdc` | register transactions | toggles via `rtlnet_sync`; `req_*_hold` and `rsp_*_hold` bundles `set_max_delay -datapath_only` of the destination period |
+| `rtlnet_axil_cdc` with `SYNC` 1 | none | a pass-through when both sides run on one clock (no flop, nothing to constrain); `rtlnet_constrain_cdc.tcl` neither counts nor constrains such an instance. Cells of the crossing sit in generate block `g_cdc` |
 
 Event spacing limits: `rtlnet_pulse_sync` needs source events at least `STAGES + 1` destination periods apart;
 `rtlnet_gray_sync` needs the count to step by at most 1 per source clock.

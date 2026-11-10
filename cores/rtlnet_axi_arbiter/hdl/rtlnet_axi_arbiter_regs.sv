@@ -83,6 +83,48 @@ module rtlnet_axi_arbiter_regs #(
 
   import rtlnet_pkg::*;
 
+  // Event and capture inputs are registered once (Phase 2b-3 timing fix: the burst legality checks of the datapath feed
+  // these counters through long paths; one clock of delay does not change any count). The event bits reset to 0.
+  logic [NUM_MASTERS-1:0] in_ev_aw_burst, in_ev_ar_burst, in_ev_w_beat, in_ev_r_beat, in_ev_err_wr, in_ev_err_rd, in_ev_wait;
+  logic        in_cap_ev;
+  logic        in_cap_dir;
+  logic [2:0]  in_cap_master;
+  logic [63:0] in_cap_addr;
+  logic [7:0]  in_cap_len;
+  logic [2:0]  in_cap_size;
+  logic [1:0]  in_cap_burst;
+  logic [2:0]  in_cap_fail;
+
+  always_ff @(posedge clk) begin
+    if (!resetn) begin
+      in_ev_aw_burst <= '0;
+      in_ev_ar_burst <= '0;
+      in_ev_w_beat   <= '0;
+      in_ev_r_beat   <= '0;
+      in_ev_err_wr   <= '0;
+      in_ev_err_rd   <= '0;
+      in_ev_wait     <= '0;
+      in_cap_ev      <= 1'b0;
+    end else begin
+      in_ev_aw_burst <= ev_aw_burst;
+      in_ev_ar_burst <= ev_ar_burst;
+      in_ev_w_beat   <= ev_w_beat;
+      in_ev_r_beat   <= ev_r_beat;
+      in_ev_err_wr   <= ev_err_wr;
+      in_ev_err_rd   <= ev_err_rd;
+      in_ev_wait     <= ev_wait;
+      in_cap_ev      <= cap_ev;
+    end
+    in_cap_dir    <= cap_dir;
+    in_cap_master <= cap_master;
+    in_cap_addr   <= cap_addr;
+    in_cap_len    <= cap_len;
+    in_cap_size   <= cap_size;
+    in_cap_burst  <= cap_burst;
+    in_cap_fail   <= cap_fail;
+  end
+
+
   // ---------------------------------------------------------------------------
   // Register map: mirrors cores/rtlnet_axi_arbiter/driver/rtlnet_axi_arbiter.h.
   // ---------------------------------------------------------------------------
@@ -179,7 +221,7 @@ module rtlnet_axi_arbiter_regs #(
   always_ff @(posedge clk) begin
     if (!resetn) begin
       status_err <= 1'b0;
-    end else if ((|ev_err_wr) || (|ev_err_rd)) begin
+    end else if ((|in_ev_err_wr) || (|in_ev_err_rd)) begin
       status_err <= 1'b1;
     end else if (err_clear) begin
       status_err <= 1'b0;
@@ -198,15 +240,15 @@ module rtlnet_axi_arbiter_regs #(
       cap_size_q   <= '0;
       cap_burst_q  <= '0;
       cap_fail_q   <= '0;
-    end else if (cap_ev && (!cap_valid || cap_clear)) begin
+    end else if (in_cap_ev && (!cap_valid || cap_clear)) begin
       cap_valid    <= 1'b1;
-      cap_dir_q    <= cap_dir;
-      cap_master_q <= cap_master;
-      cap_addr_q   <= cap_addr;
-      cap_len_q    <= cap_len;
-      cap_size_q   <= cap_size;
-      cap_burst_q  <= cap_burst;
-      cap_fail_q   <= cap_fail;
+      cap_dir_q    <= in_cap_dir;
+      cap_master_q <= in_cap_master;
+      cap_addr_q   <= in_cap_addr;
+      cap_len_q    <= in_cap_len;
+      cap_size_q   <= in_cap_size;
+      cap_burst_q  <= in_cap_burst;
+      cap_fail_q   <= in_cap_fail;
     end else if (cap_clear) begin
       cap_valid    <= 1'b0;
       cap_dir_q    <= 1'b0;
@@ -241,14 +283,14 @@ module rtlnet_axi_arbiter_regs #(
         cnt_err[i]  <= '0;
         cnt_wait[i] <= '0;
       end else begin
-        if (ev_aw_burst[i]) cnt_aw[i]   <= cnt_aw[i] + 32'd1;
-        if (ev_ar_burst[i]) cnt_ar[i]   <= cnt_ar[i] + 32'd1;
-        if (ev_w_beat[i])   cnt_w[i]    <= cnt_w[i] + 32'd1;
-        if (ev_r_beat[i])   cnt_r[i]    <= cnt_r[i] + 32'd1;
-        if (ev_err_wr[i] || ev_err_rd[i]) begin
-          cnt_err[i] <= cnt_err[i] + {31'd0, ev_err_wr[i]} + {31'd0, ev_err_rd[i]};
+        if (in_ev_aw_burst[i]) cnt_aw[i]   <= cnt_aw[i] + 32'd1;
+        if (in_ev_ar_burst[i]) cnt_ar[i]   <= cnt_ar[i] + 32'd1;
+        if (in_ev_w_beat[i])   cnt_w[i]    <= cnt_w[i] + 32'd1;
+        if (in_ev_r_beat[i])   cnt_r[i]    <= cnt_r[i] + 32'd1;
+        if (in_ev_err_wr[i] || in_ev_err_rd[i]) begin
+          cnt_err[i] <= cnt_err[i] + {31'd0, in_ev_err_wr[i]} + {31'd0, in_ev_err_rd[i]};
         end
-        if (ev_wait[i])     cnt_wait[i] <= cnt_wait[i] + 32'd1;
+        if (in_ev_wait[i])     cnt_wait[i] <= cnt_wait[i] + 32'd1;
       end
     end
   end

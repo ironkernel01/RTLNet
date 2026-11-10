@@ -50,6 +50,7 @@
  *  11-09-2026  MenuBuilder AI / Steve Spano    Boot banner names the image (LMB or DDR3)
  *  11-09-2026  MenuBuilder AI / Steve Spano    show ddr: wrap mask and the arbiter's first-illegal-burst capture
  *  11-09-2026  MenuBuilder AI / Steve Spano    show version: Image line (LMB or DDR3)
+ *  11-09-2026  MenuBuilder AI / Steve Spano    H.264 stream (Phase 2b-3): stream h264, stream stop, show stream, encoder qp, show encoder
  *  11-09-2026  MenuBuilder AI / Steve Spano    Video (Phase 1): show camera, show framebuffer, camera mode|source|rate, framebuffer crc
  * ===========================================================================
  */
@@ -70,6 +71,7 @@
 #include "rtlnet_eth_protocol.h"
 #include "rtlnet_fbcrc.h"
 #include "rtlnet_framebuf.h"
+#include "rtlnet_h264_enc.h"
 #include "rtlnet_fmt.h"
 #include "rtlnet_icmp.h"
 #include "rtlnet_iperf.h"
@@ -84,6 +86,8 @@
 #include "rtlnet_udp_echo.h"
 #include "rtlnet_udp_socket.h"
 #include "rtlnet_vdma_s2mm.h"
+#include "rtlnet_venc.h"
+#include "rtlnet_video_udp.h"
 
 #define CLI_LED_FIRST_USER  2u
 #define CLI_LED_LAST        7u
@@ -113,6 +117,7 @@ static const cli_core_t g_core_echo  = { "UDP echo",   RTLNET_PLAT_ECHO_BASE,  R
 static const cli_core_t g_core_csi2  = { "rtlnet_csi2_rx",   RTLNET_PLAT_CSI2_BASE, RTLNET_ID_CSI2 };
 static const cli_core_t g_core_s2mm  = { "rtlnet_vdma_s2mm", RTLNET_PLAT_S2MM_BASE, RTLNET_ID_S2MM };
 static const cli_core_t g_core_fb    = { "rtlnet_framebuf",  RTLNET_PLAT_FB_BASE,   RTLNET_ID_FB };
+static const cli_core_t g_core_h264  = { "rtlnet_h264_enc",  RTLNET_PLAT_H264_BASE, RTLNET_ID_H264 };
 
 /* ------------------------------------------------------------------------- */
 /* Helpers                                                                   */
@@ -1453,6 +1458,7 @@ int cli_clear_counters(const MenuCommandContext *ctx)
     }
     if (rtlnet_framebuf_probe(RTLNET_PLAT_FB_BASE, NULL) == 0) {
         rtlnet_framebuf_clear(RTLNET_PLAT_FB_BASE);
+        venc_clear_counters();
     }
     rtlnet_offload_reset_stats();
     rtlnet_lwip_clear_counters();
@@ -3105,7 +3111,7 @@ static void cli_print_rate(uint32_t x100)
  */
 static void cli_print_arb_master(uint32_t m)
 {
-    static const char *const names[] = { "CPU caches", "video write DMA" };
+    static const char *const names[] = { "CPU caches", "video write DMA", "encoder engine 0", "encoder engine 1" };
     rtlnet_axi_arbiter_counters_t c;
     if (rtlnet_axi_arbiter_read_counters(RTLNET_PLAT_ARB_BASE, m, &c) != 0) {
         return;
@@ -3253,7 +3259,7 @@ int cli_ddr_test(const MenuCommandContext *ctx)
 /* Video: camera source, frame buffer                                        */
 /* ------------------------------------------------------------------------- */
 
-#define CLI_VIDEO_FPS_X100     10000000000ull   /* RTLNET_CSI2_UI_CLK_HZ * 100: fps times 100 from a period */
+#define CLI_VIDEO_FPS_X100     9000000000ull    /* RTLNET_CSI2_UI_CLK_HZ * 100: fps times 100 from a period */
 #define CLI_VIDEO_PCT          100u
 
 static const char *const g_mode_name[RTLNET_CSI2_MODE_COUNT] = { "720p30", "1080p30" };
@@ -3512,5 +3518,179 @@ int cli_framebuffer_crc(const MenuCommandContext *ctx)
     fmt_printf("Framebuffer CRC-32 : 0x%08X (frame %u, slot %u, %ux%u, %s, %u bytes)\n", (unsigned)r.crc,
                (unsigned)r.frame.frame, (unsigned)r.slot, (unsigned)r.frame.width, (unsigned)r.frame.height,
                r.frame.pattern ? "pattern" : "camera", (unsigned)r.bytes);
+    return 0;
+}
+
+/* ------------------------------------------------------------------------- */
+/* H.264 stream (Phase 2b-3)                                                  */
+/* ------------------------------------------------------------------------- */
+
+/**
+ * @brief The configured encoder QP.
+ * @return QP.
+ */
+static uint32_t qp_now(void)
+{
+    venc_status_t s;
+    venc_get_status(&s);
+    return s.qp;
+}
+
+/**
+ * @brief STREAM H264 [IP] [PORT]: start the H.264 MPEG-TS stream over UDP.
+ * @param ctx argv[0] = host IPv4 address, argv[1] = UDP port.
+ * @return 0 when the stream started, -1 for a bad argument, an absent core or a UDP failure.
+ */
+int cli_stream_h264(const MenuCommandContext *ctx)
+{
+    uint32_t ip;
+    uint32_t port;
+    int rc;
+    if (cli_parse_ipv4(ctx->argv[0], &ip) != 0) {
+        return cli_bad_value("IPv4 address", ctx->argv[0]);
+    }
+    if (cli_parse_u32(ctx->argv[1], &port) != 0 || port == 0u || port > CLI_UDP_PORT_MAX) {
+        return cli_bad_value("UDP port (1..65535)", ctx->argv[1]);
+    }
+    if (!cli_core_check(&g_core_h264) || !cli_core_check(&g_core_fb)) {
+        return -1;
+    }
+    rc = venc_start(ip, (uint16_t)port);
+    if (rc == VENC_ERR_BUSY) {
+        fmt_printf("%% A stream is already running (stream stop first)\n");
+        return -1;
+    }
+    if (rc == VENC_ERR_UDP) {
+        fmt_printf("%% The UDP socket could not be opened (lwIP not running: link or DHCP not up)\n");
+        return -1;
+    }
+    if (rc != VENC_OK) {
+        fmt_printf("%% The encoder or the frame buffer is not usable\n");
+        return -1;
+    }
+    fmt_printf("Streaming H.264 MPEG-TS to %u.%u.%u.%u:%u (VLC: udp://@:%u), QP %u\n", (unsigned)(ip >> 24),
+               (unsigned)((ip >> 16) & 0xFFu), (unsigned)((ip >> 8) & 0xFFu), (unsigned)(ip & 0xFFu), (unsigned)port,
+               (unsigned)port, (unsigned)qp_now());
+    return 0;
+}
+
+/**
+ * @brief STREAM STOP: stop the H.264 stream.
+ * @param ctx Unused.
+ * @return 0.
+ */
+int cli_stream_stop(const MenuCommandContext *ctx)
+{
+    venc_status_t st;
+    (void)ctx;
+    venc_get_status(&st);
+    if (!st.running) {
+        fmt_printf("No stream is running\n");
+        return 0;
+    }
+    venc_stop();
+    fmt_printf("Stream stopped after %u pictures\n", (unsigned)st.pictures);
+    return 0;
+}
+
+/**
+ * @brief ENCODER QP [QP]: set the fixed quantizer.
+ * @param ctx argv[0] = QP 0..51.
+ * @return 0, or -1 for a value outside 0..51.
+ */
+int cli_encoder_qp(const MenuCommandContext *ctx)
+{
+    uint32_t qp;
+    if (cli_parse_u32(ctx->argv[0], &qp) != 0 || venc_set_qp(qp) != VENC_OK) {
+        return cli_bad_value("QP (0..51)", ctx->argv[0]);
+    }
+    if (qp < RTLNET_H264_QP_MIN_REALTIME) {
+        fmt_printf("QP %u set; the driver writes %u (real-time floor), effective at the next picture\n", (unsigned)qp,
+                   (unsigned)RTLNET_H264_QP_MIN_REALTIME);
+    } else {
+        fmt_printf("QP %u, effective at the next picture\n", (unsigned)qp);
+    }
+    return 0;
+}
+
+/**
+ * @brief SHOW STREAM: stream state, counts, bit rate, dropped pictures, TS packets and the mux CPU load.
+ * @param ctx Unused.
+ * @return 0.
+ */
+int cli_show_stream(const MenuCommandContext *ctx)
+{
+    venc_status_t s;
+    uint32_t sent;
+    uint32_t dropped;
+    uint32_t retries;
+    (void)ctx;
+    venc_get_status(&s);
+    video_udp_counters(&sent, &dropped, &retries);
+    fmt_printf("H.264 stream\n");
+    if (s.running) {
+        fmt_printf("  State           : running to %u.%u.%u.%u:%u\n", (unsigned)(s.dst_ip >> 24),
+                   (unsigned)((s.dst_ip >> 16) & 0xFFu), (unsigned)((s.dst_ip >> 8) & 0xFFu), (unsigned)(s.dst_ip & 0xFFu),
+                   (unsigned)s.dst_port);
+    } else {
+        fmt_printf("  State           : stopped\n");
+    }
+    fmt_printf("  Video           : %ux%u (mode %s), QP %u (written %u)\n", (unsigned)s.width, (unsigned)s.height,
+               s.mode == RTLNET_H264_MODE_1080P30 ? "1080p30" : "720p30", (unsigned)s.qp, (unsigned)s.qp_used);
+    fmt_printf("  Pictures        : %u sent, %u dropped (frame numbers skipped), last frame %u, last %u bytes\n",
+               (unsigned)s.pictures, (unsigned)s.dropped_pictures, (unsigned)s.last_frame, (unsigned)s.last_picture_bytes);
+    fmt_printf("  Bytes           : %u ES, %u TS, bit rate %u kb/s\n", (unsigned)s.es_bytes, (unsigned)s.ts_bytes,
+               (unsigned)(s.bit_rate_bps / 1000u));
+    fmt_printf("  TS packets      : %u in %u datagrams, %u refused by UDP (UDP sent %u, dropped %u, retries %u)\n",
+               (unsigned)s.ts_packets, (unsigned)s.datagrams, (unsigned)s.sink_errors, (unsigned)sent, (unsigned)dropped,
+               (unsigned)retries);
+    fmt_printf("  CPU load        : TS mux %u.%u %%, encoder handling and mux %u.%u %% (last second); mux time last %u us, max %u us\n",
+               (unsigned)(s.mux_load_permille / 10u), (unsigned)(s.mux_load_permille % 10u),
+               (unsigned)(s.venc_load_permille / 10u), (unsigned)(s.venc_load_permille % 10u), (unsigned)s.last_mux_us,
+               (unsigned)s.max_mux_us);
+    fmt_printf("  Errors          : %u; frame buffer published %u, dropped %u\n", (unsigned)s.errors,
+               (unsigned)s.fb_published, (unsigned)s.fb_dropped);
+    return 0;
+}
+
+/**
+ * @brief SHOW ENCODER: identity, mode, QP, status and the per-engine statistics registers.
+ * @param ctx Unused.
+ * @return 0.
+ */
+int cli_show_encoder(const MenuCommandContext *ctx)
+{
+    rtlnet_h264_enc_caps_t caps;
+    venc_status_t s;
+    uint32_t status;
+    (void)ctx;
+    if (!cli_core_check(&g_core_h264)) {
+        return 0;
+    }
+    if (rtlnet_h264_enc_probe(RTLNET_PLAT_H264_BASE, &caps) != 0) {
+        fmt_printf("%% the encoder answers with an unexpected VERSION\n");
+        return 0;
+    }
+    venc_get_status(&s);
+    status = rtlnet_h264_enc_status(RTLNET_PLAT_H264_BASE);
+    fmt_printf("H.264 encoder\n");
+    cli_print_core_line(&g_core_h264, board_debug_read32(RTLNET_PLAT_H264_BASE + RTLNET_REG_VERSION));
+    fmt_printf("  Build           : %u engines, up to %u x %u macroblocks\n", (unsigned)caps.num_engines,
+               (unsigned)caps.max_mb_w, (unsigned)caps.max_mb_h);
+    fmt_printf("  QP              : %u configured, %u written; STATUS 0x%08X (busy %u, done %u, error %u, ring stall %u), ERR_CODE %u\n",
+               (unsigned)s.qp, (unsigned)s.qp_used, (unsigned)status, (unsigned)(status & 1u),
+               (unsigned)((status >> 1) & 1u), (unsigned)((status >> 2) & 1u), (unsigned)((status >> 3) & 1u),
+               (unsigned)board_debug_read32(RTLNET_PLAT_H264_BASE + RTLNET_H264_REG_ERR_CODE));
+    fmt_printf("  Pictures        : %u coded (PIC_COUNT), %u slices\n",
+               (unsigned)board_debug_read32(RTLNET_PLAT_H264_BASE + RTLNET_H264_REG_PIC_COUNT),
+               (unsigned)board_debug_read32(RTLNET_PLAT_H264_BASE + RTLNET_H264_REG_SLICE_COUNT));
+    for (uint32_t e = 0; e < caps.num_engines; e++) {
+        rtlnet_h264_enc_stats_t t;
+        rtlnet_h264_enc_read_stats(RTLNET_PLAT_H264_BASE + 0x100u * e, &t);
+        fmt_printf("  Engine %u        : %u macroblocks, picture %u cycles (%u per macroblock), last interval %u, max %u;"
+                   " busy cycles read %u coder %u write %u\n",
+                   (unsigned)e, (unsigned)t.mb_count, (unsigned)t.pic_cyc, (unsigned)(t.mb_count ? t.pic_cyc / t.mb_count : 0u),
+                   (unsigned)t.cyc_last, (unsigned)t.cyc_max, (unsigned)t.rd_cyc, (unsigned)t.pk_cyc, (unsigned)t.wr_cyc);
+    }
     return 0;
 }

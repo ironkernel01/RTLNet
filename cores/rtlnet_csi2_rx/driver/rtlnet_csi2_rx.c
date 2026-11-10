@@ -117,7 +117,7 @@ int rtlnet_csi2_rx_set_frame_period(uintptr_t base, uint32_t period)
  * rtlnet_csi2_rx_set_rate_fps -- set the frame rate in whole frames per second
  * Steps:
  *   1. Reject 0 and anything above RTLNET_CSI2_FPS_MAX (the period would fall below the mode minimum).
- *   2. Write RTLNET_CSI2_UI_CLK_HZ / fps as the period; 30 gives 3,333,333, the reset value.
+ *   2. Write RTLNET_CSI2_UI_CLK_HZ / fps as the period; 30 gives 3,000,000, the reset value.
  * Returns: RTLNET_CSI2_OK, ERR_ARG, or ERR_REJECTED.
  */
 int rtlnet_csi2_rx_set_rate_fps(uintptr_t base, uint32_t fps)

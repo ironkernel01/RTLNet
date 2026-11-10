@@ -15,6 +15,7 @@
 #include "rtlnet_lwip.h"
 #include "rtlnet_netmgr.h"
 #include "rtlnet_platform.h"
+#include "rtlnet_venc.h"
 
 int main(void);
 
@@ -32,6 +33,7 @@ int main(void);
 int main(void)
 {
     plat_init();
+    venc_init();
     cli_start();
     for (;;) {
         int c = plat_console_getc();
@@ -41,5 +43,6 @@ int main(void)
         plat_poll();
         rtlnet_lwip_poll();
         netmgr_poll();
+        venc_poll();
     }
 }

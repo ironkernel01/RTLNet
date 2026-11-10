@@ -642,7 +642,7 @@ module tb_rtlnet_h264_xform;
       ref_dc_luma_q(wd, qp, rdc);
       ref_dc_luma_dec(rdc, qp, exp_dcy);
       run_dcl(qp, wv);
-      tb_check(dl_lat == 30, $sformatf("%s dcq_luma latency %0d", what, dl_lat));
+      tb_check(dl_lat == 34, $sformatf("%s dcq_luma latency %0d", what, dl_lat));
       for (int i = 0; i < 16; i++) begin
         tb_check(int'($signed(dl_lvl[12*i +: 12])) == rdc[i], $sformatf("%s dcq_luma qp %0d level %0d: %0d, expected %0d", what, qp, i, int'($signed(dl_lvl[12*i +: 12])), rdc[i]));
         tb_check(int'($signed(dl_dc[20*i +: 20])) == exp_dcy[i], $sformatf("%s dcq_luma qp %0d dcY %0d: %0d, expected %0d", what, qp, i, int'($signed(dl_dc[20*i +: 20])), exp_dcy[i]));

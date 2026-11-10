@@ -87,14 +87,22 @@ module tb_rtlnet_axil;
       logic          arvalid_i, arready_i, rvalid_i, rready_i;
 
       if (gw == 0) begin : g_direct
+        // Window 0: the master side runs on the CPU clock, so rtlnet_axil_cdc is used with SYNC = 1 (pass-through, no crossing).
         assign wclk = cpu_clk; assign wresetn = cpu_resetn;
-        assign awaddr_i  = m_awaddr[gw*32 +: AW]; assign awvalid_i = m_awvalid[gw]; assign m_awready[gw] = awready_i;
-        assign wdata_i   = m_wdata[gw*32 +: 32];  assign wstrb_i   = m_wstrb[gw*4 +: 4];
-        assign wvalid_i  = m_wvalid[gw];          assign m_wready[gw]  = wready_i;
-        assign m_bresp[gw*2 +: 2] = bresp_i;      assign m_bvalid[gw]  = bvalid_i; assign bready_i = m_bready[gw];
-        assign araddr_i  = m_araddr[gw*32 +: AW]; assign arvalid_i = m_arvalid[gw]; assign m_arready[gw] = arready_i;
-        assign m_rdata[gw*32 +: 32] = rdata_i;    assign m_rresp[gw*2 +: 2] = rresp_i;
-        assign m_rvalid[gw] = rvalid_i;           assign rready_i = m_rready[gw];
+        rtlnet_axil_cdc #(.ADDR_W(AW), .SYNC(1'b1)) u_cdc_sync (
+          .s_clk(cpu_clk), .s_resetn(cpu_resetn),
+          .s_axi_awaddr(m_awaddr[gw*32 +: AW]), .s_axi_awvalid(m_awvalid[gw]), .s_axi_awready(m_awready[gw]),
+          .s_axi_wdata(m_wdata[gw*32 +: 32]), .s_axi_wstrb(m_wstrb[gw*4 +: 4]), .s_axi_wvalid(m_wvalid[gw]),
+          .s_axi_wready(m_wready[gw]), .s_axi_bresp(m_bresp[gw*2 +: 2]), .s_axi_bvalid(m_bvalid[gw]),
+          .s_axi_bready(m_bready[gw]), .s_axi_araddr(m_araddr[gw*32 +: AW]), .s_axi_arvalid(m_arvalid[gw]),
+          .s_axi_arready(m_arready[gw]), .s_axi_rdata(m_rdata[gw*32 +: 32]), .s_axi_rresp(m_rresp[gw*2 +: 2]),
+          .s_axi_rvalid(m_rvalid[gw]), .s_axi_rready(m_rready[gw]),
+          .m_clk(wclk), .m_resetn(wresetn),
+          .m_axi_awaddr(awaddr_i), .m_axi_awvalid(awvalid_i), .m_axi_awready(awready_i),
+          .m_axi_wdata(wdata_i), .m_axi_wstrb(wstrb_i), .m_axi_wvalid(wvalid_i), .m_axi_wready(wready_i),
+          .m_axi_bresp(bresp_i), .m_axi_bvalid(bvalid_i), .m_axi_bready(bready_i),
+          .m_axi_araddr(araddr_i), .m_axi_arvalid(arvalid_i), .m_axi_arready(arready_i),
+          .m_axi_rdata(rdata_i), .m_axi_rresp(rresp_i), .m_axi_rvalid(rvalid_i), .m_axi_rready(rready_i));
       end else begin : g_cdc
         assign wclk    = (gw == 1) ? clk_b : clk_c;
         assign wresetn = (gw == 1) ? b_resetn : c_resetn;

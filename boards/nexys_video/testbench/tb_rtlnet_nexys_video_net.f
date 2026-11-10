@@ -15,6 +15,7 @@
 -f cores/rtlnet_csi2_rx/hdl/rtlnet_csi2_rx.f
 -f cores/rtlnet_vdma_s2mm/hdl/rtlnet_vdma_s2mm.f
 -f cores/rtlnet_framebuf/hdl/rtlnet_framebuf.f
+-f cores/rtlnet_h264_enc/hdl/rtlnet_h264_enc.f
 cores/rtlnet_eth_protocol/testbench/rtlnet_tb_eth_frames_pkg.sv
 cores/rtlnet_eth_mac/testbench/rtlnet_rtl8211e_model.sv
 microblaze/rtlnet_microblaze_sim_stub.sv

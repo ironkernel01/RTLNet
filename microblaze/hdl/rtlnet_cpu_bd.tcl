@@ -24,7 +24,7 @@
 #   * DDR3 path: M_AXI_IC (128-bit, full 16-byte line per beat) and M_AXI_DC
 #     (32-bit, 4-beat line fill, write-through stores) join in the SmartConnect
 #     sc_ddr; its master M00_AXI is the exported 128-bit AXI4 port M_AXI_DDR on
-#     the clock clk (cpu_clk, 100 MHz) with the CPU reset; the clock crossing to the
+#     the clock clk (cpu_clk, 90 MHz) with the CPU reset; the clock crossing to the
 #     memory controller is outside the block design (rtlnet_axi_cdc in the board
 #     top). The interface has no ID signals. Cache lines of 16 bytes
 #     never cross a 4 KiB boundary.
@@ -32,8 +32,8 @@
 #     INTC, RTLNet window, DMA registers, memory path) and axi_mem
 #     (3 slaves: the memory path from axi_periph, DMA MM2S, DMA S2MM; one
 #     master: the AXI BRAM controller, 64-bit).
-#   * Clock and reset come from outside: port `clk` (cpu_clk, 100 MHz from the
-#     board MMCM) and port `resetn` (active low, already synchronous to clk).
+#   * Clock and reset come from outside: port `clk` (cpu_clk, the 90 MHz ui_clk of
+#     the DDR3 controller) and port `resetn` (active low, already synchronous to clk).
 #     No clocking wizard inside; proc_sys_reset sequences the processor, LMB
 #     and peripheral resets.
 #   * Interrupts: INTC inputs 0..7 = port irq[7:0] (level, active high),
@@ -66,11 +66,11 @@
 #   * 11-09-2026: JTAG UART removed (C_USE_UART 0, no MDM AXI slave, 0x4140_0000
 #     unmapped); axi_periph has 6 masters; microblaze_riscv dict one CONFIG per line.
 #   * 11-09-2026: C_PC_WIDTH 32 (the propagated 19 bits confine execution to the LMB).
-# Clocks: clk (cpu_clk 100 MHz) for every cell.
+# Clocks: clk (cpu_clk 90 MHz) for every cell.
 # -----------------------------------------------------------------------------
 
 namespace eval rtlnet_cpu_bd {
-  variable CPU_CLK_HZ     100000000
+  variable CPU_CLK_HZ     90000000
   variable LMB_SIZE       512K
   variable UART_BAUD      115200
   variable RTLNET_BASE    0x44A00000

@@ -10,7 +10,7 @@
 //      limited-range Y/Cb/Cr, word = {Cr, Y1, Cb, Y0}), start of frame on the first word only, end of line on the last word
 //      of each of H lines, W/2 words per line; the sideband (width, height, frame number, timestamp, source flag) is stable
 //      over the frame; frame numbers count 1, 2, 3 ... with FRAME_COUNT.
-//   3. Timing (TB_REAL = 1: the localparams of the real core, 3,333,333 clocks per frame, line periods 4,444 and 2,962
+//   3. Timing (TB_REAL = 1: the localparams of the real core, 3,000,000 clocks per frame, line periods 4,000 and 2,666
 //      clocks): frame start to frame start equals FRAME_PERIOD, line start to line start equals the line period.
 //   4. FRAME_PERIOD rejection: a value below the mode minimum is rejected (STATUS.PERIOD_ERR, register unchanged), the minimum
 //      itself is accepted; a mode write whose minimum exceeds the present FRAME_PERIOD is rejected; the flags clear by writing 1.
@@ -46,11 +46,11 @@ module tb_rtlnet_csi2_rx;
   localparam bit GAP  = (`TB_GAP != 0);
 
   // Core parameters: the real values, or shortened line periods for a fast bench (a line still takes 640 / 960 clocks).
-  localparam int LINE_720   = REAL ? 4444 : (GAP ? 900 : 660);
-  localparam int LINE_1080  = REAL ? 2962 : (GAP ? 1300 : 980);
+  localparam int LINE_720   = REAL ? 4000 : (GAP ? 900 : 660);
+  localparam int LINE_1080  = REAL ? 2666 : (GAP ? 1300 : 980);
   localparam int MIN_720    = 750 * LINE_720;
   localparam int MIN_1080   = 1125 * LINE_1080;
-  localparam int PERIOD_RST = REAL ? 3_333_333 : (GAP ? 1_600_000 : 1_200_000);
+  localparam int PERIOD_RST = REAL ? 3_000_000 : (GAP ? 1_600_000 : 1_200_000);
   localparam int CAM_GAP    = GAP ? 1000 : 700;   // camera line start to line start
 
   logic clk     = 1'b0;
@@ -395,40 +395,40 @@ module tb_rtlnet_csi2_rx;
     reg_read(R_STATUS, v); tb_check((v & 32'h3F) == ST_PATTERN, $sformatf("STATUS 0x%0h at reset: pattern source, no flags", v));
 
     if (REAL) begin
-      // The real core: 3,333,333 clocks per frame, line periods 4,444 and 2,962, minimums 3,333,000 and 3,332,250.
-      spacing_expect = 3_333_333;
+      // The real core: 3,000,000 clocks per frame, line periods 4,000 and 2,666, minimums 3,000,000 and 2,999,250.
+      spacing_expect = 3_000_000;
       spacing_skip   = 1;
       line_check     = 1'b1;
       wait_frames(3);
       reg_read(R_COUNT, v); tb_check(int'(v) >= 3, "FRAME_COUNT after three frames");
       reg_read(R_ACTIVE, v); tb_check(v[1:0] == 2'd0, "ACTIVE reports 720p30");
       // Rejections at the real minimums.
-      reg_write(R_PERIOD, 32'd3_332_999);
+      reg_write(R_PERIOD, 32'd2_999_999);
       reg_read(R_STATUS, v); tb_check((v & ST_PERIOD_ERR) != 0, "a period below the 720p30 minimum was accepted");
-      reg_read(R_PERIOD, v); tb_check(v == 32'd3_333_333, "FRAME_PERIOD changed by a rejected write");
+      reg_read(R_PERIOD, v); tb_check(v == 32'd3_000_000, "FRAME_PERIOD changed by a rejected write");
       reg_write(R_STATUS, ST_PERIOD_ERR);
       reg_read(R_STATUS, v); tb_check((v & ST_PERIOD_ERR) == 0, "PERIOD_ERR did not clear");
-      reg_write(R_PERIOD, 32'd3_333_000);
+      reg_write(R_PERIOD, 32'd3_000_000);
       reg_read(R_STATUS, v); tb_check((v & ST_PERIOD_ERR) == 0, "the minimum period was rejected");
-      reg_read(R_PERIOD, v); tb_check(v == 32'd3_333_000, "the minimum period was not stored");
-      // A mode write whose minimum (1080p30: 3,332,250) is below the period is accepted; then the minimum itself.
-      reg_write(R_PERIOD, 32'd3_333_333);
+      reg_read(R_PERIOD, v); tb_check(v == 32'd3_000_000, "the minimum period was not stored");
+      // A mode write whose minimum (1080p30: 2,999,250) is below the period is accepted; then the minimum itself.
+      reg_write(R_PERIOD, 32'd3_000_000);
       reg_write(R_MODE, 32'd1);
       reg_read(R_STATUS, v); tb_check((v & (ST_MODE_ERR | ST_PERIOD_ERR)) == 0, "1080p30 rejected at the reset period");
-      spacing_expect = 3_333_333; spacing_skip = 0; mode_expect_next = -1;
+      spacing_expect = 3_000_000; spacing_skip = 0; mode_expect_next = -1;
       wait_frames(3);
       reg_read(R_ACTIVE, v); tb_check(v[1:0] == 2'd1, "ACTIVE reports 1080p30");
-      reg_write(R_PERIOD, 32'd3_332_249);
+      reg_write(R_PERIOD, 32'd2_999_249);
       reg_read(R_STATUS, v); tb_check((v & ST_PERIOD_ERR) != 0, "a period below the 1080p30 minimum was accepted");
       reg_write(R_STATUS, ST_PERIOD_ERR);
-      reg_write(R_PERIOD, 32'd3_332_250);
+      reg_write(R_PERIOD, 32'd2_999_250);
       reg_read(R_STATUS, v); tb_check((v & ST_PERIOD_ERR) == 0, "the 1080p30 minimum was rejected");
       // Back to 720p30 with a period below the 720p30 minimum is rejected.
       reg_write(R_MODE, 32'd0);
       reg_read(R_STATUS, v); tb_check((v & ST_PERIOD_ERR) != 0, "720p30 accepted with a period below its minimum");
       reg_read(R_MODE, v); tb_check(v == 32'd1, "VIDEO_MODE changed by a rejected write");
       reg_write(R_STATUS, ST_PERIOD_ERR);
-      spacing_expect = 3_332_250; spacing_skip = 1;
+      spacing_expect = 2_999_250; spacing_skip = 1;
       wait_frames(3);
       tb_check(frames_pat_complete >= 6, $sformatf("only %0d complete pattern frames", frames_pat_complete));
       tb_check(frames_1080 >= 3 && frames_720 >= 2, "both modes were not seen");

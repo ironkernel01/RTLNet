@@ -5,7 +5,7 @@
 //   DDR3 pins. Selected by rtlnet_ddr when RTLNET_DDR_SIM is defined (board
 //   benches); never synthesized.
 // Overview:
-//   * ui_clk is sys_clk (the bench clock); ui_resetn releases RELEASE_CLOCKS
+//   * ui_clk is the model's own 90 MHz clock; ui_resetn releases RELEASE_CLOCKS
 //     ui clocks after sys_rstn is released and is asserted with sys_rstn (sampled on ui_clk).
 //   * init_calib_complete rises CALIB_CLOCKS ui clocks after ui_resetn is
 //     released (the real controller needs about 100 us) and falls with sys_rstn.
@@ -18,7 +18,7 @@
 // Language: SystemVerilog-2012 (simulation only).
 // Revision: 11-09-2026
 //   * 11-09-2026: initial version.
-// Clocks: sys_clk (= ui_clk); ref_clk unused.
+// Clocks: ui_clk (generated here, 90 MHz); sys_clk and ref_clk unused.
 // -----------------------------------------------------------------------------
 `timescale 1ns / 1ps
 
@@ -27,7 +27,8 @@ module rtlnet_ddr_sim #(
   parameter int DATA_W         = 128,
   parameter int ID_W           = 2,
   parameter int RELEASE_CLOCKS = 8,
-  parameter int CALIB_CLOCKS   = 2000
+  parameter int CALIB_CLOCKS   = 2000,
+  parameter real UI_HALF_NS    = 5.5555    // half period of ui_clk: 90 MHz
 )(
   // Controller clocks and reset (the model uses sys_clk only).
   input  logic                sys_clk,
@@ -100,10 +101,13 @@ module rtlnet_ddr_sim #(
   logic [$clog2(CALIB_CLOCKS+1)-1:0]   cal_cnt;
   logic                                mem_resetn;
 
-  assign ui_clk = sys_clk;
+  // The model's own 90 MHz user clock (the controller at a 2778 ps memory clock, 4:1): sys_clk is not the user clock here.
+  logic ui_clk_r = 1'b0;
+  always #(UI_HALF_NS) ui_clk_r = ~ui_clk_r;
+  assign ui_clk = ui_clk_r;
 
   // Reset release and calibration delay; sys_rstn is the one reset of the model.
-  always_ff @(posedge sys_clk) begin
+  always_ff @(posedge ui_clk) begin
     if (!sys_rstn) begin
       rel_cnt             <= '0;
       cal_cnt             <= '0;
@@ -133,7 +137,7 @@ module rtlnet_ddr_sim #(
     .ID_W         (ID_W),
     .READ_LATENCY (20)
   ) u_mem (
-    .clk     (sys_clk),
+    .clk     (ui_clk),
     .resetn  (mem_resetn),
     .awid    (s_axi_awid),
     .awaddr  (s_axi_awaddr),

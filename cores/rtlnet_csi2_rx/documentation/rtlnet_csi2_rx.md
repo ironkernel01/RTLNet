@@ -27,7 +27,7 @@ Contents: 1 interface, 2 frame timing, 3 pattern, 4 source switch, 5 registers, 
 
 | Group | Ports | Domain | Rule |
 |---|---|---|---|
-| clock, reset | `clk`, `resetn`, `s_axi_aclk`, `s_axi_aresetn` | `clk` (`ui_clk`, 100 MHz), `s_axi_aclk` (`cpu_clk`) | synchronous, active low; both resets release from one assertion |
+| clock, reset | `clk`, `resetn`, `s_axi_aclk`, `s_axi_aresetn` | `clk` (`ui_clk`, 90 MHz), `s_axi_aclk` (`cpu_clk`) | synchronous, active low; both resets release from one assertion |
 | camera stream in | `s_cam_tdata[31:0]`, `s_cam_tvalid`, `s_cam_tlast`, `s_cam_tuser`; out `s_cam_tready`; `cam_clk_running` | `clk` | Phase 3: after the byte-clock FIFO. Same word format as the output. `cam_clk_running` is already synchronized. Tied off in the board |
 | video stream out | `m_axis_tdata[31:0]`, `m_axis_tvalid`, `m_axis_tlast`, `m_axis_tuser`; in `m_axis_tready` | `clk` | AXI4-Stream; one word per transfer; `tuser` = first word of a frame, `tlast` = last word of a line |
 | frame sideband | `m_frame_num[31:0]`, `m_timestamp[31:0]`, `m_width[15:0]`, `m_height[15:0]`, `m_src_pattern` | `clk` | registered with the stream; stable from the clock the first word of a frame enters the output register until the next first word |
@@ -45,10 +45,10 @@ Sideband: `m_frame_num` is `FRAME_COUNT` after the frame started (the first fram
 
 | Parameter | Default | Meaning |
 |---|---|---|
-| `PERIOD_RESET` | 3,333,333 | `FRAME_PERIOD` reset value (30.000 fps at 100 MHz) |
-| `PERIOD_MIN_720` | 3,333,000 | minimum `FRAME_PERIOD` at 720p30 (750 lines x 4,444) |
-| `PERIOD_MIN_1080` | 3,332,250 | minimum `FRAME_PERIOD` at 1080p30 (1,125 lines x 2,962) |
-| `LINE_PERIOD_720`, `LINE_PERIOD_1080` | 4,444, 2,962 | `clk` cycles from line start to line start |
+| `PERIOD_RESET` | 3,000,000 | `FRAME_PERIOD` reset value (30.000 fps at 90 MHz) |
+| `PERIOD_MIN_720` | 3,000,000 | minimum `FRAME_PERIOD` at 720p30 (750 lines x 4,000) |
+| `PERIOD_MIN_1080` | 2,999,250 | minimum `FRAME_PERIOD` at 1080p30 (1,125 lines x 2,666) |
+| `LINE_PERIOD_720`, `LINE_PERIOD_1080` | 4,000, 2,666 | `clk` cycles from line start to line start |
 | `CAM_TIMEOUT_RESET` | 2 | `CAM_TIMEOUT` reset value |
 
 The defaults are the values of `driver/rtlnet_csi2_rx.h`. The benches shorten the line periods for speed and run one
@@ -66,8 +66,8 @@ the DDR3 load and burst pattern match the camera in the same mode.
 
 | Mode | Active / total lines | Line period (clocks) | Words per line | Minimum `FRAME_PERIOD` |
 |---|---|---|---|---|
-| 720p30 | 720 / 750 | 4,444 | 640 | 3,333,000 |
-| 1080p30 | 1,080 / 1,125 | 2,962 | 960 | 3,332,250 |
+| 720p30 | 720 / 750 | 4,000 | 640 | 3,000,000 |
+| 1080p30 | 1,080 / 1,125 | 2,666 | 960 | 2,999,250 |
 
 A line runs at one word per clock while `m_axis_tready` is high; a line that overruns its slot starts the next line at
 once. A tick that finds the previous frame still running starts nothing and sets the sticky `STATUS.OVERRUN`. A longer
@@ -123,7 +123,7 @@ Undefined offsets read 0 and ignore writes.
 | 0x008 | `CAPS` | RO | 0x12 | `[3:0]` number of video modes (2), `[4]` test-pattern generator, `[5]` camera front end (0) |
 | 0x010 | `VIDEO_MODE` | RW | 0 | `[1:0]` 0 = 720p30, 1 = 1080p30; a value above 1 sets `STATUS.MODE_ERR`; a mode whose minimum period exceeds the present `FRAME_PERIOD` sets `STATUS.PERIOD_ERR`; both leave the register unchanged; effective at the next frame start |
 | 0x014 | `SOURCE` | RW | 0 | `[1:0]` 0 = auto, 1 = camera only, 2 = pattern only; 3 and above set `STATUS.SOURCE_ERR` and change nothing |
-| 0x018 | `FRAME_PERIOD` | RW | 3,333,333 | `clk` cycles per frame; below the minimum of the selected mode sets `STATUS.PERIOD_ERR` and changes nothing |
+| 0x018 | `FRAME_PERIOD` | RW | 3,000,000 | `clk` cycles per frame; below the minimum of the selected mode sets `STATUS.PERIOD_ERR` and changes nothing |
 | 0x01C | `CAM_TIMEOUT` | RW | 2 | frame periods without a camera frame before auto uses the pattern (0 = auto never uses the camera) |
 | 0x020 | `STATUS` | RO, flags W1C | 1 | `[0]` selected source (0 camera, 1 pattern), `[1]` camera byte clock running, `[2]` `MODE_ERR`, `[3]` `PERIOD_ERR`, `[4]` `SOURCE_ERR`, `[5]` `OVERRUN` (flags sticky, write 1 to clear; a new error in the clock of a clear keeps it set) |
 | 0x024 | `FRAME_COUNT` | RO | 0 | frames sent, both sources, counted at the first word of a frame |
@@ -172,7 +172,7 @@ that checks every word against a reference written in the bench from `gige.md` s
 | reset values | ID, VERSION, CAPS, `VIDEO_MODE` 0, `SOURCE` 0, `FRAME_PERIOD`, `CAM_TIMEOUT` 2, `STATUS` pattern bit only |
 | pattern | every word of every frame at 720p30 and 1080p30 equals the reference (eight bars, 160 / 240 pixels, BT.709 values, `{Cr, Y1, Cb, Y0}`), first-word flag on the first word only, end-of-line on the last word of each of H lines, W/2 words per line, frame numbers 1, 2, 3 ... |
 | sideband | width, height, frame number, timestamp and source flag stable over each frame |
-| timing (`real`) | frame start to frame start equals `FRAME_PERIOD` (3,333,333 and 3,332,250); line start to line start equals 4,444 and 2,962 |
+| timing (`real`) | frame start to frame start equals `FRAME_PERIOD` (3,000,000 and 2,999,250); line start to line start equals 4,444 and 2,962 |
 | rejection | a period below the minimum of each mode is rejected, the minimum is accepted, `PERIOD_ERR` clears by write 1; a mode write above the present period is rejected; mode 2 and 0x10000 set `MODE_ERR`; source 3 sets `SOURCE_ERR`; registers unchanged by a rejected write |
 | mode change | a write in mid-frame leaves the frame in progress in its old geometry (the next frame starts in the new mode), `ACTIVE` follows |
 | source switch (`fast` and `fast_gap`) | auto with the camera byte clock off sends the pattern and drains the camera stream; with the clock running and camera frames arriving auto switches to the camera between frames; the camera stopping mid-frame closes that frame short and auto returns to the pattern; `SOURCE` 2 keeps the pattern against a running camera; `SOURCE` 1 with no camera sends no frame and `FRAME_COUNT` stands still; `SOURCE` 1 with camera frames passes them; stray camera words are discarded; no frame mixes sources |

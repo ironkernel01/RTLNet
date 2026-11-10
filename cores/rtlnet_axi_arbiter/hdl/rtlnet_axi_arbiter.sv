@@ -58,6 +58,7 @@
 //   side of the register crossing only).
 // -----------------------------------------------------------------------------
 module rtlnet_axi_arbiter #(
+  parameter bit    AXIL_SYNC = 1'b0,   // 1: s_axi_aclk is clk (register window without a clock crossing)
   parameter int                     NUM_MASTERS     = 3,    // 1..8
   parameter int                     ADDR_W          = 32,
   parameter int                     DATA_W          = 128,  // 32, 64 or 128; beat = DATA_W/8 bytes
@@ -436,7 +437,7 @@ module rtlnet_axi_arbiter #(
   // Register access
   // ---------------------------------------------------------------------------
   // CPU clock -> clk crossing of whole AXI4-Lite transactions.
-  rtlnet_axil_cdc #(.ADDR_W(12)) u_axil_cdc (
+  rtlnet_axil_cdc #(.ADDR_W(12), .SYNC(AXIL_SYNC)) u_axil_cdc (
     .s_clk         (s_axi_aclk),
     .s_resetn      (s_axi_aresetn),
     .s_axi_awaddr  (s_axi_awaddr),

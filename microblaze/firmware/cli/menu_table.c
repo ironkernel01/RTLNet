@@ -41,6 +41,7 @@
  *  10-22-2026  MenuBuilder AI / Steve Spano    Checksum offload: show offload, offload tx-ip / tx-l4 / rx / all on|off
  *  11-09-2026  MenuBuilder AI / Steve Spano    DDR3: show ddr, ddr test [size in MiB]; clear counters also clears the DDR3 arbiter
  *  11-09-2026  MenuBuilder AI / Steve Spano    Video (Phase 1): show camera, show framebuffer, camera mode|source|rate, framebuffer crc; clear counters clears the video cores
+ *  11-09-2026  MenuBuilder AI / Steve Spano    H.264 stream (Phase 2b-3): stream h264 <ip> <port>, stream stop, show stream, encoder qp, show encoder
  * ===========================================================================
  */
 #include "menu.h"
@@ -105,6 +106,10 @@ const MenuCommandDef g_menu_commands[] = {
       "Video source: mode, source switch, active source, frame rate and count", cli_show_camera, MENU_MODE_NONE },
     { "cli_show_framebuffer", MENU_MODE_EXEC, "SHOW FRAMEBUFFER",
       "Video frame buffer: slots, latest published frame, reference counts, write DMA", cli_show_framebuffer, MENU_MODE_NONE },
+    { "cli_show_stream", MENU_MODE_EXEC, "SHOW STREAM",
+      "H.264 stream: pictures, bytes, bit rate, dropped pictures, TS packets and mux CPU load", cli_show_stream, MENU_MODE_NONE },
+    { "cli_show_encoder", MENU_MODE_EXEC, "SHOW ENCODER",
+      "H.264 encoder: QP, mode, status and per-engine cycle statistics", cli_show_encoder, MENU_MODE_NONE },
     { "cli_show_running", MENU_MODE_PRIV, "SHOW RUNNING-CONFIG",
       "Current configuration", cli_show_running, MENU_MODE_NONE },
     { "cli_disable", MENU_MODE_PRIV, "DISABLE",
@@ -119,6 +124,12 @@ const MenuCommandDef g_menu_commands[] = {
       "Frame rate in frames per second, 1..30 (30 is the reset value)", cli_camera_rate, MENU_MODE_NONE },
     { "cli_framebuffer_crc", MENU_MODE_PRIV, "FRAMEBUFFER CRC",
       "CRC-32 of the latest published frame, read through the cache", cli_framebuffer_crc, MENU_MODE_NONE },
+    { "cli_stream_h264", MENU_MODE_PRIV, "STREAM H264 [IP] [PORT]",
+      "Start the H.264 MPEG-TS stream over UDP to a host (VLC: udp://@:PORT)", cli_stream_h264, MENU_MODE_NONE },
+    { "cli_stream_stop", MENU_MODE_PRIV, "STREAM STOP",
+      "Stop the H.264 stream", cli_stream_stop, MENU_MODE_NONE },
+    { "cli_encoder_qp", MENU_MODE_PRIV, "ENCODER QP [QP]",
+      "H.264 quantizer 0..51, fixed for I pictures (the driver raises values below 12 to 12; default 28)", cli_encoder_qp, MENU_MODE_NONE },
     { "cli_debug_read", MENU_MODE_PRIV, "DEBUG READ [ADDR]",
       "Read a 32-bit word (hex 0x... or decimal address)", cli_debug_read, MENU_MODE_NONE },
     { "cli_debug_write", MENU_MODE_PRIV, "DEBUG WRITE [ADDR] [VALUE]",
@@ -255,6 +266,8 @@ const MenuKeywordDef g_menu_keywords[] = {
     { MENU_MODE_PRIV, "DDR", "DDR3 memory" },
     { MENU_MODE_PRIV, "CAMERA", "Video source: mode, source switch, frame rate" },
     { MENU_MODE_PRIV, "FRAMEBUFFER", "Video frame buffer in DDR3" },
+    { MENU_MODE_PRIV, "STREAM", "H.264 MPEG-TS stream over UDP" },
+    { MENU_MODE_PRIV, "ENCODER", "H.264 encoder settings" },
     { MENU_MODE_PRIV, "LED", "Set a user LED (2..7)" },
     { MENU_MODE_PRIV, "PHY", "PHY registers over MDIO" },
     { MENU_MODE_PRIV, "PHY MMD", "MMD registers, Clause 45 over Clause 22 (registers 13/14)" },

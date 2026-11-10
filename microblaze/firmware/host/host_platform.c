@@ -595,7 +595,7 @@ static void host_arb_write(uint32_t off, uint32_t value)
 #define HOST_VID_SLOTS       3u
 #define HOST_VID_SLOT_LOG2   22u
 #define HOST_VID_SLOT_BYTES  (1u << HOST_VID_SLOT_LOG2)
-#define HOST_VID_PERIOD_RST  3333333u
+#define HOST_VID_PERIOD_RST  3000000u
 #define HOST_VID_BARS        8u
 #define HOST_VID_ERR_FB      (1u << 3)     /* FBUF STATUS.FW_ERR */
 

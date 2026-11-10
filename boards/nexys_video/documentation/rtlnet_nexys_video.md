@@ -784,6 +784,50 @@ Observation: `STATUS.OVERRUN` of `rtlnet_csi2_rx` was set at the first `show cam
 a frame tick found it still running); cleared by writing 1 it stayed clear over 20 s idle, `ddr test 64`, `framebuffer crc` and two mode changes
 (`phase1_overrun_probe.txt`). The flag is startup-only and does not count a lost or bad frame.
 
+### 6.11 Phase 2b-3: H.264 streaming on one 90 MHz system clock (11-09-2026, status: bitstream gate open)
+
+Change: `u_h264` (`rtlnet_h264_top`, two engines, decoder slave 10, 0x44A0_8000) as arbiter masters 2 and 3 (`NUM_MASTERS` 4, `ARB_ID_W` 2, memory-side ID 4 bits),
+and one system clock: the MIG runs at a 2778 ps memory clock (360 MHz, 4:1), so `ui_clk` = 1440 / 16 = 90.000 MHz. The MIG needs a 9723 ps input
+period (the wizard turns a 100 MHz input into 102.848 MHz), which a second MMCM `u_mmcm2` makes exactly: 100 MHz x 36 / 5 / 7 = 102.857143 MHz (VCO 720 MHz); `ui_clk` is then exactly 90.000 MHz (0 ppm
+against the oscillator). `cpu_clk` is `ui_clk` (one net); the CPU reset is `ddr_resetn`, released after the MIG PLL locks and before the DDR3 calibration completes
+(the firmware waits for `CLK_STATUS.DDR_CALIB`: `venc_start`, `ddr test`, `show ddr` check it). `u_ddr_cdc` and the encoder bridges do not exist; the register windows of the
+arbiter, csi2, s2mm, framebuf and h264 use `rtlnet_axil_cdc` with `SYNC` 1 (pass-through). clk125, clk125_90, clk200, axis_clk and proto_clk are unchanged.
+Pattern timing at 90 MHz: `FRAME_PERIOD` 3,000,000 (30.000 fps), line periods 4,000 (720p) and 2,666 (1080p), minimums 3,000,000 and 2,999,250; the PTS step is `FRAME_PERIOD / 1000` = 3000.
+
+Memory map (DDR3 offsets): frame buffer 0x1000_0000 (3 slots, N = 3: the firmware is the only reader, one take per picture for both engines),
+rebuilt picture 0x1100_0000 / 0x1130_0000 / 0x1138_0000, compressed rings 0x1200_0000 (8 MiB, 4 MiB per engine), index rings 0x1300_0000.
+
+CDC gate (`build_bitstream.tcl`): network `fifo 15 axil_cdc 9 gray 6` before (Phase 1) and `fifo 10 axil_cdc 5 gray 6` now: the five FIFOs of `u_ddr_cdc` are gone (the CPU
+shares the arbiter clock) and the four register crossings of the arbiter, csi2, s2mm and framebuf are SYNC pass-throughs; the encoder adds none; the MAC, protocol, echo, classifier
+and offload crossings stay. CPU-only build: `fifo 5 axil_cdc 4` before, 0 and 0 now (it lists only `sync` and `reset` as required). The script gained the
+packet-FIFO RAM data path (`set_max_delay -datapath_only`, destination period) because equal 100 MHz periods had hidden its absence, and accepts the `g_cdc` prefix of the cells of `rtlnet_axil_cdc`.
+
+Clock interaction (post-synthesis checkpoint, `report_clock_interaction`): before the CDC constraints `ui_clk` (clk_pll_i) against axis_clk, proto_clk, clk200 and clk125/125_90 was
+"Timed (unsafe)" (no common phase, hold up to -2.09 ns); after them every pair with axis_clk, proto_clk, clk125 and rgmii_rxc is "Max Delay Datapath Only" or "False Path" (reset synchronizers),
+the pairs inside the MIG and the JTAG (MDM) groups are unchanged. Remaining: clk200 -> ui_clk, "Partial False Path (unsafe)", 12 of 13 endpoints: the MIG temperature monitor (see open point).
+
+Bench (Active-HDL, `tb_rtlnet_nexys_video_top`, `+VIDEO_PATH`): bars into the frame buffer, firmware take, a QCIF-sized picture (11 x 9 macroblocks, 2 engines, 2 slices) from the top-left of the 720p frame at QP 28, stream head,
+index rings, rebuilt luma PSNR against the source (floor 30 dB) and the arbiter counters: PASS (169,682 checks). `rtlnet_ddr_sim` has its own 90 MHz `ui_clk`.
+
+Build (`build.ps1 -Network -SkipFirmware -Tag s90b`): WNS +0.221 ns, WHS +0.051 ns, WPWS +0.131 ns, 0 failing endpoints; 71,482 LUT (53.4 %), 68,114 FF, 257.5 RAMB tiles (70.6 %), 80 DSP.
+Per-region setup slack (post-route checkpoint): CPU 0.550, arbiter 0.307, H.264 0.459, MIG 0.604, frame buffer 0.854, video DMA 1.388, csi2 1.619 ns.
+The history before the single clock: the first 100 MHz builds failed (CPU region -0.63 ns, arbiter -0.57, encoder -0.56; after pipelining the butterfly of `rtlnet_h264_dcq_luma`, the mode decision of `rtlnet_h264_ipred` and
+the arbiter's event inputs: CPU -0.42, arbiter -0.06, encoder -0.07; placer directives EarlyBlockPlacement -0.47 and WLDrivenBlockPlacement -0.36); a dual 90 MHz plan with separate `cpu_clk`/`enc_clk` failed at -4.5 ns because the 90/100 MHz crossings were timed as related clocks.
+
+Open point (blocks the bitstream): `report_cdc` raises one CDC-6 Warning, exit 27: the AMD MIG temperature monitor (`u_tempmon`, 12-bit `temperature_reg` in clk200 into `device_temp_sync_r1_reg` in the controller clock). It was
+"safely timed" while ui_clk and clk200 were both multiples of 100 MHz; with ui_clk fed from 102.857 MHz the clocks have no common phase. The IP's own XDC bounds it (`set_max_delay 20`). Options (decision needed, none applied): a narrow CDC-6 waiver for those
+registers; the MIG option `XADC_En` Disabled (no temperature compensation, the input tied to 0); or ref_clk (clk200) from `u_mmcm2` at 198.62 MHz (VCO 720 / 3.625) so that the clocks are related.
+
+Resolution of the open point (11-10-2026): a narrow CDC-6 waiver on the 12 `device_temp_sync_r1_reg` D pins plus `set_max_delay -datapath_only` from clk200 to those pins (bounded by one `ui_clk` period; removes TIMING-51; the objects are named by full path and clock pin so TIMING-28 and XDCB-5 do not fire). Checked on the s90b checkpoint: TIMING-51 0 findings, slack +4.24 ns, report_cdc Info only. A second DRC finding (AVAL-139, MIG extra-clock MMCM CLKOUT0 `DIVIDE_F` 3.595) is removed with `UIExtraClocks` 0 in `rtlnet_ddr_mig.prj` (`ui_clk` unchanged, CLKFBOUT); the generated MIG has CLKIN_PERIOD 9723, CLKFBOUT_MULT 14, CLKOUT3_DIVIDE 16, MMCM_MULT_F 8, tCK 2778, UI_EXTRA_CLOCKS FALSE.
+
+Final build (`build.ps1 -Network`, `RTLNET_BUILD: PASS`, log `build/phase2b3_build_final5.txt`): WNS +0.221 ns, WHS +0.007 ns, WPWS +0.131 ns, 0 failing endpoints; 71,468 LUT (53.41 %), 68,114 FF, 257.5 RAMB tiles (70.55 %, 222 RAMB36 + 71 RAMB18), 80 DSP; CDC `fifo 10 axil_cdc 5 gray 6` as expected, CDC-6 waiver on 12 pins printed. Firmware (release, LMB): text 136,064, data 1,128, bss 282,312 bytes; `XPAR_CPU_CORE_CLOCK_FREQ_HZ` 90000000; merged into the bitstream by updatemem. The firmware PTS step was computed for 100 MHz (step 2700) and is now `FRAME_PERIOD x 90000 / cpu_clk_hz` (3000).
+
+Board results (release image, 11-10-2026): `phase1_gate` PASS 19/19 (the first run after programming failed only b2, 10.378 fps, a measurement taken right after the load; the rerun gave 29.978 fps; CRC equal to the C model at 720p30 and 1080p30). `cli_test` PASS 55/55. `show ddr`: errors 0 on all masters; frame buffer drops 0.
+`stream_test`, 60 s each, QP 28:
+* 720p30: PASS on every check: 1802 pictures, 0 dropped, 0 continuity errors, 0 PTS gaps (step 3000), ffprobe h264 Constrained Baseline 1280x720 30.00 fps, PSNR minimum 51.14 dB (floor 30), bit rate 1037 kb/s, TS-mux CPU load 3.5 % (3.6 % with picture handling), 0 UDP drops. The VLC snapshot on `udp://@:5004` shows the eight color bars, equal to the decoded PNG (`phase2b3_decoded_720p30.png`).
+* 1080p30: FAIL. 1344 pictures sent, 459 dropped (frame numbers skipped, 25 %), 22.4 pictures per second, PTS steps of 6000 where a picture is dropped; the decoded pictures are correct (PSNR minimum 51.09 dB), bit rate 1621 kb/s, TS-mux load 5.6 %, no continuity errors. Cause: `show encoder` reports 928 to 929 clocks per macroblock per engine against the 735 budget (720p: 859 and 880, which fit its 1,800 macroblock budget of 1,666 clocks per macroblock). Busy cycles show the write path (`recon_wr`: 32 single-beat writes per macroblock) at 3.4 to 3.6 million of 3.8 million picture cycles, against about 373 per macroblock in simulation. Open.
+* net_test and tcp_test could not run: the PC NIC `Ethernet` (the direct link, board 192.169.1.199) is Disconnected; the stream used the board's DHCP lease on the LAN. The 100 MHz TCP figures (68.9 and 96.8 Mbit/s) were not re-measured.
+
 ## 7. Network integration (done 10-22-2026) and what remains
 
 Integrated: `u_mac`, `u_mdio`, `u_protocol` (every leaf, the CPU network path and its classifier), `u_echo` under

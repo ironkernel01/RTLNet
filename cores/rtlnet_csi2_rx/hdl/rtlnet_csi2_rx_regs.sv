@@ -20,9 +20,9 @@
 module rtlnet_csi2_rx_regs #(
   parameter int          NUM_MODES       = 2,
   parameter bit          CAMERA_PRESENT  = 1'b0,
-  parameter int          PERIOD_RESET    = 3_333_333,
-  parameter int          PERIOD_MIN_720  = 3_333_000,
-  parameter int          PERIOD_MIN_1080 = 3_332_250,
+  parameter int          PERIOD_RESET    = 3_000_000,
+  parameter int          PERIOD_MIN_720  = 3_000_000,
+  parameter int          PERIOD_MIN_1080 = 2_999_250,
   parameter int          CAM_TIMEOUT_RST = 2
 )(
   // Core clock and its reset (synchronous, active low).

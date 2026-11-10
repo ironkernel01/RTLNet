@@ -25,7 +25,8 @@
 // -----------------------------------------------------------------------------
 module rtlnet_axil_cdc #(
   parameter int ADDR_W = 12,               // address bits carried
-  parameter int STAGES = 3                 // toggle synchronizer depth
+  parameter int STAGES = 3,                // toggle synchronizer depth
+  parameter bit SYNC   = 1'b0              // 1: s_clk and m_clk are the same clock, direct pass-through, no crossing
 )(
   // AXI4-Lite slave, s_clk domain.
   input  logic              s_clk,
@@ -69,6 +70,28 @@ module rtlnet_axil_cdc #(
   input  logic              m_axi_rvalid,
   output logic              m_axi_rready
 );
+
+  // SYNC = 1: the master side runs on the slave side's clock. The register slave on the master side answers the handshakes itself, so the
+  // two ports are wired straight through (no flop, no crossing, nothing for rtlnet_constrain_cdc.tcl to constrain).
+  if (SYNC) begin : g_sync
+    assign m_axi_awaddr  = s_axi_awaddr;
+    assign m_axi_awvalid = s_axi_awvalid;
+    assign s_axi_awready = m_axi_awready;
+    assign m_axi_wdata   = s_axi_wdata;
+    assign m_axi_wstrb   = s_axi_wstrb;
+    assign m_axi_wvalid  = s_axi_wvalid;
+    assign s_axi_wready  = m_axi_wready;
+    assign s_axi_bresp   = m_axi_bresp;
+    assign s_axi_bvalid  = m_axi_bvalid;
+    assign m_axi_bready  = s_axi_bready;
+    assign m_axi_araddr  = s_axi_araddr;
+    assign m_axi_arvalid = s_axi_arvalid;
+    assign s_axi_arready = m_axi_arready;
+    assign s_axi_rdata   = m_axi_rdata;
+    assign s_axi_rresp   = m_axi_rresp;
+    assign s_axi_rvalid  = m_axi_rvalid;
+    assign m_axi_rready  = s_axi_rready;
+  end else begin : g_cdc
 
   // ---------------------------------------------------------------------------
   // Slave side (s_clk)
@@ -257,6 +280,8 @@ module rtlnet_axil_cdc #(
         default: m_state <= MS_IDLE;
       endcase
     end
+  end
+
   end
 
 endmodule

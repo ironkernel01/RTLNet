@@ -38,10 +38,10 @@
 //   * 10-22-2026: m_axis_eth_* / s_axis_eth_* frame streams (AXI DMA).
 //   * 11-09-2026: processor MicroBlaze V in the block design; ports unchanged.
 //   * 11-09-2026: caches and the DDR3 master m_axi_ddr_* on clk.
-// Clocks: clk (cpu_clk 100 MHz) only; resetn synchronous to clk, active low.
+// Clocks: clk (cpu_clk 90 MHz) only; resetn synchronous to clk, active low.
 // -----------------------------------------------------------------------------
 module rtlnet_cpu_microblaze (
-  // cpu_clk (100 MHz) and its synchronous active-low reset from the board top.
+  // cpu_clk (90 MHz) and its synchronous active-low reset from the board top.
   input  logic        clk,
   input  logic        resetn,
 

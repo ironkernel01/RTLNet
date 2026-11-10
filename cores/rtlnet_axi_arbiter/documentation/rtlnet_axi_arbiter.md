@@ -168,7 +168,7 @@ address, len, size, burst and the failed rules).
 
 ## 5. Clocks and crossings
 
-All arbitration and data logic is in `clk` (the memory-controller user clock, 100 MHz). The register file is in `clk`
+All arbitration and data logic is in `clk` (the memory-controller user clock, 90 MHz on the Nexys Video; `AXIL_SYNC` 1 there, so the register window runs on `clk` without a clock crossing). The register file is in `clk`
 too. The CPU register port is on `s_axi_aclk` behind `rtlnet_axil_cdc` (whole-transaction toggle crossing, constrained
 by `scripts/rtlnet_constrain_cdc.tcl`) and `rtlnet_axil_slave`, the same pattern as `rtlnet_udp_echo`. `err_irq` is a
 `clk` flop output; a consumer in another domain synchronizes it. Both resets must come from one assertion. The core has

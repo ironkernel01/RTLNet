@@ -29,7 +29,7 @@ install is committed.
 
 | Group | Ports | Contract |
 |---|---|---|
-| clock, reset | `clk`, `resetn` | cpu_clk 100 MHz from the board MMCM; `resetn` synchronous to `clk`, active low (board `rtlnet_reset_sync`) |
+| clock, reset | `clk`, `resetn` | cpu_clk 90 MHz from the board MMCM (second MMCM); `resetn` synchronous to `clk`, active low (board `rtlnet_reset_sync`) |
 | console | in `uart_rxd`, out `uart_txd` | USB-UART bridge, 115200 8N1; `uart_rxd` is asynchronous, idle high |
 | register master | `m_axi_aw*`, `m_axi_w*`, `m_axi_b*`, `m_axi_ar*`, `m_axi_r*` | AXI4-Lite master, 32-bit address and data, full processor addresses (0x44A0_0000..0x44AF_FFFF), into `rtlnet_axil_decoder`; one transaction at a time |
 | DDR3 master | `m_axi_ddr_*` | AXI4 master, 128-bit data, 32-bit address (`0x8000_0000`..`0x9FFF_FFFF`), no ID signals, on `clk` (`cpu_clk`) with `resetn`; the 32 to 128-bit width conversion is in the SmartConnect `sc_ddr`; the board top carries the port to the memory controller clock (`ui_clk`) through `rtlnet_axi_cdc` (`u_ddr_cdc`) |
@@ -63,7 +63,7 @@ not use them). The frame streams are in `clk`; the protocol wrapper's CPU FIFOs 
 | `sc_ddr` | SmartConnect 1.0 | 2 slave ports (S00 instruction cache `M_AXI_IC`, S01 data cache `M_AXI_DC`), 1 master port to the exported `M_AXI_DDR`, one clock (`aclk` = `clk`); 32 to 128-bit width conversion, no clock crossing; reset `aresetn` from `rst_cpu` |
 | `const_one` | inline constant 1.0 | `dcm_locked` tie |
 
-No clocking wizard: every clock pin is the `clk` port (`FREQ_HZ` 100 MHz), the SmartConnect included. All firmware runs from internal
+No clocking wizard: every clock pin is the `clk` port (`FREQ_HZ` 90 MHz), the SmartConnect included. All firmware runs from internal
 block RAM; no firmware section is placed in DDR3, which the `ddr test` memory test uses and, later, the video frame store. Block RAM of the core: 160 RAMB36 (LMB 128, AXI BRAM 32) plus the cache RAM of the processor (a few RAMB36 and RAMB18, see the build totals in the board document).
 
 ## 4. Address map

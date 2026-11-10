@@ -81,6 +81,7 @@
 #define RTLNET_PLAT_CSI2_BASE       (RTLNET_PLAT_WINDOW_BASE + 0x05000u)
 #define RTLNET_PLAT_S2MM_BASE       (RTLNET_PLAT_WINDOW_BASE + 0x06000u)
 #define RTLNET_PLAT_FB_BASE         (RTLNET_PLAT_WINDOW_BASE + 0x07000u)
+#define RTLNET_PLAT_H264_BASE       (RTLNET_PLAT_WINDOW_BASE + 0x08000u)   /* H.264 encoder, Phase 2b-3 */
 #define RTLNET_PLAT_PROT_BASE       (RTLNET_PLAT_WINDOW_BASE + 0x10000u)
 #define RTLNET_PLAT_ARP_BASE        (RTLNET_PLAT_PROT_BASE + 0x1000u)
 #define RTLNET_PLAT_ICMP_BASE       (RTLNET_PLAT_PROT_BASE + 0x2000u)
@@ -108,6 +109,7 @@
 #define RTLNET_ID_CSI2              0x43534932u   /* "CSI2" */
 #define RTLNET_ID_S2MM              0x53324D4Du   /* "S2MM" */
 #define RTLNET_ID_FB                0x46425546u   /* "FBUF" */
+#define RTLNET_ID_H264              0x48323634u   /* "H264" */
 
 /* Firmware identity. */
 #define RTLNET_FW_NAME              "rtlnet-fw"

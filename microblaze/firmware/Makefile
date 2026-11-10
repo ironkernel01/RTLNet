@@ -13,8 +13,8 @@ CC       ?= gcc
 CFLAGS   ?= -std=c11 -Wall -Wextra -Werror -pedantic -O2
 CORES    := rtlnet_eth_mac rtlnet_mdio rtlnet_eth_protocol rtlnet_arp rtlnet_icmp rtlnet_dhcp \
             rtlnet_iperf rtlnet_udp_socket rtlnet_udp_echo rtlnet_classifier rtlnet_tcp_offload rtlnet_axi_arbiter \
-            rtlnet_csi2_rx rtlnet_vdma_s2mm rtlnet_framebuf
-INCLUDES := -Isrc -Isrc/lwip -Icli -Ihost -I../../cores/rtlnet_common/driver -I../driver \
+            rtlnet_csi2_rx rtlnet_vdma_s2mm rtlnet_framebuf rtlnet_h264_enc
+INCLUDES := -Isrc -Isrc/lwip -Isrc/video -Icli -Ihost -I../../cores/rtlnet_common/driver -I../driver \
             $(foreach c,$(CORES),$(if $(wildcard ../../cores/$(c)/driver),-I../../cores/$(c)/driver))
 DRV_SRCS := $(wildcard ../../cores/rtlnet_eth_mac/driver/*.c ../../cores/rtlnet_mdio/driver/*.c \
             ../../cores/rtlnet_eth_protocol/driver/*.c ../../cores/rtlnet_arp/driver/*.c \
@@ -22,9 +22,9 @@ DRV_SRCS := $(wildcard ../../cores/rtlnet_eth_mac/driver/*.c ../../cores/rtlnet_
             ../../cores/rtlnet_iperf/driver/*.c ../../cores/rtlnet_udp_socket/driver/*.c \
             ../../cores/rtlnet_udp_echo/driver/*.c ../../cores/rtlnet_classifier/driver/*.c \
             ../../cores/rtlnet_tcp_offload/driver/*.c ../../cores/rtlnet_axi_arbiter/driver/*.c \
-            ../../cores/rtlnet_csi2_rx/driver/*.c ../../cores/rtlnet_vdma_s2mm/driver/*.c ../../cores/rtlnet_framebuf/driver/*.c)
+            ../../cores/rtlnet_csi2_rx/driver/*.c ../../cores/rtlnet_vdma_s2mm/driver/*.c ../../cores/rtlnet_framebuf/driver/*.c ../../cores/rtlnet_h264_enc/driver/*.c)
 HOST_SRCS := host/main.c host/host_platform.c host/host_lwip_stub.c src/rtlnet_board.c src/rtlnet_fmt.c \
-             src/rtlnet_netmgr.c src/rtlnet_cpupath.c src/rtlnet_offload.c src/rtlnet_ddrtest.c src/rtlnet_fbcrc.c cli/menu.c cli/menu_table.c cli/cli_commands.c $(DRV_SRCS)
+             src/rtlnet_netmgr.c src/rtlnet_cpupath.c src/rtlnet_offload.c src/rtlnet_ddrtest.c src/rtlnet_fbcrc.c src/video/rtlnet_tsmux.c src/video/rtlnet_venc.c cli/menu.c cli/menu_table.c cli/cli_commands.c $(DRV_SRCS)
 TARGET   := build/menu.exe
 
 .PHONY: all clean run demo firmware check

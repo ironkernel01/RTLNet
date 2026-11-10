@@ -13,7 +13,7 @@
 //   * Frame timing: a free-running frame timer ticks every FRAME_PERIOD clocks (the value latched at the previous tick, so
 //     a change takes effect at the next frame). On a tick with the pattern selected and no frame in progress the generator
 //     starts one frame in the mode of VIDEO_MODE at that tick; a tick that finds a frame still running counts as an
-//     overrun (STATUS.OVERRUN) and starts nothing. The reset value 3,333,333 gives 30.000 frames per second at 100 MHz.
+//     overrun (STATUS.OVERRUN) and starts nothing. The reset value 3,000,000 gives 30.000 frames per second at the 90 MHz ui_clk.
 //   * Source switch (SOURCE): in auto the camera is used when the camera byte clock runs (cam_clk_running) and a camera
 //     frame start arrived within CAM_TIMEOUT frame periods; otherwise the pattern. The selection changes only between
 //     frames. A camera frame that is in progress when the camera is no longer selected (cut off) is abandoned: its
@@ -29,11 +29,12 @@
 //   side of the register crossing only).
 // -----------------------------------------------------------------------------
 module rtlnet_csi2_rx #(
-  parameter int PERIOD_RESET      = 3_333_333,   // clocks per frame at reset: 30.000 fps at 100 MHz
-  parameter int PERIOD_MIN_720    = 3_333_000,   // 750 lines * LINE_PERIOD_720
-  parameter int PERIOD_MIN_1080   = 3_332_250,   // 1125 lines * LINE_PERIOD_1080
-  parameter int LINE_PERIOD_720   = 4444,        // clocks per line at 720p30
-  parameter int LINE_PERIOD_1080  = 2962,        // clocks per line at 1080p30
+  parameter bit    AXIL_SYNC = 1'b0,   // 1: s_axi_aclk is clk (register window without a clock crossing)
+  parameter int PERIOD_RESET      = 3_000_000,   // clocks per frame at reset: 30.000 fps at 90 MHz
+  parameter int PERIOD_MIN_720    = 3_000_000,   // 750 lines * LINE_PERIOD_720
+  parameter int PERIOD_MIN_1080   = 2_999_250,   // 1125 lines * LINE_PERIOD_1080
+  parameter int LINE_PERIOD_720   = 4000,        // clocks per line at 720p30
+  parameter int LINE_PERIOD_1080  = 2666,        // clocks per line at 1080p30
   parameter int CAM_TIMEOUT_RESET = 2            // frame periods
 )(
   // Core clock and its reset (synchronous, active low); the AXI4-Lite clock and its reset (released from the same
@@ -120,7 +121,7 @@ module rtlnet_csi2_rx #(
   logic [31:0] reg_rd_data;
 
   // Register clock -> clk crossing of whole AXI4-Lite transactions.
-  rtlnet_axil_cdc #(.ADDR_W(12)) u_axil_cdc (
+  rtlnet_axil_cdc #(.ADDR_W(12), .SYNC(AXIL_SYNC)) u_axil_cdc (
     .s_clk         (s_axi_aclk),
     .s_resetn      (s_axi_aresetn),
     .s_axi_awaddr  (s_axi_awaddr),

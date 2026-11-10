@@ -59,11 +59,11 @@
 `timescale 1ns / 1ps
 
 module rtlnet_microblaze_sim_stub #(
-  parameter int CLK_HZ  = 100_000_000,
+  parameter int CLK_HZ  = 90_000_000,
   parameter int BAUD    = 115_200,
   parameter int TIMEOUT = 20_000            // clocks per AXI4-Lite transaction
 )(
-  // cpu_clk (100 MHz) and its synchronous active-low reset from the board top.
+  // cpu_clk (90 MHz) and its synchronous active-low reset from the board top.
   input  logic        clk,
   input  logic        resetn,
 
@@ -517,6 +517,9 @@ module rtlnet_microblaze_sim_stub #(
     int n;
     n = $size(frame);
     if (n == 0) return;
+    // Start on a clock edge: a call that lands exactly on an edge (cpu_clk is 90 MHz, edges at 11.111 ns) otherwise races the
+    // first beat against the sampling of the stream.
+    @(posedge clk);
     for (int b = 0; b < n; b += 8) begin
       logic [63:0] d;
       logic [7:0]  k;

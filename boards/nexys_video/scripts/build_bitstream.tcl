@@ -45,7 +45,8 @@
 #   * 10-22-2026: XSA export (write_hw_platform -fixed).
 #   * 11-09-2026: Explore directives and a post-route phys_opt_design while WNS is negative (MicroBlaze V caches).
 #   * 11-09-2026: u_ddr_cdc (rtlnet_axi_cdc, five packet FIFOs): expected fifo instances +5 in both builds; ASYNC_REG on the MIG
-#     reset synchronizers (CDC-8); methodology waivers for the vendor MIG (LUTAR-1, PDRC-190, XDCB-5), each with required targets.
+#     reset synchronizers (CDC-8); methodology waivers for the vendor MIG (LUTAR-1, PDRC-190, XDCB-5), each with required targets;
+#     one CDC-6 waiver on the 12 MIG temperature-monitor synchronizer pins (exact count required).
 #   * 11-09-2026: block design C_PC_WIDTH 32 (execution from DDR3); no change to the gates.
 #   * 11-09-2026: tag argument: outputs in build/<tag>/ (variant builds do not overwrite the network image).
 #   * 11-09-2026: DDR3 controller IP generated from the MIG project; expected rtlnet_axil_cdc instances +1 (the
@@ -53,6 +54,17 @@
 #   * 11-09-2026: Phase 1 video cores u_csi2, u_s2mm and u_fb (cpu_clk to ui_clk register windows, one rtlnet_axil_cdc each):
 #     expected rtlnet_axil_cdc instances +3 in both builds (network 6 to 9, CPU-only 1 to 4); no new FIFO, Gray or
 #     synchronizer crossing (the beat FIFO of the write DMA is one clock domain).
+#   * 11-09-2026: one system clock (ui_clk 90 MHz, MIG at 2778 ps): u_ddr_cdc is removed (its five FIFOs, fifo 15 to 10), the CPU, arbiter
+#     masters, frame buffer, video DMA, bar generator and H.264 engines share ui_clk, and their register windows (arbiter, csi2, s2mm, framebuf,
+#     h264) run with rtlnet_axil_cdc SYNC 1, a pass-through (axil_cdc 10 to 5 in the network build, the MAC, protocol, echo, classifier and
+#     offload windows stay; CPU-only 5 to 0, so that build lists only the sync and reset classes as required). Gray 6 is unchanged.
+#   * 11-09-2026 (superseded, kept for the history): enc_clk (90 MHz, second MMCM): the two engine masters of u_h264 cross to ui_clk through one rtlnet_axi_cdc each, five
+#     packet FIFOs per bridge: expected fifo +10 in both builds (network 15 to 25, CPU-only 5 to 15). The register window of u_h264 now crosses
+#     cpu_clk to enc_clk (still one rtlnet_axil_cdc); no new Gray or axil_cdc instance. cpu_clk is 90 MHz.
+#   * 11-09-2026: RTLNET_PLACE_DIRECTIVE environment variable selects the place_design directive (default Explore).
+#   * 11-09-2026: Phase 2b-3 u_h264 (rtlnet_h264_top, register window cpu_clk to ui_clk through its one rtlnet_axil_cdc): expected
+#     rtlnet_axil_cdc +1 in both builds (network 9 to 10, CPU-only 4 to 5); the engines and their masters are all on ui_clk, so no
+#     FIFO, Gray or synchronizer crossing is added.
 # -----------------------------------------------------------------------------
 
 # Script-relative roots (survive tree moves; no dependence on the caller's cwd).
@@ -202,8 +214,8 @@ write_checkpoint -force [file join $BUILD_DIR post_synth.dcp]
 # FIFOs u_mac/u_rx_fifo, u_mac/u_tx_fifo, u_protocol/u_ingress_fifo,
 # u_protocol/u_egress_fifo and the socket layer's u_rx_fifo, u_tx_fifo and
 # u_tx_desc_fifo, and the CPU network path queues u_protocol/u_cpu_rx_fifo and
-# u_protocol/u_cpu_tx_fifo, plus the checksum offload's u_protocol/g_cpu.g_offload.u_cpu_offload/u_tx/u_tx_fifo, and the DDR3 bridge u_ddr_cdc's five FIFOs u_aw/w/b/ar/r_fifo (fifo 15); register crossings of the MAC, the protocol wrapper
-# and the UDP echo, plus the CPU-path classifier's and the checksum offload's u_axil_cdc, the DDR3 arbiter's and the video cores' u_csi2, u_s2mm and u_fb u_axil_cdc (axil_cdc 9); Gray counters u_mac/u_tx_count_sync and the
+# u_protocol/u_cpu_tx_fifo, plus the checksum offload's u_protocol/g_cpu.g_offload.u_cpu_offload/u_tx/u_tx_fifo, and the DDR3 bridge u_ddr_cdc's five FIFOs u_aw/w/b/ar/r_fifo (gone: the CPU is on ui_clk); register crossings of the MAC, the protocol wrapper
+# and the UDP echo, plus the CPU-path classifier's and the checksum offload's u_axil_cdc, the DDR3 arbiter's, the video cores' u_csi2, u_s2mm and u_fb and the H.264 encoder's u_h264 u_axil_cdc (axil_cdc 10); Gray counters u_mac/u_tx_count_sync and the
 # wrapper's four ingress/egress counter crossings and its CPU transmit reject
 # counter u_cnt_cpu_reject_sync (gray 6). A change of these
 # counts fails the build until the expectation is reviewed and updated here.
@@ -212,10 +224,10 @@ if {$NETWORK} {
   if {![file exists $rgmii_xdc]} { nv_exit 11 "XDC not found: $rgmii_xdc" }
   if {[catch {read_xdc $rgmii_xdc} err]} { nv_exit 13 "RGMII constraints: $err" }
   set ::rtlnet_cdc_required {sync reset gray fifo axil_cdc}
-  set ::rtlnet_cdc_expect   {fifo 15 axil_cdc 9 gray 6}
+  set ::rtlnet_cdc_expect   {fifo 10 axil_cdc 5 gray 6}
 } else {
-  set ::rtlnet_cdc_required {sync reset axil_cdc fifo}
-  set ::rtlnet_cdc_expect   {fifo 5 axil_cdc 4 gray 0}
+  set ::rtlnet_cdc_required {sync reset}
+  set ::rtlnet_cdc_expect   {fifo 0 axil_cdc 0 gray 0}
 }
 # CDC-8 (asynchronous reset synchronized with missing ASYNC_REG): the AMD memory controller IP
 # (u_ddr/g_amd.u_ddr/u_mig) synchronizes the reset into its reference-clock and divided-clock domains
@@ -239,13 +251,56 @@ foreach re $mig_re_list {
 set ::rtlnet_cdc_report [file join $RPT_DIR cdc_instances.txt]
 if {[catch {source [file join $REPO scripts rtlnet_constrain_cdc.tcl]} err]} { nv_exit 13 "CDC constraints: $err" }
 
+# CDC-6 waiver for the vendor MIG temperature monitor (user decision 11-10-2026). The IP passes the
+# 12-bit XADC temperature from clk200 into ui_clk through its own two-register synchronizer
+# (temp_mon_enabled.u_tempmon/device_temp_sync_r1_reg[0..11]), bounded by the IP's set_max_delay. The
+# value changes slowly and the IP filters it, so a mixed sample only nudges the compensation. ui_clk
+# (90 MHz from a 102.857 MHz MIG input) has no common period with clk200, so report_cdc flags it. The
+# waiver names only these destination cells: exactly 12 must exist inside u_tempmon, or the build stops.
+set nv_tm_dst [get_pins -quiet -hier -filter {NAME =~ *temp_mon_enabled.u_tempmon/device_temp_sync_r1_reg[*]/D}]
+if {[llength $nv_tm_dst] != 12} { nv_exit 13 "MIG tempmon CDC-6 waiver: expected 12 device_temp_sync_r1_reg D pins, found [llength $nv_tm_dst]" }
+foreach p $nv_tm_dst {
+  if {![string match "u_ddr/g_amd.u_ddr/u_mig/*" $p]} { nv_exit 13 "MIG tempmon CDC-6 waiver: unexpected target $p" }
+}
+# The IP bounds this crossing with a plain set_max_delay -to (its -datapath_only line is commented out), which
+# times clk200 and ui_clk as related (TIMING-51: no common phase). Constrain it the way every rtlnet crossing is
+# constrained: set_max_delay -datapath_only from the source clock, bounded by one destination period. The
+# -from/-to form is more specific than the IP's -to form and takes precedence.
+# Objects are named by full path and by clock pin (no hierarchical filter query, no clock name inside the constraint:
+# methodology XDCB-5 and TIMING-28).
+set nv_tm_dst_names [get_property NAME $nv_tm_dst]
+set nv_tm_dst [get_pins $nv_tm_dst_names]
+set nv_tm_d0 [lindex [lsort $nv_tm_dst_names] 0]
+set nv_tm_src_pin [get_pins -quiet [string map {device_temp_sync_r1_reg[0]/D xadc_supplied_temperature.temperature_reg[0]/C} $nv_tm_d0]]
+if {[string first {device_temp_sync_r1_reg[0]/D} $nv_tm_d0] < 0 || [llength $nv_tm_src_pin] != 1} {
+  nv_exit 13 "MIG tempmon max delay: source register pin not found for $nv_tm_d0"
+}
+set nv_tm_src_clk [get_clocks -quiet -of_objects $nv_tm_src_pin]
+set nv_tm_dst_clk [get_clocks -quiet -of_objects [get_pins -quiet [string map {{/D} {/C}} $nv_tm_d0]]]
+if {[llength $nv_tm_src_clk] != 1 || [llength $nv_tm_dst_clk] != 1} {
+  nv_exit 13 "MIG tempmon max delay: clocks not found (src '$nv_tm_src_clk', dst '$nv_tm_dst_clk')"
+}
+set nv_tm_period [get_property PERIOD $nv_tm_dst_clk]
+set_max_delay -datapath_only -from $nv_tm_src_clk -to $nv_tm_dst $nv_tm_period
+puts "rtlnet_build: MIG tempmon crossing $nv_tm_src_clk -> $nv_tm_dst_clk: set_max_delay -datapath_only $nv_tm_period on [llength $nv_tm_dst] pins"
+if {[catch {create_waiver -type CDC -id CDC-6 -to $nv_tm_dst -user rtlnet \
+      -description "AMD MIG u_tempmon: XADC temperature clk200 -> ui_clk through the IP's own two-register synchronizer, bounded by set_max_delay -datapath_only of one ui_clk period; user decision 11-10-2026"} err]} {
+  nv_exit 13 "MIG tempmon CDC-6 waiver: $err"
+}
+puts "rtlnet_build: CDC-6 waiver on [llength $nv_tm_dst] MIG tempmon synchronizer pins (device_temp_sync_r1_reg)"
+
 # ---------------------------------------------------------------------------
 # Implementation.
 # ---------------------------------------------------------------------------
 # Timing-driven directives: the MicroBlaze V with its caches has a 8-level control path
 # (stall into the pipeline reset) that the default flow misses by a few hundred ps.
 if {[catch {opt_design} err]}   { nv_exit 25 "opt_design: $err" }
-if {[catch {place_design -directive Explore} err]} { nv_exit 26 "place_design: $err" }
+# RTLNET_PLACE_DIRECTIVE (default Explore) selects the placer strategy: the MicroBlaze V cache path is placement sensitive and a
+# variant run (-Tag) tries another one.
+set place_dir Explore
+if {[info exists ::env(RTLNET_PLACE_DIRECTIVE)] && $::env(RTLNET_PLACE_DIRECTIVE) ne ""} { set place_dir $::env(RTLNET_PLACE_DIRECTIVE) }
+puts "rtlnet_build: place_design -directive $place_dir"
+if {[catch {place_design -directive $place_dir} err]} { nv_exit 26 "place_design: $err" }
 if {[catch {phys_opt_design -directive AggressiveExplore} err]} { nv_exit 26 "phys_opt_design: $err" }
 if {[catch {route_design -directive Explore} err]} { nv_exit 30 "route_design: $err" }
 # Post-route physical optimization, only while setup slack is negative.

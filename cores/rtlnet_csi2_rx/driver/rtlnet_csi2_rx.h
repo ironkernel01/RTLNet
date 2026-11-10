@@ -14,7 +14,7 @@
  * Behaviour. The core sends one YUV422 video stream (32-bit words of two pixels, Y0 Cb Y1 Cr, start-of-frame and
  * end-of-line flags) to rtlnet_vdma_s2mm. In this phase the stream comes from the 75 percent color-bar generator; the
  * camera front end (Phase 3) joins through the same source switch. VIDEO_MODE selects 720p30 or 1080p30; FRAME_PERIOD
- * is the ui_clk cycle count per frame (3,333,333 at the 100 MHz ui_clk is 30.000 fps). A rejected write leaves the
+ * is the ui_clk cycle count per frame (3,000,000 at the 90 MHz ui_clk is 30.000 fps). A rejected write leaves the
  * register unchanged and sets the matching sticky STATUS flag; the driver clears the flag and returns
  * RTLNET_CSI2_ERR_REJECTED.
  *
@@ -62,10 +62,10 @@
 #define RTLNET_CSI2_STATUS_ERR_MASK     0x0000003Cu
 
 /* Frame geometry and timing, matched by the RTL localparams. */
-#define RTLNET_CSI2_UI_CLK_HZ           100000000u
-#define RTLNET_CSI2_PERIOD_RESET        3333333u      /* 30.000 fps */
-#define RTLNET_CSI2_PERIOD_MIN_720P30   3333000u      /* 750 lines * 4444 cycles */
-#define RTLNET_CSI2_PERIOD_MIN_1080P30  3332250u      /* 1125 lines * 2962 cycles */
+#define RTLNET_CSI2_UI_CLK_HZ           90000000u
+#define RTLNET_CSI2_PERIOD_RESET        3000000u      /* 30.000 fps */
+#define RTLNET_CSI2_PERIOD_MIN_720P30   3000000u      /* 750 lines * 4000 cycles */
+#define RTLNET_CSI2_PERIOD_MIN_1080P30  2999250u      /* 1125 lines * 2666 cycles */
 #define RTLNET_CSI2_WIDTH_720P30        1280u
 #define RTLNET_CSI2_HEIGHT_720P30       720u
 #define RTLNET_CSI2_WIDTH_1080P30       1920u

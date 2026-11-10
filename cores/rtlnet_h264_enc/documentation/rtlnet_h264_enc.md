@@ -23,10 +23,10 @@ Two video modes run on one build, selected by registers (VIDEO_MODE of the camer
 ## 2. Clocking and engine count
 
 * `enc_clk` carries the engines, their memory ports and the register file. The board runs it from the MIG `ui_clk`,
-  100 MHz; the out-of-context synthesis check constrains it to 10.000 ns.
+  90.000 MHz (the one system clock of the board); the out-of-context synthesis check constrains it to 11.111 ns.
 * `s_axi_aclk` (cpu_clk) carries only the AXI4-Lite slave side of `rtlnet_axil_cdc`. Both resets release from one assertion.
 * `NUM_ENGINES = 2` is the default. 1080p30 needs 8160 x 30 = 244 800 macroblocks per second. Two engines at 100 MHz have a
-  budget of 100e6 / (8160 x 30) x 2 = 816 clocks per macroblock per engine; one engine has 408. Section 11.1 lists the measured
+  budget of 90e6 / (8160 x 30) x 2 = 735 clocks per macroblock per engine (816 at 100 MHz); one engine has 367. Section 11.1 lists the measured
   clocks per macroblock: 373 for smooth content, at most 500 on dense content at QP 12 and above. Each engine codes a
   horizontal band of macroblock rows as its own slice(s).
 * A band split is a register property: the first `NUM_ENGINES - 1` engines take `ceil(MB_H / NUM_ENGINES)` rows, the last
@@ -642,7 +642,40 @@ port selects registered decoded fields (`invq` outputs the decoded tag).
 ## 12. Open points
 
 * The register-crossing constraints of `rtlnet_axil_cdc` (`scripts/rtlnet_constrain_cdc.tcl`) apply in the board build.
-* The per-engine master vectors connect to the DDR3 arbiter on `ui_clk` in phase 2b-3, with no `rtlnet_axi_cdc`.
 * The fallback estimate (section 3.3) is a fitted estimate, not a bound; it is calibrated on 176x144 synthetic content.
 * LUT use of the transform units (38.8 k LUT for two engines) can be reduced by sharing the dequantizer multipliers.
 
+## 13. Board integration (phase 2b-3, 11-09-2026)
+
+`rtlnet_h264_top` is instance `u_h264` of the Nexys Video top (`NUM_ENGINES` 2, `ID_W` 2, `RAM_STYLE` "block", `AXIL_SYNC` 1). The CPU,
+the DDR3 arbiter and its masters, the frame buffer, the video DMA and the bar generator, and both engines run on the one system clock `ui_clk`
+(90.000 MHz, the MIG user clock). The engine masters connect to arbiter masters 2 and 3 with no clock crossing and no `rtlnet_axi_cdc`; the
+register window is decoder slave 10 (0x44A0_8000) and runs without a crossing too (`rtlnet_axil_cdc` with `SYNC` 1, a pass-through; the
+`AXIL_SYNC` parameter of the core passes it on). With `AXIL_SYNC` 0 (default) `s_axi_aclk` may be another clock and the core keeps its one
+`rtlnet_axil_cdc`. Facts that integration added:
+
+* **ID width.** `rtlnet_h264_wr_master` tells its ring, index and rebuilt-picture write responses apart by `bid[1:0]`, so `ID_W` is at least 2.
+  The arbiter's slave-side ID is therefore 2 bits and its memory-side ID 4 bits (2 + `IDX_W` 2 for four masters); the MIG project's AXI ID width
+  went from 2 to 4 bits (`rtlnet_ddr.md`).
+* **Address width.** The engines drive 32-bit addresses; the board connects the low 29 bits to the 512 MiB arbiter. Every buffer lies below
+  512 MiB (map in `rtlnet_nexys_video.md` 6.11).
+* **Frame-buffer reader.** The frame-buffer reader port is not used. The firmware holds a slot for the whole picture through its own
+  reader (`FW_TAKE`/`FW_RELEASE`), points `IN_BASE` at it and releases it at `STATUS.DONE`. One take covers both engines.
+* **Budget at 90 MHz.** 735 clocks per macroblock per engine for 1080p30 against 378 to 484 measured in simulation (and 391 to 415 for I_PCM).
+  Out-of-context synthesis at 11.111 ns (`h264_synth.tcl`, two engines): 39,489 LUT, 25,377 FF, 18 RAMB36 + 2 RAMB18, 74 DSP, post-synthesis
+  WNS +1.455 ns, 0 critical warnings.
+* **Timing fixes found in the board build** (first run at 100 MHz, before the single-clock decision). With the Phase 1 design around it, the encoder's
+  decisions failed 100 MHz timing by up to 0.56 ns:
+  * `rtlnet_h264_dcq_luma`: the Hadamard butterfly read its 16:1 operand multiplexers and formed the four-operand sums in one clock. The
+    operands are now registered in the issue clock and the sums written back in the next, and a butterfly phase takes 5 clocks. The latency
+    from `start` to `done` is 34 clocks (was 30); the bench checks 34.
+  * `rtlnet_h264_ipred`: the serial first-best search took three chained 20-bit compares. Clock 1 registers the six pairwise `<=` results of
+    the candidate totals, clock 2 picks the earliest legal minimum (the same result, ties to the earlier of DC, V, H, Plane). `dec_done` comes
+    5 clocks after `dec_start` (was 4).
+  The macroblock budget (section 11.1) grows by at most 5 clocks per macroblock; the picture-level counters are measured on the board (`show encoder`).
+
+### 13.1 Synthesis and board measurements (11-10-2026)
+
+Out-of-context synthesis of `rtlnet_h264_top` (2 engines) at 11.111 ns: WNS +1.455 ns, 39,489 LUT, 25,377 FF, 18 RAMB36 + 2 RAMB18, 74 DSP (`boards/nexys_video/build/phase2b3_h264_synth90.txt`). In the board build (one 90 MHz clock) the encoder region has +0.459 ns setup slack.
+
+On the board (QP 28, color bars): 720p30 codes every picture at 859 to 880 clocks per macroblock per engine (fits its budget of 1,666) and streams without drops. 1080p30 needs at most 735 clocks per macroblock per engine; the board shows 928 to 929, so 25 % of the pictures are dropped. The busy-cycle counters show the rebuilt-picture write path (`rtlnet_h264_recon_wr`, 32 single-beat writes per macroblock) taking 3.4 to 3.6 million of the 3.8 million clocks of a picture; the simulation (fast memory model) measures about 373 per macroblock. Open.

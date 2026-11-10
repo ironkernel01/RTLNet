@@ -14,7 +14,7 @@
 //   * Widths: W 16 bits signed in, Yf 20 bits signed (|Yf| <= 65280), |Yf| 16 bits, product plus 4f 32 bits, level 12 bits
 //     signed, f 20 bits signed, product with 16V 30 bits signed, dcY 20 bits signed.
 //   * qp is sampled at start and must be at most 51. nz is high when any level is non-zero. Outputs are valid and held from
-//     done until the next start. Latency: done 30 clocks after start (start at clock t, done high at t + 30).
+//     done until the next start. Latency: done 34 clocks after start (start at clock t, done high at t + 34).
 // Language: SystemVerilog-2012.
 // Revision: 11-09-2026
 //   * 11-09-2026: initial version.
@@ -112,11 +112,15 @@ module rtlnet_h264_dcq_luma (
   assign i2 = col_mode ? {2'd2, cnt[1:0]}        : {cnt[1:0], 2'd2};
   assign i3 = col_mode ? {2'd3, cnt[1:0]}        : {cnt[1:0], 2'd3};
 
+  // Butterfly pipeline (Phase 2b-3 timing fix): the operands are read into registers in the issue clock and the sums are
+  // formed and written back in the next clock, so the 16:1 operand multiplexers and the four-operand adders are in
+  // different clocks. A butterfly phase takes 5 clocks (4 issues, then one clock for the last write-back).
+  logic        bf_v;
+  logic [3:0]  w0, w1, w2, w3;
+  logic        bf_issue;
+  assign bf_issue = ((ph == P_ROW1) || (ph == P_COL1) || (ph == P_ROW2) || (ph == P_COL2)) && (cnt < 3'd4);
+
   always_comb begin
-    ba = m[i0];
-    bb = m[i1];
-    bc = m[i2];
-    bd = m[i3];
     o0 = ba + bb + bc + bd;
     o1 = ba + bb - bc - bd;
     o2 = ba - bb - bc + bd;
@@ -168,7 +172,9 @@ module rtlnet_h264_dcq_luma (
       q2_v <= 1'b0;
       s1_v <= 1'b0;
       s2_v <= 1'b0;
+      bf_v <= 1'b0;
     end else begin
+      bf_v <= bf_issue;
       done <= 1'b0;
       q1_v <= (ph == P_Q) && (cnt < 3'd4);
       q2_v <= q1_v;
@@ -185,7 +191,7 @@ module rtlnet_h264_dcq_luma (
           end
         end
         P_ROW1, P_COL1, P_ROW2, P_COL2: begin
-          if (cnt == 3'd3) begin
+          if (cnt == 3'd4) begin
             cnt <= 3'd0;
             case (ph)
               P_ROW1:  ph <= P_COL1;
@@ -230,11 +236,19 @@ module rtlnet_h264_dcq_luma (
     if ((ph == P_IDLE) && start) begin
       for (int i = 0; i < 16; i++) m[i] <= 20'(signed'(w_in[16*i +: 16]));
     end
-    if ((ph == P_ROW1) || (ph == P_COL1) || (ph == P_ROW2) || (ph == P_COL2)) begin
-      m[i0] <= o0;
-      m[i1] <= o1;
-      m[i2] <= o2;
-      m[i3] <= o3;
+    ba <= m[i0];
+    bb <= m[i1];
+    bc <= m[i2];
+    bd <= m[i3];
+    w0 <= i0;
+    w1 <= i1;
+    w2 <= i2;
+    w3 <= i3;
+    if (bf_v) begin
+      m[w0] <= o0;
+      m[w1] <= o1;
+      m[w2] <= o2;
+      m[w3] <= o3;
     end
     if (ph == P_CPY) begin
       for (int i = 0; i < 16; i++) m[i] <= 20'(lvl[i]);

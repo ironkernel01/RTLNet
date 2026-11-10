@@ -731,6 +731,31 @@ static void demo_video(void)
     host_capture_clear();
     demo_type("framebuffer crc\r");
     demo_check(demo_has("% rtlnet_framebuf not present in this build"), "framebuffer crc: core absent");
+    /* H.264 stream commands without the encoder core: refusals, QP validation, the status screens. */
+    host_capture_clear();
+    demo_type("stream h264 192.168.68.10 5004\r");
+    demo_check(demo_has("% rtlnet_h264_enc not present in this build"), "stream h264: encoder absent");
+    host_capture_clear();
+    demo_type("stream h264 300.1.1.1 5004\r");
+    demo_check(demo_has("% Invalid IPv4 address") || demo_has("IPv4 address"), "stream h264: bad address rejected");
+    host_capture_clear();
+    demo_type("encoder qp 60\r");
+    demo_check(demo_has("QP (0..51)"), "encoder qp: 60 rejected");
+    host_capture_clear();
+    demo_type("encoder qp 8\r");
+    demo_check(demo_has("the driver writes 12"), "encoder qp: 8 accepted with the floor note");
+    host_capture_clear();
+    demo_type("encoder qp 28\r");
+    demo_check(demo_has("QP 28, effective at the next picture"), "encoder qp: 28 accepted");
+    host_capture_clear();
+    demo_type("show stream\r");
+    demo_check(demo_has("State           : stopped") && demo_has("QP 28") && demo_has("CPU load        : TS mux 0.0 %"), "show stream: stopped, QP 28");
+    host_capture_clear();
+    demo_type("show encoder\r");
+    demo_check(demo_has("% rtlnet_h264_enc not present in this build"), "show encoder: core absent");
+    host_capture_clear();
+    demo_type("stream stop\r");
+    demo_check(demo_has("No stream is running"), "stream stop: nothing running");
 
     /* Reset state: 720p30, auto, pattern active, 30.00 fps. */
     host_model_video_set(1);
@@ -738,7 +763,7 @@ static void demo_video(void)
     host_capture_clear();
     demo_type("show camera\r");
     demo_check(demo_has("  Video mode      : 720p30 (1280x720)") && demo_has("  Source setting  : auto") &&
-               demo_has("  Active source   : pattern") && demo_has("  Frame period    : 3333333 ui_clk cycles (30.00 fps)") &&
+               demo_has("  Active source   : pattern") && demo_has("  Frame period    : 3000000 ui_clk cycles (30.00 fps)") &&
                demo_has("  Frame count     : 150") && demo_has("  Camera timeout  : 2 frame periods") &&
                demo_has("  Status          : 0x00000001 (pattern-active)"), "show camera: reset state");
     host_capture_clear();
@@ -789,10 +814,10 @@ static void demo_video(void)
     demo_check(demo_has("% Invalid video source"), "camera source: bad name rejected");
     host_capture_clear();
     demo_type("camera rate 15\r");
-    demo_check(demo_has("Frame rate 15 fps (6666666 ui_clk cycles per frame)"), "camera rate 15");
+    demo_check(demo_has("Frame rate 15 fps (6000000 ui_clk cycles per frame)"), "camera rate 15");
     host_capture_clear();
     demo_type("show camera\r");
-    demo_check(demo_has("  Frame period    : 6666666 ui_clk cycles (15.00 fps)"), "show camera: 15 fps");
+    demo_check(demo_has("  Frame period    : 6000000 ui_clk cycles (15.00 fps)"), "show camera: 15 fps");
     static const char *const bad_rate[] = { "camera rate 0\r", "camera rate 31\r", "camera rate abc\r", "camera rate -1\r" };
     for (unsigned i = 0; i < sizeof(bad_rate) / sizeof(bad_rate[0]); i++) {
         host_capture_clear();
@@ -802,15 +827,15 @@ static void demo_video(void)
     demo_type("camera rate 30\r");
     /* The mode and period interplay: a period below the 720p30 minimum is legal at 1080p30 and blocks the switch back. */
     demo_type("camera mode 1080p30\r");
-    demo_type("debug write 0x44A05018 3332500\r");
+    demo_type("debug write 0x44A05018 2999500\r");
     host_capture_clear();
     demo_type("camera mode 720p30\r");
     demo_check(demo_has("% Video mode 720p30 rejected: the frame period is below its minimum"), "camera mode: rejected below the minimum period");
     host_capture_clear();
     demo_type("show camera\r");
-    demo_check(demo_has("  Video mode      : 1080p30 (1920x1080)") && demo_has("  Frame period    : 3332500 ui_clk cycles (30.00 fps)") &&
+    demo_check(demo_has("  Video mode      : 1080p30 (1920x1080)") && demo_has("  Frame period    : 2999500 ui_clk cycles (30.00 fps)") &&
                demo_has("  Status          : 0x00000001 (pattern-active)"), "show camera: rejected mode leaves the register and clears the flag");
-    demo_type("debug write 0x44A05018 3333333\r");
+    demo_type("debug write 0x44A05018 3000000\r");
     demo_type("camera mode 720p30\r");
     /* Writes the driver does not make: the core's flags show in show camera. */
     demo_type("debug write 0x44A05010 5\r");

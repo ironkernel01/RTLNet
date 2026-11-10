@@ -171,7 +171,7 @@ try {
 
     # b: reset state and frame rate from the PC clock.
     $c0 = Get-Camera (Invoke-Cli $sp 'show camera')
-    Add-Result 'b1 show camera: reset state' ($c0.Mode -eq '720p30' -and $c0.Source -eq 'auto' -and $c0.Active -eq 'pattern' -and $c0.Period -eq 3333333) `
+    Add-Result 'b1 show camera: reset state' ($c0.Mode -eq '720p30' -and $c0.Source -eq 'auto' -and $c0.Active -eq 'pattern' -and $c0.Period -eq 3000000) `
         ("mode $($c0.Mode), source setting $($c0.Source), active $($c0.Active), period $($c0.Period) ($($c0.Fps) fps), frame count $($c0.Frames)")
     Start-Sleep -Milliseconds 4000
     $c1 = Get-Camera (Invoke-Cli $sp 'show camera')
@@ -205,16 +205,16 @@ try {
     $r = Invoke-Cli $sp 'camera mode 720p30'
     Add-Result 'f1 camera mode 720p30' ($r.Text -match 'Video mode 720p30 \(1280x720\)') 'accepted'
     $r = Invoke-Cli $sp 'camera rate 15'
-    Add-Result 'f2 camera rate 15' ($r.Text -match 'Frame rate 15 fps \(6666666 ui_clk cycles per frame\)') 'accepted'
+    Add-Result 'f2 camera rate 15' ($r.Text -match 'Frame rate 15 fps \(6000000 ui_clk cycles per frame\)') 'accepted'
     Start-Sleep -Milliseconds 500
     $r0 = Get-Camera (Invoke-Cli $sp 'show camera')
     Start-Sleep -Milliseconds 2000
     $r1 = Get-Camera (Invoke-Cli $sp 'show camera')
     $rate15 = Get-Rate $r0 $r1
-    $expect = 100000000.0 / [double]$r1.Period
-    Add-Result 'f3 frame rate follows the printed period' ($r1.Period -eq 6666666 -and [math]::Abs($rate15 - $expect) -le 0.5) ('{0:N3} fps measured, {1:N3} fps from the period {2}' -f $rate15, $expect, $r1.Period)
+    $expect = 90000000.0 / [double]$r1.Period
+    Add-Result 'f3 frame rate follows the printed period' ($r1.Period -eq 6000000 -and [math]::Abs($rate15 - $expect) -le 0.5) ('{0:N3} fps measured, {1:N3} fps from the period {2}' -f $rate15, $expect, $r1.Period)
     $r = Invoke-Cli $sp 'camera rate 30'
-    Add-Result 'f4 camera rate 30' ($r.Text -match 'Frame rate 30 fps \(3333333 ui_clk cycles per frame\)') 'reset period restored'
+    Add-Result 'f4 camera rate 30' ($r.Text -match 'Frame rate 30 fps \(3000000 ui_clk cycles per frame\)') 'reset period restored'
     $r = Invoke-Cli $sp 'camera source pattern'
     $s1 = Get-Camera (Invoke-Cli $sp 'show camera')
     Add-Result 'f5 camera source pattern' ($r.Text -match 'Video source pattern' -and $s1.Source -eq 'pattern' -and $s1.Active -eq 'pattern') "setting $($s1.Source), active $($s1.Active)"
@@ -227,7 +227,7 @@ try {
     $b4 = Invoke-Cli $sp 'camera source radar'
     $badOk = ($b1.Text -match '% Invalid video mode') -and ($b2.Text -match '% Invalid frame rate') -and ($b3.Text -match '% Invalid frame rate') -and ($b4.Text -match '% Invalid video source')
     $s3 = Get-Camera (Invoke-Cli $sp 'show camera')
-    Add-Result 'f7 bad inputs rejected, nothing changed' ($badOk -and $s3.Mode -eq '720p30' -and $s3.Period -eq 3333333 -and $s3.Source -eq 'auto') "mode $($s3.Mode), period $($s3.Period), source $($s3.Source)"
+    Add-Result 'f7 bad inputs rejected, nothing changed' ($badOk -and $s3.Mode -eq '720p30' -and $s3.Period -eq 3000000 -and $s3.Source -eq 'auto') "mode $($s3.Mode), period $($s3.Period), source $($s3.Source)"
     Start-Sleep -Milliseconds 1000
     $m = $model['720p30']
     $crc2 = Get-Crc (Invoke-Cli $sp 'framebuffer crc' 60000)

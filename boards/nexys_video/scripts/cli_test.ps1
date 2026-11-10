@@ -139,7 +139,7 @@ try {
         'Board ID\s+: NXVD \(0x4E585644\)', 'Register map\s+: 11-09-2026', 'Build ID\s+: 0x[0-9a-f]{8} \(git [0-9a-f]{8}\), tree (clean|dirty)',
         'Firmware\s+: rtlnet-fw') 'rtlnet>'
     Send-Step $sp 'show system' "show system`r" @(
-        'MMCM\s+: locked', 'CPU clock\s+: 100000000 Hz', 'Clock clk125\s*: 12[45]\.\d{3} MHz', 'Clock clk200\s*: (199|200)\.\d{3} MHz',
+        'MMCM\s+: locked', 'CPU clock\s+: 90000000 Hz', 'Clock clk125\s*: 12[45]\.\d{3} MHz', 'Clock clk200\s*: (199|200)\.\d{3} MHz',
         'Clock axis_clk\s*: 62\.\d{3} MHz', 'Clock proto_clk\s*: (49|50)\.\d{3} MHz') 'rtlnet>'
     Send-Step $sp '? (exec)' '?' @('User exec commands:', 'show version\s+- ', 'enable\s+- ') 'rtlnet>'
     Send-Step $sp 'enable' "enable`r" @() 'rtlnet#'
@@ -164,9 +164,10 @@ try {
     $ddrImage = (($script:log.ToString() -replace "`r", '') -match '(DDR3 image|(?m)^\s*Image\s+: DDR3)')
     Send-Step $sp 'show ddr' "show ddr`r" @(
         'Calibration\s+: done', 'Arbiter\s+: ID "ARBT" 0x41524254, version 11-09-2026 at 0x44A04000',
-        'Arbiter config\s+: 2 master\(s\), 16-byte beats, ID width 1, 8 outstanding, high-priority mask 0x02, narrow mask 0x01, wrap mask 0x01',
+        'Arbiter config\s+: 4 master\(s\), 16-byte beats, ID width 2, 8 outstanding, high-priority mask 0x02, narrow mask 0x01, wrap mask 0x01',
         'illegal-burst flag clear', 'Master 0 \(CPU caches\): AW bursts \d+',
-        'Master 1 \(video write DMA\): AW bursts \d+, .* errors 0,') 'rtlnet#'
+        'Master 1 \(video write DMA\): AW bursts \d+, .* errors 0,', 'Master 2 \(encoder engine 0\): AW bursts \d+, .* errors 0,',
+        'Master 3 \(encoder engine 1\): AW bursts \d+, .* errors 0,') 'rtlnet#'
     if ($ddrImage) {
         Skip-Step 'ddr test (bad size)' 'DDR3 image refuses ddr test'
         Skip-Step 'ddr test (default)' 'DDR3 image refuses ddr test'
@@ -199,15 +200,28 @@ try {
     Send-Step $sp 'show camera (1080p30)' "show camera`r" @('Video mode\s+: 1080p30 \(1920x1080\)') 'rtlnet#'
     Send-Step $sp 'camera mode 720p30' "camera mode 720p30`r" @('Video mode 720p30 \(1280x720\)') 'rtlnet#'
     Send-Step $sp 'camera mode (bad)' "camera mode 4k`r" @('% Invalid video mode \(720p30 or 1080p30\) "4k"') 'rtlnet#'
-    Send-Step $sp 'camera rate 15' "camera rate 15`r" @('Frame rate 15 fps \(6666666 ui_clk cycles per frame\)') 'rtlnet#'
-    Send-Step $sp 'show camera (15 fps)' "show camera`r" @('Frame period\s+: 6666666 ui_clk cycles \(15\.00 fps\)') 'rtlnet#'
+    Send-Step $sp 'camera rate 15' "camera rate 15`r" @('Frame rate 15 fps \(6000000 ui_clk cycles per frame\)') 'rtlnet#'
+    Send-Step $sp 'show camera (15 fps)' "show camera`r" @('Frame period\s+: 6000000 ui_clk cycles \(15\.00 fps\)') 'rtlnet#'
     Send-Step $sp 'camera rate (bad)' "camera rate 31`r" @('% Invalid frame rate in fps \(1\.\.30\) "31"') 'rtlnet#'
-    Send-Step $sp 'camera rate 30' "camera rate 30`r" @('Frame rate 30 fps \(3333333 ui_clk cycles per frame\)') 'rtlnet#'
+    Send-Step $sp 'camera rate 30' "camera rate 30`r" @('Frame rate 30 fps \(3000000 ui_clk cycles per frame\)') 'rtlnet#'
     Send-Step $sp 'camera source (bad)' "camera source radar`r" @('% Invalid video source \(auto, camera or pattern\) "radar"') 'rtlnet#'
     Send-Step $sp 'camera source pattern' "camera source pattern`r" @('Video source pattern') 'rtlnet#'
     Send-Step $sp 'camera source auto' "camera source auto`r" @('Video source auto') 'rtlnet#'
     Send-Step $sp 'framebuffer crc' "framebuffer crc`r" @(
         'Framebuffer CRC-32 : 0x[0-9A-F]{8} \(frame \d+, slot \d, \d+x\d+, (pattern|camera), \d+ bytes\)') 'rtlnet#' 60000
+    # H.264 stream (Phase 2b-3): command formats and refusals; the stream itself is checked by stream_test.ps1.
+    Send-Step $sp 'show encoder' "show encoder`r" @(
+        'ID "H264" 0x48323634', 'Build\s+: 2 engines, up to 120 x 68 macroblocks', 'QP\s+: \d+ configured, \d+ written; STATUS 0x[0-9A-F]{8}',
+        'Engine 0\s+: \d+ macroblocks, picture \d+ cycles', 'Engine 1\s+: \d+ macroblocks, picture \d+ cycles') 'rtlnet#'
+    Send-Step $sp 'encoder qp (bad)' "encoder qp 52`r" @('% Invalid QP \(0\.\.51\) "52"') 'rtlnet#'
+    Send-Step $sp 'encoder qp 8 (floor)' "encoder qp 8`r" @('QP 8 set; the driver writes 12') 'rtlnet#'
+    Send-Step $sp 'encoder qp 28' "encoder qp 28`r" @('QP 28, effective at the next picture') 'rtlnet#'
+    Send-Step $sp 'stream h264 (bad address)' "stream h264 300.1.1.1 5004`r" @('% Invalid IPv4 address "300\.1\.1\.1"') 'rtlnet#'
+    Send-Step $sp 'stream h264 (bad port)' "stream h264 192.168.68.1 0`r" @('% Invalid UDP port \(1\.\.65535\) "0"') 'rtlnet#'
+    Send-Step $sp 'show stream (stopped)' "show stream`r" @(
+        'State\s+: stopped', 'Pictures\s+: \d+ sent, \d+ dropped', 'TS packets\s+: \d+ in \d+ datagrams',
+        'CPU load\s+: TS mux \d+\.\d %', 'Errors\s+: \d+; frame buffer published \d+, dropped \d+') 'rtlnet#'
+    Send-Step $sp 'stream stop (none)' "stream stop`r" @('No stream is running') 'rtlnet#'
     Send-Step $sp 'conf t (tcp)' "configure terminal`r" @() 'rtlnet(config)#'
     Send-Step $sp 'tcp echo port 2007' "tcp echo port 2007`r" @() 'rtlnet(config)#'
     Send-Step $sp 'end (tcp)' "end`r" @() 'rtlnet#'

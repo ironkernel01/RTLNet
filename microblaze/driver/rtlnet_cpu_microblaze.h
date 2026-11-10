@@ -66,8 +66,14 @@
 #define RTLNET_CPU_RTLNET_BASE      0x44A00000u
 #define RTLNET_CPU_RTLNET_SIZE      0x00100000u
 
-/* Processor clock (cpu_clk from the board MMCM). */
-#define RTLNET_CPU_CLK_HZ           100000000u
+/* Processor clock (cpu_clk from the board MMCM): read from the exported hardware (XSA, BSP xparameters.h), never typed here.
+ * The desktop harness (RTLNET_HOST_TEST) models the board's 90 MHz. */
+#ifdef RTLNET_HOST_TEST
+#define RTLNET_CPU_CLK_HZ           90000000u
+#else
+#include "xparameters.h"
+#define RTLNET_CPU_CLK_HZ           ((uint32_t)XPAR_CPU_CORE_CLOCK_FREQ_HZ)
+#endif
 
 /* INTC input numbering: core port irq[7:0] on inputs 0..7. */
 #define RTLNET_CPU_IRQ_EXT0         0u            /* irq[0] .. irq[7] = inputs 0..7 */

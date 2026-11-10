@@ -1,0 +1,2 @@
+# Firmware host tests: <name> script:<host script path> [arguments]   (passes on exit code 0)
+tsmux_host_test   script:microblaze/firmware/test/tsmux_host_test.ps1

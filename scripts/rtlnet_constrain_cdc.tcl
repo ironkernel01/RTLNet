@@ -11,7 +11,8 @@
 #   reset     rtlnet_reset_sync: false path to the CLR/PRE pins of pipe_reg[*].
 #   gray      rtlnet_gray_sync: gray_src_reg -> gray_dst_ff_reg[0][*],
 #             set_max_delay -datapath_only and set_bus_skew of one source period.
-#   fifo      rtlnet_packet_fifo (instances u_*_fifo): s_gray -> s_gray_m1 and
+#   fifo      rtlnet_packet_fifo (instances u_*_fifo): the RAM data path (RAM cells -> read data registers,
+#             set_max_delay -datapath_only of the destination period), s_gray -> s_gray_m1 and
 #             m_gray -> m_gray_s1 as for gray; the event toggles
 #             events_s -> events_m1 set_max_delay -datapath_only of one source
 #             period.
@@ -36,7 +37,10 @@
 #   instance count than expected (a crossing lost or added by a design change
 #   must be reviewed). ::rtlnet_cdc_result holds the per-class counts.
 #   Default required classes: all five.
-# Revision: 10-22-2026
+# Revision: 11-09-2026
+#   * 11-09-2026: rtlnet_axil_cdc cells live in generate block g_cdc (SYNC parameter): the name patterns accept the prefix.
+#   * 11-09-2026: packet FIFO RAM data path bounded (datapath_only, destination period); needed once cpu_clk and enc_clk (90 MHz)
+#     differ from ui_clk (100 MHz).
 #   * 10-22-2026: initial version.
 # -----------------------------------------------------------------------------
 
@@ -195,6 +199,19 @@ proc rtlnet_cdc::do_fifo {} {
         incr n_x [llength $e_m1]
       }
     }
+    # RAM data crossing: the FIFO storage is written in s_clk and read in m_clk. A word is read only after its Gray pointer has
+    # crossed (two or more destination clocks after the write), so the RAM-to-read-register path is bounded by one destination
+    # period with set_max_delay -datapath_only, like the Gray bundles. Without it Vivado times the path between the two clocks
+    # as if they were related (equal periods hid the missing constraint while cpu_clk and ui_clk were both 100 MHz).
+    set ram  [get_cells -quiet -hierarchical -filter "REF_NAME =~ RAM* && NAME =~ [string map {[ \[ ] \]} $inst]/u_ram/*"]
+    set rreg [get_cells -quiet -hierarchical -filter "IS_SEQUENTIAL == 1 && NAME =~ [string map {[ \[ ] \]} $inst]/u_ram/*doutb_reg*"]
+    if {[llength $ram] > 0 && [llength $rreg] > 0} {
+      set per [period_of [lindex $rreg 0]]
+      if {$per ne ""} {
+        set_max_delay -datapath_only -from $ram -to $rreg $per
+        incr n_x [llength $rreg]
+      }
+    }
     note fifo $inst [expr {[llength $s_m1] + [llength $m_s1] + [llength $e_m1]}]
   }
   set counts(fifo) [list $n_inst $n_x]
@@ -208,11 +225,16 @@ proc rtlnet_cdc::do_axil_cdc {} {
   set n_inst 0
   set n_x 0
   foreach inst [instances rtlnet_axil_cdc] {
+    # SYNC = 1 instance: a pass-through with no flop, so there is no crossing to constrain or count.
+    if {[llength [cells_in $inst {.*}]] == 0} {
+      puts "rtlnet_cdc: $inst is a SYNC pass-through (no clock crossing), not counted"
+      continue
+    }
     incr n_inst
-    set req [cells_in $inst {req_[a-z_]+_hold_reg(\[[0-9]+\])?}]
-    set rsp [cells_in $inst {rsp_[a-z_]+_hold_reg(\[[0-9]+\])?}]
-    set ack [cells_in $inst {u_ack_sync/g_bit\[0\]\.sync_ff_reg\[0\]}]
-    set rqs [cells_in $inst {u_req_sync/g_bit\[0\]\.sync_ff_reg\[0\]}]
+    set req [cells_in $inst {(g_cdc\.)?req_[a-z_]+_hold_reg(\[[0-9]+\])?}]
+    set rsp [cells_in $inst {(g_cdc\.)?rsp_[a-z_]+_hold_reg(\[[0-9]+\])?}]
+    set ack [cells_in $inst {(g_cdc\.)?u_ack_sync/g_bit\[0\]\.sync_ff_reg\[0\]}]
+    set rqs [cells_in $inst {(g_cdc\.)?u_req_sync/g_bit\[0\]\.sync_ff_reg\[0\]}]
     if {[llength $req] == 0 || [llength $rsp] == 0 || [llength $ack] == 0 || [llength $rqs] == 0} {
       fail "$inst: req_*_hold / rsp_*_hold / toggle synchronizers not found"; continue
     }

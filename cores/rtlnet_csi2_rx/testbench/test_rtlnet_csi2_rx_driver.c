@@ -121,14 +121,14 @@ int main(void)
     g_id = RTLNET_CSI2_ID_VALUE;
 
     check(rtlnet_csi2_rx_read_state(TEST_BASE, &st) == RTLNET_CSI2_OK && st.video_mode == 0u && st.source == 0u &&
-          st.frame_period == 3333333u && st.cam_timeout == 2u && st.frame_count == 42u && (st.status & RTLNET_CSI2_STATUS_PATTERN) != 0u,
-          "reset state: 720p30, auto, 3,333,333, timeout 2, pattern active");
+          st.frame_period == 3000000u && st.cam_timeout == 2u && st.frame_count == 42u && (st.status & RTLNET_CSI2_STATUS_PATTERN) != 0u,
+          "reset state: 720p30, auto, 3,000,000, timeout 2, pattern active");
     check(rtlnet_csi2_rx_read_state(TEST_BASE, NULL) == RTLNET_CSI2_ERR_ARG, "read_state NULL");
 
     check(rtlnet_csi2_rx_set_mode(TEST_BASE, RTLNET_CSI2_MODE_1080P30) == RTLNET_CSI2_OK && g_mode == 1u, "set_mode 1080p30");
     check(rtlnet_csi2_rx_set_mode(TEST_BASE, 2u) == RTLNET_CSI2_ERR_ARG && g_mode == 1u && g_err == 0u,
           "set_mode 2 refused by the driver, nothing written");
-    g_period = 3332500u;
+    g_period = 2999500u;
     check(rtlnet_csi2_rx_set_mode(TEST_BASE, RTLNET_CSI2_MODE_720P30) == RTLNET_CSI2_ERR_REJECTED && g_mode == 1u && g_err == 0u,
           "set_mode 720p30 with a short period: rejected, flag cleared");
     g_period = RTLNET_CSI2_PERIOD_RESET;
@@ -140,14 +140,14 @@ int main(void)
     check(rtlnet_csi2_rx_set_source(TEST_BASE, RTLNET_CSI2_SRC_AUTO) == RTLNET_CSI2_OK && g_source == 0u && g_err == 0u,
           "a stale error flag does not fail a good write");
 
-    check(rtlnet_csi2_rx_set_frame_period(TEST_BASE, 3000000u) == RTLNET_CSI2_ERR_REJECTED && g_period == RTLNET_CSI2_PERIOD_RESET &&
+    check(rtlnet_csi2_rx_set_frame_period(TEST_BASE, 2999999u) == RTLNET_CSI2_ERR_REJECTED && g_period == RTLNET_CSI2_PERIOD_RESET &&
           g_err == 0u, "period below the minimum rejected");
-    check(rtlnet_csi2_rx_set_frame_period(TEST_BASE, RTLNET_CSI2_PERIOD_MIN_720P30) == RTLNET_CSI2_OK && g_period == 3333000u,
+    check(rtlnet_csi2_rx_set_frame_period(TEST_BASE, RTLNET_CSI2_PERIOD_MIN_720P30) == RTLNET_CSI2_OK && g_period == 3000000u,
           "period at the minimum accepted");
-    check(rtlnet_csi2_rx_set_rate_fps(TEST_BASE, 30u) == RTLNET_CSI2_OK && g_period == 3333333u, "30 fps is the reset period");
-    check(rtlnet_csi2_rx_set_rate_fps(TEST_BASE, 15u) == RTLNET_CSI2_OK && g_period == 6666666u, "15 fps");
+    check(rtlnet_csi2_rx_set_rate_fps(TEST_BASE, 30u) == RTLNET_CSI2_OK && g_period == 3000000u, "30 fps is the reset period");
+    check(rtlnet_csi2_rx_set_rate_fps(TEST_BASE, 15u) == RTLNET_CSI2_OK && g_period == 6000000u, "15 fps");
     check(rtlnet_csi2_rx_set_rate_fps(TEST_BASE, 0u) == RTLNET_CSI2_ERR_ARG && rtlnet_csi2_rx_set_rate_fps(TEST_BASE, 31u) == RTLNET_CSI2_ERR_ARG &&
-          g_period == 6666666u, "0 and 31 fps refused, register unchanged");
+          g_period == 6000000u, "0 and 31 fps refused, register unchanged");
 
     check(rtlnet_csi2_rx_mode_width(0u) == 1280u && rtlnet_csi2_rx_mode_height(0u) == 720u && rtlnet_csi2_rx_mode_width(1u) == 1920u &&
           rtlnet_csi2_rx_mode_height(1u) == 1080u && rtlnet_csi2_rx_mode_width(2u) == 0u && rtlnet_csi2_rx_mode_height(2u) == 0u,

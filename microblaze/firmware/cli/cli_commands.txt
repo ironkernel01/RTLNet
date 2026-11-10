@@ -18,6 +18,7 @@ REVISION:10-22-2026:TCP iperf server (lwiperf), phy reset, phy mmd / c45, LED an
 REVISION:10-22-2026:Checksum offload: show offload, offload tx-ip / tx-l4 / rx / all on|off
 REVISION:11-09-2026:DDR3: show ddr, ddr test [size in MiB]; clear counters also clears the DDR3 arbiter
 REVISION:11-09-2026:Video (Phase 1): show camera, show framebuffer, camera mode|source|rate, framebuffer crc; clear counters clears the video cores
+REVISION:11-09-2026:H.264 stream (Phase 2b-3): stream h264 <ip> <port>, stream stop, show stream, encoder qp, show encoder
 
 # ---------------------------------------------------------------------------
 # Modes
@@ -37,6 +38,8 @@ KEYWORD:priv:DEBUG:Raw register access
 KEYWORD:priv:DDR:DDR3 memory
 KEYWORD:priv:CAMERA:Video source: mode, source switch, frame rate
 KEYWORD:priv:FRAMEBUFFER:Video frame buffer in DDR3
+KEYWORD:priv:STREAM:H.264 MPEG-TS stream over UDP
+KEYWORD:priv:ENCODER:H.264 encoder settings
 KEYWORD:priv:LED:Set a user LED (2..7)
 KEYWORD:priv:PHY:PHY registers over MDIO
 KEYWORD:priv:PHY MMD:MMD registers, Clause 45 over Clause 22 (registers 13/14)
@@ -82,6 +85,8 @@ cli_show_offload:exec:SHOW OFFLOAD:Checksum offload: discovery, CTRL, lwIP flags
 cli_show_ddr:exec:SHOW DDR:DDR3 calibration, caches, arbiter identity, error status and counters
 cli_show_camera:exec:SHOW CAMERA:Video source: mode, source switch, active source, frame rate and count
 cli_show_framebuffer:exec:SHOW FRAMEBUFFER:Video frame buffer: slots, latest published frame, reference counts, write DMA
+cli_show_stream:exec:SHOW STREAM:H.264 stream: pictures, bytes, bit rate, dropped pictures, TS packets and mux CPU load
+cli_show_encoder:exec:SHOW ENCODER:H.264 encoder: QP, mode, status and per-engine cycle statistics
 
 # ---------------------------------------------------------------------------
 # Privileged exec
@@ -93,6 +98,9 @@ cli_camera_mode:priv:CAMERA MODE [MODE]:Video mode: 720p30 or 1080p30 (effective
 cli_camera_source:priv:CAMERA SOURCE [SOURCE]:Video source: auto, camera or pattern
 cli_camera_rate:priv:CAMERA RATE [FPS]:Frame rate in frames per second, 1..30 (30 is the reset value)
 cli_framebuffer_crc:priv:FRAMEBUFFER CRC:CRC-32 of the latest published frame, read through the cache
+cli_stream_h264:priv:STREAM H264 [IP] [PORT]:Start the H.264 MPEG-TS stream over UDP to a host (VLC: udp://@:PORT)
+cli_stream_stop:priv:STREAM STOP:Stop the H.264 stream
+cli_encoder_qp:priv:ENCODER QP [QP]:H.264 quantizer 0..51, fixed for I pictures (the driver raises values below 12 to 12; default 28)
 cli_debug_read:priv:DEBUG READ [ADDR]:Read a 32-bit word (hex 0x... or decimal address)
 cli_debug_write:priv:DEBUG WRITE [ADDR] [VALUE]:Write a 32-bit word
 cli_phy_read:priv:PHY READ [REG]:Read a PHY register (0..31) over MDIO

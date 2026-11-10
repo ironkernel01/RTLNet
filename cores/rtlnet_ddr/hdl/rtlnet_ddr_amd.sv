@@ -15,7 +15,7 @@
 //     connected. (The calibration tap loader ports exist only when the IP is built
 //     with SKIP_CALIB, which the build does not define.)
 //   * AXI4 data width 128 bits (MIG native: 16 DQ x 8 beats), address 29 bits
-//     (512 MiB), ID width 2; the burst rules of the controller (INCR, full
+//     (512 MiB), ID width 4; the burst rules of the controller (INCR, full
 //     width, no 4 KiB crossing) are enforced by rtlnet_axi_arbiter in front.
 //   * The only AMD-specific file of the core besides the IP script.
 // Language: SystemVerilog-2012.
@@ -28,7 +28,7 @@
 module rtlnet_ddr_amd #(
   parameter int ADDR_W = 29,
   parameter int DATA_W = 128,
-  parameter int ID_W   = 2
+  parameter int ID_W   = 4
 )(
   // Controller clocks and reset: sys_clk 100 MHz (controller PLL input),
   // ref_clk 200 MHz (IDELAYCTRL reference), sys_rstn asynchronous active low.
@@ -102,8 +102,8 @@ module rtlnet_ddr_amd #(
   logic ui_rst;
 
   generate
-    if (ADDR_W != 29 || DATA_W != 128 || ID_W != 2) begin : g_bad_cfg
-      $fatal(1, "rtlnet_ddr_amd: ADDR_W=%0d DATA_W=%0d ID_W=%0d, the MIG project is 29/128/2", ADDR_W, DATA_W, ID_W);
+    if (ADDR_W != 29 || DATA_W != 128 || ID_W != 4) begin : g_bad_cfg
+      $fatal(1, "rtlnet_ddr_amd: ADDR_W=%0d DATA_W=%0d ID_W=%0d, the MIG project is 29/128/4", ADDR_W, DATA_W, ID_W);
     end
   endgenerate
 
@@ -128,11 +128,6 @@ module rtlnet_ddr_amd #(
     .ddr3_odt            (ddr3_odt),
     .ui_clk              (ui_clk),
     .ui_clk_sync_rst     (ui_rst),
-    .ui_addn_clk_0       (),
-    .ui_addn_clk_1       (),
-    .ui_addn_clk_2       (),
-    .ui_addn_clk_3       (),
-    .ui_addn_clk_4       (),
     .mmcm_locked         (),
     .aresetn             (s_axi_aresetn),
     .app_sr_req          (1'b0),

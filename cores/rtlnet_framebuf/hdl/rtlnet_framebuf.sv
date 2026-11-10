@@ -28,6 +28,7 @@
 //   register crossing only).
 // -----------------------------------------------------------------------------
 module rtlnet_framebuf #(
+  parameter bit    AXIL_SYNC = 1'b0,   // 1: s_axi_aclk is clk (register window without a clock crossing)
   parameter int          N           = 3,                  // slots, 2..8
   parameter int          NUM_READERS = 1,                  // external reader ports (the firmware reader is extra)
   parameter int          ADDR_W      = 29,                 // DDR3 byte address bits
@@ -132,7 +133,7 @@ module rtlnet_framebuf #(
   logic [31:0] reg_rd_data;
 
   // Register clock -> clk crossing of whole AXI4-Lite transactions.
-  rtlnet_axil_cdc #(.ADDR_W(12)) u_axil_cdc (
+  rtlnet_axil_cdc #(.ADDR_W(12), .SYNC(AXIL_SYNC)) u_axil_cdc (
     .s_clk         (s_axi_aclk),
     .s_resetn      (s_axi_aresetn),
     .s_axi_awaddr  (s_axi_awaddr),

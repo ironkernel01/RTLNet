@@ -64,12 +64,12 @@ uint32_t rtlnet_host_reg_read32(uintptr_t addr)
     case RTLNET_FB_REG_SLOT_BYTES:    return SLOT_BYTES;
     case RTLNET_FB_REG_LATEST_BASE:   return FB_OFFSET + (latest_slot() * SLOT_BYTES);
     case RTLNET_FB_REG_LATEST_FRAME:  return g_published;
-    case RTLNET_FB_REG_LATEST_TS:     return g_published * 3333333u;
+    case RTLNET_FB_REG_LATEST_TS:     return g_published * 3000000u;
     case RTLNET_FB_REG_LATEST_WH:     return (720u << 16) | 1280u;
     case RTLNET_FB_REG_LATEST_SRC:    return 1u;
     case RTLNET_FB_REG_FW_BASE:       return FB_OFFSET + (g_fw_slot * SLOT_BYTES);
     case RTLNET_FB_REG_FW_FRAME:      return g_fw_frame;
-    case RTLNET_FB_REG_FW_TS:         return g_fw_frame * 3333333u;
+    case RTLNET_FB_REG_FW_TS:         return g_fw_frame * 3000000u;
     case RTLNET_FB_REG_FW_WH:         return (720u << 16) | 1280u;
     case RTLNET_FB_REG_FW_SRC:        return 1u;
     case RTLNET_FB_REG_PUBLISHED:     return g_published;

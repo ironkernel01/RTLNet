@@ -26,13 +26,13 @@
 // Revision: 11-09-2026
 //   * 10-22-2026: initial version.
 //   * 11-09-2026: CLK_STATUS bit 1 = DDR3 calibration complete (input ddr_calib_async); VERSION 11-09-2026.
-// Clocks: clk (cpu_clk 100 MHz) only; resetn synchronous to clk, active low.
+// Clocks: clk (cpu_clk 90 MHz) only; resetn synchronous to clk, active low.
 // -----------------------------------------------------------------------------
 module rtlnet_nexys_video_sysregs #(
   parameter logic [31:0] BUILD_ID    = 32'h0000_0000,  // git hash, set by the build script
   parameter logic        BUILD_DIRTY = 1'b0,           // tree had uncommitted changes
   parameter logic        NETWORK     = 1'b0,           // RTLNET_WITH_NETWORK build
-  parameter int          CPU_CLK_HZ  = 100_000_000,
+  parameter int          CPU_CLK_HZ  = 90_000_000,
   parameter int          MS_CYCLES   = CPU_CLK_HZ / 1000,
   parameter int          NUM_CLK     = 5               // monitored clocks (beacons)
 )(

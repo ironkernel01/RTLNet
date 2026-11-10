@@ -122,7 +122,7 @@ function Fwd([string]$p) { return ($p -replace '\\', '/') }
 # Core drivers (cores/<core>/driver): the only code that touches each core.
 $drvCores = @('rtlnet_eth_mac', 'rtlnet_mdio', 'rtlnet_eth_protocol', 'rtlnet_arp', 'rtlnet_icmp',
               'rtlnet_dhcp', 'rtlnet_iperf', 'rtlnet_udp_socket', 'rtlnet_udp_echo', 'rtlnet_classifier',
-              'rtlnet_tcp_offload', 'rtlnet_axi_arbiter', 'rtlnet_csi2_rx', 'rtlnet_vdma_s2mm', 'rtlnet_framebuf')
+              'rtlnet_tcp_offload', 'rtlnet_axi_arbiter', 'rtlnet_csi2_rx', 'rtlnet_vdma_s2mm', 'rtlnet_framebuf', 'rtlnet_h264_enc')
 $drvSrcs = @(
     'cores/rtlnet_eth_mac/driver/rtlnet_eth_mac.c', 'cores/rtlnet_mdio/driver/rtlnet_mdio.c',
     'cores/rtlnet_mdio/driver/rtlnet_phy_rtl8211e.c', 'cores/rtlnet_eth_protocol/driver/rtlnet_eth_protocol.c',
@@ -131,10 +131,11 @@ $drvSrcs = @(
     'cores/rtlnet_udp_socket/driver/rtlnet_udp_socket.c', 'cores/rtlnet_udp_echo/driver/rtlnet_udp_echo.c',
     'cores/rtlnet_classifier/driver/rtlnet_classifier.c', 'cores/rtlnet_tcp_offload/driver/rtlnet_tcp_offload.c',
     'cores/rtlnet_axi_arbiter/driver/rtlnet_axi_arbiter.c', 'cores/rtlnet_csi2_rx/driver/rtlnet_csi2_rx.c',
-    'cores/rtlnet_vdma_s2mm/driver/rtlnet_vdma_s2mm.c', 'cores/rtlnet_framebuf/driver/rtlnet_framebuf.c'
+    'cores/rtlnet_vdma_s2mm/driver/rtlnet_vdma_s2mm.c', 'cores/rtlnet_framebuf/driver/rtlnet_framebuf.c',
+    'cores/rtlnet_h264_enc/driver/rtlnet_h264_enc.c'
 ) | Where-Object { Test-Path -LiteralPath (Join-Path $Repo $_) }
 $inc = @(
-    "-I$Fw/src", "-I$Fw/src/lwip", "-I$Fw/cli",
+    "-I$Fw/src", "-I$Fw/src/lwip", "-I$Fw/src/video", "-I$Fw/cli",
     "-I$Repo/cores/rtlnet_common/driver",
     "-I$Repo/microblaze/driver"
 ) + ($drvCores | Where-Object { Test-Path -LiteralPath (Join-Path $Repo "cores/$_/driver") } |
@@ -249,12 +250,13 @@ MEMORY
     $sysInc  = @('-isystem', $bspInc, "-specs=$bspSpec")
     # -O2 on the frame path (netif, lwIP glue, TCP echo, lwIP), -Os elsewhere (CLI, drivers).
     $cflags  = $common + @('-g', '-ffunction-sections', '-fdata-sections')
-    $fastSrc = @('rtlnet_lwip_netif', 'rtlnet_lwip', 'rtlnet_tcp_echo', 'rtlnet_tcp_iperf', 'rtlnet_lwiperf', 'rtlnet_offload', 'rtlnet_ddrtest')
+    $fastSrc = @('rtlnet_lwip_netif', 'rtlnet_lwip', 'rtlnet_tcp_echo', 'rtlnet_tcp_iperf', 'rtlnet_lwiperf', 'rtlnet_offload', 'rtlnet_ddrtest', 'rtlnet_tsmux', 'rtlnet_venc', 'rtlnet_video_udp')
     $objs = @()
     $fwSrcs = @(
         'src/main.c', 'src/rtlnet_platform.c', 'src/rtlnet_board.c', 'src/rtlnet_fmt.c', 'src/rtlnet_netmgr.c',
         'src/rtlnet_cpupath.c', 'src/rtlnet_offload.c', 'src/rtlnet_ddrtest.c', 'src/rtlnet_fbcrc.c', 'src/lwip/rtlnet_lwip.c', 'src/lwip/rtlnet_lwip_netif.c', 'src/lwip/rtlnet_tcp_echo.c',
-        'src/lwip/rtlnet_tcp_iperf.c', 'src/lwip/rtlnet_lwiperf.c',
+        'src/lwip/rtlnet_tcp_iperf.c', 'src/lwip/rtlnet_lwiperf.c', 'src/lwip/rtlnet_video_udp.c',
+        'src/video/rtlnet_tsmux.c', 'src/video/rtlnet_venc.c',
         'cli/menu.c', 'cli/menu_table.c', 'cli/cli_commands.c'
     ) | ForEach-Object { "$Fw/$_" }
     foreach ($s in ($fwSrcs + ($drvSrcs | ForEach-Object { "$Repo/$_" }))) {
@@ -285,7 +287,7 @@ MEMORY
 # board layer against a register model; lwIP replaced by host/host_lwip_stub.c.
 if ($HostHarness -or $Demo) {
     $hsrcs = @('host/main.c', 'host/host_platform.c', 'host/host_lwip_stub.c', 'src/rtlnet_board.c', 'src/rtlnet_fmt.c',
-               'src/rtlnet_netmgr.c', 'src/rtlnet_cpupath.c', 'src/rtlnet_offload.c', 'src/rtlnet_ddrtest.c', 'src/rtlnet_fbcrc.c', 'cli/menu.c', 'cli/menu_table.c',
+               'src/rtlnet_netmgr.c', 'src/rtlnet_cpupath.c', 'src/rtlnet_offload.c', 'src/rtlnet_ddrtest.c', 'src/rtlnet_fbcrc.c', 'src/video/rtlnet_tsmux.c', 'src/video/rtlnet_venc.c', 'cli/menu.c', 'cli/menu_table.c',
                'cli/cli_commands.c') |
              ForEach-Object { "$Fw/$_" }
     $exe = Join-Path $Out 'menu.exe'
