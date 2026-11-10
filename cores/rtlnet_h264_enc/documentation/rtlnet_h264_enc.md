@@ -1,6 +1,6 @@
-# rtlnet_h264_enc: H.264 encoder core, phase 2b-2 (Intra16x16, transform, quantizer, CAVLC, I_PCM fallback)
+# rtlnet_h264_enc: H.264 encoder core, phases 2b-2 to 2c-1 (Intra16x16, I_PCM fallback, P pictures at motion vector (0,0))
 
-Revision: 11-10-2026 (phase 2b-4: burst-only DDR3 access, section 14)
+Revision: 11-10-2026 (phase 2c-1: P pictures without motion search, section 15; phase 2b-4: burst-only DDR3 access, section 14)
 
 ## 1. Purpose and scope
 
@@ -11,7 +11,9 @@ chroma prediction by SAD, the 4x4 integer transform with the luma and chroma DC 
 coding and the rebuild loop (dequantizer, inverse transform, prediction add), so the rebuilt picture equals what a decoder
 shows. Every I slice macroblock is Intra16x16 unless it falls back to I_PCM (section 3.3). The read DMA with 4:2:2 to 4:2:0
 conversion, the bit packer with emulation prevention, the NAL and slice syntax, the write DMA into a compressed ring, the
-index ring and the rebuilt-picture write are unchanged from phase 2b-1.
+index ring and the rebuilt-picture write are unchanged from phase 2b-1. Phase 2c-1 adds P pictures (slice_type 5): every
+macroblock is P_Skip, P_L0_16x16 at the motion vector (0,0) with its residual, Intra16x16 or I_PCM, predicted from the co-located
+macroblock of the previous picture's rebuilt tiles; there is no motion search (section 15). A register bit selects the picture type.
 
 Two video modes run on one build, selected by registers (VIDEO_MODE of the camera design):
 
@@ -44,16 +46,21 @@ rtlnet_h264_top                      top: registers, the engine array, completio
     rtlnet_h264_rd_dma               16 row bursts per strip of RD_STRIP_MB macroblocks (8 beats at the default 4)
       rtlnet_h264_c422to420          YUYV 4:2:2 rows to 4:2:0 macroblock rows (row held per macroblock of the strip)
     rtlnet_ram_core                  strip buffer (2 halves of RD_STRIP_MB banks of 24 words of 16 bytes, 32-word pitch)
+    rtlnet_h264_ref_dma              P pictures: the co-located reference macroblock, a 16-beat luma and an 8-beat chroma burst
+    rtlnet_ram_core                  reference macroblock buffer (2 banks of 24 of 32 words of 16 bytes), REF_BUF_KB
     rtlnet_h264_mb_enc               stage A: mode decision, transform, quantizer, rebuild loop, I_PCM copy
-      rtlnet_h264_ipred              Intra16x16 / chroma prediction candidates, SAD, mode decision
-      rtlnet_h264_fwdq               forward 4x4 transform and AC quantizer (4 lanes, 3 stages)
+      rtlnet_h264_ipred              Intra16x16 / chroma prediction candidates, SAD, mode decision, inter SAD
+      rtlnet_h264_mvctx              P pictures: motion vector context (neighbours' vectors), mvp and the skip vector
+        rtlnet_h264_mvpred           median predictor and P_Skip vector (clauses 8.4.1.3, 8.4.1.1), combinational
+        rtlnet_ram_core              motion vector line RAM (one 32-bit word per macroblock column), MV_LINE_KB
+      rtlnet_h264_fwdq               forward 4x4 transform and AC quantizer (4 lanes, 3 stages; inter modes: rounding 1/6, DC position)
       rtlnet_h264_dcq_luma           luma DC: 4x4 Hadamard, quantizer, inverse Hadamard and scaling
       rtlnet_h264_dcq_chroma  x 2    chroma DC (Cb, Cr): 2x2 transform, quantizer, inverse and scaling
       rtlnet_h264_invq               dequantizer and inverse 4x4 transform of the rebuild loop
       rtlnet_ram_core                line RAM: rebuilt bottom row of the macroblock row above
     rtlnet_ram_core  x 2             coefficient buffer copies (2 banks of 128 words of 48 bits): stage A read-back, stage B read
     rtlnet_ram_core                  rebuilt macroblock buffer (2 banks of 96 words of 4 samples)
-    rtlnet_h264_mb_cavlc             stage B: macroblock layer syntax, nC, two block coders, I_PCM layer
+    rtlnet_h264_mb_cavlc             stage B: macroblock layer syntax (I and P slices), skip run, nC, two block coders, I_PCM layer
       rtlnet_h264_cavlc_blk  x 2     CAVLC residual block coder (ping-pong), coeff_token / total_zeros / run_before tables
       rtlnet_ram_core                upper-neighbour total_coeff line RAM
       rtlnet_ram_core                tile staging buffer (32 x 128 bits)
@@ -65,7 +72,8 @@ rtlnet_h264_top                      top: registers, the engine array, completio
 ```
 
 Files: `hdl/rtlnet_h264_top.sv` (top), `hdl/rtlnet_h264_enc_regs.sv`, `hdl/rtlnet_h264_engine.sv` (one engine), the
-datapath modules above, `hdl/rtlnet_h264_enc.f` (compile order), `driver/rtlnet_h264_enc.{h,c}`, `testbench/`.
+datapath modules above (phase 2c-1 adds `rtlnet_h264_ref_dma.sv`, `rtlnet_h264_mvctx.sv` and `rtlnet_h264_mvpred.sv`),
+`hdl/rtlnet_h264_enc.f` (compile order), `driver/rtlnet_h264_enc.{h,c}`, `testbench/`.
 `rtlnet_h264_mb_pcm` of phase 2b-1 is gone: the I_PCM macroblock layer is written by stage B like any other.
 
 ### 3.1 Macroblock pipeline
@@ -84,8 +92,9 @@ Stage A phases (`rtlnet_h264_mb_enc`):
 | Phase | Clocks | Work |
 |---|---|---|
 | TOP, PREP | about 20 | neighbours from the line RAM and registers into `ipred`; plane parameters and DC values |
-| SAD | 96 + 10 | 96 row segments (16 luma blocks, 4 Cb, 4 Cr blocks, 4 rows each) accumulate the SAD of every legal mode; the mode decision |
+| SAD | 96 + 10 | 96 row segments (16 luma blocks, 4 Cb, 4 Cr blocks, 4 rows each) accumulate the SAD of every legal mode (and, in P pictures, of the reference macroblock); the mode decision |
 | PASS1 | 96 + about 20 | source minus prediction, forward transform, AC quantizer, levels into the coefficient RAM; the 24 DC coefficients into the DC units |
+| MD1, MD2 | 3 | P pictures only: inter against intra cost (section 15.2) |
 | CHK | 3 | fallback decision (section 3.3) |
 | DCW | 6 | DC levels into the coefficient RAM; the coded block pattern |
 | PASS3 | 96 + about 15 | rebuild: levels, dequantizer, inverse transform, prediction add and clip, into the rebuilt RAM; left column and bottom row captured |
@@ -178,6 +187,8 @@ on average. The driver therefore writes `max(QP, RTLNET_H264_QP_MIN_REALTIME)` i
 | ADDR_W | 32 | only 32 supported (elaboration `$fatal`) |
 | ID_W | 4 | AXI ID width of each engine port |
 | RD_STRIP_MB | 4 | macroblocks per input-read burst strip, 2, 4 or 8: row bursts of 2 x RD_STRIP_MB beats (8 beats = 128 bytes at 4) |
+| REF_BUF_KB | 1 | reference macroblock buffer per engine, KiB (two banks of 32 words of 16 bytes, 24 used per bank; at least 1) |
+| MV_LINE_KB | 1 | motion vector line RAM per engine, KiB (one 32-bit word per macroblock column and one more; at least MAX_MB_W + 1 words) |
 | MB_BUF_KB | 4 | strip buffer, KiB (two halves of RD_STRIP_MB banks of 32 words of 16 bytes = 2 x RD_STRIP_MB x 512 B; at least RD_STRIP_MB) |
 | REC_BUF_KB | 1 | rebuilt macroblock buffer, KiB (two banks of 96 words of 4 samples) |
 | COEF_BUF_KB | 1 | coefficient buffer per copy, KiB (two banks of 128 words of 48 bits) |
@@ -197,7 +208,8 @@ parameters, so one build codes both video modes.
 | AXI4 masters, `enc_clk` | `m_axi_aw*`, `w*`, `b*`, `ar*`, `r*` as packed vectors, engine e at `[e*W +: W]`, arbiter style; 128-bit data, ADDR_W 32, ID_W 4 |
 | Interrupt | `irq`, level on `enc_clk`: `CTRL.IRQ_EN` and (`STATUS.DONE` or `STATUS.ERR`) |
 
-Every burst is INCR, size 16 bytes (full width), at most 16 beats, and never crosses 4 KiB (`rtlnet_axi_arbiter` rejects
+In P pictures the AR channel also carries the reference reads (AXI ID 1; the input strips use ID 0): a 16-beat luma tile burst and an 8-beat
+chroma tile burst per macroblock, from addresses that are multiples of 256 and 128 (section 15.1). Every burst is INCR, size 16 bytes (full width), at most 16 beats, and never crosses 4 KiB (`rtlnet_axi_arbiter` rejects
 anything else from a non-narrow master). The core issues bursts only (section 14): read bursts are `2 x RD_STRIP_MB` beats (8 at the default;
 fewer, but at least 2, for the last strip of a macroblock row whose width is not a multiple of `RD_STRIP_MB`) from an address that is a
 multiple of `32 x RD_STRIP_MB`; the rebuilt picture is written as a 16-beat luma tile burst and an 8-beat chroma tile burst per macroblock; an
@@ -212,7 +224,7 @@ remainder). Simulation assertions in `rtlnet_h264_wr_master` and `rtlnet_h264_en
 | Offset | Name | Access | Meaning |
 |---|---|---|---|
 | 0x000 | ID | RO | "H264" = 0x48323634 |
-| 0x004 | VERSION | RO | 0x11102026 (11-10-2026: tiled rebuilt picture, 128-byte index records) |
+| 0x004 | VERSION | RO | 0x11102C01 (11-10-2026, phase 2c-1: P pictures; 0x11102026 was the tiled rebuilt picture with 128-byte index records) |
 | 0x008 | CAPS | RO | [7:0] MAX_MB_W, [15:8] MAX_MB_H, [19:16] NUM_ENGINES |
 | 0x00C | CTRL | RW | bit 0 START (self-clearing), bit 1 RING_RESET (self-clearing), bit 8 IRQ_EN |
 | 0x010 | STATUS | RW | bit 0 BUSY, bit 1 DONE (W1C), bit 2 ERR (W1C), bit 3 RING_STALL (live, any engine) |
@@ -223,15 +235,15 @@ remainder). Simulation assertions in `rtlnet_h264_wr_master` and `rtlnet_h264_en
 | 0x02C | QP | RW | slice QP 0..51; `slice_qp_delta = QP - 26` (reset 26). The driver writes at least `RTLNET_H264_QP_MIN_REALTIME` (12) |
 | 0x030 | FRAME_NUM | RW | frame_num written in `log2_max_frame_num` bits |
 | 0x034 | IDR_PIC_ID | RW | idr_pic_id of an IDR picture |
-| 0x038 | PIC_CFG | RW | [0] IDR picture (reset 1), [12:8] log2_max_frame_num (reset 4, range 4..16) |
+| 0x038 | PIC_CFG | RW | [0] IDR picture (reset 1), [1] P picture (reset 0; never with [0]: START is rejected with ERR_CODE 1), [12:8] log2_max_frame_num (reset 4, range 4..16) |
 | 0x03C | MB_MODE | RW | [0] 1 = every macroblock is I_PCM (debug, exact rebuilt picture), 0 = Intra16x16 with the per-macroblock I_PCM fallback (reset 0) |
 | 0x040 | IN_BASE | RW | input frame base, multiple of 32 x RD_STRIP_MB (128) |
 | 0x044 | IN_STRIDE | RW | input line stride in bytes, multiple of 128, at least MB_W x 32 |
 | 0x048 | RY_BASE | RW | rebuilt picture luma tile base, multiple of 256 (256 bytes per macroblock) |
 | 0x04C | reserved | RO | reads 0, writes ignored (was RY_STRIDE) |
 | 0x050 | RU_BASE | RW | rebuilt picture chroma tile base (Cb then Cr), multiple of 128 (128 bytes per macroblock) |
-| 0x054 | reserved | RO | reads 0, writes ignored (was RV_BASE) |
-| 0x058 | reserved | RO | reads 0, writes ignored (was RC_STRIDE) |
+| 0x054 | REF_Y_BASE | RW | reference picture luma tile base (P pictures; the previous picture's rebuilt tiles), multiple of 256 (was reserved, RV_BASE) |
+| 0x058 | REF_U_BASE | RW | reference picture chroma tile base (P pictures), multiple of 128 (was reserved, RC_STRIDE) |
 | 0x060 | RING_BASE | RW | compressed ring base, multiple of 16 (all engines) |
 | 0x064 | RING_SIZE | RW | compressed ring size in bytes, multiple of 16 x NUM_ENGINES, each share at least 1024 |
 | 0x068 | RING_WPTR | RO | byte offset after the last burst whose write response arrived |
@@ -257,6 +269,11 @@ window 0 is engine 0. Writes to RING_RPTR and IDX_RPTR in window e go to engine 
 split into `NUM_ENGINES` equal shares, engine e using share e: `RING_SIZE / NUM_ENGINES` bytes from
 `RING_BASE + e x RING_SIZE / NUM_ENGINES`, and `IDX_ENTRIES / NUM_ENGINES` entries from
 `IDX_BASE + 128 x e x IDX_ENTRIES / NUM_ENGINES`.
+
+P pictures (phase 2c-1): PIC_CFG[1] = 1 codes the picture as P slices against the picture whose rebuilt tiles are at REF_Y_BASE and
+REF_U_BASE (written by the previous picture to its RY_BASE and RU_BASE; the two buffers alternate, section 15.3); PIC_CFG[0] must be 0,
+FRAME_NUM follows clause 7.4.3 (previous reference picture's frame_num plus one, modulo 2^log2_max_frame_num) and IDR_PIC_ID is not
+used. The reference bases are read only in P pictures and must be tile aligned then.
 
 Rules: write the configuration while the core is idle, at least a few clocks before START (the check is registered); write
 RING_RESET once after changing RING_BASE or RING_SIZE and before the first picture. START with an illegal configuration
@@ -321,10 +338,12 @@ Per picture, engine 0 writes the access unit delimiter; every engine writes its 
   applies to every byte after the NAL header start code, in the packer.
 * Access unit delimiter: NAL header 0x09 (nal_ref_idc 0, type 9), primary_pic_type 7, rbsp trailing bits: `00 00 00 01 09 F0`.
 * Slice NAL unit: nal_ref_idc 3, nal_unit_type 5 (IDR) or 1. Slice header (clause 7.3.3): `first_mb_in_slice` ue(v),
-  `slice_type` ue(v) = 7, `pic_parameter_set_id` ue(v) = 0, `frame_num` u(log2_max_frame_num), `idr_pic_id` ue(v) (IDR only),
-  no POC fields (`pic_order_cnt_type` 2), `dec_ref_pic_marking` (IDR: `no_output_of_prior_pics_flag` 0 and
-  `long_term_reference_flag` 0; non-IDR: `adaptive_ref_pic_marking_mode_flag` 0), `slice_qp_delta` se(v) = QP - 26,
-  `disable_deblocking_filter_idc` ue(v) = 1.
+  `slice_type` ue(v) = 7 (I picture) or 5 (P picture, phase 2c-1; all slices of the picture have the type), `pic_parameter_set_id` ue(v) = 0,
+  `frame_num` u(log2_max_frame_num), `idr_pic_id` ue(v) (IDR only), no POC fields (`pic_order_cnt_type` 2), for a P slice
+  `num_ref_idx_active_override_flag` 0 (the PPS default is one reference) and `ref_pic_list_modification_flag_l0` 0,
+  `dec_ref_pic_marking` (IDR: `no_output_of_prior_pics_flag` 0 and `long_term_reference_flag` 0; non-IDR: `adaptive_ref_pic_marking_mode_flag` 0:
+  the sliding window with `max_num_ref_frames` 1), `slice_qp_delta` se(v) = QP - 26, `disable_deblocking_filter_idc` ue(v) = 1. The P slice
+  header therefore has three zero bits after `frame_num`.
 * Macroblock layer (clause 7.3.5), Intra16x16 macroblock: `mb_type` ue(v) = 1 + prediction mode + 4 x cbp_chroma + 12 x (cbp_luma
   != 0) (Table 7-11), `intra_chroma_pred_mode` ue(v), `mb_qp_delta` se(v) = 0, `Intra16x16DCLevel` (always, nC of luma block 0),
   the 16 `Intra16x16ACLevel` blocks when the luma cbp is 15 (zigzag positions 1..15, luma4x4BlkIdx order), the two
@@ -332,7 +351,17 @@ Per picture, engine 0 writes the access unit delimiter; every engine writes its 
   `residual_block_cavlc` (clause 9.2): `coeff_token` (Tables 9-5 with the nC class of clause 9.2.1), the trailing-one signs,
   the level codes (`level_prefix` and `level_suffix`, suffixLength adaptation, escape at prefix 15), `total_zeros` (Tables
   9-7 to 9-9), `run_before` (Table 9-10). Slice QP only: `mb_qp_delta` is 0.
-* Macroblock layer of a fallback macroblock: `mb_type` ue(v) = 25 (I_PCM), `pcm_alignment_zero_bit`s to the byte boundary, 256
+* P slices (phase 2c-1, clauses 7.3.4 and 7.3.5): before every macroblock that is not skipped, `mb_skip_run` ue(v) (the skipped macroblocks since the
+  last coded one of the slice, 0 when none); at the end of the slice, `mb_skip_run` when the last macroblocks are skipped (not written for 0). The
+  run restarts at every slice. A skipped macroblock (P_Skip) writes nothing. `P_L0_16x16`: `mb_type` ue(v) = 0, no `ref_idx_l0` (one active
+  reference), `mvd_l0` x and y se(v) (the motion vector minus its prediction, clause 8.4.1.3; both are 0 in phase 2c-1), `coded_block_pattern` me(v)
+  (Table 9-4 inter column: luma 8x8 mask in bits 3..0, `cbp_chroma` in bits 5..4), then only when the pattern is not 0 `mb_qp_delta` se(v) = 0
+  and the residual: the luma 4x4 blocks of the coded 8x8 groups as `LumaLevel4x4` (16 coefficients, zigzag positions 0..15, `luma4x4BlkIdx` order;
+  there is no luma DC block), then the chroma DC and AC blocks as for intra. Intra macroblocks in a P slice use the I `mb_type` plus 5 (Intra16x16
+  `5 + 1 + mode + 4 x cbp_chroma + 12 x (cbp_luma != 0)`, I_PCM 30); the PPS has `constrained_intra_pred_flag` 0, so an intra macroblock predicts
+  from inter neighbours. nC (clause 9.2.1): a P_Skip or P_L0_16x16 neighbour is available inside the slice with its `TotalCoeff` (skip: 0; blocks of
+  an uncoded 8x8 group: 0).
+* Macroblock layer of a fallback macroblock: `mb_type` ue(v) = 25 (I_PCM; 30 in a P slice), `pcm_alignment_zero_bit`s to the byte boundary, 256
   luma samples, 64 Cb samples, 64 Cr samples, 8 bits each, raster order. A PCM sample value of 0 is allowed: clause 7.4.5 states
   `pcm_sample_luma` and `pcm_sample_chroma` as sample values without a restriction in this edition, and emulation prevention
   protects any zero run.
@@ -343,16 +372,17 @@ Per picture, engine 0 writes the access unit delimiter; every engine writes its 
   `max_num_ref_frames` 1, `frame_mbs_only_flag` 1, frame cropping 1088 to 1080 (`frame_crop_bottom_offset` 4). PPS: CAVLC
   (`entropy_coding_mode_flag` 0), `deblocking_filter_control_present_flag` 1, `pic_init_qp` 26 (`pic_init_qp_minus26` 0).
 
-Quantization: forward AC `level = (|W| x MF + f) >> qbits`, `qbits = 15 + QP/6`, `f = 2^qbits / 3` (intra), luma DC on the
+Quantization: forward AC `level = (|W| x MF + f) >> qbits`, `qbits = 15 + QP/6`, `f = 2^qbits / 3` (intra; `2^qbits / 6` for inter macroblocks), luma DC on the
 Hadamard of the 16 block DCs with `qbits + 1` and `2 f`, chroma DC on the 2x2 transform of the four DCs with QPc = table of
-clause 8.5.8 for `chroma_qp_index_offset` 0; dequantization and the inverse transforms are the clause 8.5 integer arithmetic.
+clause 8.5.8 for `chroma_qp_index_offset` 0 (the chroma DC of an inter macroblock uses `2f` with the inter `f`); dequantization and the inverse transforms are the clause 8.5 integer arithmetic.
 
 ## 9. Driver
 
 `driver/rtlnet_h264_enc.{h,c}` (C, `rtlnet_mmio.h` for register access): `probe`, `get_mode` / `set_mode` (0 = 720p30,
 default; 1 = 1080p30: writes MB_W, MB_H, fills the SPS parameters), `band_rows` (the ceil split), `configure`, `ring_reset`,
 `start_picture`, `wait_done`, `status`, `clear_status`, `set_read_pointers`, `index_wptr`, `decode_index_entry`,
-`read_stats` and `write_sps_pps`. `configure` writes `max(cfg->qp, RTLNET_H264_QP_MIN_REALTIME)` into the QP register
+`read_stats` and `write_sps_pps`. Phase 2c-1 adds `start_picture_ex` (picture type IDR or P), `next_frame_num`, `set_reference` and the two-buffer helper
+`buffers_init`, `buffers_begin` and `buffers_end` (section 15.3); `start_picture` is unchanged and starts an I picture. `configure` writes `max(cfg->qp, RTLNET_H264_QP_MIN_REALTIME)` into the QP register
 (`RTLNET_H264_QP_MIN_REALTIME` = 12, section 3.3); `cfg->mb_pcm` writes MB_MODE. The host test
 `testbench/test_rtlnet_h264_enc_driver.c` checks the register writes against a register model (including the QP clamp at 5, 12
 and 51) and checks the SPS and PPS bytes with an independent bit reader (fields, emulation prevention, level, cropping,
@@ -378,9 +408,10 @@ All H.264 RTL benches run in Verilator 5.050 (MSYS2 UCRT64, g++ 16.2), through `
   blocks of all `nC` classes, `maxNumCoeff` 4, 15 and 16, levels up to 2047, random back-pressure; the CAVLC tables are also
   cross-checked against OpenH264 and JM, 0 mismatches), `tb_rtlnet_h264_mbcavlc` (macroblock layer, nC, the neighbours across
   macroblocks and slices, I_PCM macroblocks inside the pictures with a random bit offset for the alignment), `tb_rtlnet_h264_xform`
-  (forward and inverse transform, quantizers and the DC units, 274 372 checks) and `tb_rtlnet_h264_ipred` (prediction candidates, SAD
-  and mode decision, 54 241 checks).
-* Encoder bench `tb_rtlnet_h264_top`: loads the input image into a memory model (`tb_h264_axi_mem`, behind the real
+  (forward and inverse transform, quantizers and the DC units, with the inter modes of phase 2c-1) and `tb_rtlnet_h264_ipred` (prediction
+  candidates, SAD and mode decision, inter SAD), `tb_rtlnet_h264_mbcavlc` also checks the P slice syntax of phase 2c-1 (section 15.5) and
+  `tb_rtlnet_h264_mvpred` (phase 2c-1) the motion vector predictor and its context.
+* Encoder bench `tb_rtlnet_h264_top`: loads the input image of each picture (`+INPFX`, `+GOP`: a string of I and P letters; two rebuilt buffers) into a memory model (`tb_h264_axi_mem`, behind the real
   `rtlnet_axi_arbiter`), programs the registers over AXI4-Lite, plays the firmware (polls the index rings, copies each
   slice out of each engine's ring, advances the read pointers), checks index entries, NAL framing, `first_mb_in_slice`
   against an independent band/slice computation, and dumps the stream and the rebuilt planes. `+INJECT` corrupts one byte
@@ -394,7 +425,9 @@ All H.264 RTL benches run in Verilator 5.050 (MSYS2 UCRT64, g++ 16.2), through `
   floor met; `-Inject` runs the negative control (all three comparisons must fail); `-Pcm` runs the global I_PCM mode (the rebuilt
   picture must equal the source exactly). `ffprobe` and OpenH264 report the decoded size per config (1280x720 and 1920x1080, which
   proves the cropping). PNGs per config are written to `.sim/h264/<config>/png/` (`src_<n>`, `jm_<n>`, `oh_<n>`, `ff_<n>`, `side_<n>`).
-* `testbench/h264_mutation.ps1`: 13 mutations, each restored byte for byte (SHA-256 checked) (section 11.4).
+* `testbench/h264_mutation.ps1`: 19 mutations (13 of phase 2b-2, 6 of the P path), each restored byte for byte (SHA-256 checked) (section 11.4, 15.5).
+* `testbench/h264_harness_par.ps1` runs the harness configurations in parallel (one process each); the P-picture configurations `p_*` of phase 2c-1
+  (GOPs of generated sequences, section 15.5) run only when named with `-Config`.
 * Synthesis check `testbench/h264_synth.tcl` through `scripts/rtlnet_vivado.ps1`.
 
 ### Tool builds (no hardcoded paths)
@@ -639,6 +672,8 @@ bench and `qcif_gradnoise_q18`), DC prediction with a missing neighbour (ipred b
 (`qcif_checker_q0` fails its PSNR floor), saturated DC level flag removed (`qcif_checker_q0`, the root cause of section 3.3), I_PCM
 macroblock counted as 0 coefficients for nC (mbcavlc bench), level pair merge limit exceeded (cavlc bench).
 
+Phase 2c-1 adds six mutations of the P path (section 15.5).
+
 ### 11.5 Out-of-context synthesis
 
 `xc7a200tsbg484-1`, `enc_clk` 100 MHz, `h264_synth.tcl` (defaults, NUM_ENGINES 2): PASS, 0 critical warnings, post-synthesis WNS +0.344 ns
@@ -707,6 +742,7 @@ are shorter. Cause: with 32 single-beat writes per macroblock the encoder measur
 |---|---|---|
 | Encoder input read (AR) | 16 bursts of 2 beats per macroblock (one pixel row of 32 bytes) | 16 row bursts per strip of `RD_STRIP_MB` macroblocks: 8 beats (128 bytes) at the default 4; the last strip of a row with a width that is not a multiple of 4 has `2 x n` beats (2, 4 or 6), never 1 |
 | Rebuilt picture (AW) | 32 single-beat writes per macroblock (16 luma rows, 8 + 8 chroma rows with 8-byte strobes) | 1 burst of 16 beats (luma tile, 256 B) and 1 burst of 8 beats (chroma tile, 128 B) per macroblock |
+| Reference read (AR, ID 1; P pictures, phase 2c-1) | not present | 1 burst of 16 beats (luma tile, 256 B) and 1 burst of 8 beats (chroma tile, 128 B) per macroblock, from tile-aligned addresses; the strip DMA and this DMA never overlap |
 | Index record (AW) | 1 beat of 16 bytes | 1 burst of 8 beats (128-byte record) |
 | Compressed ring (AW) | up to 16 beats; every NAL unit end closed a burst (the 6-byte access unit delimiter was a 1-beat burst) | up to 16 beats; only a slice NAL unit end, the ring end and 4 KiB close a burst early (the delimiter joins the burst of the slice that follows); the last burst of a slice can still be short, down to 1 beat |
 | Video write DMA (`rtlnet_vdma_s2mm`) | 16-beat bursts | unchanged: line starts are 256-byte aligned at both strides (2560 and 3840 bytes), so every burst is 16 beats, 720p30 and 1080p30 |
@@ -755,3 +791,147 @@ and `rtlnet_framebuf` have no memory port.
 423 and 425 clocks per macroblock); 1080p30 PASS (1802 pictures, 0 dropped, 0 continuity errors, 0 PTS gaps, PSNR minimum 51.09 dB, 2210 kb/s, TS-mux load 7.0 %,
 435 clocks per macroblock on both engines, last interval 379, busy cycles read 455 k, coder 1,550 k, write 699 k of 1,778 k per picture). The write path that was 3.4 million
 clocks per picture is 0.7 million. `show ddr`: errors 0 on all masters.
+
+## 15. P pictures, phase 2c-1 (11-10-2026)
+
+Phase 2c adds P pictures in two stages. Stage 2c-1 (this section) codes P slices in which every inter macroblock uses the motion vector (0,0)
+and nothing is searched; stage 2c-2 adds the sliding search window, integer-pel search, motion vector differences, chroma eighth-sample
+interpolation and the picture-edge rule. The syntax writer, the motion vector context and the residual path are general: stage 2c-2 replaces the
+reference fetch and drives a search result (vector and cost) into the mode decision (section 15.4).
+
+### 15.1 Design
+
+* **Picture type.** `PIC_CFG[1]` selects a P picture: `slice_type` 5, `nal_unit_type` 1, `nal_ref_idc` 3 (section 8). A P picture is never an IDR
+  picture: START with `PIC_CFG[1:0]` = 3 is rejected (`ERR_CODE` 1). The slice header carries `num_ref_idx_active_override_flag` 0,
+  `ref_pic_list_modification_flag_l0` 0 and `adaptive_ref_pic_marking_mode_flag` 0. With `max_num_ref_frames` 1 and
+  `gaps_in_frame_num_value_allowed_flag` 0, clause 7.4.3 requires `frame_num` of each picture to be the previous reference picture's value plus one
+  modulo `MaxFrameNum` (every picture is a reference picture, an IDR picture restarts at 0); the firmware or driver writes it
+  (`rtlnet_h264_enc_next_frame_num`).
+* **Reference picture.** `REF_Y_BASE` and `REF_U_BASE` hold the tile bases of the previous picture's rebuilt picture, in the layout of section 7. The driver
+  alternates two rebuilt buffers: picture n is written to buffer n mod 2 (`RY_BASE`, `RU_BASE`) and reads buffer (n - 1) mod 2 as the
+  reference. `rtlnet_h264_ref_dma` fetches the co-located macroblock of every macroblock of the band, in raster order, ahead of stage A: one 16-beat burst
+  for the luma tile and one 8-beat burst for the chroma tile into a bank of the reference macroblock buffer (two banks, `REF_BUF_KB`). A second
+  fetch sequencer in the engine runs beside the input-strip sequencer; the two DMAs share the AR and R channels one at a time: the reference DMA starts
+  only while the strip DMA is idle and no strip start is pending, and the strip sequencer starts only while the reference DMA is idle. The reference reads
+  use AXI ID 1, the strip reads ID 0. Stage A starts a macroblock of a P picture when its reference bank is full, so the fetch does not add to the
+  per-macroblock time as long as it stays ahead (it takes about 50 clocks against 380).
+* **Mode decision (stage A).** The candidates are P_Skip, P_L0_16x16 at (0,0), Intra16x16 and the I_PCM fallback. The SAD phase accumulates the SAD of the source against the
+  reference macroblock (luma and chroma, `sad_iy` and `sad_ic` of `rtlnet_h264_ipred`) beside the intra candidates, so no phase is added. Two clocks
+  after the intra decision (MD1, MD2) the encoder compares the inter cost `SAD_inter + lambda x bits(mvd)` with the intra cost `SAD + mode cost + 16 x
+  lambda` (the SAD and mode cost of the best intra modes of `ipred`); ties go to inter. `lambda = round(0.92 x 2^((QP - 12) / 6))`, at least 1
+  (the form of the JM motion lambda: 1 at QP 12, 7 at QP 30, 83 at QP 51), `bits(mvd)` the lengths of the two se(v) codes of `mvd = mv - mvp`. The 16 bits of intra
+  charge stand for the larger `mb_type` and mode fields of an intra macroblock in a P slice and give a static scene a bias towards the reference. Chosen
+  inter: P_L0_16x16; if the quantized residual is empty (cbp 0) and the skip vector is (0,0), P_Skip.
+* **Motion vector context.** `rtlnet_h264_mvctx` keeps the vectors and the inter flag of the left macroblock (registers) and of the row above (a
+  line RAM, one 32-bit word per column, `MV_LINE_KB`), and `rtlnet_h264_mvpred` derives from them, with the availability of the left, above, above-right and
+  above-left macroblocks inside the slice and the picture, the median predictor `mvp` of clause 8.4.1.3 (neighbour C replaced by D when it is not
+  available; B and C replaced by A when both are unavailable and A is available; the single matching reference index; the median) and the P_Skip vector of
+  clause 8.4.1.1. The context is started with each macroblock, ready 5 clocks later (inside the 20-clock neighbour phase), and updated at its end
+  (intra and I_PCM macroblocks: inter 0, vector 0; P_Skip: the skip vector). `mvd = mv - mvp` is coded as se(v) for every P_L0_16x16 macroblock, so the syntax is the
+  one stage 2c-2 needs; with every vector equal to (0,0) the predictor is (0,0) and `mvd` is (0,0) in this stage.
+* **Inter residual and rebuild.** The luma blocks have 16 coefficients, with no luma DC transform: `rtlnet_h264_fwdq` runs with `in_full` (the DC position is quantized like the
+  others, with the class 0 multiplier) and `rtlnet_h264_invq` with `in_full` (the DC position is dequantized like the others); the luma DC unit still runs
+  (its schedule is unchanged) and its result is ignored. The chroma blocks are as for intra (DC 2 x 2 plus AC), with the inter rounding offset. Quantizer rounding:
+  `f = 2^qbits / 6` for inter (`/ 3` for intra), an encoder choice (also in the chroma DC unit: `2 f` with the inter `f`). The coded block pattern is the luma 8x8 mask (a bit is
+  set when a level of one of its four 4x4 blocks is non-zero) and `cbp_chroma` as for intra (2 when an AC level is non-zero, else 1 when a DC level is). The rebuild is
+  the reference sample plus the inverse-transformed residual, clipped; a skipped macroblock is rebuilt to the prediction. The rebuilt tile write is unchanged. The size estimate
+  and the fallback to I_PCM apply to inter macroblocks as to intra ones (the luma DC unit does not count).
+* **Isolated coefficient elimination (encoder choice).** An inter macroblock whose quantized residual consists of at most 6 non-zero levels, every one of magnitude 1, is coded
+  without a residual (its levels are dropped, cbp 0, the rebuild adds nothing). These levels are the requantization of the previous picture's quantization error;
+  at low QP their dequantized size is below one sample, the inverse transform rounds it away, and without the rule they repeat in every picture of a static scene. With the rule a static scene
+  codes as P_Skip from the first P picture on at every QP tested (12, 28, 38, 51).
+* **Syntax (stage B, `rtlnet_h264_mb_cavlc`).** `mb_skip_run` ue(v) before each coded macroblock of a P slice and, from the engine (state `E_SKR`), at the slice end when it is not 0; the run restarts at every
+  slice. P mb_type 0, no `ref_idx` (one active reference), `mvd_l0` x and y se(v), the inter coded_block_pattern me(v) (Table 9-4, generated from the JM table by
+  `testbench/h264_gen_cbp_table.py`), `mb_qp_delta` only for cbp != 0, `LumaLevel4x4` blocks of the coded 8x8 groups, then chroma. Intra macroblock types are offset by 5. nC counts skipped and inter
+  neighbours as available with their `TotalCoeff` (0 for a skip and for uncoded groups). An inter macroblock above the size cap falls back to I_PCM (mb_type 30). Section 8 lists the syntax.
+
+### 15.2 Restrictions of stage 2c-1
+
+* Every inter macroblock has the vector (0,0): no search, no sub-sample vectors, no picture-edge rule (the co-located macroblock is always inside the picture).
+* P_Skip needs the skip vector (clause 8.4.1.1) to be (0,0), because its prediction would otherwise need that vector. The skip vector is computed in full (it is `mvp` unless A or B is
+  unavailable or has the vector (0,0) with reference index 0). With every vector (0,0) it is always (0,0); stage 2c-2 lifts the restriction by predicting P_Skip from the skip vector.
+* One reference picture (the previous one), one slice type per picture (all slices P), no B slices, no weighted prediction, no deblocking (`disable_deblocking_filter_idc` 1), CAVLC only.
+* Intra macroblocks in P slices are Intra16x16 or I_PCM as in I slices; `constrained_intra_pred_flag` is 0.
+* The first picture of a stream, and the first picture after any decoder reset, is an IDR picture; the firmware (not the core) decides the GOP.
+
+### 15.3 Registers and driver
+
+PIC_CFG[1] (P picture), REF_Y_BASE (0x054), REF_U_BASE (0x058) and the VERSION 0x11102C01: section 6. Driver (`driver/rtlnet_h264_enc.{h,c}`):
+`rtlnet_h264_enc_start_picture_ex(base, frame_num, idr_pic_id, RTLNET_H264_PIC_IDR | RTLNET_H264_PIC_P)`, `rtlnet_h264_enc_next_frame_num`,
+`rtlnet_h264_enc_set_reference`, and the two-buffer helper (`rtlnet_h264_enc_buffers_t`): `buffers_init(y0, u0, y1, u1)`, `buffers_begin(base, bufs, type)` (writes the current buffer's
+`RY_BASE`/`RU_BASE` and, for a P picture, the other buffer's reference bases; rejects a P picture before any picture has been completed), `buffers_end` after DONE (the written buffer becomes the reference).
+`rtlnet_h264_enc_start_picture` is unchanged and starts an I picture. The firmware does not use the new API in this stage. A
+GOP loop is: IDR (`frame_num` 0, new `idr_pic_id`), then P pictures with `frame_num = next_frame_num(previous)`; `buffers_begin` before and `buffers_end` after each picture.
+
+### 15.4 What stage 2c-2 replaces
+
+* The reference fetch: the sliding search window per engine replaces the co-located macroblock read (`rtlnet_h264_ref_dma`, the reference buffer and the AR arbitration stay as the pattern).
+* In `rtlnet_h264_mb_enc` the trio `inter_mv_x`, `inter_mv_y` (constant 0 here) and `inter_sad` (the SAD at that vector) is the plug: the search drives them, `mvd` and the rate term follow, the prediction
+  read (`ref_word`, `ref_seg`) addresses the interpolated or shifted reference, and the skip decision drops its `inter_mv == 0` test.
+* `rtlnet_h264_mvctx` already stores arbitrary 14-bit vectors, and the syntax writer codes arbitrary `mvd`; `tb_rtlnet_h264_mvpred` covers them.
+
+### 15.5 Verification (Verilator, section 10)
+
+All runs 11-10-2026 with the final RTL; logs in `.sim/logs/` (gitignored work directory; the log names are listed here).
+
+| Check | Result | Log |
+|---|---|---|
+| Unit benches with their negative controls (`scripts/rtlnet_regression.ps1 -Match "^tb_rtlnet_h264_"`) | 14 passed, 0 failed: bitpack 4 checks, c422 4, cavlc 37 912, mbcavlc 4 936 (P slices: 164 inter, 762 skipped, 126 intra-in-P macroblocks and a 600-macroblock skip run), xform 483 044, ipred 56 161, mvpred 608 461 | `p2c1_units.log` |
+| Motion vector predictor (`tb_rtlnet_h264_mvpred`) | 200 020 neighbour sets (directed edge cases: no neighbour, only A, B, C or D, B and C unavailable with an intra A, single matching reference index, median with ties, skip with a zero A or B, +-8191) and 2 100 context macroblocks over pictures with random slice starts: 608 461 checks | `p2c1_units.log` |
+| Decoder harness, earlier configurations | `h264_harness_par.ps1` over all 74 configurations (I pictures only): 74 of 74 passed | `p2c1_oldv_par.log` |
+| Decoder harness, P configurations `p_*` | 40 of 40 passed: JM, OpenH264 and FFmpeg byte-identical to the de-tiled rebuilt picture of EVERY picture of every GOP, PSNR floors of (sequence, QP) met for every picture | `p2c1_v_par.log`, `p2c1_cutv_par.log` (the six cut configurations after the GOP change) |
+| Negative controls | `-InjectBurst` (1-beat rebuilt AW): monitor fires (2 of 2); `-InjectBurstRef` (4-beat reference read): monitor fires (2 of 2); `-Inject` (corrupted stream byte): all three decoder comparisons fail (`p_qcif_pan_q28`, `qcif_s1`) | `p2c1_negs.log` |
+| Lint, driver test | `LINT PASS` (0 warnings in `rtlnet_h264_*`); `DRIVER TEST PASS: rtlnet_h264_enc checks=450` | `p2c1_negs.log` |
+| Burst monitor, 1080p 2 engines QP 28 pan (9 pictures, engine 0) | input AR 146 880 bursts of 8 beats; reference AR 32 640 x 16 beats and 32 640 x 8 beats; rebuilt AW 36 720 x 8 and 36 720 x 16; index AW 18 x 8; no 1-beat transaction | `p2c1_v_p_1080p_e2_s2_pan_q28.log` |
+
+The P configurations (QCIF 176x144 unless noted; every GOP is `IPPPPPPPP` (9 pictures) or `IPPPPIPPPP` (a second IDR picture inside the run), the `cut` GOP is `IPPPPPPPPP`
+with the scene cut at picture 5 inside the P run, and `p_qcif_pan_gop20_q28` has 20 pictures so that `frame_num` wraps at 16):
+sequences static (all-skip required), pan (whole-pixel pan of a photo: 4 samples right and 1 down per picture), bars_move (moving colour bars), noise_p (independent noise) and
+cut (scene change); QP 12, 20, 28, 38, 51; 1 and 2 engines; 1, 2, 3, 4 and 9 slices (static and cut configurations with several slices cover the skip run reset at slice starts);
+widths 208, 80 and 288 (the strip tails); a 16 KiB ring with a slow consumer; 720p and 1080p with 1 and 2 engines and 1, 2 and 4 slices over QP 12, 28, 38 and 51. The static
+configurations (`p_qcif_static_*`, `p_720p_e2_s2_q38`, `p_1080p_e2_s2_static_q28`) require every P picture to be at most 6 + 24 x slices stream bytes and its rebuilt
+picture to equal the previous one: they pass (16 bytes per P picture at QCIF with one slice). `ffmpeg -debug mb_type` of the static QP 28 stream before
+the isolated coefficient elimination was added showed 12 of 99 macroblocks of the first P picture as P_L0_16x16 with one +-1 level each; with the rule every P macroblock is skipped.
+The PSNR floors of the sequences are in `h264_psnr_floors.txt` (the minimum over the pictures and configurations minus 1 dB).
+
+**Clocks per macroblock** (`PIC_CYC / MB_COUNT` of an engine, memory model latency 20, gap 20 %, `-Lat 20 -Gap 20`; the gate for P pictures at 1080p, 2 engines, is 480):
+
+| Content | Engines | I pictures | P pictures |
+|---|---|---|---|
+| 1080p, pan QP 28 (moving content) | 2 | 379 | 381 (gate 480) |
+| 1080p, static QP 28 (all skip) | 2 | 379 | 381 |
+| 1080p, QP 38 and 51 (rotating sequences) | 2 | 379 | 381 |
+| 1080p, QP 12 (`p_1080p_e1_s1_q12`, pan) | 1 | 433 | 435 |
+| 720p, QP 12 to 51 | 1 and 2 | 379 | 381 to 382 |
+| QCIF, smooth and static content | 1 | 383 to 385 | 385 to 387 |
+| QCIF, noise QP 12 / 28 (dense, I_PCM fallback) | 1 | 440 / 526 | 442 / 525 |
+| QCIF, strip width 5 (80 x 144, 2 engines) | 2 | 399 to 406 | 405 to 418 |
+
+A P picture costs 2 clocks per macroblock more than an I picture (the inter decision, MD1 and MD2); the reference fetch overlaps stage A. The macroblock time is stage A (about 381 clocks): stage B
+codes a skipped macroblock in a few clocks and a dense inter macroblock inside the stage A time. The 735-clock board budget leaves margin for the 15 % the board adds over the model.
+
+**Mutations of the P path** (`h264_mutation.ps1 -Only 14,15,16,17,18,19`; logs `p2c1_mutation.log`, `p2c1_mutation2.log`, `p2c1_mutation3.log`; each file restored with an identical SHA-256): (14) a wrong inter coded_block_pattern code
+(cbp 31): caught by the mbcavlc bench and by `p_qcif_pan_q12` (all three decoders); (15) `mb_skip_run` off by one: caught by the mbcavlc bench and by `p_qcif_cut_q28` (all three decoders); (16) the reference
+chroma tile pointer stepping by 256: caught by `p_qcif_pan_q28`; (17) P_Skip chosen although luma levels are coded: caught by `p_qcif_pan_q28`; (18) the intra rounding offset used for inter blocks: caught by the xform bench only
+(a legal encoder choice that a decoder cannot see); (19) the single-matching-reference rule ignoring neighbour C: caught by the mvpred bench only (every vector is 0 in this stage). The first versions of three mutations survived
+and were replaced or their configuration changed: a cbp code (cbp 1) that the sequences never produce, a B and C substitution that is equivalent to the median rule when A is the only inter neighbour, and the skip run mutation
+under `p_qcif_cut_q28`, whose scene cut fell on the second IDR picture so that no coded macroblock followed a skipped one (the cut GOP has no IDR picture at the cut now).
+
+**Verilator compile memory.** The model of `tb_rtlnet_h264_top` at 720p and 1080p generated one 71 MB C++ file (the constant-bound loops of the bench unrolled); one `cc1plus` needed 4 to 18 GB and minutes to compile. The harness
+now passes `--unroll-count 8 --unroll-stmts 500 --output-split 5000` to `rtlnet_run_verilator.ps1 -Extra`: the largest generated file is 0.4 MB, the 720p bench builds and runs in about 50 s, and the
+results are unchanged. `h264_harness_par.ps1` defaults to 4 jobs. The harness still builds one model per configuration (the picture size, slice count, engine count and QP are defines of the bench); building one model per define set
+would need those values as run-time plusargs, a larger change that is not made.
+
+### 15.6 RAM added
+
+Phase 2c-1 adds two memories per engine, both `rtlnet_ram_core` instances with `*_KB` size parameters and `RAM_STYLE`:
+
+| Memory | Parameter | Size per engine | Block RAM (`RAM_STYLE` "block") |
+|---|---|---|---|
+| Reference macroblock buffer (2 banks of 32 words, 24 used, 128 bit) | `REF_BUF_KB` 1 | 64 x 128 bit = 8 Kibit | 4 RAMB18 (128 bit wide as four 36-bit slices, depth 64 of 512): 2 RAMB36 equivalents; 4 RAMB36 equivalents for 2 engines |
+| Motion vector line RAM (one 32-bit word per column) | `MV_LINE_KB` 1 | 256 x 32 bit = 8 Kibit | 1 RAMB18: 0.5 RAMB36 equivalents; 1 for 2 engines |
+
+Total for `NUM_ENGINES` 2: 10 RAMB18, about 5 RAMB36 equivalents, on top of the 22 RAMB36 + 2 RAMB18 of section 14.3 (by capacity only 32 Kibit, under one RAMB36; the width of the reference words
+sets the count). `RAM_STYLE` "distributed" puts the reference buffer in about 130 LUTs per engine. Memory outside the core: the second rebuilt buffer, 3,133,440 bytes at 1080p. The
+added logic is small (the inter decision, the motion vector context, the reference DMA, two comparators); no synthesis has been run for phase 2c-1 (the synthesis slot is the architect's), so the LUT, DSP and timing figures of section 14.3 are
+those of the phase 2b-4 build.

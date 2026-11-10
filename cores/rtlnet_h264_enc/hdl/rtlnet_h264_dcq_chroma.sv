@@ -7,7 +7,8 @@
 //   * One start with W00 of the plane's four blocks (raster order, 2x2). Yc = [1 1; 1 -1] W [1 1; 1 -1] with no scaling:
 //     Yc00 = w0+w1+w2+w3, Yc01 = w0-w1+w2-w3, Yc10 = w0+w1-w2-w3, Yc11 = w0-w1-w2+w3, level order c0..c3.
 //   * Quantizer, 4 lanes, three pipeline stages: level = sign * min(2047, (|Yc| * MF(qpc%6, class a) + 2f) >> (16 + qpc/6)),
-//     f = (1 << (15 + qpc/6)) / 3. qpc is the already mapped chroma QP (rtlnet_h264_pkg h264_qpc).
+//     f = (1 << (15 + qpc/6)) / 3 (intra) or / 6 (inter: the input inter selects the rounding offset 1/6 of an inter macroblock,
+//     half the intra f, like the AC quantizer). qpc is the already mapped chroma QP (rtlnet_h264_pkg h264_qpc).
 //   * Decoder side: f = [1 1; 1 -1] c [1 1; 1 -1], dcC = ((f * 16V(qpc%6, 0,0)) << (qpc/6)) >> 5, element i = chroma block i,
 //     saturated to 20 bits signed.
 //   * Widths: W 16 bits signed in, Yc 18 bits signed (|Yc| <= 16320), product plus 2f 31 bits, level 12 bits signed, f 14 bits
@@ -27,6 +28,7 @@ module rtlnet_h264_dcq_chroma (
   // Command, clk domain: start pulses one clock while idle; qpc and w_in are sampled at start.
   input  logic        start,
   input  logic [5:0]  qpc,
+  input  logic        inter,
   input  logic [63:0] w_in,
 
   // Status and results, clk domain.
@@ -92,6 +94,7 @@ module rtlnet_h264_dcq_chroma (
   logic [2:0]  st;
   logic [2:0]  qm;
   logic [3:0]  q6;
+  logic        inter_q;
   logic signed [15:0] w [4];
   logic signed [17:0] y [4];
   logic [15:0] a1_abs [4];
@@ -156,6 +159,7 @@ module rtlnet_h264_dcq_chroma (
     if ((st == S_IDLE) && start) begin
       qm   <= 3'(qpc % 6'd6);
       q6   <= 4'(qpc / 6'd6);
+      inter_q <= inter;
       for (int i = 0; i < 4; i++) w[i] <= signed'(w_in[16*i +: 16]);
     end
     if (st == S_1) begin
@@ -166,7 +170,7 @@ module rtlnet_h264_dcq_chroma (
     end
     if (st == S_2) begin
       for (int c = 0; c < 4; c++) begin
-        a2_sum[c] <= 32'(a1_abs[c]) * 32'(mf00(qm)) + {9'd0, f_of(q6), 1'b0};
+        a2_sum[c] <= 32'(a1_abs[c]) * 32'(mf00(qm)) + (inter_q ? {10'd0, f_of(q6)[21:1], 1'b0} : {9'd0, f_of(q6), 1'b0});
         a2_sgn[c] <= a1_sgn[c];
       end
     end

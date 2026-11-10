@@ -10,11 +10,15 @@
 //     checks p_valid exactly two clocks later and all four modes' samples (an illegal mode reads 0). The SAD
 //     accumulators are compared 4 clocks after the last query, the decision 4 clocks after dec_start (given 3 clocks
 //     after the last query) against the reference argmin (cost and tie order of the module header).
+//   * Inter candidate (phase 2c-1): every query also carries four random reference samples (q_ref); the accumulators sad_iy and
+//     sad_ic (SAD of source against reference over luma, and over Cb plus Cr) are compared with the reference sums, and
+//     dec_cost_y / dec_cost_c with the total (SAD plus mode cost) of the chosen intra mode, valid with dec_done.
 //   * Corner cases: all 0, all 255, steep gradients that saturate the plane clip, extreme above-left sample.
 //   * +INJECT_FAILURE is the negative control (forces one failed check).
 // Language: SystemVerilog-2012 (simulation only).
-// Revision: 11-09-2026
+// Revision: 11-10-2026
 //   * 11-09-2026: initial version.
+//   * 11-10-2026: phase 2c-1: inter SAD accumulators and the cost of the chosen intra modes.
 // Clocks: clk, 100 MHz.
 // -----------------------------------------------------------------------------
 `timescale 1ns / 1ps
@@ -36,6 +40,9 @@ module tb_rtlnet_h264_ipred;
   logic [1:0]   q_plane = '0, q_seg = '0;
   logic [3:0]   q_y = '0;
   logic [31:0]  q_src = '0;
+  logic [31:0]  q_ref = '0;
+  logic [17:0]  sad_iy, sad_ic;
+  logic [19:0]  dec_cost_y, dec_cost_c;
   logic         q_acc = 1'b0;
   logic         p_valid;
   logic [127:0] p_px;
@@ -60,6 +67,8 @@ module tb_rtlnet_h264_ipred;
   bit avt, avl;
   int sy [16][16];
   int sc [2][8][8];
+  int ry [16][16];
+  int rc [2][8][8];
 
   function automatic int clip1(input int v);
     if (v < 0) return 0;
@@ -204,6 +213,32 @@ module tb_rtlnet_h264_ipred;
     return w;
   endfunction
 
+  function automatic logic [31:0] ref_word(input int plane, input int seg, input int y);
+    logic [31:0] w;
+    for (int i = 0; i < 4; i++) begin
+      if (plane == 0) w[8*i +: 8] = 8'(ry[y][4 * seg + i]);
+      else            w[8*i +: 8] = 8'(rc[plane - 1][y][4 * seg + i]);
+    end
+    return w;
+  endfunction
+
+  // Reference SAD of the reference samples against the source for one query (the inter candidate).
+  function automatic int ref_sad_inter(input int plane, input int seg, input int y);
+    int s, p, v;
+    s = 0;
+    for (int i = 0; i < 4; i++) begin
+      if (plane == 0) begin
+        p = ry[y][4 * seg + i];
+        v = sy[y][4 * seg + i];
+      end else begin
+        p = rc[plane - 1][y][4 * seg + i];
+        v = sc[plane - 1][y][4 * seg + i];
+      end
+      s += (p > v) ? (p - v) : (v - p);
+    end
+    return s;
+  endfunction
+
   // Reference SAD of one query for one mode.
   function automatic int ref_sad(input int plane, input int mode, input int seg, input int y);
     int s, p, v;
@@ -246,6 +281,7 @@ module tb_rtlnet_h264_ipred;
       q_seg   = 2'(seg);
       q_y     = 4'(y);
       q_src   = src_word(plane, seg, y);
+      q_ref   = ref_word(plane, seg, y);
       q_acc   = acc;
       e_px[0] = exp_word(plane, seg, y);
       qcount++;
@@ -310,6 +346,7 @@ module tb_rtlnet_h264_ipred;
 
   longint rsad_y [4];
   longint rsad_c [4];
+  longint rsad_iy, rsad_ic;
   logic [127:0] hy, hl, hc, hlc;
   int kind_n, kind_l, kind_s, tlkind;
   int lat;
@@ -356,6 +393,11 @@ module tb_rtlnet_h264_ipred;
       tlc[1] = (tlkind == 1) ? 255 : (tlkind == 2) ? 0 : $urandom % 256;
       for (int y = 0; y < 16; y++) for (int x = 0; x < 16; x++) sy[y][x] = srcval(kind_s, x, y, 16);
       for (int p = 0; p < 2; p++) for (int y = 0; y < 8; y++) for (int x = 0; x < 8; x++) sc[p][y][x] = srcval(kind_s, x, y, 8);
+      // Reference samples: close to the source (small SAD), random, or equal.
+      for (int y = 0; y < 16; y++) for (int x = 0; x < 16; x++)
+        ry[y][x] = (cs % 3 == 0) ? sy[y][x] : ((cs % 3 == 1) ? clip1(sy[y][x] + ($urandom % 11) - 5) : ($urandom % 256));
+      for (int p = 0; p < 2; p++) for (int y = 0; y < 8; y++) for (int x = 0; x < 8; x++)
+        rc[p][y][x] = (cs % 3 == 0) ? sc[p][y][x] : ((cs % 3 == 1) ? clip1(sc[p][y][x] + ($urandom % 11) - 5) : ($urandom % 256));
       for (int i = 0; i < 16; i++) begin
         hy[8*i +: 8] = 8'(ty[i]);
         hl[8*i +: 8] = 8'(ly[i]);
@@ -385,11 +427,14 @@ module tb_rtlnet_h264_ipred;
         rsad_y[m] = 0;
         rsad_c[m] = 0;
       end
+      rsad_iy = 0;
+      rsad_ic = 0;
       // Queries: luma 16 rows x 4 segments, Cb and Cr 8 rows x 2 segments, one per clock.
       for (int y = 0; y < 16; y++) begin
         for (int s = 0; s < 4; s++) begin
           tick(1'b1, 0, s, y, 1'b1);
           for (int m = 0; m < 4; m++) if (legal(m, 1'b1)) rsad_y[m] += ref_sad(0, m, s, y);
+          rsad_iy += ref_sad_inter(0, s, y);
         end
       end
       for (int p = 0; p < 2; p++) begin
@@ -397,6 +442,7 @@ module tb_rtlnet_h264_ipred;
           for (int s = 0; s < 2; s++) begin
             tick(1'b1, p + 1, s, y, 1'b1);
             for (int m = 0; m < 4; m++) if (legal(m, 1'b0)) rsad_c[m] += ref_sad(p + 1, m, s, y);
+            rsad_ic += ref_sad_inter(p + 1, s, y);
           end
         end
       end
@@ -411,6 +457,8 @@ module tb_rtlnet_h264_ipred;
         tb_check(longint'(sad_y[18*m +: 18]) == rsad_y[m], $sformatf("case %0d sad_y[%0d] %0d expected %0d", cs, m, sad_y[18*m +: 18], rsad_y[m]));
         tb_check(longint'(sad_c[18*m +: 18]) == rsad_c[m], $sformatf("case %0d sad_c[%0d] %0d expected %0d", cs, m, sad_c[18*m +: 18], rsad_c[m]));
       end
+      tb_check(longint'(sad_iy) == rsad_iy, $sformatf("case %0d sad_iy %0d expected %0d", cs, sad_iy, rsad_iy));
+      tb_check(longint'(sad_ic) == rsad_ic, $sformatf("case %0d sad_ic %0d expected %0d", cs, sad_ic, rsad_ic));
       dec_start = 1'b0;
       lat = 1;
       while (!dec_done && lat < 20) begin
@@ -420,6 +468,13 @@ module tb_rtlnet_h264_ipred;
       tb_check(dec_done === 1'b1, "dec_done seen");
       tb_check(int'(dec_luma_mode) == ref_pick(1'b1, rsad_y), $sformatf("case %0d luma mode %0d expected %0d", cs, dec_luma_mode, ref_pick(1'b1, rsad_y)));
       tb_check(int'(dec_chroma_mode) == ref_pick(1'b0, rsad_c), $sformatf("case %0d chroma mode %0d expected %0d", cs, dec_chroma_mode, ref_pick(1'b0, rsad_c)));
+      begin
+        int cy, cc;
+        cy = (dec_luma_mode == 2) ? 0 : ((dec_luma_mode == 3) ? 32 : 16);
+        cc = (dec_chroma_mode == 0) ? 0 : ((dec_chroma_mode == 3) ? 32 : 16);
+        tb_check(longint'(dec_cost_y) == rsad_y[dec_luma_mode] + cy, $sformatf("case %0d dec_cost_y %0d expected %0d", cs, dec_cost_y, rsad_y[dec_luma_mode] + cy));
+        tb_check(longint'(dec_cost_c) == rsad_c[dec_chroma_mode] + cc, $sformatf("case %0d dec_cost_c %0d expected %0d", cs, dec_cost_c, rsad_c[dec_chroma_mode] + cc));
+      end
       seen[dec_luma_mode]++;
       seen[4 + dec_chroma_mode]++;
     end

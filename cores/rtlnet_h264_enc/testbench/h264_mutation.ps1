@@ -15,13 +15,19 @@ Overview:
     rtlnet_h264_mb_cavlc, (9) DC prediction with a missing neighbour in rtlnet_h264_ipred, (10) the I_PCM fallback never taken
     (rtlnet_h264_mb_enc), (11) the saturated DC level flag of the fallback removed (the root cause of the QP 0 failure) (rtlnet_h264_mb_enc), (12) an I_PCM macroblock
     counted as 0 coefficients for the neighbours' nC (rtlnet_h264_mb_cavlc), (13) the 32-bit limit of a merged level pair
-    exceeded (rtlnet_h264_cavlc_blk).
+    exceeded (rtlnet_h264_cavlc_blk). P-path mutations (phase 2c-1): (14) a wrong inter coded_block_pattern code (rtlnet_h264_pkg),
+    (15) mb_skip_run off by one (rtlnet_h264_mb_cavlc), (16) the reference chroma tile pointer advancing by the luma tile size
+    (rtlnet_h264_engine), (17) P_Skip chosen although luma levels are coded (rtlnet_h264_mb_enc), (18) the intra rounding offset used
+    for inter blocks (rtlnet_h264_fwdq: a legal encoder choice a decoder cannot see, only the transform bench catches it),
+    (19) the single-matching-reference rule ignoring neighbour C (rtlnet_h264_mvpred: mvp is always 0 in stage 2c-1, so only the
+    mvpred bench catches it).
   * A mutation is CAUGHT when every listed check fails (non-zero exit). The file is restored in a finally block.
   * Prints `MUTATION <n> <name>: CAUGHT|SURVIVED ...` and `MUTATION RESULT: <caught> of <total> caught`; exit 0 only when
     all are caught and every file is restored identical.
 Usage: powershell -NoProfile -ExecutionPolicy Bypass -File h264_mutation.ps1 [-Only <mutation numbers>]
-Revision: 11-09-2026
+Revision: 11-10-2026
   * 11-09-2026: initial version; mutations 10 to 13 (I_PCM fallback, level pair merge).
+  * 11-10-2026: mutations 14 to 19 (P path).
 -------------------------------------------------------------------------------
 #>
 param([string]$Only = '')   # comma separated mutation numbers, e.g. 1,2,5; all when empty
@@ -78,7 +84,27 @@ $Muts = @(
        Checks = @(@{ Kind = 'bench'; Bench = 'tb_rtlnet_h264_mbcavlc'; Fl = 'cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_mbcavlc.f' }) },
     @{ Name = 'level pair merge limit exceeded'; File = 'rtlnet_h264_cavlc_blk.sv';
        Old = "{1'b0, len3b} > 7'd32);"; New = "{1'b0, len3b} > 7'd33);";
-       Checks = @(@{ Kind = 'bench'; Bench = 'tb_rtlnet_h264_cavlc'; Fl = 'cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_cavlc.f' }) }
+       Checks = @(@{ Kind = 'bench'; Bench = 'tb_rtlnet_h264_cavlc'; Fl = 'cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_cavlc.f' }) },
+    @{ Name = 'wrong inter coded_block_pattern code'; File = 'rtlnet_h264_pkg.sv';
+       Old = "6'd31: r = 6'd19;"; New = "6'd31: r = 6'd20;";
+       Checks = @(@{ Kind = 'bench'; Bench = 'tb_rtlnet_h264_mbcavlc'; Fl = 'cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_mbcavlc.f' },
+                  @{ Kind = 'harness'; Config = 'p_qcif_pan_q12' }) },
+    @{ Name = 'mb_skip_run off by one'; File = 'rtlnet_h264_mb_cavlc.sv';
+       Old = "C_SR: begin cmd_valid = 1'b1; cmd_op = PK_UE; cmd_val = 32'(run_q); end"; New = "C_SR: begin cmd_valid = 1'b1; cmd_op = PK_UE; cmd_val = 32'(run_q) + 32'd1; end";
+       Checks = @(@{ Kind = 'bench'; Bench = 'tb_rtlnet_h264_mbcavlc'; Fl = 'cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_mbcavlc.f' },
+                  @{ Kind = 'harness'; Config = 'p_qcif_cut_q28' }) },
+    @{ Name = 'reference chroma pointer step wrong'; File = 'rtlnet_h264_engine.sv';
+       Old = "rfu_ptr   <= rfu_ptr + ADDR_W'(REC_CHROMA_TILE_BYTES);"; New = "rfu_ptr   <= rfu_ptr + ADDR_W'(REC_LUMA_TILE_BYTES);";
+       Checks = @(@{ Kind = 'harness'; Config = 'p_qcif_pan_q28' }) },
+    @{ Name = 'P_Skip chosen with coded luma levels'; File = 'rtlnet_h264_mb_enc.sv';
+       Old = "o_skip       <= inter_q && (nz8_e == 4'd0) && (drop_q"; New = "o_skip       <= inter_q && (drop_q";
+       Checks = @(@{ Kind = 'harness'; Config = 'p_qcif_pan_q28' }) },
+    @{ Name = 'intra rounding offset used for inter blocks'; File = 'rtlnet_h264_fwdq.sv';
+       Old = "(q1_inter ? (32'(f_of(q1_q6)) >> 1) : 32'(f_of(q1_q6)))"; New = "32'(f_of(q1_q6))";
+       Checks = @(@{ Kind = 'bench'; Bench = 'tb_rtlnet_h264_xform'; Fl = 'cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_xform.f' }) },
+    @{ Name = 'single matching reference index: neighbour C ignored'; File = 'rtlnet_h264_mvpred.sv';
+       Old = "mvp_x = ra ? ax : (rb ? bx : cx);"; New = "mvp_x = ra ? ax : (rb ? bx : ax);";
+       Checks = @(@{ Kind = 'bench'; Bench = 'tb_rtlnet_h264_mvpred'; Fl = 'cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_mvpred.f' }) }
 )
 
 function Get-Sha([string]$p) { return (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash }

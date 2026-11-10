@@ -40,12 +40,16 @@
 #include <stdint.h>   /* uint32_t, uint8_t, uintptr_t */
 
 #define RTLNET_H264_ID_VALUE             0x48323634u   /* "H264" */
-#define RTLNET_H264_VERSION_VALUE        0x11102026u
+#define RTLNET_H264_VERSION_VALUE        0x11102C01u
 /* Revision 11-09-2026: initial register map (phase 2b-1); MB_MODE register and cfg->mb_pcm (phase 2b-2);
  * RTLNET_H264_QP_MIN_REALTIME (the QP clamp of rtlnet_h264_enc_configure).
  * Revision 11-10-2026 (VERSION 0x11102026, burst-only DDR3 access): the rebuilt picture is macroblock-tiled (RY_BASE and
  * RU_BASE are the luma and chroma tile bases; the stride registers and RV_BASE are reserved), index entries are 128-byte
- * records, in_base and in_stride are multiples of RTLNET_H264_IN_ALIGN. */
+ * records, in_base and in_stride are multiples of RTLNET_H264_IN_ALIGN.
+ * Revision 11-10-2026 (VERSION 0x11102C01, phase 2c-1, P pictures): PIC_CFG bit 1 selects a P picture, REF_Y_BASE (0x054) and
+ * REF_U_BASE (0x058) hold the reference picture's tile bases, the two-buffer helper rtlnet_h264_enc_buffers_*, the P-aware
+ * start rtlnet_h264_enc_start_picture_ex and the frame_num helper. rtlnet_h264_enc_start_picture is unchanged (it starts
+ * an I picture, IDR or not, and clears the P bit). */
 
 /* Real-time QP floor: rtlnet_h264_enc_configure writes max(cfg->qp, RTLNET_H264_QP_MIN_REALTIME) into the QP register. Below
  * this QP dense macroblocks leave the macroblock coder over its clock budget (documentation section "Throughput"); the
@@ -62,14 +66,15 @@
 #define RTLNET_H264_REG_QP               0x02Cu   /* slice QP 0..51 (slice_qp_delta = QP - 26) */
 #define RTLNET_H264_REG_FRAME_NUM        0x030u   /* frame_num, written in log2_max_frame_num bits */
 #define RTLNET_H264_REG_IDR_PIC_ID       0x034u   /* idr_pic_id of an IDR picture */
-#define RTLNET_H264_REG_PIC_CFG          0x038u   /* [0] IDR picture, [12:8] log2_max_frame_num */
+#define RTLNET_H264_REG_PIC_CFG          0x038u   /* [0] IDR picture, [1] P picture (not with [0]), [12:8] log2_max_frame_num */
 #define RTLNET_H264_REG_MB_MODE          0x03Cu   /* [0] 1 = I_PCM macroblocks (debug fallback), 0 = Intra16x16 */
 #define RTLNET_H264_REG_IN_BASE          0x040u   /* input frame base, multiple of RTLNET_H264_IN_ALIGN */
 #define RTLNET_H264_REG_IN_STRIDE        0x044u   /* input line stride in bytes, multiple of RTLNET_H264_IN_ALIGN, >= MB_W * 32 */
 #define RTLNET_H264_REG_RY_BASE          0x048u   /* rebuilt picture luma tile base, multiple of 256 (256 bytes per macroblock) */
 /* 0x04C (former rebuilt luma stride) is reserved: reads 0, writes ignored */
 #define RTLNET_H264_REG_RU_BASE          0x050u   /* rebuilt picture chroma tile base (Cb then Cr), multiple of 128 (128 bytes per macroblock) */
-/* 0x054 (former Cr base) and 0x058 (former chroma stride) are reserved: read 0, writes ignored */
+#define RTLNET_H264_REG_REFY_BASE        0x054u   /* reference picture luma tile base (P pictures: the previous picture's rebuilt tiles), multiple of 256 */
+#define RTLNET_H264_REG_REFU_BASE        0x058u   /* reference picture chroma tile base (P pictures), multiple of 128 */
 #define RTLNET_H264_REG_RING_BASE        0x060u   /* compressed ring base, multiple of 16 */
 #define RTLNET_H264_REG_RING_SIZE        0x064u   /* compressed ring size in bytes, multiple of 16, >= 1024 */
 #define RTLNET_H264_REG_RING_WPTR        0x068u   /* RO, byte offset after the last completed burst */
@@ -110,6 +115,7 @@
 
 /* PIC_CFG fields. */
 #define RTLNET_H264_PIC_CFG_IDR          (1u << 0)
+#define RTLNET_H264_PIC_CFG_P            (1u << 1)   /* P picture: slice_type 5, nal_unit_type 1; never together with IDR (start is rejected) */
 #define RTLNET_H264_PIC_CFG_LOG2FN_SHIFT 8u
 #define RTLNET_H264_PIC_CFG_LOG2FN_MASK  0x1Fu
 
@@ -127,7 +133,7 @@
  *   word 1  length in bytes, start code and emulation-prevention bytes included (picture entry: the sum
  *           over the access unit delimiter and all slice NAL units)
  *   word 2  [15:0] picture number, [31:16] slice number (picture entry: number of slices)
- *   word 3  [7:0] slice type (7 = I), [15:8] QP, [16] last slice of the picture, [17] IDR picture,
+ *   word 3  [7:0] slice type (7 = I, 5 = P), [15:8] QP, [16] last slice of the picture, [17] IDR picture,
  *           [24] entry kind (0 slice, 1 picture)
  * A slice entry appears when every byte of its NAL unit is in memory; the picture entry follows the last
  * slice entry. Slices and the picture are contiguous in the ring and may wrap the ring end.
@@ -160,6 +166,10 @@
 #define RTLNET_H264_LOG2_FN_MAX          16u
 #define RTLNET_H264_SPS_PPS_MAX_BYTES    64u   /* a buffer this size always holds the SPS and the PPS */
 
+/* Picture types of rtlnet_h264_enc_start_picture_ex() and the buffer helper. */
+#define RTLNET_H264_PIC_IDR              0u   /* I picture, IDR: frame_num 0, new idr_pic_id (all macroblocks intra) */
+#define RTLNET_H264_PIC_P                1u   /* P picture: P_Skip, P_L0_16x16 (vector 0 in phase 2c-1), Intra16x16, I_PCM */
+
 /* Build parameters read from CAPS. */
 typedef struct {
     uint32_t max_mb_w;
@@ -184,6 +194,16 @@ typedef struct {
     uint32_t idx_base;
     uint32_t idx_entries;
 } rtlnet_h264_enc_cfg_t;
+
+/* The two rebuilt-picture buffers of a stream with P pictures. Picture n is written to buffer (n mod 2 counted from the first
+ * picture after init) and a P picture reads the other buffer, the previous picture, as its reference: the encoder keeps one
+ * reference picture (SPS max_num_ref_frames 1). Each buffer is a luma tile area and a chroma tile area. */
+typedef struct {
+    uint32_t y_base[2];      /* luma tile base of buffer 0 and 1, multiples of RTLNET_H264_REC_LUMA_TILE_BYTES */
+    uint32_t u_base[2];      /* chroma tile base of buffer 0 and 1, multiples of RTLNET_H264_REC_CHROMA_TILE_BYTES */
+    uint32_t cur;            /* the buffer the next picture is written to (0 or 1) */
+    uint32_t has_ref;        /* 1 after a picture has been completed into the other buffer */
+} rtlnet_h264_enc_buffers_t;
 
 /* One index-ring entry, decoded. */
 typedef struct {
@@ -258,10 +278,38 @@ int rtlnet_h264_enc_set_mode(uintptr_t base, uint32_t video_mode, rtlnet_h264_en
  * registers; the caller then calls rtlnet_h264_enc_ring_reset() once and rtlnet_h264_enc_start_picture(). */
 int rtlnet_h264_enc_configure(uintptr_t base, const rtlnet_h264_enc_cfg_t *cfg);
 
+/* Start one picture of the given type (RTLNET_H264_PIC_IDR or RTLNET_H264_PIC_P): writes PIC_CFG (IDR or P flag, log2_max_frame_num
+ * kept), frame_num and idr_pic_id, clears DONE and starts. frame_num is 0 for an IDR picture (idr_pic_id differs between consecutive
+ * IDR pictures, clause 7.4.3); for a P picture it is rtlnet_h264_enc_next_frame_num() of the previous picture's frame_num
+ * (max_num_ref_frames 1, gaps not allowed) and idr_pic_id is not used. The reference registers must be set for a P picture
+ * (rtlnet_h264_enc_set_reference or rtlnet_h264_enc_buffers_begin). -1 when the core is busy, the type is unknown, or a P
+ * picture has frame_num above 2^log2_max_frame_num - 1. */
+int rtlnet_h264_enc_start_picture_ex(uintptr_t base, uint32_t frame_num, uint32_t idr_pic_id, uint32_t pic_type);
+
+/* frame_num of the next reference picture: (prev_frame_num + 1) mod 2^log2_max_frame_num (clause 7.4.3 with every picture a
+ * reference picture and no gaps). prev_frame_num is the previous picture's value (0 after an IDR picture). Returns 0 when
+ * log2_max_frame_num is outside 4..16. */
+uint32_t rtlnet_h264_enc_next_frame_num(uint32_t prev_frame_num, uint32_t log2_max_frame_num);
+
+/* Write REF_Y_BASE and REF_U_BASE (the reference picture's rebuilt tiles for the next P picture). -1 on a base that is not a
+ * multiple of 256 (luma) or 128 (chroma); nothing is written then. */
+int rtlnet_h264_enc_set_reference(uintptr_t base, uint32_t ref_y_base, uint32_t ref_u_base);
+
+/* Initialize the two rebuilt buffers (nothing is written to the core). -1 on a NULL argument or a misaligned base. */
+int rtlnet_h264_enc_buffers_init(rtlnet_h264_enc_buffers_t *b, uint32_t y0, uint32_t u0, uint32_t y1, uint32_t u1);
+
+/* Before a picture: write RY_BASE and RU_BASE of the current buffer and, for a P picture, REF_Y_BASE and REF_U_BASE of the other
+ * buffer. -1 for a P picture when no picture has been completed yet (no reference), for an unknown type, or a NULL argument;
+ * nothing is written then. */
+int rtlnet_h264_enc_buffers_begin(uintptr_t base, const rtlnet_h264_enc_buffers_t *b, uint32_t pic_type);
+
+/* After the picture is done: the written buffer becomes the reference and the other one the next write target. */
+void rtlnet_h264_enc_buffers_end(rtlnet_h264_enc_buffers_t *b);
+
 /* Clear the ring and index pointers and fill levels. The core must be idle with the ring consumed. */
 void rtlnet_h264_enc_ring_reset(uintptr_t base);
 
-/* Write frame_num, idr_pic_id and the IDR flag, clear DONE, and start one picture. frame_num is 0 for an IDR
+/* Write frame_num, idr_pic_id and the IDR flag (the P flag is cleared: this starts an I picture), clear DONE, and start one picture. frame_num is 0 for an IDR
  * picture and idr_pic_id differs between consecutive IDR pictures (ITU-T H.264 clause 7.4.3). -1 when the core is busy. */
 int rtlnet_h264_enc_start_picture(uintptr_t base, uint32_t frame_num, uint32_t idr_pic_id, int idr);
 

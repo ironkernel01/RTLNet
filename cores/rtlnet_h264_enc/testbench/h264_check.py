@@ -23,8 +23,14 @@ Overview:
   * compare: python -I h264_check.py compare --a X.yuv --b Y.yuv --w W --h H --label NAME
     Byte comparison of two 4:2:0 YUV files (all frames); prints PSNR, and on a mismatch the first differing
     frame, plane and macroblock (x, y); exit code 1 on any difference or size mismatch.
-Revision: 11-09-2026
+  * Sequences (phase 2c-1): --gop <I/P letters> names the picture types (printed as PTYPE lines, used by --allskip). A single
+    --pattern name with several pictures (a sequence: static, pan, ...) applies the floor of (name, qp) to every picture, and
+    --measure prints one candidate line with the minimum PSNR over the pictures. --allskip (static scene) requires every P
+    picture to be coded as skipped macroblocks only: at most 6 + 24 x --slices stream bytes (the access unit delimiter, and per
+    slice the header, mb_skip_run and the trailing bits), and its rebuilt picture byte-identical to the previous picture's.
+Revision: 11-10-2026
   * 11-09-2026: initial version; PSNR report and floors, bits per picture, --pcm switch (intra 16x16 phase).
+  * 11-10-2026: sequences, --gop, --allskip.
 """
 import argparse
 import math
@@ -165,16 +171,29 @@ def cmd_assemble(args):
     rc = 0
     floors = read_floors(args.floors)
     marks = split_pictures(stream)
+    min_psnr = {}
+    prev_yuv = None
     for n in range(args.pics):
         rec = hex_to_bytes("%s_rec%d.hex" % (args.prefix, n))
         yuv, w, h = rebuilt_to_yuv(rec, info, args.disp_h)
         with open("%s/rebuilt%d.yuv" % (args.dir, n), "wb") as f:
             f.write(yuv)
+        ptype = args.gop[n] if n < len(args.gop) else "I"
+        print("PTYPE pic%d %s" % (n, ptype))
         if n < len(marks):
             end = marks[n + 1] if n + 1 < len(marks) else len(stream)
             bits = (end - marks[n]) * 8
             print("BITS pic%d %d" % (n, bits))
             print("BITS_PER_MB pic%d %.1f" % (n, bits / float(info["mbw"] * info["mbh"])))
+            if args.allskip and ptype == "P":
+                limit = 6 + 24 * args.slices
+                if (end - marks[n]) > limit or (prev_yuv is not None and yuv != prev_yuv):
+                    print("MISMATCH pic%d is not all-skip: %d bytes (limit %d), rebuilt equals the previous picture: %s" % (
+                        n, end - marks[n], limit, yuv == prev_yuv))
+                    rc = 1
+                else:
+                    print("ALLSKIP OK pic%d: %d bytes (limit %d), rebuilt identical to the previous picture" % (n, end - marks[n], limit))
+        prev_yuv = yuv
         if not args.refs:
             continue
         ref = open(args.refs[n], "rb").read()
@@ -202,6 +221,19 @@ def cmd_assemble(args):
             continue
         pats = args.pattern.split(",")
         key = (pats[min(n, len(pats) - 1)], args.qp)
+        if len(pats) == 1 and args.pics > 1:
+            # A sequence: one floor for every picture, measured as the minimum over the pictures.
+            min_psnr[key] = min(min_psnr.get(key, math.inf), pa)
+            if key in floors:
+                if pa < floors[key]:
+                    print("FLOOR FAIL pic%d %s qp %d: PSNR %.2f dB below the floor %.2f dB" % (n, key[0], args.qp, pa, floors[key]))
+                    rc = 1
+                else:
+                    print("FLOOR OK pic%d %s qp %d: PSNR %.2f dB >= %.2f dB" % (n, key[0], args.qp, pa, floors[key]))
+            elif not args.measure:
+                print("FLOOR MISSING pic%d %s qp %d: add a line to the floors file (run the harness with -Measure)" % (n, key[0], args.qp))
+                rc = 1
+            continue
         if key in floors:
             if pa < floors[key]:
                 print("FLOOR FAIL pic%d %s qp %d: PSNR %.2f dB below the floor %.2f dB" % (n, key[0], args.qp, pa, floors[key]))
@@ -214,6 +246,10 @@ def cmd_assemble(args):
         else:
             print("FLOOR MISSING pic%d %s qp %d: add a line to the floors file (run the harness with -Measure)" % (n, key[0], args.qp))
             rc = 1
+    if args.measure:
+        for key, pa in min_psnr.items():
+            val = 99.0 if pa == math.inf else max(0.0, math.floor((pa - 1.0) * 10.0) / 10.0)
+            print("FLOOR %s %d %.1f" % (key[0], key[1], val))
     print("stream %d bytes (+%d SPS/PPS)" % (len(stream), len(sps)))
     return rc
 
@@ -239,6 +275,9 @@ def main():
     s.add_argument("--qp", type=int, default=-1)
     s.add_argument("--floors", default="")
     s.add_argument("--measure", action="store_true")
+    s.add_argument("--gop", default="")
+    s.add_argument("--allskip", action="store_true")
+    s.add_argument("--slices", type=int, default=1)
     a = ap.parse_args()
     return cmd_compare(a) if a.cmd == "compare" else cmd_assemble(a)
 

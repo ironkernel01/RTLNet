@@ -23,6 +23,8 @@
 //   * 11-09-2026: initial version.
 //   * 11-10-2026: tiled rebuilt picture: RY_BASE and RU_BASE are the luma and chroma tile bases, the stride registers and
 //     RV_BASE are reserved; index records are 128 bytes.
+//   * 11-10-2026: phase 2c-1 (P pictures): PIC_CFG bit 1 selects a P picture, REF_Y_BASE (0x054) and REF_U_BASE (0x058) hold the
+//     tile bases of the reference picture, VERSION 0x11102C01.
 // Clocks: clk (all logic).
 // -----------------------------------------------------------------------------
 module rtlnet_h264_enc_regs #(
@@ -54,6 +56,9 @@ module rtlnet_h264_enc_regs #(
   output logic [31:0] cfg_in_stride,
   output logic [31:0] cfg_ry_base,
   output logic [31:0] cfg_ru_base,
+  output logic        cfg_p,
+  output logic [31:0] cfg_refy_base,
+  output logic [31:0] cfg_refu_base,
   output logic [5:0]  cfg_qp,
   output logic        cfg_mb_pcm,
   output logic [15:0] cfg_frame_num,
@@ -117,8 +122,11 @@ module rtlnet_h264_enc_regs #(
   localparam logic [11:0] REG_IN_BASE     = 12'h040;
   localparam logic [11:0] REG_IN_STRIDE   = 12'h044;
   localparam logic [11:0] REG_RY_BASE     = 12'h048;   // rebuilt picture luma tile base (256 B per macroblock)
-  // 0x04C, 0x054 and 0x058 (the former strides and the Cr base) are reserved: they read 0 and ignore writes.
+  // 0x04C (the former luma stride) is reserved: it reads 0 and ignores writes. 0x054 and 0x058 were reserved and are the
+  // reference tile bases since phase 2c-1.
   localparam logic [11:0] REG_RU_BASE     = 12'h050;   // rebuilt picture chroma tile base (Cb then Cr, 128 B per macroblock)
+  localparam logic [11:0] REG_REFY_BASE   = 12'h054;   // reference picture luma tile base (P pictures; the previous rebuilt picture)
+  localparam logic [11:0] REG_REFU_BASE   = 12'h058;   // reference picture chroma tile base (P pictures)
   localparam logic [11:0] REG_RING_BASE   = 12'h060;
   localparam logic [11:0] REG_RING_SIZE   = 12'h064;
   localparam logic [11:0] REG_RING_WPTR   = 12'h068;
@@ -148,7 +156,7 @@ module rtlnet_h264_enc_regs #(
   localparam int STATUS_STALL_BIT    = 3;
 
   localparam logic [31:0] CORE_ID      = id4("H", "2", "6", "4");
-  localparam logic [31:0] CORE_VERSION = 32'h1110_2026;
+  localparam logic [31:0] CORE_VERSION = 32'h1110_2C01;   // 11-10, phase 2c-1
   // CAPS: [7:0] MAX_MB_W, [15:8] MAX_MB_H, [19:16] NUM_ENGINES.
   localparam logic [31:0] CORE_CAPS    = {12'd0, 4'(NUM_ENGINES), 8'(MAX_MB_H), 8'(MAX_MB_W)};
 
@@ -197,11 +205,14 @@ module rtlnet_h264_enc_regs #(
       cfg_frame_num   <= '0;
       cfg_idr_pic_id  <= '0;
       cfg_idr         <= 1'b1;
+      cfg_p           <= 1'b0;
       cfg_log2_fn     <= 5'd4;
       cfg_in_base     <= '0;
       cfg_in_stride   <= '0;
       cfg_ry_base     <= '0;
       cfg_ru_base     <= '0;
+      cfg_refy_base   <= '0;
+      cfg_refu_base   <= '0;
       cfg_ring_base   <= '0;
       cfg_ring_size   <= '0;
       cfg_idx_base    <= '0;
@@ -275,12 +286,15 @@ module rtlnet_h264_enc_regs #(
           REG_IDR_PIC_ID:  cfg_idr_pic_id  <= reg_wr_data[15:0];
           REG_PIC_CFG: begin
             cfg_idr     <= reg_wr_data[0];
+            cfg_p       <= reg_wr_data[1];
             cfg_log2_fn <= reg_wr_data[12:8];
           end
           REG_IN_BASE:     cfg_in_base     <= reg_wr_data;
           REG_IN_STRIDE:   cfg_in_stride   <= reg_wr_data;
           REG_RY_BASE:     cfg_ry_base     <= reg_wr_data;
           REG_RU_BASE:     cfg_ru_base     <= reg_wr_data;
+          REG_REFY_BASE:   cfg_refy_base   <= reg_wr_data;
+          REG_REFU_BASE:   cfg_refu_base   <= reg_wr_data;
           REG_RING_BASE:   cfg_ring_base   <= reg_wr_data;
           REG_RING_SIZE:   cfg_ring_size   <= reg_wr_data;
           REG_RING_RPTR: begin
@@ -350,11 +364,13 @@ module rtlnet_h264_enc_regs #(
         REG_MB_MODE:     reg_rd_data <= {31'd0, cfg_mb_pcm};
         REG_FRAME_NUM:   reg_rd_data <= {16'd0, cfg_frame_num};
         REG_IDR_PIC_ID:  reg_rd_data <= {16'd0, cfg_idr_pic_id};
-        REG_PIC_CFG:     reg_rd_data <= {19'd0, cfg_log2_fn, 7'd0, cfg_idr};
+        REG_PIC_CFG:     reg_rd_data <= {19'd0, cfg_log2_fn, 6'd0, cfg_p, cfg_idr};
         REG_IN_BASE:     reg_rd_data <= cfg_in_base;
         REG_IN_STRIDE:   reg_rd_data <= cfg_in_stride;
         REG_RY_BASE:     reg_rd_data <= cfg_ry_base;
         REG_RU_BASE:     reg_rd_data <= cfg_ru_base;
+        REG_REFY_BASE:   reg_rd_data <= cfg_refy_base;
+        REG_REFU_BASE:   reg_rd_data <= cfg_refu_base;
         REG_RING_BASE:   reg_rd_data <= cfg_ring_base;
         REG_RING_SIZE:   reg_rd_data <= cfg_ring_size;
         REG_RING_WPTR:   reg_rd_data <= ring_wptr[31:0];

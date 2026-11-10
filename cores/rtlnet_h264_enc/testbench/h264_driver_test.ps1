@@ -3,9 +3,12 @@
 File: h264_driver_test.ps1
 Purpose: build and run the host unit test of the rtlnet_h264_enc driver (test_rtlnet_h264_enc_driver.c) with the
   host gcc from rtlnet_tools.ps1; prints its DRIVER TEST line and exits 0 on PASS.
+  * Phase 2c-1 fields covered by the test: PIC_CFG bit 1 (start_picture_ex), REF_Y_BASE / REF_U_BASE with their alignment rules,
+    next_frame_num (wrap), the two-buffer helper, VERSION 0x11102C01.
 Usage: powershell -NoProfile -ExecutionPolicy Bypass -File h264_driver_test.ps1
-Revision: 11-09-2026
+Revision: 11-10-2026
   * 11-09-2026: initial version.
+  * 11-10-2026: the test covers the P picture fields of the driver.
 -------------------------------------------------------------------------------
 #>
 $ErrorActionPreference = 'Stop'

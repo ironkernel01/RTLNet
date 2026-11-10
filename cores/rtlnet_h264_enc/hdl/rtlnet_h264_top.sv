@@ -19,8 +19,9 @@
 //     unit delimiter, the slice NAL units and their index entries.
 //   * irq is a level on enc_clk: high while CTRL.IRQ_EN and (STATUS.DONE or STATUS.ERR).
 // Language: SystemVerilog-2012.
-// Revision: 11-09-2026
+// Revision: 11-10-2026
 //   * 11-09-2026: initial version.
+//   * 11-10-2026: phase 2c-1: REF_BUF_KB, MV_LINE_KB; the P picture and reference base registers go to the engines.
 // Clocks: enc_clk (engine, memory port, register file); s_axi_aclk (AXI4-Lite slave side of the register
 //   crossing only).
 // -----------------------------------------------------------------------------
@@ -37,6 +38,8 @@ module rtlnet_h264_top #(
   parameter int    COEF_BUF_KB = 1,      // coefficient buffer: two banks of 102 words of 48 bits (needs 1)
   parameter int    LINE_KB     = 4,      // rebuilt bottom-row line buffer: 2 x 16 bytes per macroblock column
   parameter int    FIFO_KB     = 1,      // compressed-ring word FIFO
+  parameter int    REF_BUF_KB  = 1,      // reference macroblock buffer (P pictures): two banks of 32 words of 16 bytes
+  parameter int    MV_LINE_KB  = 1,      // motion vector line RAM (P pictures): one 32-bit word per macroblock column
   parameter string RAM_STYLE   = "block"  // "block" | "distributed", for every engine memory (RAM instancing rule)
 )(
   // Engine clock (MIG ui_clk, 100 MHz) and its reset (synchronous, active low); the register clock and its
@@ -153,6 +156,9 @@ module rtlnet_h264_top #(
   logic [31:0] cfg_in_stride;
   logic [31:0] cfg_ry_base;
   logic [31:0] cfg_ru_base;
+  logic        cfg_p;
+  logic [31:0] cfg_refy_base;
+  logic [31:0] cfg_refu_base;
   logic [5:0]  cfg_qp;
   logic        cfg_mb_pcm;
   logic [15:0] cfg_frame_num;
@@ -271,7 +277,8 @@ module rtlnet_h264_top #(
     .start(start), .ring_reset(ring_reset),
     .cfg_mb_w(cfg_mb_w), .cfg_mb_h(cfg_mb_h), .cfg_slices(cfg_slices),
     .cfg_in_base(cfg_in_base), .cfg_in_stride(cfg_in_stride),
-    .cfg_ry_base(cfg_ry_base), .cfg_ru_base(cfg_ru_base),
+    .cfg_ry_base(cfg_ry_base), .cfg_ru_base(cfg_ru_base), .cfg_p(cfg_p), .cfg_refy_base(cfg_refy_base),
+    .cfg_refu_base(cfg_refu_base),
     .cfg_qp(cfg_qp), .cfg_mb_pcm(cfg_mb_pcm), .cfg_frame_num(cfg_frame_num),
     .cfg_idr_pic_id(cfg_idr_pic_id),
     .cfg_idr(cfg_idr), .cfg_log2_fn(cfg_log2_fn), .cfg_pic_no(cfg_pic_no),
@@ -291,7 +298,8 @@ module rtlnet_h264_top #(
     for (e = 0; e < NUM_ENGINES; e++) begin : g_engine
       rtlnet_h264_engine #(
         .ADDR_W(ADDR_W), .ID_W(ID_W), .MAX_MB_W(MAX_MB_W), .MAX_MB_H(MAX_MB_H), .MB_BUF_KB(MB_BUF_KB), .RD_STRIP_MB(RD_STRIP_MB),
-        .REC_BUF_KB(REC_BUF_KB), .COEF_BUF_KB(COEF_BUF_KB), .LINE_KB(LINE_KB), .FIFO_KB(FIFO_KB), .EMIT_AUD(e == 0), .RAM_STYLE(RAM_STYLE)
+        .REC_BUF_KB(REC_BUF_KB), .COEF_BUF_KB(COEF_BUF_KB), .LINE_KB(LINE_KB), .FIFO_KB(FIFO_KB), .REF_BUF_KB(REF_BUF_KB),
+        .MV_LINE_KB(MV_LINE_KB), .EMIT_AUD(e == 0), .RAM_STYLE(RAM_STYLE)
       ) u_engine (
         .clk(enc_clk), .resetn(enc_resetn),
         .start(start), .busy(eng_busy[e]), .done(eng_done[e]), .err_cfg(eng_err_cfg[e]), .err_axi(eng_err_axi[e]),
@@ -299,7 +307,8 @@ module rtlnet_h264_top #(
         .cfg_mb_w(cfg_mb_w), .cfg_mb_h(cfg_mb_h), .eng_slices(eng_slices_w), .slice_base(slice_base[e]),
         .cfg_in_base(cfg_in_base),
         .cfg_in_stride(cfg_in_stride), .cfg_ry_base(cfg_ry_base),
-        .cfg_ru_base(cfg_ru_base), .cfg_qp(cfg_qp), .cfg_mb_pcm(cfg_mb_pcm),
+        .cfg_ru_base(cfg_ru_base), .cfg_p(cfg_p), .cfg_refy_base(cfg_refy_base), .cfg_refu_base(cfg_refu_base),
+        .cfg_qp(cfg_qp), .cfg_mb_pcm(cfg_mb_pcm),
         .cfg_frame_num(cfg_frame_num), .cfg_idr_pic_id(cfg_idr_pic_id), .cfg_idr(cfg_idr), .cfg_log2_fn(cfg_log2_fn),
         .cfg_pic_no(cfg_pic_no), .band_first_row(band_first[e]), .band_rows(band_rows[e]),
         .cfg_ring_base(cfg_ring_base + 32'(e) * ring_size_e), .cfg_ring_size(ring_size_e),

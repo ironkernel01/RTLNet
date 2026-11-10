@@ -23,8 +23,15 @@ Overview:
     rectangle, 1 and 2 pixel lines, high contrast), checker (0/255 and mid-gray checkerboards with cell sizes 1, 2, 4,
     8 and 16 in separate regions), photo (smooth synthetic photo: low-frequency sinusoids and soft blobs with a
     vignette, one soft horizon, film grain sigma about 2, smooth chroma with a hue drift).
-Revision: 11-09-2026
+  * Sequences (phase 2c-1, P pictures): python -I h264_gen.py --seq <name> --count N --w W --h H --out <prefix> writes
+    <prefix><n>.hex and <prefix><n>_ref.yuv for n = 0 .. N - 1 (the same file formats). static: the photo pattern, identical in
+    every picture. pan: a photo canvas larger than the picture, the window moving by whole pixels (4 pixels right, 1 down per
+    picture; the even horizontal step keeps the 4:2:2 chroma aligned). bars_move: the 75 % colour bars scrolling 8 pixels per
+    picture (wrapping). noise_p: independent noise pictures (seed 7 + n). cut: the photo (static) for the first half of the
+    pictures and the edges pattern (static) from the middle on, a scene change.
+Revision: 11-10-2026
   * 11-09-2026: initial version; textured patterns for the intra 16x16 phase.
+  * 11-10-2026: sequences for the P pictures (--seq, --count).
 """
 import argparse
 import math
@@ -256,9 +263,67 @@ def make_planes(pattern, w, h, frame, seed):
     raise SystemExit("unknown pattern " + pattern)
 
 
+def write_picture(prefix, w, h, ys, us, vs):
+    with open(prefix + ".hex", "w", newline="\n") as f:
+        for y in range(h):
+            row = bytearray(w * 2)
+            row[0::4] = ys[y][0::2]
+            row[1::4] = us[y]
+            row[2::4] = ys[y][1::2]
+            row[3::4] = vs[y]
+            for i in range(0, len(row), 16):
+                f.write(bytes(row[i:i + 16][::-1]).hex() + "\n")
+    with open(prefix + "_ref.yuv", "wb") as f:
+        for y in range(h):
+            f.write(ys[y])
+        for plane in (us, vs):
+            for r in range(h // 2):
+                f.write(bytes((p + q + 1) >> 1 for p, q in zip(plane[2 * r], plane[2 * r + 1])))
+
+
+SEQUENCES = ("static", "pan", "bars_move", "noise_p", "cut")
+
+
+def make_sequence(seq, w, h, count):
+    """Yield (Y rows, U rows, V rows) of pictures 0 .. count - 1 of a sequence."""
+    if seq == "static":
+        planes = make_planes("photo", w, h, 0, 7)
+        for _ in range(count):
+            yield planes
+    elif seq == "pan":
+        dx, dy = 4, 1
+        cw_w, cw_h = w + dx * (count - 1), h + dy * (count - 1)
+        ys, us, vs = make_planes("photo", cw_w, cw_h, 0, 7)
+        for n in range(count):
+            x0, y0 = dx * n, dy * n
+            yield ([ys[y0 + y][x0:x0 + w] for y in range(h)],
+                   [us[y0 + y][x0 // 2:x0 // 2 + w // 2] for y in range(h)],
+                   [vs[y0 + y][x0 // 2:x0 // 2 + w // 2] for y in range(h)])
+    elif seq == "bars_move":
+        ys, us, vs = make_planes("bars", w, h, 0, 1)
+        for n in range(count):
+            sh = (8 * n) % w
+            cs = sh // 2
+            yield ([bytes(row[-sh:] + row[:-sh]) if sh else row for row in ys],
+                   [bytes(row[-cs:] + row[:-cs]) if cs else row for row in us],
+                   [bytes(row[-cs:] + row[:-cs]) if cs else row for row in vs])
+    elif seq == "noise_p":
+        for n in range(count):
+            yield make_planes("noise", w, h, 0, 7 + n)
+    elif seq == "cut":
+        first = make_planes("photo", w, h, 0, 7)
+        second = make_planes("edges", w, h, 0, 7)
+        for n in range(count):
+            yield first if n < (count + 1) // 2 else second
+    else:
+        raise SystemExit("unknown sequence " + seq)
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--pattern", required=True)
+    ap.add_argument("--pattern", default="")
+    ap.add_argument("--seq", default="")
+    ap.add_argument("--count", type=int, default=1)
     ap.add_argument("--w", type=int, required=True)
     ap.add_argument("--h", type=int, required=True)
     ap.add_argument("--frame", type=int, default=0)
@@ -268,22 +333,15 @@ def main():
     w, h = a.w, a.h
     if w % 16 or h % 16 or (w * 2) % 32:
         raise SystemExit("w and h must be multiples of 16 (macroblock), line stride a multiple of 32")
+    if a.seq:
+        for n, (ys, us, vs) in enumerate(make_sequence(a.seq, w, h, a.count)):
+            write_picture("%s%d" % (a.out, n), w, h, ys, us, vs)
+        print("wrote", a.count, "pictures of sequence", a.seq, "at", a.out)
+        return 0
+    if not a.pattern:
+        raise SystemExit("--pattern or --seq is required")
     ys, us, vs = make_planes(a.pattern, w, h, a.frame, a.seed)
-    with open(a.out + ".hex", "w", newline="\n") as f:
-        for y in range(h):
-            row = bytearray(w * 2)
-            row[0::4] = ys[y][0::2]
-            row[1::4] = us[y]
-            row[2::4] = ys[y][1::2]
-            row[3::4] = vs[y]
-            for i in range(0, len(row), 16):
-                f.write(bytes(row[i:i + 16][::-1]).hex() + "\n")
-    with open(a.out + "_ref.yuv", "wb") as f:
-        for y in range(h):
-            f.write(ys[y])
-        for plane in (us, vs):
-            for r in range(h // 2):
-                f.write(bytes((p + q + 1) >> 1 for p, q in zip(plane[2 * r], plane[2 * r + 1])))
+    write_picture(a.out, w, h, ys, us, vs)
     print("wrote", a.out + ".hex", a.out + "_ref.yuv")
 
 

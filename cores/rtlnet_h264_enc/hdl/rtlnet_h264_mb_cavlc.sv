@@ -1,7 +1,8 @@
 // -----------------------------------------------------------------------------
 // File: rtlnet_h264_mb_cavlc.sv
 // Purpose: stage B of the H.264 encoder: the macroblock layer syntax (clause 7.3.5) and CAVLC residual coding (clause 9.2)
-//   of one Intra16x16 macroblock in an I slice, from the quantized levels in the coefficient RAM into packer commands.
+//   of one macroblock of an I or P slice (Intra16x16, I_PCM, P_L0_16x16, P_Skip), from the quantized levels in the coefficient
+//   RAM into packer commands.
 // Overview:
 //   * Per macroblock: mb_type ue(v) = 1 + i16_mode + 4 * cbp_chroma + 12 * cbp_luma (Table 7-11), intra_chroma_pred_mode ue(v),
 //     mb_qp_delta se(v) = 0, then residual(): Intra16x16DCLevel always (maxNumCoeff 16); when cbp_luma the 16
@@ -27,11 +28,23 @@
 //   * I_PCM macroblock (input pcm): mb_type ue(v) = 25, PK_ALIGN, then the 96 sample words of the coefficient RAM as 32-bit
 //     fields (word i = samples 4i .. 4i + 3, first sample in the top byte), 3 clocks per word; every block counts 16
 //     coefficients for the neighbours' nC (clause 9.2.1).
+//   * P slices (p_slice, phase 2c-1): every macroblock that is not skipped is preceded by mb_skip_run ue(v) (clause 7.3.4), the
+//     count of skipped macroblocks since the last coded one; a skipped macroblock (skip) writes nothing, counts one in the run
+//     and sets all total_coeff of the macroblock to 0 for the neighbours' nC (clause 9.2.1: a P_Skip neighbour is available
+//     with nN = 0). skip_run is the running count: the engine writes it at the end of the slice when it is not 0, and
+//     slice_start clears it. The I macroblock types of a P slice are offset by 5 (Table 7-13: Intra16x16 5 + 1 + mode + 4 *
+//     cbp_chroma + 12 * (cbp_luma != 0), I_PCM 30).
+//   * P_L0_16x16 (inter): mb_type ue(v) = 0, no ref_idx (one reference picture), mvd_l0 x and y se(v) (inputs mvd_x, mvd_y: the
+//     motion vector minus its prediction), coded_block_pattern me(v) (Table 9-4 inter column: cbp = luma 8x8 mask cbp_luma4 in
+//     bits 3..0 and cbp_chroma in bits 5..4), and only when cbp != 0 mb_qp_delta se(v) = 0 and the residual: the luma 4x4 blocks
+//     of every coded 8x8 block (LumaLevel4x4, 16 coefficients, zigzag positions 0..15, luma4x4BlkIdx order), the chroma DC
+//     and AC blocks as for intra. Luma blocks of an 8x8 block with its cbp bit 0 are not coded and count total_coeff 0.
 //   * Cycles: an empty macroblock (cbp 0) takes about 20 clocks; a dense macroblock about 350 to 450; an I_PCM macroblock
 //     about 290 (the packer takes one byte per clock, so its 386 bytes need at least that many clocks).
 // Language: SystemVerilog-2012.
-// Revision: 11-09-2026
+// Revision: 11-10-2026
 //   * 11-09-2026: initial version.
+//   * 11-10-2026: phase 2c-1: P slices (mb_skip_run, P_L0_16x16, P_Skip, offset intra types).
 // Clocks: clk.
 // -----------------------------------------------------------------------------
 module rtlnet_h264_mb_cavlc #(
@@ -57,6 +70,14 @@ module rtlnet_h264_mb_cavlc #(
   input  logic              cbp_luma,
   input  logic [1:0]        chroma_mode,
   input  logic [CRAM_AW-1:0] cbase,
+  input  logic              p_slice,
+  input  logic              skip,
+  input  logic              inter,
+  input  logic [3:0]        cbp_luma4,
+  input  logic signed [15:0] mvd_x,
+  input  logic signed [15:0] mvd_y,
+  input  logic              slice_start,
+  output logic [15:0]       skip_run,
   output logic              busy,
   output logic              done,
 
@@ -78,17 +99,22 @@ module rtlnet_h264_mb_cavlc #(
   localparam int LAW = $clog2(MAX_MB_W);
 
   // Coder states.
-  localparam logic [3:0] C_IDLE = 4'd0;
-  localparam logic [3:0] C_H0   = 4'd1;
-  localparam logic [3:0] C_H1   = 4'd2;
-  localparam logic [3:0] C_H2   = 4'd3;
-  localparam logic [3:0] C_BLK  = 4'd4;
-  localparam logic [3:0] C_FIN  = 4'd7;
-  localparam logic [3:0] C_P0   = 4'd8;
-  localparam logic [3:0] C_P1   = 4'd9;
-  localparam logic [3:0] C_PR   = 4'd10;
-  localparam logic [3:0] C_PW   = 4'd11;
-  localparam logic [3:0] C_PE   = 4'd12;
+  localparam logic [4:0] C_IDLE = 5'd0;
+  localparam logic [4:0] C_H0   = 5'd1;
+  localparam logic [4:0] C_H1   = 5'd2;
+  localparam logic [4:0] C_H2   = 5'd3;
+  localparam logic [4:0] C_BLK  = 5'd4;
+  localparam logic [4:0] C_FIN  = 5'd7;
+  localparam logic [4:0] C_P0   = 5'd8;
+  localparam logic [4:0] C_P1   = 5'd9;
+  localparam logic [4:0] C_PR   = 5'd10;
+  localparam logic [4:0] C_PW   = 5'd11;
+  localparam logic [4:0] C_PE   = 5'd12;
+  localparam logic [4:0] C_SR   = 5'd13;   // mb_skip_run
+  localparam logic [4:0] C_I0   = 5'd14;   // inter: mb_type
+  localparam logic [4:0] C_I1   = 5'd15;   // mvd_l0 x
+  localparam logic [4:0] C_I2   = 5'd16;   // mvd_l0 y
+  localparam logic [4:0] C_I3   = 5'd17;   // coded_block_pattern
 
   // Reader states.
   localparam logic [1:0] R_IDLE  = 2'd0;
@@ -96,19 +122,21 @@ module rtlnet_h264_mb_cavlc #(
   localparam logic [1:0] R_CAP   = 2'd2;
   localparam logic [1:0] R_HOLD  = 2'd3;
 
-  // Item numbers: 0 luma DC, 1..16 luma AC (blkIdx = item - 1), 17 Cb DC, 18 Cr DC, 19..22 Cb AC, 23..26 Cr AC, 31 end.
-  function automatic logic item_valid(input logic [4:0] s, input logic cl, input logic [1:0] cc);
-    if (s == 5'd0)                     return 1'b1;
-    if (s <= 5'd16)                    return cl;
+  // Item numbers: 0 luma DC (Intra16x16 only), 1..16 luma blocks (blkIdx = item - 1; AC blocks of Intra16x16 when cbp_luma, the
+  // blocks of the coded 8x8 groups of an inter macroblock), 17 Cb DC, 18 Cr DC, 19..22 Cb AC, 23..26 Cr AC, 31 end. cl4 is the
+  // luma 8x8 coded mask (all ones or zero for Intra16x16).
+  function automatic logic item_valid(input logic [4:0] s, input logic [3:0] cl4, input logic [1:0] cc, input logic it);
+    if (s == 5'd0)                     return !it;
+    if (s <= 5'd16)                    return cl4[2'((s - 5'd1) >> 2)];
     if (s <= 5'd18)                    return (cc != 2'd0);
     if (s <= 5'd26)                    return (cc == 2'd2);
     return 1'b0;
   endfunction
 
-  function automatic logic [4:0] next_item(input logic [4:0] s, input logic cl, input logic [1:0] cc);
+  function automatic logic [4:0] next_item(input logic [4:0] s, input logic [3:0] cl4, input logic [1:0] cc, input logic it);
     logic [4:0] r;
     r = 5'd31;
-    for (int i = 26; i >= 1; i--) if ((5'(i) > s) && item_valid(5'(i), cl, cc)) r = 5'(i);
+    for (int i = 26; i >= 1; i--) if ((5'(i) > s) && item_valid(5'(i), cl4, cc, it)) r = 5'(i);
     return r;
   endfunction
 
@@ -150,7 +178,7 @@ module rtlnet_h264_mb_cavlc #(
   // ---------------------------------------------------------------------------
   // State
   // ---------------------------------------------------------------------------
-  logic [3:0]         st;
+  logic [4:0]         st;
   logic [1:0]         rst;
   logic [CRAM_AW-1:0] cbase_q;
   logic [LAW-1:0]     mbx_q;
@@ -160,6 +188,13 @@ module rtlnet_h264_mb_cavlc #(
   logic [1:0]         cbpc_q;
   logic               cbpl_q;
   logic [1:0]         cmode_q;
+  logic               pslice_q;
+  logic               inter_q;
+  logic               pcm_q;
+  logic [3:0]         cbpl4_q;
+  logic signed [15:0] mvdx_q;
+  logic signed [15:0] mvdy_q;
+  logic [15:0]        run_q;
 
   // Total-coeff bookkeeping, 5 bits each: current macroblock luma (index by * 4 + bx) and chroma (p * 4 + by * 2 + bx), the
   // left macroblock's right column (luma by; chroma p * 2 + by) and the upper macroblock's bottom row (luma bx; chroma p * 2 + bx).
@@ -210,6 +245,7 @@ module rtlnet_h264_mb_cavlc #(
   logic [39:0]        ln_wr_data;
 
   assign busy = (st != C_IDLE);
+  assign skip_run = run_q;
 
   // ---------------------------------------------------------------------------
   // Reader address generation
@@ -226,7 +262,8 @@ module rtlnet_h264_mb_cavlc #(
   always_comb begin
     for (int i = 0; i < 16; i++) rr[i] = rbuf[12*i +: 12];
     blk_coef = '0;
-    if (r_item == 5'd0) begin
+    if ((r_item == 5'd0) || (inter_q && (r_item <= 5'd16))) begin
+      // Intra16x16DCLevel or LumaLevel4x4: 16 coefficients, maxNumCoeff 16.
       blk_mode = 2'd0;
       for (int k = 0; k < 16; k++) blk_coef[12*k +: 12] = rr[zz(k)];
     end else if ((r_item == 5'd17) || (r_item == 5'd18)) begin
@@ -299,7 +336,10 @@ module rtlnet_h264_mb_cavlc #(
   // Command output
   // ---------------------------------------------------------------------------
   logic [31:0] mbtype;
-  assign mbtype = 32'd1 + 32'(mode_q) + 32'd4 * 32'(cbpc_q) + (cbpl_q ? 32'd12 : 32'd0);
+  assign mbtype = 32'd1 + 32'(mode_q) + 32'd4 * 32'(cbpc_q) + (cbpl_q ? 32'd12 : 32'd0) + (pslice_q ? MB_TYPE_P_INTRA_BASE : 32'd0);
+
+  logic [5:0] cbp_q;
+  assign cbp_q = {cbpc_q, cbpl4_q};
 
   always_comb begin
     cmd_valid = 1'b0;
@@ -307,6 +347,11 @@ module rtlnet_h264_mb_cavlc #(
     cmd_val   = 32'd0;
     cmd_len   = 6'd0;
     case (st)
+      C_SR: begin cmd_valid = 1'b1; cmd_op = PK_UE; cmd_val = 32'(run_q); end
+      C_I0: begin cmd_valid = 1'b1; cmd_op = PK_UE; cmd_val = MB_TYPE_P_L0_16X16; end
+      C_I1: begin cmd_valid = 1'b1; cmd_op = PK_SE; cmd_val = 32'(mvdx_q); end
+      C_I2: begin cmd_valid = 1'b1; cmd_op = PK_SE; cmd_val = 32'(mvdy_q); end
+      C_I3: begin cmd_valid = 1'b1; cmd_op = PK_UE; cmd_val = 32'(h264_cbp_inter_code(cbp_q)); end
       C_H0: begin cmd_valid = 1'b1; cmd_op = PK_UE; cmd_val = mbtype; end
       C_H1: begin cmd_valid = 1'b1; cmd_op = PK_UE; cmd_val = 32'(cmode_q); end
       C_H2: begin cmd_valid = 1'b1; cmd_op = PK_SE; cmd_val = 32'd0; end
@@ -316,7 +361,7 @@ module rtlnet_h264_mb_cavlc #(
         cmd_val   = blk_cmd_val[bsel];
         cmd_len   = blk_cmd_len[bsel];
       end
-      C_P0: begin cmd_valid = 1'b1; cmd_op = PK_UE; cmd_val = MB_TYPE_I_PCM; end
+      C_P0: begin cmd_valid = 1'b1; cmd_op = PK_UE; cmd_val = MB_TYPE_I_PCM + (pslice_q ? MB_TYPE_P_INTRA_BASE : 32'd0); end
       C_P1: begin cmd_valid = 1'b1; cmd_op = PK_ALIGN; end
       C_PE: begin cmd_valid = 1'b1; cmd_op = PK_FIELD; cmd_val = pw_data; cmd_len = 6'd32; end
       default: begin
@@ -329,7 +374,7 @@ module rtlnet_h264_mb_cavlc #(
   assign rtake     = disp;
   assign blk_start = {disp && nsel, disp && !nsel};
   assign blk_ready = {cmd_ready && (st == C_BLK) && bsel, cmd_ready && (st == C_BLK) && !bsel};
-  assign last_disp = (next_item(r_item, cbpl_q, cbpc_q) == 5'd31);
+  assign last_disp = (next_item(r_item, cbpl4_q, cbpc_q, inter_q) == 5'd31);
 
   for (genvar gi = 0; gi < 2; gi++) begin : g_blk
     logic        b_busy;
@@ -373,6 +418,13 @@ module rtlnet_h264_mb_cavlc #(
       cbpc_q  <= '0;
       cbpl_q  <= 1'b0;
       cmode_q <= '0;
+      pslice_q <= 1'b0;
+      inter_q <= 1'b0;
+      pcm_q   <= 1'b0;
+      cbpl4_q <= '0;
+      mvdx_q  <= '0;
+      mvdy_q  <= '0;
+      run_q   <= '0;
       rs      <= '0;
       ri      <= '0;
       rd_v_q  <= 1'b0;
@@ -413,9 +465,9 @@ module rtlnet_h264_mb_cavlc #(
       // Reader.
       case (rst)
         R_IDLE: begin
-          if (start && !pcm) begin
+          if (start && !pcm && !skip && !(inter && (cbp_luma4 == 4'd0) && (cbp_chroma == 2'd0))) begin
             cbase_q <= cbase;
-            rs      <= 5'd0;
+            rs      <= inter ? next_item(5'd0, cbp_luma4, cbp_chroma, 1'b1) : 5'd0;
             ri      <= 3'd0;
             rvalid  <= 1'b0;
             rst     <= R_ISSUE;
@@ -433,10 +485,10 @@ module rtlnet_h264_mb_cavlc #(
         R_HOLD: begin
           if (rtake) begin
             rvalid <= 1'b0;
-            if (next_item(rs, cbpl_q, cbpc_q) == 5'd31) begin
+            if (next_item(rs, cbpl4_q, cbpc_q, inter_q) == 5'd31) begin
               rst <= R_IDLE;
             end else begin
-              rs  <= next_item(rs, cbpl_q, cbpc_q);
+              rs  <= next_item(rs, cbpl4_q, cbpc_q, inter_q);
               ri  <= 3'd0;
               rst <= R_ISSUE;
             end
@@ -444,6 +496,8 @@ module rtlnet_h264_mb_cavlc #(
         end
         default: rst <= R_IDLE;
       endcase
+
+      if (slice_start) run_q <= '0;
 
       // Coder.
       if (blk_done[0]) act[0] <= 1'b0;
@@ -459,6 +513,12 @@ module rtlnet_h264_mb_cavlc #(
             cbpc_q  <= cbp_chroma;
             cbpl_q  <= cbp_luma;
             cmode_q <= chroma_mode;
+            pslice_q <= p_slice;
+            inter_q <= inter;
+            pcm_q   <= pcm;
+            cbpl4_q <= inter ? cbp_luma4 : {4{cbp_luma}};
+            mvdx_q  <= mvd_x;
+            mvdy_q  <= mvd_y;
             cbase_q <= cbase;
             // An I_PCM macroblock counts as 16 coefficients in every block for the neighbours (clause 9.2.1).
             for (int i = 0; i < 16; i++) lc[i] <= pcm ? 5'd16 : 5'd0;
@@ -468,9 +528,27 @@ module rtlnet_h264_mb_cavlc #(
             act      <= '0;
             all_disp <= 1'b0;
             pw_n     <= '0;
-            st       <= pcm ? C_P0 : C_H0;
+            if (skip) begin
+              // P_Skip: nothing is written; it joins the run and all its total_coeff are 0.
+              for (int i = 0; i < 16; i++) lc[i] <= 5'd0;
+              for (int i = 0; i < 8; i++)  cc[i] <= 5'd0;
+              run_q <= run_q + 16'd1;
+              st    <= C_FIN;
+            end else if (p_slice) begin
+              st <= C_SR;
+            end else begin
+              st <= pcm ? C_P0 : C_H0;
+            end
           end
         end
+        C_SR: if (cmd_ready) begin
+          run_q <= '0;
+          st    <= pcm_q ? C_P0 : (inter_q ? C_I0 : C_H0);
+        end
+        C_I0: if (cmd_ready) st <= C_I1;
+        C_I1: if (cmd_ready) st <= C_I2;
+        C_I2: if (cmd_ready) st <= C_I3;
+        C_I3: if (cmd_ready) st <= (cbp_q != 6'd0) ? C_H2 : C_FIN;
         C_H0: if (cmd_ready) st <= C_H1;
         C_H1: if (cmd_ready) st <= C_H2;
         C_H2: if (cmd_ready) st <= C_BLK;

@@ -21,12 +21,18 @@
 //   * Decision: total(m) = SAD(m) + cost(m) over the legal modes, ties go to the first of the order DC, V, H, Plane.
 //     Luma cost DC 0, V 16, H 16, Plane 32; chroma cost DC 0, H 16, V 16, Plane 32. dec_luma_mode / dec_chroma_mode
 //     carry the spec mode numbers (DC when nothing else is legal).
+//   * Inter candidate (phase 2c-1): with every query the caller offers q_ref, the four reference samples of the same segment
+//     (the co-located macroblock of the reference picture, motion vector (0,0)); with q_acc their SAD against q_src is added
+//     to sad_iy (luma) or sad_ic (Cb and Cr together), cleared with nb_load. The inter candidate takes no part in the intra
+//     decision; the caller compares sad_iy + sad_ic plus its rate term with dec_cost_y + dec_cost_c, the total (SAD plus
+//     mode cost) of the chosen intra modes, valid with dec_done.
 //   * Plane prediction: Clip1((a + b*(x-C) + c*(y-C) + 16) >> 5) with C 7 (luma) or 3 (chroma), evaluated as
 //     (k0 + c*y + b*x) >> 5 with k0 = a + 16 - C*(b + c). H and V sums use the above-left sample at the end of the sum.
 //   * A new nb_load, or a query before prep_done, is not allowed.
 // Language: SystemVerilog-2012.
-// Revision: 11-09-2026
+// Revision: 11-10-2026
 //   * 11-09-2026: initial version.
+//   * 11-10-2026: phase 2c-1: inter SAD accumulators (q_ref) and the total cost of the chosen intra modes.
 // Clocks: clk.
 // -----------------------------------------------------------------------------
 module rtlnet_h264_ipred (
@@ -54,6 +60,7 @@ module rtlnet_h264_ipred (
   input  logic [3:0]   q_y,
   input  logic [31:0]  q_src,
   input  logic         q_acc,
+  input  logic [31:0]  q_ref,
   output logic         p_valid,
   output logic [127:0] p_px,
 
@@ -63,7 +70,11 @@ module rtlnet_h264_ipred (
   output logic [1:0]   dec_luma_mode,
   output logic [1:0]   dec_chroma_mode,
   output logic [71:0]  sad_y,
-  output logic [71:0]  sad_c
+  output logic [71:0]  sad_c,
+  output logic [17:0]  sad_iy,
+  output logic [17:0]  sad_ic,
+  output logic [19:0]  dec_cost_y,
+  output logic [19:0]  dec_cost_c
 );
 
   // ---------------------------------------------------------------------------
@@ -330,7 +341,7 @@ module rtlnet_h264_ipred (
   logic [1:0]  q1_pl;
   logic signed [19:0] q1_t;
   logic signed [12:0] q1_b;
-  logic [31:0] q1_top, q1_src;
+  logic [31:0] q1_top, q1_src, q1_ref;
   logic [7:0]  q1_left, q1_dc;
 
   logic signed [12:0] sel_b, sel_c;
@@ -359,7 +370,7 @@ module rtlnet_h264_ipred (
   always_ff @(posedge clk) begin
     if (!resetn) begin
       q1_v <= 1'b0; q1_acc <= 1'b0; q1_pl <= '0; q1_t <= '0; q1_b <= '0;
-      q1_top <= '0; q1_src <= '0; q1_left <= '0; q1_dc <= '0;
+      q1_top <= '0; q1_src <= '0; q1_ref <= '0; q1_left <= '0; q1_dc <= '0;
     end else begin
       q1_v   <= q_valid;
       q1_acc <= q_acc;
@@ -368,6 +379,7 @@ module rtlnet_h264_ipred (
       q1_b   <= sel_b;
       q1_top <= t_seg;
       q1_src <= q_src;
+      q1_ref <= q_ref;
       q1_left <= l_byte;
       q1_dc  <= dc_byte;
     end
@@ -406,16 +418,17 @@ module rtlnet_h264_ipred (
 
   logic        q2_acc;
   logic        q2_luma;
-  logic [31:0] q2_src;
+  logic [31:0] q2_src, q2_ref;
   always_ff @(posedge clk) begin
     if (!resetn) begin
-      p_valid <= 1'b0; p_px <= '0; q2_acc <= 1'b0; q2_luma <= 1'b0; q2_src <= '0;
+      p_valid <= 1'b0; p_px <= '0; q2_acc <= 1'b0; q2_luma <= 1'b0; q2_src <= '0; q2_ref <= '0;
     end else begin
       p_valid <= q1_v;
       if (q1_v) p_px <= px_n;
       q2_acc  <= q1_v && q1_acc;
       q2_luma <= (q1_pl == 2'd0);
       q2_src  <= q1_src;
+      q2_ref  <= q1_ref;
     end
   end
 
@@ -425,6 +438,8 @@ module rtlnet_h264_ipred (
   logic        s3_v;
   logic        s3_luma;
   logic [10:0] s3_sad [4];
+  logic [10:0] s3_sad_i;
+  logic [17:0] acc_iy, acc_ic;
   logic [17:0] acc_y [4];
   logic [17:0] acc_c [4];
 
@@ -440,7 +455,7 @@ module rtlnet_h264_ipred (
 
   always_ff @(posedge clk) begin
     if (!resetn) begin
-      s3_v <= 1'b0; s3_luma <= 1'b0;
+      s3_v <= 1'b0; s3_luma <= 1'b0; s3_sad_i <= '0; acc_iy <= '0; acc_ic <= '0;
       for (int m = 0; m < 4; m++) begin
         s3_sad[m] <= '0; acc_y[m] <= '0; acc_c[m] <= '0;
       end
@@ -450,11 +465,15 @@ module rtlnet_h264_ipred (
       for (int m = 0; m < 4; m++) begin
         s3_sad[m] <= sad4(p_px[32*m +: 32], q2_src);
       end
+      s3_sad_i <= sad4(q2_ref, q2_src);
       if (nb_load) begin
+        acc_iy <= '0; acc_ic <= '0;
         for (int m = 0; m < 4; m++) begin
           acc_y[m] <= '0; acc_c[m] <= '0;
         end
       end else if (s3_v) begin
+        if (s3_luma) acc_iy <= acc_iy + 18'(s3_sad_i);
+        else         acc_ic <= acc_ic + 18'(s3_sad_i);
         for (int m = 0; m < 4; m++) begin
           if (s3_luma) begin
             if (leg_y[m]) acc_y[m] <= acc_y[m] + 18'(s3_sad[m]);
@@ -465,6 +484,9 @@ module rtlnet_h264_ipred (
       end
     end
   end
+
+  assign sad_iy = acc_iy;
+  assign sad_ic = acc_ic;
 
   always_comb begin
     for (int m = 0; m < 4; m++) begin
@@ -510,7 +532,7 @@ module rtlnet_h264_ipred (
 
   always_ff @(posedge clk) begin
     if (!resetn) begin
-      d_st <= 3'd0; dec_done <= 1'b0; dec_luma_mode <= 2'd2; dec_chroma_mode <= 2'd0;
+      d_st <= 3'd0; dec_done <= 1'b0; dec_luma_mode <= 2'd2; dec_chroma_mode <= 2'd0; dec_cost_y <= '0; dec_cost_c <= '0;
       for (int m = 0; m < 4; m++) begin
         tot_y[m] <= '0; tot_c[m] <= '0;
       end
@@ -542,8 +564,10 @@ module rtlnet_h264_ipred (
           d_st <= 3'd4;
         end
         default: begin
-          dec_done <= 1'b1;
-          d_st     <= 3'd0;
+          dec_done   <= 1'b1;
+          dec_cost_y <= tot_y[dec_luma_mode];
+          dec_cost_c <= tot_c[dec_chroma_mode];
+          d_st       <= 3'd0;
         end
       endcase
     end

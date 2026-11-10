@@ -431,6 +431,93 @@ int rtlnet_h264_enc_configure(uintptr_t base, const rtlnet_h264_enc_cfg_t *cfg)
 }
 
 /*
+ * rtlnet_h264_enc_next_frame_num -- see the header
+ * Returns: (prev + 1) mod 2^log2_max_frame_num, or 0 for a log2_max_frame_num outside 4..16.
+ */
+uint32_t rtlnet_h264_enc_next_frame_num(uint32_t prev_frame_num, uint32_t log2_max_frame_num)
+{
+    if ((log2_max_frame_num < RTLNET_H264_LOG2_FN_MIN) || (log2_max_frame_num > RTLNET_H264_LOG2_FN_MAX)) {
+        return 0u;
+    }
+    return (prev_frame_num + 1u) & ((1u << log2_max_frame_num) - 1u);
+}
+
+/*
+ * rtlnet_h264_enc_set_reference -- see the header
+ * Returns: 0, or -1 for a misaligned base (nothing written).
+ */
+int rtlnet_h264_enc_set_reference(uintptr_t base, uint32_t ref_y_base, uint32_t ref_u_base)
+{
+    if (((ref_y_base % RTLNET_H264_REC_LUMA_TILE_BYTES) != 0u) || ((ref_u_base % RTLNET_H264_REC_CHROMA_TILE_BYTES) != 0u)) {
+        return -1;
+    }
+    rtlnet_reg_write32(base, RTLNET_H264_REG_REFY_BASE, ref_y_base);
+    rtlnet_reg_write32(base, RTLNET_H264_REG_REFU_BASE, ref_u_base);
+    return 0;
+}
+
+/*
+ * rtlnet_h264_enc_buffers_init -- see the header
+ * Returns: 0, or -1 for a NULL pointer or a misaligned base.
+ */
+int rtlnet_h264_enc_buffers_init(rtlnet_h264_enc_buffers_t *b, uint32_t y0, uint32_t u0, uint32_t y1, uint32_t u1)
+{
+    if (b == NULL) {
+        return -1;
+    }
+    if (((y0 % RTLNET_H264_REC_LUMA_TILE_BYTES) != 0u) || ((y1 % RTLNET_H264_REC_LUMA_TILE_BYTES) != 0u) ||
+        ((u0 % RTLNET_H264_REC_CHROMA_TILE_BYTES) != 0u) || ((u1 % RTLNET_H264_REC_CHROMA_TILE_BYTES) != 0u)) {
+        return -1;
+    }
+    b->y_base[0] = y0;
+    b->y_base[1] = y1;
+    b->u_base[0] = u0;
+    b->u_base[1] = u1;
+    b->cur       = 0u;
+    b->has_ref   = 0u;
+    return 0;
+}
+
+/*
+ * rtlnet_h264_enc_buffers_begin -- see the header
+ * Steps:
+ *   1. Reject a NULL argument, an unknown type, or a P picture with no reference yet.
+ *   2. Write RY_BASE and RU_BASE of the current buffer.
+ *   3. For a P picture write REF_Y_BASE and REF_U_BASE of the other buffer.
+ * Returns: 0 or -1 (nothing written on -1).
+ */
+int rtlnet_h264_enc_buffers_begin(uintptr_t base, const rtlnet_h264_enc_buffers_t *b, uint32_t pic_type)
+{
+    uint32_t other;
+
+    if ((b == NULL) || (b->cur > 1u) || ((pic_type != RTLNET_H264_PIC_IDR) && (pic_type != RTLNET_H264_PIC_P))) {
+        return -1;
+    }
+    if ((pic_type == RTLNET_H264_PIC_P) && (b->has_ref == 0u)) {
+        return -1;
+    }
+    other = 1u - b->cur;
+    rtlnet_reg_write32(base, RTLNET_H264_REG_RY_BASE, b->y_base[b->cur]);
+    rtlnet_reg_write32(base, RTLNET_H264_REG_RU_BASE, b->u_base[b->cur]);
+    if (pic_type == RTLNET_H264_PIC_P) {
+        rtlnet_reg_write32(base, RTLNET_H264_REG_REFY_BASE, b->y_base[other]);
+        rtlnet_reg_write32(base, RTLNET_H264_REG_REFU_BASE, b->u_base[other]);
+    }
+    return 0;
+}
+
+/*
+ * rtlnet_h264_enc_buffers_end -- see the header
+ */
+void rtlnet_h264_enc_buffers_end(rtlnet_h264_enc_buffers_t *b)
+{
+    if (b != NULL) {
+        b->cur     = 1u - (b->cur & 1u);
+        b->has_ref = 1u;
+    }
+}
+
+/*
  * rtlnet_h264_enc_ring_reset -- see the header
  * Returns: nothing.
  */
@@ -456,9 +543,51 @@ int rtlnet_h264_enc_start_picture(uintptr_t base, uint32_t frame_num, uint32_t i
     if ((rtlnet_reg_read32(base, RTLNET_H264_REG_STATUS) & RTLNET_H264_STATUS_BUSY) != 0u) {
         return -1;
     }
-    cfg = rtlnet_reg_read32(base, RTLNET_H264_REG_PIC_CFG) & ~RTLNET_H264_PIC_CFG_IDR;
+    cfg = rtlnet_reg_read32(base, RTLNET_H264_REG_PIC_CFG) & ~(RTLNET_H264_PIC_CFG_IDR | RTLNET_H264_PIC_CFG_P);
     if (idr != 0) {
         cfg |= RTLNET_H264_PIC_CFG_IDR;
+    }
+    rtlnet_reg_write32(base, RTLNET_H264_REG_PIC_CFG, cfg);
+    rtlnet_reg_write32(base, RTLNET_H264_REG_FRAME_NUM, frame_num);
+    rtlnet_reg_write32(base, RTLNET_H264_REG_IDR_PIC_ID, idr_pic_id);
+    rtlnet_reg_write32(base, RTLNET_H264_REG_STATUS, RTLNET_H264_STATUS_DONE);
+    rtlnet_reg_write32(base, RTLNET_H264_REG_CTRL,
+                       (rtlnet_reg_read32(base, RTLNET_H264_REG_CTRL) & RTLNET_H264_CTRL_IRQ_EN) |
+                       RTLNET_H264_CTRL_START);
+    return 0;
+}
+
+/*
+ * rtlnet_h264_enc_start_picture_ex -- see the header
+ * Steps:
+ *   1. Reject an unknown type, a P frame_num beyond log2_max_frame_num bits, or BUSY.
+ *   2. Write PIC_CFG (the IDR or the P flag, log2_max_frame_num kept), frame_num and idr_pic_id (IDR only).
+ *   3. Clear DONE and write CTRL.START.
+ * Returns: 0 or -1.
+ */
+int rtlnet_h264_enc_start_picture_ex(uintptr_t base, uint32_t frame_num, uint32_t idr_pic_id, uint32_t pic_type)
+{
+    uint32_t cfg;
+    uint32_t log2fn;
+
+    if ((pic_type != RTLNET_H264_PIC_IDR) && (pic_type != RTLNET_H264_PIC_P)) {
+        return -1;
+    }
+    if ((rtlnet_reg_read32(base, RTLNET_H264_REG_STATUS) & RTLNET_H264_STATUS_BUSY) != 0u) {
+        return -1;
+    }
+    cfg    = rtlnet_reg_read32(base, RTLNET_H264_REG_PIC_CFG) & ~(RTLNET_H264_PIC_CFG_IDR | RTLNET_H264_PIC_CFG_P);
+    log2fn = (cfg >> RTLNET_H264_PIC_CFG_LOG2FN_SHIFT) & RTLNET_H264_PIC_CFG_LOG2FN_MASK;
+    if ((pic_type == RTLNET_H264_PIC_P) && ((log2fn < RTLNET_H264_LOG2_FN_MIN) || (log2fn > RTLNET_H264_LOG2_FN_MAX) ||
+                                           (frame_num >= (1u << log2fn)))) {
+        return -1;
+    }
+    if (pic_type == RTLNET_H264_PIC_IDR) {
+        cfg |= RTLNET_H264_PIC_CFG_IDR;
+        frame_num = 0u;
+    } else {
+        cfg |= RTLNET_H264_PIC_CFG_P;
+        idr_pic_id = 0u;
     }
     rtlnet_reg_write32(base, RTLNET_H264_REG_PIC_CFG, cfg);
     rtlnet_reg_write32(base, RTLNET_H264_REG_FRAME_NUM, frame_num);

@@ -5,11 +5,14 @@
 //   slice out of the compressed ring, advances the read pointers), and writes the Annex B stream and the
 //   rebuilt planes for the decoder harness (scripts in this directory).
 // Overview:
-//   * Configuration by defines: TB_MBW, TB_MBH (picture size in macroblocks), TB_SLICES, TB_PICS (1 or 2),
+//   * Configuration by defines: TB_MBW, TB_MBH (picture size in macroblocks), TB_SLICES, TB_PICS (pictures per run),
 //     TB_QP, TB_RING_KB (compressed ring size), TB_CONSUMER_DELAY (clocks between firmware polls),
 //     TB_LAT (memory read latency), TB_GAP (percent of clocks without ready/valid on the memory port),
 //     TB_MEM_LOG2 (memory model size in 16-byte words, power of two).
-//   * Plusargs: +IN0=<hex file> picture 0 input, +IN1=<hex file> picture 1 input (optional), +OUT=<path prefix>
+//   * Plusargs: +INPFX=<path prefix>: the input of picture n is the hex file <prefix><n>.hex, loaded into the one input buffer
+//     just before the picture starts; +GOP=<string of I and P, one letter per picture> (default all I): an I picture is an IDR
+//     picture (frame_num 0, idr_pic_id counting the IDR pictures), a P picture is a non-IDR picture with frame_num counting the
+//     pictures since the last IDR modulo 16, coded against the previous picture's rebuilt picture; +OUT=<path prefix>
 //     for <prefix>_stream.hex, <prefix>_rec<n>.hex and <prefix>_info.txt, +INJECT flips one bit of one residual
 //     (coefficient or sample) byte inside the first slice, after the rebuilt picture is written (the harness negative
 //     control: every decoder must then differ from the rebuilt picture or report an error), +INJECT_FAILURE forces a
@@ -17,10 +20,13 @@
 //   * TB_PCM (define, 1; the MB_MODE note): the bench writes MB_MODE (register 0x03C, bit 0 = 1) before the pictures, which selects the
 //     I_PCM macroblock mode (debug fallback). With TB_PCM undefined the register is not written (reset value 0 =
 //     intra 16x16 macroblocks, and an RTL without the register works too).
+//   * Two rebuilt buffers: picture n writes buffer n mod 2 (RY/RU base registers) and a P picture reads the other one as its
+//     reference (REF_Y_BASE / REF_U_BASE), so the previous picture's rebuilt tiles stay in the memory model; every picture's
+//     rebuilt planes are dumped after it is done.
 //   * Input memory format: packed YUYV 4:2:2, byte order Y0 U0 Y1 V0, line stride MBW * 32 bytes, as
 //     128-bit words, byte 0 in bits [7:0], one word per hex line ($readmemh).
-//   * Memory map built from the picture size (all 4 KiB aligned): input 0, input 1 (two-picture runs), the rebuilt
-//     picture as macroblock tiles (luma 256 B and chroma 128 B per macroblock, raster order), compressed ring, index ring
+//   * Memory map built from the picture size (all 4 KiB aligned): the input buffer, the two rebuilt pictures as macroblock tiles
+//     (luma 256 B and chroma 128 B per macroblock, raster order, luma and chroma tile areas of each), compressed ring, index ring
 //     (64 records of 128 bytes). The input lines are padded to a multiple of 128 bytes (the strip burst size): the
 //     generator's dense hex file is spread to that stride after loading. The rebuilt planes are de-tiled when they are
 //     dumped (dense planes: Y stride MBW * 16, Cb and Cr stride ceil16(MBW * 8)), so the decoder harness compares them
@@ -31,11 +37,14 @@
 //   * Checks: register reads, no error flag, per-slice index entries and the picture entry, NAL framing and the
 //     slice header's first_mb_in_slice against an independent computation, read-pointer protocol, the AXI protocol
 //     checks of the memory model, and the RTL assertions.
+//   * TB_DEBUG_MB (define): prints one DBGMB line per macroblock of engine 0 (mode, skip, coded block pattern, size estimate), for
+//     the investigation of the mode decision; it reads internal signals of the engine and is off by default.
 //   * Race-free: every bench output changes at the falling clock edge and every input is sampled there.
 // Language: SystemVerilog-2012 (simulation only; Verilator 5 --timing and Active-HDL).
 // Revision: 11-10-2026
 //   * 11-09-2026: initial version.
 //   * 11-10-2026: tiled rebuilt picture, 128-byte index records, padded input stride, burst monitor.
+//   * 11-10-2026: phase 2c-1: GOPs of I and P pictures, two rebuilt buffers, one input buffer reloaded per picture.
 // Clocks: enc_clk 150 MHz, s_axi_aclk 100 MHz.
 // -----------------------------------------------------------------------------
 `timescale 1ns / 1ps
@@ -97,7 +106,7 @@ module tb_rtlnet_h264_top;
                           R_STATUS = 12'h010, R_ERR_CODE = 12'h014, R_MB_W = 12'h020, R_MB_H = 12'h024,
                           R_SLICES = 12'h028, R_QP = 12'h02C, R_FRAME_NUM = 12'h030, R_IDR_PIC_ID = 12'h034,
                           R_PIC_CFG = 12'h038, R_MB_MODE = 12'h03C, R_IN_BASE = 12'h040, R_IN_STRIDE = 12'h044, R_RY_BASE = 12'h048,
-                          R_RU_BASE = 12'h050,
+                          R_RU_BASE = 12'h050, R_REFY_BASE = 12'h054, R_REFU_BASE = 12'h058,
                           R_RING_BASE = 12'h060, R_RING_SIZE = 12'h064, R_RING_WPTR = 12'h068,
                           R_RING_RPTR = 12'h06C, R_RING_FILL = 12'h070, R_IDX_BASE = 12'h078,
                           R_IDX_ENTRIES = 12'h07C, R_IDX_WPTR = 12'h080, R_IDX_RPTR = 12'h084,
@@ -266,7 +275,7 @@ module tb_rtlnet_h264_top;
   endfunction
 
   int unsigned IN_STRIDE, IN_SIZE, RY_STRIDE, RY_SIZE, RC_STRIDE, RC_SIZE;
-  int unsigned IN0_BASE, IN1_BASE, RY_BASE, RU_BASE, RING_BASE, RING_SIZE, IDX_BASE, MEM_END;
+  int unsigned IN0_BASE, RYA_BASE, RUA_BASE, RYB_BASE, RUB_BASE, RING_BASE, RING_SIZE, IDX_BASE, MEM_END;
   int unsigned IN_DENSE;
 
   task automatic build_map();
@@ -278,10 +287,11 @@ module tb_rtlnet_h264_top;
     RC_STRIDE = ((MBW * 8) + 15) & ~15;
     RC_SIZE   = RC_STRIDE * MBH * 8;
     IN0_BASE  = 0;
-    IN1_BASE  = align4k(IN0_BASE + IN_SIZE);
-    RY_BASE   = (PICS > 1) ? align4k(IN1_BASE + IN_SIZE) : IN1_BASE;
-    RU_BASE   = align4k(RY_BASE + MBW * MBH * 256);
-    RING_BASE = align4k(RU_BASE + MBW * MBH * 128);
+    RYA_BASE  = align4k(IN0_BASE + IN_SIZE);
+    RUA_BASE  = align4k(RYA_BASE + MBW * MBH * 256);
+    RYB_BASE  = align4k(RUA_BASE + MBW * MBH * 128);
+    RUB_BASE  = align4k(RYB_BASE + MBW * MBH * 256);
+    RING_BASE = align4k(RUB_BASE + MBW * MBH * 128);
     RING_SIZE = RING_KB * 1024;
     IDX_BASE  = align4k(RING_BASE + RING_SIZE);
     MEM_END   = IDX_BASE + IDX_ENTRIES * IDX_REC;
@@ -344,6 +354,11 @@ module tb_rtlnet_h264_top;
   int    pic_stream_start;
   int    clocks;
   int    cur_pic;
+  bit    pic_is_p;
+  string gop;
+  string inpfx;
+  int    idr_count;
+  int    since_idr;
   int    eng_pic_bytes [4];
 
   function automatic logic [127:0] mem_word(input int unsigned byte_addr);
@@ -388,6 +403,9 @@ module tb_rtlnet_h264_top;
     integer f;
     string  name;
     logic [127:0] w;
+    int unsigned RY_BASE, RU_BASE;
+    RY_BASE = (p % 2 == 0) ? RYA_BASE : RYB_BASE;
+    RU_BASE = (p % 2 == 0) ? RUA_BASE : RUB_BASE;
     plane_y = new[RY_SIZE];
     plane_u = new[RC_SIZE];
     plane_v = new[RC_SIZE];
@@ -483,7 +501,8 @@ module tb_rtlnet_h264_top;
         tb_check(en[95:80] == 16'(e * SE + slices_done[e]),
                  $sformatf("engine %0d slice entry number %0d, expected %0d", e, en[95:80], e * SE + slices_done[e]));
         tb_check(en[79:64] == 16'(cur_pic), $sformatf("slice entry picture number %0d", en[79:64]));
-        tb_check(en[103:96] == 8'd7, $sformatf("slice entry type %0d", en[103:96]));
+        tb_check(en[103:96] == (pic_is_p ? 8'd5 : 8'd7), $sformatf("slice entry type %0d", en[103:96]));
+        tb_check(en[113] == !pic_is_p, "slice entry IDR flag");
         tb_check(en[111:104] == 8'(QP), $sformatf("slice entry QP %0d", en[111:104]));
         tb_check(en[112] == (slices_done[e] == SE - 1), "slice entry last flag");
         tb_check(int'(len) < int'(rsz), "slice length below the ring size");
@@ -523,13 +542,13 @@ module tb_rtlnet_h264_top;
                $sformatf("slice %0d start code", sl));
       b0 = stream[pos+4];
       tb_check(b0[7] == 1'b0 && b0[6:5] == 2'b11, "NAL header nal_ref_idc");
-      tb_check(b0[4:0] == 5'd5 || b0[4:0] == 5'd1, "NAL unit type");
+      tb_check(b0[4:0] == (pic_is_p ? 5'd1 : 5'd5), $sformatf("NAL unit type %0d, expected %0d", b0[4:0], pic_is_p ? 1 : 5));
       bitpos = 0;
       first_mb = read_ue(stream, pos + 5, bitpos);
       stype = read_ue(stream, pos + 5, bitpos);
       tb_check(first_mb == slice_first_mb(sl), $sformatf("slice %0d first_mb_in_slice %0d, expected %0d", sl, first_mb,
                                                        slice_first_mb(sl)));
-      tb_check(stype == 7, $sformatf("slice %0d slice_type %0d", sl, stype));
+      tb_check(stype == (pic_is_p ? 5 : 7), $sformatf("slice %0d slice_type %0d", sl, stype));
       pos += 4;
       while ((pos + 3) < stream.size() && !((stream[pos] == 0) && (stream[pos+1] == 0) && (stream[pos+2] == 1))) pos++;
       if ((pos + 3) < stream.size()) pos -= 1;
@@ -542,6 +561,7 @@ module tb_rtlnet_h264_top;
     int total_entries [4];
     bit all_entries;
     cur_pic = p;
+    pic_is_p = (gop.len() > p) && (gop.getc(p) == "P");
     pic_stream_start = stream.size();
     for (int e = 0; e < NE; e++) begin
       slices_done[e] = 0;
@@ -549,10 +569,29 @@ module tb_rtlnet_h264_top;
       total_entries[e] = 0;
       estream[e].delete();
     end
-    reg_write(R_FRAME_NUM, 32'd0);
-    reg_write(R_IDR_PIC_ID, 32'(p));
-    reg_write(R_PIC_CFG, {19'd0, 5'd4, 7'd0, 1'b1});
-    reg_write(R_IN_BASE, (p == 0) ? IN0_BASE : IN1_BASE);
+    // Input: the picture's hex file into the one input buffer.
+    begin
+      string fname;
+      fname = $sformatf("%s%0d.hex", inpfx, p);
+      $readmemh(fname, u_mem.mem, IN0_BASE >> 4);
+      spread_lines(IN0_BASE);
+    end
+    if (!pic_is_p) begin
+      reg_write(R_FRAME_NUM, 32'd0);
+      reg_write(R_IDR_PIC_ID, 32'(idr_count));
+      idr_count++;
+      since_idr = 0;
+    end else begin
+      since_idr++;
+      reg_write(R_FRAME_NUM, 32'(since_idr % 16));
+    end
+    // Rebuilt picture of buffer p mod 2; a P picture reads the other buffer (the previous picture).
+    reg_write(R_RY_BASE, (p % 2 == 0) ? RYA_BASE : RYB_BASE);
+    reg_write(R_RU_BASE, (p % 2 == 0) ? RUA_BASE : RUB_BASE);
+    reg_write(R_REFY_BASE, (p % 2 == 0) ? RYB_BASE : RYA_BASE);
+    reg_write(R_REFU_BASE, (p % 2 == 0) ? RUB_BASE : RUA_BASE);
+    reg_write(R_PIC_CFG, {19'd0, 5'd4, 6'd0, pic_is_p, !pic_is_p});
+    reg_write(R_IN_BASE, IN0_BASE);
     reg_write(R_CTRL, 32'h1);
     got_done = 0;
     all_entries = 0;
@@ -579,7 +618,7 @@ module tb_rtlnet_h264_top;
     reg_read(R_PIC_COUNT, c);
     tb_check(int'(c) == (p + 1), $sformatf("PIC_COUNT %0d", c));
     for (int e = 0; e < NE; e++) begin
-      reg_read(ereg(e, R_PIC_CYC), c);  $display("STAT pic%0d eng%0d PIC_CYC=%0d", p, e, c);
+      reg_read(ereg(e, R_PIC_CYC), c);  $display("STAT pic%0d eng%0d PIC_CYC=%0d type=%s", p, e, c, pic_is_p ? "P" : "I");
       reg_read(ereg(e, R_MB_COUNT), c); $display("STAT pic%0d eng%0d MB_COUNT=%0d", p, e, c);
       tb_check(int'(c) == MBW * band_rows_of(e), $sformatf("engine %0d MB_COUNT %0d", e, c));
       reg_read(ereg(e, R_CYC_LAST), c); $display("STAT pic%0d eng%0d CYC_LAST=%0d", p, e, c);
@@ -593,24 +632,17 @@ module tb_rtlnet_h264_top;
   endtask
 
   initial begin
-    have_in0 = $value$plusargs("IN0=%s", in0_file);
-    have_in1 = $value$plusargs("IN1=%s", in1_file);
+    have_in0 = $value$plusargs("INPFX=%s", inpfx);
+    have_in1 = 1'b0;
     have_out = $value$plusargs("OUT=%s", out_prefix);
+    if (!$value$plusargs("GOP=%s", gop)) gop = "";
+    idr_count = 0;
+    since_idr = 0;
     inject   = $test$plusargs("INJECT");
     build_map();
-    tb_check(have_in0 && have_out, "plusargs +IN0 and +OUT are required");
+    tb_check(have_in0 && have_out, "plusargs +INPFX and +OUT are required");
     tb_check(MEM_END <= (16 << `TB_MEM_LOG2), $sformatf("memory model too small: need %0d bytes", MEM_END));
     tb_check((SLICES % NE) == 0, "TB_SLICES must be a multiple of TB_ENGINES");
-    if (have_in0) $readmemh(in0_file, u_mem.mem, IN0_BASE >> 4);
-    if (have_in0) spread_lines(IN0_BASE);
-    if (PICS > 1) begin
-      if (have_in1) begin
-        $readmemh(in1_file, u_mem.mem, IN1_BASE >> 4);
-        spread_lines(IN1_BASE);
-      end else begin
-        for (int unsigned a = 0; a < IN_SIZE; a += 16) u_mem.mem[(IN1_BASE + a) >> 4] = u_mem.mem[(IN0_BASE + a) >> 4];
-      end
-    end
     for (int e = 0; e < 4; e++) begin
       idx_rd[e] = 0;
       ring_rd[e] = 0;
@@ -633,8 +665,6 @@ module tb_rtlnet_h264_top;
     reg_write(R_MB_MODE, 32'h1);
 `endif
     reg_write(R_IN_STRIDE, IN_STRIDE);
-    reg_write(R_RY_BASE, RY_BASE);
-    reg_write(R_RU_BASE, RU_BASE);
     reg_write(R_RING_BASE, RING_BASE);
     reg_write(R_RING_SIZE, RING_SIZE);
     reg_write(R_IDX_BASE, IDX_BASE);
@@ -671,15 +701,32 @@ module tb_rtlnet_h264_top;
   logic [NE-1:0] mon_awvalid, mon_awready;
   logic [NE*8-1:0] mon_awlen;
   logic [NE*4-1:0] mon_awid;
-  bit inj_burst;
+  logic [NE*4-1:0] mon_arid;
+  logic [NE*8-1:0] mon_arlen;
+  logic [NE-1:0]   mon_arvalid, mon_arready;
+  bit inj_burst, inj_burst_ref;
   int unsigned inj_cnt = 0;
-  initial inj_burst = $test$plusargs("INJECT_BURST");
+  initial begin
+    inj_burst     = $test$plusargs("INJECT_BURST");
+    inj_burst_ref = $test$plusargs("INJECT_BURST_REF");
+  end
   always @(posedge enc_clk) if (resetn) inj_cnt <= inj_cnt + 1;
   always_comb begin
     mon_awvalid = e_awvalid;
     mon_awready = e_awready;
     mon_awlen   = e_awlen;
     mon_awid    = e_awid;
+    mon_arid    = e_arid;
+    mon_arlen   = e_arlen;
+    mon_arvalid = e_arvalid;
+    mon_arready = e_arready;
+    // Negative control of the reference-read check: one 4-beat reference AR shown to the monitor.
+    if (inj_burst_ref && (inj_cnt == 30000)) begin
+      mon_arvalid[0]    = 1'b1;
+      mon_arready[0]    = 1'b1;
+      mon_arlen[7:0]    = 8'd3;
+      mon_arid[3:0]     = 4'd1;
+    end
     if (inj_burst && (inj_cnt == 20000)) begin
       mon_awvalid[0]     = 1'b1;
       mon_awready[0]     = 1'b1;
@@ -689,8 +736,16 @@ module tb_rtlnet_h264_top;
   end
   tb_h264_burst_mon #(.NE(NE), .ID_W(4)) u_bmon (
     .clk(enc_clk), .resetn(resetn), .awid(mon_awid), .awlen(mon_awlen), .awvalid(mon_awvalid), .awready(mon_awready),
-    .arlen(e_arlen), .arvalid(e_arvalid), .arready(e_arready)
+    .arid(mon_arid), .arlen(mon_arlen), .arvalid(mon_arvalid), .arready(mon_arready)
   );
+
+`ifdef TB_DEBUG_MB
+  always @(posedge enc_clk) if (resetn && dut.g_engine[0].u_engine.a_done)
+    $display("DBGMB pic%0d x%0d inter %0d skip %0d pcm %0d cbp4 %0d cbpc %0d est %0d nb %0d nbdc %0d mvd %0d,%0d", cur_pic,
+      dut.g_engine[0].u_engine.a_x, dut.g_engine[0].u_engine.a_inter, dut.g_engine[0].u_engine.a_skip, dut.g_engine[0].u_engine.a_pcm,
+      dut.g_engine[0].u_engine.a_cbp4, dut.g_engine[0].u_engine.a_cbpc, dut.g_engine[0].u_engine.u_mb_enc.est_tot,
+      dut.g_engine[0].u_engine.u_mb_enc.nb_q, dut.g_engine[0].u_engine.u_mb_enc.nb_dc, dut.g_engine[0].u_engine.a_mvdx, dut.g_engine[0].u_engine.a_mvdy);
+`endif
 
   // Ring-full stall observation (the full guard).
   int unsigned stall_cycles = 0;

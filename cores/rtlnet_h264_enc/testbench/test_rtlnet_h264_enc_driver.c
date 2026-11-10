@@ -8,6 +8,8 @@
  * RTLNET_HOST_TEST hooks of rtlnet_mmio.h, and checks the SPS and PPS bytes of rtlnet_h264_enc_write_sps_pps()
  * with an independent bit reader written here from ITU-T Rec. H.264 clauses 7.3.2.1.1, 7.3.2.2 and 7.4.1:
  * field values, emulation prevention, level selection and cropping for QCIF, 720p and 1080p (coded 1088).
+ * Phase 2c-1 adds the P picture fields: PIC_CFG bit 1 (start_picture_ex, the earlier start clears it), REF_Y_BASE / REF_U_BASE and
+ * their alignment, frame_num wrap, the two-buffer helper (alternation, reference choice, no P without a reference).
  * Prints one line "DRIVER TEST PASS: rtlnet_h264_enc checks=<n>" or "DRIVER TEST FAIL: ..." and returns 0 / 1.
  * The decoders (JM, OpenH264, FFmpeg) decode the same bytes in the harness.
  *
@@ -348,6 +350,71 @@ int main(void)
     g_reg[RTLNET_H264_REG_MB_COUNT / 4u] = 99u; g_reg[RTLNET_H264_REG_CYC_MAX / 4u] = 391u;
     rtlnet_h264_enc_read_stats(TEST_BASE, &stats);
     check((stats.mb_count == 99u) && (stats.cyc_max == 391u), "stats");
+
+    /* P pictures (phase 2c-1): PIC_CFG bit 1, the reference registers, frame_num, the two-buffer helper. */
+    {
+        rtlnet_h264_enc_buffers_t bufs;
+
+        check(RTLNET_H264_VERSION_VALUE == 0x11102C01u, "VERSION of phase 2c-1");
+        check((RTLNET_H264_REG_REFY_BASE == 0x054u) && (RTLNET_H264_REG_REFU_BASE == 0x058u), "reference register offsets");
+        g_reg[RTLNET_H264_REG_STATUS / 4u] = 0u;
+        g_reg[RTLNET_H264_REG_PIC_CFG / 4u] = (4u << RTLNET_H264_PIC_CFG_LOG2FN_SHIFT) | RTLNET_H264_PIC_CFG_IDR;
+        check(rtlnet_h264_enc_start_picture_ex(TEST_BASE, 5u, 9u, RTLNET_H264_PIC_P) == 0, "start P picture");
+        check((g_reg[RTLNET_H264_REG_PIC_CFG / 4u] & RTLNET_H264_PIC_CFG_P) != 0u, "P flag set");
+        check((g_reg[RTLNET_H264_REG_PIC_CFG / 4u] & RTLNET_H264_PIC_CFG_IDR) == 0u, "IDR flag cleared for a P picture");
+        check(((g_reg[RTLNET_H264_REG_PIC_CFG / 4u] >> RTLNET_H264_PIC_CFG_LOG2FN_SHIFT) & 0x1Fu) == 4u, "log2_max_frame_num kept by a P start");
+        check(g_reg[RTLNET_H264_REG_FRAME_NUM / 4u] == 5u, "P frame_num written");
+        check(g_reg[RTLNET_H264_REG_IDR_PIC_ID / 4u] == 0u, "idr_pic_id 0 for a P picture");
+        check((g_reg[0x0F0u / 4u] & RTLNET_H264_CTRL_START) != 0u, "START written for a P picture");
+        check(rtlnet_h264_enc_start_picture_ex(TEST_BASE, 16u, 0u, RTLNET_H264_PIC_P) != 0, "P frame_num beyond log2_max_frame_num rejected");
+        check(rtlnet_h264_enc_start_picture_ex(TEST_BASE, 1u, 0u, 7u) != 0, "unknown picture type rejected");
+        g_reg[RTLNET_H264_REG_STATUS / 4u] = RTLNET_H264_STATUS_BUSY;
+        check(rtlnet_h264_enc_start_picture_ex(TEST_BASE, 1u, 0u, RTLNET_H264_PIC_P) != 0, "P start while busy rejected");
+        g_reg[RTLNET_H264_REG_STATUS / 4u] = 0u;
+        check(rtlnet_h264_enc_start_picture_ex(TEST_BASE, 3u, 4u, RTLNET_H264_PIC_IDR) == 0, "start IDR picture with the extended start");
+        check(((g_reg[RTLNET_H264_REG_PIC_CFG / 4u] & RTLNET_H264_PIC_CFG_IDR) != 0u) &&
+              ((g_reg[RTLNET_H264_REG_PIC_CFG / 4u] & RTLNET_H264_PIC_CFG_P) == 0u), "IDR flag set, P flag cleared");
+        check((g_reg[RTLNET_H264_REG_FRAME_NUM / 4u] == 0u) && (g_reg[RTLNET_H264_REG_IDR_PIC_ID / 4u] == 4u), "IDR: frame_num 0, idr_pic_id written");
+        g_reg[RTLNET_H264_REG_PIC_CFG / 4u] |= RTLNET_H264_PIC_CFG_P;
+        check(rtlnet_h264_enc_start_picture(TEST_BASE, 0u, 1u, 1) == 0, "the earlier start still works");
+        check((g_reg[RTLNET_H264_REG_PIC_CFG / 4u] & RTLNET_H264_PIC_CFG_P) == 0u, "the earlier start clears the P flag");
+
+        check(rtlnet_h264_enc_next_frame_num(0u, 4u) == 1u, "next frame_num after the IDR picture");
+        check(rtlnet_h264_enc_next_frame_num(14u, 4u) == 15u, "next frame_num below the wrap");
+        check(rtlnet_h264_enc_next_frame_num(15u, 4u) == 0u, "frame_num wraps at 2^log2_max_frame_num (16)");
+        check(rtlnet_h264_enc_next_frame_num(0xFFFFu, 16u) == 0u, "frame_num wraps at 65536");
+        check(rtlnet_h264_enc_next_frame_num(3u, 3u) == 0u, "log2_max_frame_num 3 rejected (0)");
+        check(rtlnet_h264_enc_next_frame_num(3u, 17u) == 0u, "log2_max_frame_num 17 rejected (0)");
+
+        g_reg[RTLNET_H264_REG_REFY_BASE / 4u] = 0xAAAAu;
+        check(rtlnet_h264_enc_set_reference(TEST_BASE, 0x30080u, 0x40000u) != 0, "luma reference base not a multiple of 256 rejected");
+        check(rtlnet_h264_enc_set_reference(TEST_BASE, 0x30000u, 0x40040u) != 0, "chroma reference base not a multiple of 128 rejected");
+        check(g_reg[RTLNET_H264_REG_REFY_BASE / 4u] == 0xAAAAu, "a rejected reference writes nothing");
+        check(rtlnet_h264_enc_set_reference(TEST_BASE, 0x30100u, 0x40080u) == 0, "set_reference");
+        check((g_reg[RTLNET_H264_REG_REFY_BASE / 4u] == 0x30100u) && (g_reg[RTLNET_H264_REG_REFU_BASE / 4u] == 0x40080u), "reference bases written");
+
+        check(rtlnet_h264_enc_buffers_init(&bufs, 0x10000u, 0x20000u, 0x10080u, 0x20000u) != 0, "buffer init rejects a misaligned luma base");
+        check(rtlnet_h264_enc_buffers_init(&bufs, 0x10000u, 0x20000u, 0x50000u, 0x60040u) != 0, "buffer init rejects a misaligned chroma base");
+        check(rtlnet_h264_enc_buffers_init(&bufs, 0x10000u, 0x20000u, 0x50000u, 0x60000u) == 0, "buffer init");
+        g_reg[RTLNET_H264_REG_RY_BASE / 4u] = 0x1111u; g_reg[RTLNET_H264_REG_REFY_BASE / 4u] = 0x2222u;
+        check(rtlnet_h264_enc_buffers_begin(TEST_BASE, &bufs, RTLNET_H264_PIC_P) != 0, "a P picture without a reference is rejected");
+        check((g_reg[RTLNET_H264_REG_RY_BASE / 4u] == 0x1111u) && (g_reg[RTLNET_H264_REG_REFY_BASE / 4u] == 0x2222u), "a rejected begin writes nothing");
+        check(rtlnet_h264_enc_buffers_begin(TEST_BASE, &bufs, RTLNET_H264_PIC_IDR) == 0, "begin the first (IDR) picture");
+        check((g_reg[RTLNET_H264_REG_RY_BASE / 4u] == 0x10000u) && (g_reg[RTLNET_H264_REG_RU_BASE / 4u] == 0x20000u), "picture 0 writes buffer 0");
+        check(g_reg[RTLNET_H264_REG_REFY_BASE / 4u] == 0x2222u, "an IDR picture leaves the reference registers alone");
+        rtlnet_h264_enc_buffers_end(&bufs);
+        check(rtlnet_h264_enc_buffers_begin(TEST_BASE, &bufs, RTLNET_H264_PIC_P) == 0, "begin the first P picture");
+        check((g_reg[RTLNET_H264_REG_RY_BASE / 4u] == 0x50000u) && (g_reg[RTLNET_H264_REG_RU_BASE / 4u] == 0x60000u), "picture 1 writes buffer 1");
+        check((g_reg[RTLNET_H264_REG_REFY_BASE / 4u] == 0x10000u) && (g_reg[RTLNET_H264_REG_REFU_BASE / 4u] == 0x20000u), "picture 1 reads buffer 0");
+        rtlnet_h264_enc_buffers_end(&bufs);
+        check(rtlnet_h264_enc_buffers_begin(TEST_BASE, &bufs, RTLNET_H264_PIC_P) == 0, "begin the second P picture");
+        check((g_reg[RTLNET_H264_REG_RY_BASE / 4u] == 0x10000u) && (g_reg[RTLNET_H264_REG_REFY_BASE / 4u] == 0x50000u) &&
+              (g_reg[RTLNET_H264_REG_REFU_BASE / 4u] == 0x60000u), "picture 2 writes buffer 0 and reads buffer 1");
+        check(rtlnet_h264_enc_buffers_begin(TEST_BASE, &bufs, 9u) != 0, "unknown type rejected by the buffer helper");
+        check(rtlnet_h264_enc_buffers_begin(TEST_BASE, NULL, RTLNET_H264_PIC_P) != 0, "NULL buffers rejected");
+        rtlnet_h264_enc_buffers_init(&bufs, 0x10000u, 0x20000u, 0x50000u, 0x60000u);
+        check((bufs.cur == 0u) && (bufs.has_ref == 0u), "a new IDR picture restarts the buffers");
+    }
 
     if (g_fails == 0) {
         printf("DRIVER TEST PASS: rtlnet_h264_enc checks=%d\n", g_checks);

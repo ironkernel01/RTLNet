@@ -34,10 +34,36 @@
 //   * I_PCM copy (pcm_mode, or the fallback after CHK): the source macroblock (24 words of 16 bytes) is copied into the rebuilt
 //     RAM and into the coefficient RAM (words 0..95, the same word index and the sample order of the stream, first sample in the
 //     top byte), 4 words per source word; the left column and bottom row are captured from the copy and the line RAM written.
-//   * Outputs for stage B with done: i16 prediction mode, chroma prediction mode, cbp_chroma (0..2), cbp_luma (0 or 1).
+//   * Outputs for stage B with done: i16 prediction mode, chroma prediction mode, cbp_chroma (0..2), cbp_luma (0 or 1); for a
+//     P macroblock also o_inter, o_skip, o_cbp4 (the luma 8x8 coded block pattern) and o_mvd_x / o_mvd_y.
+//   * P pictures (phase 2c-1, p_pic): the candidates are P_Skip, P_L0_16x16 at the motion vector (0, 0) (the co-located macroblock
+//     of the reference picture, read from the reference macroblock buffer through the ref_rd port), Intra16x16 and I_PCM.
+//       MD1/MD2 (3 clocks after the intra decision) compare the inter cost, SAD(source, reference) over luma and chroma (the
+//              accumulators of rtlnet_h264_ipred, filled in the SAD phase next to the intra candidates) plus lambda(QP) times
+//              the bits of mvd = mv - mvp, with the intra cost, the SAD plus mode cost of the best intra modes plus lambda times
+//              INTRA_BIAS_BITS; ties go to inter. The plug for stage 2c-2 is the trio inter_mv (the vector), inter_sad (SAD at
+//              that vector) and the mvd bits: the search result replaces inter_mv and inter_sad.
+//       PASS1  an inter macroblock subtracts the reference instead of the intra prediction; rtlnet_h264_fwdq runs with in_inter
+//              (rounding offset 1/6) and in_full for the 16 luma blocks (the DC position is quantized like the others; there is
+//              no luma DC transform, its result is ignored). The chroma blocks and their DC units are as for intra.
+//       PASS3  the rebuild adds the reference to the residual (rtlnet_h264_invq with in_full for luma).
+//       cbp    luma bit g (8x8 block g in raster order) is set when a quantized level of one of its four 4x4 blocks is non-zero;
+//              cbp_chroma as for intra. P_Skip is chosen when the inter candidate won, cbp is 0 and the skip motion vector
+//              (clause 8.4.1.1, rtlnet_h264_mvctx) is (0, 0): with the reference prediction at mv (0, 0) the rebuilt macroblock
+//              is the same macroblock. A skip motion vector other than (0, 0) forbids P_Skip in 2c-1 (the prediction would need
+//              that vector); stage 2c-2 lifts the restriction.
+//       Isolated coefficient elimination (inter macroblocks, an encoder choice): an inter macroblock whose residual consists of at
+//              most DROP_LEVELS non-zero levels, all of magnitude 1, is coded with no residual: its levels are dropped (cbp 0, the
+//              rebuild adds nothing to the prediction). Such levels are the requantization of the previous picture's quantization
+//              error; at low QP their dequantized size is below one sample (the inverse transform rounds it away) and they would
+//              repeat in every picture. A static scene codes as P_Skip with this rule, also in the first picture after an I picture.
+//       The estimate of the fallback (CHK) excludes the luma DC unit for an inter macroblock; a macroblock above the limit is
+//       coded as I_PCM like an intra one. rtlnet_h264_mvctx keeps the vectors of the neighbours (mvp for P_L0_16x16, the skip
+//       vector) and is updated at the end of every macroblock of a P picture (intra and I_PCM macroblocks count as intra).
 // Language: SystemVerilog-2012.
-// Revision: 11-09-2026
+// Revision: 11-10-2026
 //   * 11-09-2026: initial version; per-macroblock I_PCM fallback.
+//   * 11-10-2026: phase 2c-1: P pictures (inter candidate, skip, inter residual and rebuild, motion vector context).
 // Clocks: clk.
 // -----------------------------------------------------------------------------
 module rtlnet_h264_mb_enc #(
@@ -46,7 +72,9 @@ module rtlnet_h264_mb_enc #(
   parameter string RAM_STYLE  = "block",
   parameter int    SRC_AW     = 6,
   parameter int    REC_AW     = 8,
-  parameter int    CRAM_AW    = 8
+  parameter int    CRAM_AW    = 8,
+  parameter int    REF_AW     = 6,
+  parameter int    MV_LINE_KB = 1
 )(
   // Clock and synchronous active-low reset.
   input  logic                clk,
@@ -55,13 +83,16 @@ module rtlnet_h264_mb_enc #(
   // Macroblock command, clk domain: start pulses one clock when idle. The values are sampled with start.
   input  logic                start,
   input  logic                pcm_mode,
+  input  logic                p_pic,
   input  logic [7:0]          mb_x,
   input  logic                av_top,
   input  logic                av_left,
+  input  logic                av_tr,
   input  logic [5:0]          qp,
   input  logic [SRC_AW-1:0]   src_base,
   input  logic [REC_AW-1:0]   reb_base,
   input  logic [CRAM_AW-1:0]  coef_base,
+  input  logic [REF_AW-1:0]   ref_base,
   output logic                busy,
   output logic                done,
 
@@ -71,6 +102,16 @@ module rtlnet_h264_mb_enc #(
   output logic [1:0]          o_cbp_chroma,
   output logic                o_cbp_luma,
   output logic                o_pcm,
+  output logic                o_inter,
+  output logic                o_skip,
+  output logic [3:0]          o_cbp4,
+  output logic signed [15:0]  o_mvd_x,
+  output logic signed [15:0]  o_mvd_y,
+
+  // Reference macroblock buffer read port: ref_rd_data is valid the clock after ref_rd_en.
+  output logic                ref_rd_en,
+  output logic [REF_AW-1:0]   ref_rd_addr,
+  input  logic [127:0]        ref_rd_data,
 
   // Source macroblock buffer read port: src_rd_data is valid the clock after src_rd_en.
   output logic                src_rd_en,
@@ -103,6 +144,13 @@ module rtlnet_h264_mb_enc #(
   localparam int EST_BLK   = 16;
   localparam int EST_LIMIT = 3072;
 
+  // Inter decision: the intra candidate is charged INTRA_BIAS_BITS bits of rate (the larger mb_type and the intra mode fields of
+  // a P slice, and a bias towards the reference so that a static scene codes as skip).
+  localparam int INTRA_BIAS_BITS = 16;
+
+  // Isolated coefficient elimination: an inter macroblock with at most DROP_LEVELS non-zero levels, all +-1, is coded without residual.
+  localparam int DROP_LEVELS = 6;
+
   // Phase states.
   localparam logic [4:0] S_IDLE  = 5'd0;
   localparam logic [4:0] S_TOP   = 5'd1;
@@ -122,6 +170,8 @@ module rtlnet_h264_mb_enc #(
   localparam logic [4:0] S_CHK3  = 5'd15;
   localparam logic [4:0] S_CHK4  = 5'd16;
   localparam logic [4:0] S_CHK5  = 5'd17;
+  localparam logic [4:0] S_MD1   = 5'd18;
+  localparam logic [4:0] S_MD2   = 5'd19;
 
   generate
     if ((2 * MAX_MB_W) > (1 << LINE_AW)) begin : g_line_small
@@ -182,6 +232,34 @@ module rtlnet_h264_mb_enc #(
   /* verilator lint_on UNUSEDSIGNAL */
   logic [1:0]         lm_q;
   logic [1:0]         cm_q;
+  logic [17:0]        ip_sad_iy;
+  logic [17:0]        ip_sad_ic;
+  logic [19:0]        ip_cost_y;
+  logic [19:0]        ip_cost_c;
+
+  // Inter decision (P pictures).
+  logic               inter_q;
+  logic [19:0]        cost_in;
+  logic [19:0]        cost_ia;
+  logic [3:0]         nz8;
+  logic               drop_q;
+  logic               big_q;
+  logic [15:0]        lv_sum;
+  logic [3:0]         nz8_e;
+  logic               mv_ready;
+  logic               mv_ready_seen;
+  logic signed [13:0] mvp_x, mvp_y, skip_x, skip_y;
+  logic               skip_zero;
+  logic signed [13:0] inter_mv_x, inter_mv_y;
+  logic [17:0]        inter_sad;
+  logic signed [15:0] mvd_x_w, mvd_y_w;
+  logic [7:0]         lam;
+  logic [31:0]        ref_s1;
+  logic [31:0]        d1_ref, d2_ref, e2_ref;
+  logic               fq_in_inter, fq_in_full;
+  logic               iq_in_full;
+  logic               mv_upd;
+  logic signed [13:0] mv_upd_x, mv_upd_y;
 
   // Issue pipeline (source read, stage 1, two delay stages).
   logic               s1_v;
@@ -307,6 +385,28 @@ module rtlnet_h264_mb_enc #(
   assign it_y     = blk_y(it_b, it_r);
   assign it_addr  = sbase_q + ((it_plane == 2'd0) ? SRC_AW'(it_y) : (SRC_AW'(16) + SRC_AW'(it_y[2:0])));
 
+  // Reference macroblock buffer (the co-located rebuilt tiles, documentation section 7): luma row y at word y, the Cb tile at words
+  // 16..19 (word 16 + k holds rows 2k and 2k + 1, the even row in the low 8 bytes), the Cr tile at words 20..23.
+  function automatic logic [REF_AW-1:0] ref_word(input logic [1:0] pl, input logic [3:0] y);
+    case (pl)
+      2'd0:    return REF_AW'(y);
+      2'd1:    return REF_AW'(5'd16) + REF_AW'(y[2:1]);
+      default: return REF_AW'(5'd20) + REF_AW'(y[2:1]);
+    endcase
+  endfunction
+
+  // The four reference samples of an item (plane, 4-sample segment, row) from the 128-bit buffer word.
+  function automatic logic [31:0] ref_seg(input logic [127:0] w, input logic [1:0] pl, input logic [1:0] sg, input logic y0);
+    if (pl == 2'd0) return w[32*sg +: 32];
+    else            return w[64*y0 + 32*sg[0] +: 32];
+  endfunction
+
+  // Reference read: the item of the issue phases (SAD, PASS1) at the same time as the source read, or the item leaving the
+  // inverse transform (PASS3) of an inter macroblock.
+  assign ref_rd_en   = (iss_run && p_pic) || (sel_p3 && iq_out_v && inter_q);
+  assign ref_rd_addr = ref_base + (iss_run ? ref_word(it_plane, it_y) : ref_word(iq_out_pl, iq_out_yy));
+  assign ref_s1      = ref_seg(ref_rd_data, s1_pl, s1_sg, s1_yy[0]);
+
   // Level cost estimate in bits: 0 for a zero level, else a table by the bit length of |level| (1 .. 12).
   function automatic logic [6:0] lcost(input logic signed [11:0] l);
     logic [11:0] m;
@@ -391,7 +491,7 @@ module rtlnet_h264_mb_enc #(
   // Residual of the delayed item (PASS1): 4 x signed 9 bit.
   logic [35:0] res_d2;
   logic [31:0] p_d2_sel;
-  assign p_d2_sel = (blk_plane(d2_b) == 2'd0) ? p_luma_sel : p_chroma_sel;
+  assign p_d2_sel = inter_q ? d2_ref : ((blk_plane(d2_b) == 2'd0) ? p_luma_sel : p_chroma_sel);
   always_comb begin
     for (int i = 0; i < 4; i++) begin
       res_d2[9*i +: 9] = 9'(signed'({1'b0, d2_src[8*i +: 8]}) - signed'({1'b0, p_d2_sel[8*i +: 8]}));
@@ -401,7 +501,7 @@ module rtlnet_h264_mb_enc #(
   // Reconstructed word of the delayed rebuild item (PASS3): clip(pred + residual).
   logic [31:0] rec_word;
   logic [31:0] p_e2_sel;
-  assign p_e2_sel = (blk_plane(e2_b) == 2'd0) ? p_luma_sel : p_chroma_sel;
+  assign p_e2_sel = inter_q ? e2_ref : ((blk_plane(e2_b) == 2'd0) ? p_luma_sel : p_chroma_sel);
   always_comb begin
     for (int i = 0; i < 4; i++) begin
       logic signed [17:0] v;
@@ -469,6 +569,28 @@ module rtlnet_h264_mb_enc #(
   assign lr_wdata  = cnt[0] ? bot_c : bot_y;
 
   // ---------------------------------------------------------------------------
+  // Motion vector context and the inter candidate (P pictures)
+  // ---------------------------------------------------------------------------
+  // Stage 2c-1: the only vector is (0, 0) and the cost is the SAD of the co-located reference macroblock; stage 2c-2 drives
+  // inter_mv_x / inter_mv_y and inter_sad from the search.
+  assign inter_mv_x = 14'sd0;
+  assign inter_mv_y = 14'sd0;
+  assign inter_sad  = ip_sad_iy + ip_sad_ic;
+  assign mvd_x_w    = 16'(inter_mv_x) - 16'(mvp_x);
+  assign mvd_y_w    = 16'(inter_mv_y) - 16'(mvp_y);
+  assign lam        = h264_lambda(qp_q);
+  assign mv_upd_x   = o_skip ? skip_x : inter_mv_x;
+  assign mv_upd_y   = o_skip ? skip_y : inter_mv_y;
+  assign mv_upd     = (st == S_DONE) && p_pic;
+
+  rtlnet_h264_mvctx #(.MAX_MB_W(MAX_MB_W), .MV_LINE_KB(MV_LINE_KB), .RAM_STYLE(RAM_STYLE)) u_mvctx (
+    .clk(clk), .resetn(resetn),
+    .start(start && (st == S_IDLE) && p_pic), .mb_x(mb_x[6:0]), .av_top(av_top), .av_left(av_left), .av_tr(av_tr),
+    .ready(mv_ready), .mvp_x(mvp_x), .mvp_y(mvp_y), .skip_x(skip_x), .skip_y(skip_y), .skip_zero(skip_zero),
+    .upd(mv_upd), .upd_inter(o_inter), .upd_mvx(mv_upd_x), .upd_mvy(mv_upd_y)
+  );
+
+  // ---------------------------------------------------------------------------
   // Datapath units
   // ---------------------------------------------------------------------------
   rtlnet_h264_ipred u_ipred (
@@ -477,14 +599,17 @@ module rtlnet_h264_mb_enc #(
     .nb_tl_cb(tl_cb), .nb_tl_cr(tl_cr), .nb_av_top(avt_q), .nb_av_left(avl_q),
     .prep_done(ip_prep_done),
     .q_valid(ip_q_valid), .q_plane(ip_q_plane), .q_seg(ip_q_seg), .q_y(ip_q_y), .q_src(ip_q_src), .q_acc(ip_q_acc),
+    .q_ref(ref_s1),
     .p_valid(ip_p_valid), .p_px(ip_p_px),
     .dec_start(ip_dec_start), .dec_done(ip_dec_done), .dec_luma_mode(ip_dec_lm), .dec_chroma_mode(ip_dec_cm),
-    .sad_y(ip_sad_y), .sad_c(ip_sad_c)
+    .sad_y(ip_sad_y), .sad_c(ip_sad_c), .sad_iy(ip_sad_iy), .sad_ic(ip_sad_ic),
+    .dec_cost_y(ip_cost_y), .dec_cost_c(ip_cost_c)
   );
 
   rtlnet_h264_fwdq u_fwdq (
     .clk(clk), .resetn(resetn),
     .qp(fq_in_qp), .in_valid(fq_in_v), .in_first(fq_in_first), .in_res(fq_in_res), .in_tag(fq_in_tag),
+    .in_inter(fq_in_inter), .in_full(fq_in_full),
     .out_valid(fq_out_v), .out_row(fq_out_row), .out_lvl(fq_out_lvl), .out_dc_valid(fq_out_dcv), .out_dc(fq_out_dc),
     .out_tag(fq_out_tag)
   );
@@ -492,6 +617,7 @@ module rtlnet_h264_mb_enc #(
   rtlnet_h264_invq u_invq (
     .clk(clk), .resetn(resetn),
     .qp(iq_in_qp), .in_valid(iq_in_v), .in_first(iq_in_first), .in_lvl(iq_in_lvl), .in_dc(iq_in_dc), .in_tag(iq_in_tag),
+    .in_full(iq_in_full),
     .out_valid(iq_out_v), .out_row(iq_out_row), .out_res(iq_out_res), .out_tag(iq_out_tag),
     .out_pl(iq_out_pl), .out_sg(iq_out_sg), .out_yy(iq_out_yy)
   );
@@ -501,11 +627,11 @@ module rtlnet_h264_mb_enc #(
     .busy(dqy_busy), .done(dqy_done), .lvl_out(dqy_lvl), .nz(dqy_nz), .dc_out(dqy_dc)
   );
   rtlnet_h264_dcq_chroma u_dcq_cb (
-    .clk(clk), .resetn(resetn), .start(dqc_start), .qpc(qpc_q), .w_in(dcw_cb),
+    .clk(clk), .resetn(resetn), .start(dqc_start), .qpc(qpc_q), .inter(inter_q), .w_in(dcw_cb),
     .busy(dqcb_busy), .done(dqcb_done), .lvl_out(dqcb_lvl), .nz(dqcb_nz), .dc_out(dqcb_dc)
   );
   rtlnet_h264_dcq_chroma u_dcq_cr (
-    .clk(clk), .resetn(resetn), .start(dqc_start), .qpc(qpc_q), .w_in(dcw_cr),
+    .clk(clk), .resetn(resetn), .start(dqc_start), .qpc(qpc_q), .inter(inter_q), .w_in(dcw_cr),
     .busy(dqcr_busy), .done(dqcr_done), .lvl_out(dqcr_lvl), .nz(dqcr_nz), .dc_out(dqcr_dc)
   );
 
@@ -521,12 +647,15 @@ module rtlnet_h264_mb_enc #(
     if (p3_s1_b < 5'd16)      iq_in_dc = dqy_dc[20*p3_s1_b[3:0] +: 20];
     else if (p3_s1_b < 5'd20) iq_in_dc = dqcb_dc[20*p3_s1_b[1:0] +: 20];
     else                      iq_in_dc = dqcr_dc[20*p3_s1_b[1:0] +: 20];
+    if (drop_q)               iq_in_dc = 20'sd0;
   end
 
   assign iq_in_v     = p3_s1_v;
   assign iq_in_first = (p3_s1_r == 2'd0);
-  assign iq_in_lvl   = cof_rdata;
+  assign nz8_e       = drop_q ? 4'd0 : nz8;
+  assign iq_in_lvl   = drop_q ? 48'd0 : cof_rdata;
   assign iq_in_tag   = {3'd0, p3_s1_b};
+  assign iq_in_full  = inter_q && (p3_s1_b < 5'd16);
   assign iq_in_qp    = (p3_s1_b < 5'd16) ? qp_q : qpc_q;
 
   assign cof_rd_en   = p3_run;
@@ -585,6 +714,24 @@ module rtlnet_h264_mb_enc #(
       o_cbp_chroma <= '0;
       o_cbp_luma  <= 1'b0;
       o_pcm       <= 1'b0;
+      o_inter     <= 1'b0;
+      o_skip      <= 1'b0;
+      o_cbp4      <= '0;
+      o_mvd_x     <= '0;
+      o_mvd_y     <= '0;
+      inter_q     <= 1'b0;
+      cost_in     <= '0;
+      cost_ia     <= '0;
+      nz8         <= '0;
+      drop_q      <= 1'b0;
+      big_q       <= 1'b0;
+      lv_sum      <= '0;
+      mv_ready_seen <= 1'b0;
+      d1_ref      <= '0;
+      d2_ref      <= '0;
+      e2_ref      <= '0;
+      fq_in_inter <= 1'b0;
+      fq_in_full  <= 1'b0;
       est_q       <= '0;
       ovf_q       <= 1'b0;
       w_sat       <= '0;
@@ -692,6 +839,8 @@ module rtlnet_h264_mb_enc #(
       d2_b   <= d1_b;
       d2_r   <= d1_r;
       d2_src <= d1_src;
+      d1_ref <= ref_s1;
+      d2_ref <= d1_ref;
 
       // Forward transform input register (PASS1).
       fq_in_v     <= d2_v;
@@ -699,6 +848,8 @@ module rtlnet_h264_mb_enc #(
       fq_in_res   <= res_d2;
       fq_in_tag   <= {3'd0, d2_b};
       fq_in_qp    <= (d2_b < 5'd16) ? qp_q : qpc_q;
+      fq_in_inter <= inter_q;
+      fq_in_full  <= inter_q && (d2_b < 5'd16);
 
       // Forward transform outputs: DC capture, nonzero flags, DC unit starts.
       if (fq_out_dcv) begin
@@ -712,7 +863,10 @@ module rtlnet_h264_mb_enc #(
       if (fq_out_v) begin
         fq_rows <= fq_rows + 7'd1;
         if (fq_out_tag[4:0] < 5'd16) begin
-          if (|fq_out_lvl) ac_nz_y <= 1'b1;
+          if (|fq_out_lvl) begin
+            ac_nz_y <= 1'b1;
+            nz8[{fq_out_tag[3], fq_out_tag[1]}] <= 1'b1;
+          end
         end else begin
           if (|fq_out_lvl) ac_nz_c <= 1'b1;
         end
@@ -727,6 +881,7 @@ module rtlnet_h264_mb_enc #(
       if (r1_v) begin
         est_q <= est_q + 16'(r1_cost[0]) + 16'(r1_cost[1]) + 16'(r1_cost[2]) + 16'(r1_cost[3]);
         if (r1_sat) ovf_q <= 1'b1;
+        if ((r1_cost[0] > 7'd1) || (r1_cost[1] > 7'd1) || (r1_cost[2] > 7'd1) || (r1_cost[3] > 7'd1)) big_q <= 1'b1;
         if (r1_row3) begin
           blk_nz <= 1'b0;
           if (blk_nz || r1_nz) nb_q <= nb_q + 6'd1;
@@ -754,6 +909,8 @@ module rtlnet_h264_mb_enc #(
       e2_b   <= e1_b;
       e2_r   <= e1_r;
       e2_res <= e1_res;
+      e2_ref <= ref_seg(ref_rd_data, blk_plane(e1_b), blk_seg(e1_b), blk_y(e1_b, e1_r)[0]);
+      if (mv_ready) mv_ready_seen <= 1'b1;
       if (e2_v) begin
         wr_cnt <= wr_cnt + 7'd1;
         // Left column (right column of the macroblock) and bottom row capture.
@@ -812,6 +969,13 @@ module rtlnet_h264_mb_enc #(
             blk_nz  <= 1'b0;
             ovf_q   <= 1'b0;
             o_pcm   <= pcm_mode;
+            o_inter <= 1'b0;
+            o_skip  <= 1'b0;
+            inter_q <= 1'b0;
+            nz8     <= '0;
+            drop_q  <= 1'b0;
+            big_q   <= 1'b0;
+            mv_ready_seen <= 1'b0;
             dqy_done_q  <= 1'b0;
             dqcb_done_q <= 1'b0;
             dqcr_done_q <= 1'b0;
@@ -874,10 +1038,32 @@ module rtlnet_h264_mb_enc #(
             o_i16_mode    <= ip_dec_lm;
             o_chroma_mode <= ip_dec_cm;
             iss_n         <= '0;
-            iss_run       <= 1'b1;
             cnt           <= '0;
-            st            <= S_P1;
+            if (p_pic) begin
+              st <= S_MD1;
+            end else begin
+              iss_run <= 1'b1;
+              st      <= S_P1;
+            end
           end
+        end
+
+        // Inter decision: cost of the reference at the vector against the best intra modes (3 clocks).
+        S_MD1: begin
+          cost_in <= 20'(inter_sad) + 20'(lam) * (20'(h264_se_len(mvd_x_w)) + 20'(h264_se_len(mvd_y_w)));
+          cost_ia <= ip_cost_y + ip_cost_c + (20'(lam) << $clog2(INTRA_BIAS_BITS));
+          st      <= S_MD2;
+        end
+
+        S_MD2: begin
+          inter_q <= (cost_in <= cost_ia);
+          o_inter <= (cost_in <= cost_ia);
+          o_mvd_x <= mvd_x_w;
+          o_mvd_y <= mvd_y_w;
+          iss_n   <= '0;
+          iss_run <= 1'b1;
+          cnt     <= '0;
+          st      <= S_P1;
         end
 
         S_P1: begin
@@ -900,14 +1086,15 @@ module rtlnet_h264_mb_enc #(
 
         // Fallback decision, in five clocks: level costs of the DC levels, word sums, sum of the DC part, total, branch.
         S_CHK: begin
-          for (int i = 0; i < 16; i++) w_cost[i] <= lcost(dqy_lvl[12*i +: 12]);
+          // The luma DC unit's result does not exist for an inter macroblock (no luma DC transform): it counts as zero.
+          for (int i = 0; i < 16; i++) w_cost[i] <= inter_q ? 7'd0 : lcost(dqy_lvl[12*i +: 12]);
           for (int i = 0; i < 4; i++) begin
             w_cost[16 + i] <= lcost(dqcb_lvl[12*i +: 12]);
             w_cost[20 + i] <= lcost(dqcr_lvl[12*i +: 12]);
           end
           for (int i = 0; i < 4; i++) begin
-            w_sat[i] <= sat4(dqy_lvl[48*i +: 48]);
-            w_nz[i]  <= |dqy_lvl[48*i +: 48];
+            w_sat[i] <= !inter_q && sat4(dqy_lvl[48*i +: 48]);
+            w_nz[i]  <= !inter_q && (|dqy_lvl[48*i +: 48]);
           end
           w_sat[4] <= sat4(dqcb_lvl);
           w_nz[4]  <= |dqcb_lvl;
@@ -922,6 +1109,7 @@ module rtlnet_h264_mb_enc #(
           end
           nb_dc <= 3'(|w_nz[3:0]) + 3'(w_nz[4]) + 3'(w_nz[5]);
           if (|w_sat) ovf_q <= 1'b1;
+          for (int i = 16; i < 24; i++) if (w_cost[i] > 7'd1) big_q <= 1'b1;
           st    <= S_CHK3;
         end
 
@@ -932,17 +1120,22 @@ module rtlnet_h264_mb_enc #(
 
         S_CHK4: begin
           est_tot <= est_q + est_dc + 16'(EST_BASE) + 16'(EST_BLK) * (16'(nb_q) + 16'(nb_dc));
+          lv_sum  <= est_q + est_dc;
           st      <= S_CHK5;
         end
 
         S_CHK5: begin
           if (ovf_q || (est_tot > 16'(EST_LIMIT))) begin
             o_pcm  <= 1'b1;
+            o_inter <= 1'b0;
+            o_skip <= 1'b0;
+            inter_q <= 1'b0;
             pcm_w  <= '0;
             pcm_ph <= '0;
             st     <= S_PCM;
           end else begin
-            st <= S_DCW;
+            drop_q <= inter_q && !big_q && (lv_sum <= 16'(DROP_LEVELS));
+            st     <= S_DCW;
           end
         end
 
@@ -950,7 +1143,11 @@ module rtlnet_h264_mb_enc #(
           dcw_n <= dcw_n + 3'd1;
           if (dcw_n == 3'd5) begin
             o_cbp_luma   <= ac_nz_y;
-            o_cbp_chroma <= ac_nz_c ? 2'd2 : ((dqcb_nz || dqcr_nz) ? 2'd1 : 2'd0);
+            o_cbp4       <= nz8_e;
+            o_cbp_chroma <= drop_q ? 2'd0 : (ac_nz_c ? 2'd2 : ((dqcb_nz || dqcr_nz) ? 2'd1 : 2'd0));
+            // P_Skip: the inter candidate with nothing to code, and the skip vector equal to the vector of the prediction.
+            o_skip       <= inter_q && (nz8_e == 4'd0) && (drop_q || (!ac_nz_c && !dqcb_nz && !dqcr_nz)) && skip_zero &&
+                            (inter_mv_x == 14'sd0) && (inter_mv_y == 14'sd0);
             p3_n         <= '0;
             p3_run       <= 1'b1;
             sel_p3       <= 1'b1;
@@ -1011,5 +1208,12 @@ module rtlnet_h264_mb_enc #(
       endcase
     end
   end
+
+  // synthesis translate_off
+  // The motion vector context (5 clocks) is ready long before the inter decision.
+  always_ff @(posedge clk) begin
+    if (resetn && (st == S_MD1) && !mv_ready_seen) $error("rtlnet_h264_mb_enc: motion vector context not ready at the inter decision");
+  end
+  // synthesis translate_on
 
 endmodule

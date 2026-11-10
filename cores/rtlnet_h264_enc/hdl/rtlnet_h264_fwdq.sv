@@ -9,18 +9,22 @@
 //     1 -2 2 -1]). Column stage: 16 accumulators add Cf[u][r] * T_r[c] as the rows arrive, so W = Cf X Cf^T is complete
 //     one clock after the fourth row. W is held for the four clocks of the quantizer, which walks the rows.
 //   * Quantizer, 4 lanes, pipelined in three stages (abs and MF select; |W| * MF + f; shift, clamp, sign):
-//     level = sign * min(2047, (|W| * MF(qp%6, class) + f) >> (15 + qp/6)), f = (1 << (15 + qp/6)) / 3 (constant table).
-//     Position (0,0) is the DC: its level output is 0 and W00 leaves unquantized on out_dc.
-//   * The block's qp and tag are sampled with the block's first row and travel with it, so blocks of different qp may
-//     follow each other back to back.
+//     level = sign * min(2047, (|W| * MF(qp%6, class) + f) >> (15 + qp/6)), f = (1 << (15 + qp/6)) / 3 (constant table; intra)
+//     or / 6 (inter: in_inter, half the intra value: the usual rounding offsets 1/3 intra and 1/6 inter, an encoder choice).
+//     Position (0,0) is the DC: its level output is 0 and W00 leaves unquantized on out_dc, unless in_full is set (the luma
+//     blocks of an inter macroblock have no separate DC transform: the DC position is quantized like the others, with the
+//     class 0 multiplier; W00 still leaves on out_dc).
+//   * The block's qp, tag, in_inter and in_full are sampled with the block's first row and travel with it, so blocks of
+//     different qp may follow each other back to back.
 //   * Widths: residual 9 bits signed, row transform 12 bits signed, W 16 bits signed (|W| <= 9180), |W| 14 bits, MF 14 bits,
 //     product plus f 32 bits, level 12 bits signed.
 //   * Cadence: a block's four rows arrive on four consecutive clocks; the next block's first row may follow on the next
 //     clock (no gap required, gaps allowed). No stall. Latency: out_row 0 appears 8 clocks after the clock of in_first
 //     (in_first at clock t, out_valid first high at t + 8), then rows 1..3 on the next three clocks.
 // Language: SystemVerilog-2012.
-// Revision: 11-09-2026
+// Revision: 11-10-2026
 //   * 11-09-2026: initial version.
+//   * 11-10-2026: phase 2c-1: in_inter (rounding offset 1/6) and in_full (DC position quantized) for inter macroblocks.
 // Clocks: clk.
 // -----------------------------------------------------------------------------
 module rtlnet_h264_fwdq (
@@ -34,6 +38,8 @@ module rtlnet_h264_fwdq (
   input  logic        in_first,
   input  logic [35:0] in_res,
   input  logic [7:0]  in_tag,
+  input  logic        in_inter,
+  input  logic        in_full,
 
   // Output rows, clk domain: four consecutive rows per block, fixed latency, no stall.
   output logic        out_valid,
@@ -95,9 +101,11 @@ module rtlnet_h264_fwdq (
   logic [1:0]  rcnt;
   logic [7:0]  tag_a;
   logic [5:0]  qp_a;
+  logic        inter_a, full_a;
   logic [1:0]  row_idx;
   logic [7:0]  cur_tag;
   logic [5:0]  cur_qp;
+  logic        cur_inter, cur_full;
   logic signed [8:0]  x [4];
   logic signed [11:0] s03, d03, s12, d12;
   logic signed [11:0] tn [4];
@@ -106,11 +114,14 @@ module rtlnet_h264_fwdq (
   logic [1:0]  t_row;
   logic [7:0]  t_tag;
   logic [5:0]  t_qp;
+  logic        t_inter, t_full;
   logic signed [11:0] t [4];
 
   assign row_idx = in_first ? 2'd0 : rcnt;
   assign cur_tag = in_first ? in_tag : tag_a;
   assign cur_qp  = in_first ? qp : qp_a;
+  assign cur_inter = in_first ? in_inter : inter_a;
+  assign cur_full  = in_first ? in_full : full_a;
 
   always_comb begin
     for (int c = 0; c < 4; c++) x[c] = in_res[9*c +: 9];
@@ -136,12 +147,16 @@ module rtlnet_h264_fwdq (
 
   always_ff @(posedge clk) begin
     if (in_valid) begin
-      tag_a <= cur_tag;
-      qp_a  <= cur_qp;
+      tag_a   <= cur_tag;
+      qp_a    <= cur_qp;
+      inter_a <= cur_inter;
+      full_a  <= cur_full;
     end
-    t_row <= row_idx;
-    t_tag <= cur_tag;
-    t_qp  <= cur_qp;
+    t_row   <= row_idx;
+    t_tag   <= cur_tag;
+    t_qp    <= cur_qp;
+    t_inter <= cur_inter;
+    t_full  <= cur_full;
     for (int c = 0; c < 4; c++) t[c] <= tn[c];
   end
 
@@ -153,6 +168,7 @@ module rtlnet_h264_fwdq (
   logic signed [15:0] wh   [4][4];
   logic [7:0]  w_tag;
   logic [5:0]  w_qp;
+  logic        w_inter, w_full;
   logic        wload;
   logic        qrun;
   logic [1:0]  qrow;
@@ -173,8 +189,10 @@ module rtlnet_h264_fwdq (
     end
     if (wload) begin
       for (int u = 0; u < 4; u++) for (int c = 0; c < 4; c++) wh[u][c] <= accn[u][c];
-      w_tag <= t_tag;
-      w_qp  <= t_qp;
+      w_tag   <= t_tag;
+      w_qp    <= t_qp;
+      w_inter <= t_inter;
+      w_full  <= t_full;
     end
   end
 
@@ -197,6 +215,7 @@ module rtlnet_h264_fwdq (
   logic        q1_valid;
   logic [1:0]  q1_row;
   logic [7:0]  q1_tag;
+  logic        q1_inter, q1_full;
   logic [3:0]  q1_q6;
   logic [13:0] q1_abs [4];
   logic [13:0] q1_mf  [4];
@@ -229,6 +248,8 @@ module rtlnet_h264_fwdq (
   always_ff @(posedge clk) begin
     q1_row <= qrow;
     q1_tag <= w_tag;
+    q1_inter <= w_inter;
+    q1_full  <= w_full;
     q1_q6  <= q6;
     q1_dc  <= 16'(wh[0][0]);
     for (int c = 0; c < 4; c++) begin
@@ -244,6 +265,7 @@ module rtlnet_h264_fwdq (
   logic        q2_valid;
   logic [1:0]  q2_row;
   logic [7:0]  q2_tag;
+  logic        q2_full;
   logic [3:0]  q2_q6;
   logic [31:0] q2_sum [4];
   logic        q2_sgn [4];
@@ -257,10 +279,11 @@ module rtlnet_h264_fwdq (
   always_ff @(posedge clk) begin
     q2_row <= q1_row;
     q2_tag <= q1_tag;
+    q2_full  <= q1_full;
     q2_q6  <= q1_q6;
     q2_dc  <= q1_dc;
     for (int c = 0; c < 4; c++) begin
-      q2_sum[c] <= 32'(q1_abs[c]) * 32'(q1_mf[c]) + 32'(f_of(q1_q6));
+      q2_sum[c] <= 32'(q1_abs[c]) * 32'(q1_mf[c]) + (q1_inter ? (32'(f_of(q1_q6)) >> 1) : 32'(f_of(q1_q6)));
       q2_sgn[c] <= q1_sgn[c];
     end
   end
@@ -276,7 +299,7 @@ module rtlnet_h264_fwdq (
       sh[c] = q2_sum[c] >> (5'd15 + {1'b0, q2_q6});
       if (sh[c] > 32'd2047) sh[c] = 32'd2047;
       lv[c] = q2_sgn[c] ? -12'(sh[c][10:0]) : 12'(sh[c][10:0]);
-      if ((q2_row == 2'd0) && (c == 0)) lv[c] = 12'sd0;
+      if ((q2_row == 2'd0) && (c == 0) && !q2_full) lv[c] = 12'sd0;
     end
   end
 

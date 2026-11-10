@@ -17,6 +17,13 @@
 # memory (luma 256 B and chroma 128 B tiles, one burst each) and the bench de-tiles it for the decoder comparison; the strip_*
 # configurations have widths that are not a multiple of the 4-macroblock input strip. Build the decoders once with
 # h264_build_decoders.ps1.
+# Phase 2c-1 (P pictures, motion vector (0,0) only): tb_rtlnet_h264_mbcavlc also checks the P slice syntax (mb_skip_run, P_Skip, P_L0_16x16,
+# the inter coded_block_pattern, the offset intra mb_type), tb_rtlnet_h264_mvpred the motion vector predictor and its context (clauses
+# 8.4.1.3 and 8.4.1.1), the xform and ipred benches the inter quantizer modes and the inter SAD. The p_* harness configurations run GOPs
+# of generated sequences (static, pan, moving bars, noise, a scene cut; QCIF, 720p, 1080p, 1 and 2 engines, 1 to 9 slices, QP 12 to 51):
+# every picture of every GOP is decoded by JM, OpenH264 and FFmpeg and compared byte for byte with that picture's rebuilt picture,
+# and h264_harness_par.ps1 runs them in parallel (one process per configuration). The _burstrefneg entry is the negative control of the
+# monitor's reference-read check (a 4-beat reference read must fail the bench).
 tb_rtlnet_h264_bitpack  cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_bitpack.f  sim=verilator
 tb_rtlnet_h264_bitpack  cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_bitpack.f  neg  plusargs=INJECT_FAILURE  expectfail  sim=verilator
 tb_rtlnet_h264_c422     cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_c422.f     sim=verilator
@@ -29,9 +36,13 @@ tb_rtlnet_h264_xform    cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_xform.f  
 tb_rtlnet_h264_xform    cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_xform.f    neg  plusargs=INJECT_FAILURE  expectfail  sim=verilator
 tb_rtlnet_h264_ipred    cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_ipred.f    sim=verilator
 tb_rtlnet_h264_ipred    cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_ipred.f    neg  plusargs=INJECT_FAILURE  expectfail  sim=verilator
+tb_rtlnet_h264_mvpred   cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_mvpred.f   sim=verilator
+tb_rtlnet_h264_mvpred   cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_mvpred.f   neg  plusargs=INJECT_FAILURE  expectfail  sim=verilator
 h264_driver_test        script:cores/rtlnet_h264_enc/testbench/h264_driver_test.ps1
 h264_harness            script:cores/rtlnet_h264_enc/testbench/h264_harness.ps1
 h264_harness_neg        script:cores/rtlnet_h264_enc/testbench/h264_harness.ps1 -Config qcif_s1,qcif_e2_s4,qcif_photo_q28,qcif_edges_q18 -Inject
 h264_harness_pcm        script:cores/rtlnet_h264_enc/testbench/h264_harness.ps1 -Pcm -Config qcif_s1,qcif_s3,qcif_e2_s4
 h264_harness_burstneg  script:cores/rtlnet_h264_enc/testbench/h264_harness.ps1 -InjectBurst -Config qcif_s1,qcif_e2_s4
+h264_harness_burstrefneg script:cores/rtlnet_h264_enc/testbench/h264_harness.ps1 -InjectBurstRef -Config p_qcif_pan_q28,p_qcif_pan_e2_s2_q28
+h264_harness_p         script:cores/rtlnet_h264_enc/testbench/h264_harness_par.ps1 -Config p_* -Jobs 4 -Prefix p2c1 -NoPng
 h264_lint               script:cores/rtlnet_h264_enc/testbench/h264_lint.ps1

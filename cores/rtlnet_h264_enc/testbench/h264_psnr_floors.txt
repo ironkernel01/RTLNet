@@ -40,3 +40,24 @@ zoneplate 18 44.1
 zoneplate 28 34.9
 zoneplate 38 26.2
 zoneplate 51 15.9
+# Sequences of the P-picture configurations (phase 2c-1): <sequence> <qp> <floor_dB>, the floor of EVERY picture of the sequence (the minimum overall PSNR over the pictures and
+# configurations, QCIF, 720p, 1080p, minus 1 dB, rounded down to 0.1 dB; 99.0 = lossless).
+bars_move 12 62.3
+bars_move 28 43.3
+bars_move 51 29.6
+cut 12 49.3
+cut 28 38.7
+cut 38 30.4
+cut 51 17.6
+noise_p 12 99.0
+noise_p 28 32.5
+noise_p 51 12.3
+pan 12 47.9
+pan 20 43.2
+pan 28 38.6
+pan 38 32.8
+pan 51 25.8
+static 12 49.3
+static 28 40.4
+static 38 36.4
+static 51 30.9

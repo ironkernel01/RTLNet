@@ -17,8 +17,10 @@
 //   * +INJECT_FAILURE is the negative control (forces one failed check). Checks use comparisons on whole values; no
 //     foreach loops.
 // Language: SystemVerilog-2012 (simulation only).
-// Revision: 11-09-2026
+// Revision: 11-10-2026
 //   * 11-09-2026: initial version.
+//   * 11-10-2026: phase 2c-1: the chroma DC unit's inter rounding offset; inter modes of fwdq (in_inter: rounding offset 1/6; in_full: the DC position is quantized) and invq
+//     (in_full: the DC position is dequantized like the others), swept over all QP in the same ways as the intra modes.
 // Clocks: clk, 100 MHz.
 // -----------------------------------------------------------------------------
 `timescale 1ns / 1ps
@@ -43,6 +45,12 @@ module tb_rtlnet_h264_xform;
   logic        f_first = 1'b0;
   logic [35:0] f_res = '0;
   logic [7:0]  f_tag = '0;
+  logic        f_inter = 1'b0;
+  logic        f_full = 1'b0;
+  logic        i_full = 1'b0;
+  // Mode of the blocks of the running test (sampled by the DUT with the first row; random on the other rows).
+  logic        m_inter = 1'b0;
+  logic        m_full = 1'b0;
   logic        fo_valid, fo_dc_valid;
   logic [1:0]  fo_row;
   logic [47:0] fo_lvl;
@@ -71,6 +79,7 @@ module tb_rtlnet_h264_xform;
 
   logic         c_start = 1'b0;
   logic [5:0]   c_qpc = '0;
+  logic         c_inter = 1'b0;
   logic [63:0]  c_w = '0;
   logic         c_busy, c_done, c_nz;
   logic [47:0]  c_lvl;
@@ -78,12 +87,13 @@ module tb_rtlnet_h264_xform;
 
   rtlnet_h264_fwdq u_fwdq (
     .clk(clk), .resetn(resetn), .qp(f_qp), .in_valid(f_valid), .in_first(f_first), .in_res(f_res), .in_tag(f_tag),
+    .in_inter(f_inter), .in_full(f_full),
     .out_valid(fo_valid), .out_row(fo_row), .out_lvl(fo_lvl), .out_dc_valid(fo_dc_valid), .out_dc(fo_dc), .out_tag(fo_tag)
   );
 
   rtlnet_h264_invq u_invq (
     .clk(clk), .resetn(resetn), .qp(i_qp), .in_valid(i_valid), .in_first(i_first), .in_lvl(i_lvl), .in_dc(i_dc),
-    .in_tag(i_tag), .out_valid(io_valid), .out_row(io_row), .out_res(io_res), .out_tag(io_tag),
+    .in_tag(i_tag), .in_full(i_full), .out_valid(io_valid), .out_row(io_row), .out_res(io_res), .out_tag(io_tag),
     .out_pl(io_pl), .out_sg(io_sg), .out_yy(io_yy)
   );
 
@@ -104,7 +114,7 @@ module tb_rtlnet_h264_xform;
   );
 
   rtlnet_h264_dcq_chroma u_dcc (
-    .clk(clk), .resetn(resetn), .start(c_start), .qpc(c_qpc), .w_in(c_w), .busy(c_busy), .done(c_done),
+    .clk(clk), .resetn(resetn), .start(c_start), .qpc(c_qpc), .inter(c_inter), .w_in(c_w), .busy(c_busy), .done(c_done),
     .lvl_out(c_lvl), .nz(c_nz), .dc_out(c_dc)
   );
 
@@ -166,7 +176,7 @@ module tb_rtlnet_h264_xform;
   function automatic int ref_ac_lvl(input int w, input int qp, input int pos);
     int qbits;
     qbits = 15 + qp / 6;
-    return ref_quant(w, MFT[qp % 6][pclass(pos)], (64'd1 << qbits) / 3, qbits);
+    return ref_quant(w, MFT[qp % 6][pclass(pos)], m_inter ? ((64'd1 << qbits) / 6) : ((64'd1 << qbits) / 3), qbits);
   endfunction
 
   // Luma DC: Yf = H Wd H, level = (|Yf| MF + 4f) >> (qbits + 2).
@@ -197,7 +207,7 @@ module tb_rtlnet_h264_xform;
     y[2] = wd[0] + wd[1] - wd[2] - wd[3];
     y[3] = wd[0] - wd[1] - wd[2] + wd[3];
     qbits = 15 + qpc / 6;
-    for (int i = 0; i < 4; i++) lvl[i] = ref_quant(y[i], MFT[qpc % 6][0], 2 * ((64'd1 << qbits) / 3), qbits + 1);
+    for (int i = 0; i < 4; i++) lvl[i] = ref_quant(y[i], MFT[qpc % 6][0], m_inter ? (2 * ((64'd1 << qbits) / 6)) : (2 * ((64'd1 << qbits) / 3)), qbits + 1);
   endtask
 
   // Clause 8.5.9 / 8.5.12.1 LevelScale form for one coefficient at raster position pos (flat weights 16).
@@ -250,7 +260,7 @@ module tb_rtlnet_h264_xform;
     longint g [16];
     longint h [16];
     longint x;
-    for (int p = 0; p < 16; p++) d[p] = (p == 0) ? longint'(dc) : ref_scale_ac(lvl[p], qp, p);
+    for (int p = 0; p < 16; p++) d[p] = ((p == 0) && !m_full) ? longint'(dc) : ref_scale_ac(lvl[p], qp, p);
     for (int i = 0; i < 4; i++) begin
       e[i*4 + 0] = d[i*4 + 0] + d[i*4 + 2];
       e[i*4 + 1] = d[i*4 + 0] - d[i*4 + 2];
@@ -347,6 +357,8 @@ module tb_rtlnet_h264_xform;
       f_first = (r == 0);
       f_qp    = 6'((r == 0) ? qp : rr(0, 51));
       f_tag   = 8'((r == 0) ? tag : rr(0, 255));
+      f_inter = (r == 0) ? m_inter : 1'(rr(0, 1));
+      f_full  = (r == 0) ? m_full : 1'(rr(0, 1));
       for (int c = 0; c < 4; c++) f_res[9*c +: 9] = 9'(x[4*r + c]);
       if (r == 0) f_in_cyc[tag] = int'(cyc);
     end
@@ -371,6 +383,7 @@ module tb_rtlnet_h264_xform;
       i_qp    = 6'((r == 0) ? qp : rr(0, 51));
       i_tag   = 8'((r == 0) ? tag : rr(0, 255));
       i_dc    = 20'((r == 0) ? dc : rr(-500000, 500000));
+      i_full  = (r == 0) ? m_full : 1'(rr(0, 1));
       for (int c = 0; c < 4; c++) i_lvl[12*c +: 12] = 12'(lvl[4*r + c]);
       if (r == 0) i_in_cyc[tag] = int'(cyc);
     end
@@ -422,7 +435,7 @@ module tb_rtlnet_h264_xform;
       tb_check(fg_lat[b] == 8, $sformatf("%s block %0d: latency %0d", what, b, fg_lat[b]));
       tb_check(fg_dc[b] == w[0], $sformatf("%s block %0d qp %0d: W00 %0d, expected %0d", what, b, qs[b], fg_dc[b], w[0]));
       for (int p = 0; p < 16; p++) begin
-        lv = (p == 0) ? 0 : ref_ac_lvl(w[p], qs[b], p);
+        lv = ((p == 0) && !m_full) ? 0 : ref_ac_lvl(w[p], qs[b], p);
         tb_check(fg_lvl[b][p] == lv, $sformatf("%s block %0d qp %0d pos %0d: level %0d, expected %0d", what, b, qs[b], p, fg_lvl[b][p], lv));
       end
     end
@@ -566,11 +579,13 @@ module tb_rtlnet_h264_xform;
     @(negedge clk);
     c_start = 1'b1;
     c_qpc   = 6'(qpc);
+    c_inter = m_inter;
     c_w     = w;
     t0      = int'(cyc);
     @(negedge clk);
     c_start = 1'b0;
     c_qpc   = 6'(rr(0, 51));
+    c_inter = 1'(rr(0, 1));
     c_w     = {2{32'($urandom)}};
     while (!c_done) @(negedge clk);
     dc_lat = int'(cyc) - t0;
@@ -697,6 +712,19 @@ module tb_rtlnet_h264_xform;
     fwd_qp_sweep();
     fwd_mixed();
     inv_sweep();
+    // Inter modes (phase 2c-1): rounding offset 1/6 with the DC position left out (chroma blocks) and quantized (luma blocks).
+    m_inter = 1'b1; m_full = 1'b0;
+    fwd_qp_sweep();
+    m_full = 1'b1;
+    fwd_qp_sweep();
+    fwd_mixed();
+    inv_sweep();
+    // The chroma chains of an inter macroblock: AC quantizer and the chroma DC unit with the rounding offset 1/6.
+    m_full = 1'b0;
+    for (int qp = 0; qp < 52; qp++) begin
+      for (int style = 0; style < 4; style++) chain(1'b0, ref_qpc(qp), style, $sformatf("inter chroma chain qpc %0d style %0d", ref_qpc(qp), style));
+    end
+    m_inter = 1'b0; m_full = 1'b0;
     for (int qp = 0; qp < 52; qp++) begin
       for (int style = 0; style < 4; style++) begin
         chain(1'b1, qp, style, $sformatf("luma chain qp %0d style %0d", qp, style));

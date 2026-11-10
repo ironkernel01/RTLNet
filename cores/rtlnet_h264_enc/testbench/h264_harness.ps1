@@ -30,17 +30,30 @@ Overview:
   * Configurations: <size>_e<engines>_s<slices>_q<QP> for 720p and 1080p (slices of the whole picture; e1_s2 is one engine
     with two slices), qcif_<pattern>_q<QP> for QCIF, and the named QCIF structure checks (qcif_s1, qcif_s3, qcif_ring, qcif_e2_*,
     qcif_2pic, ... at QP 28). -Config takes names or wildcards (qcif_*_q0, 720p_e2_*).
-Usage: powershell -NoProfile -ExecutionPolicy Bypass -File h264_harness.ps1 [-Config qcif_s1,720p_*] [-Inject] [-InjectBurst] [-Pcm] [-Measure] [-Threads N] [-Gap pct] [-Lat clocks]
+  * P pictures (phase 2c-1): configurations named p_* run a GOP (Gop: a string of I and P, one letter per picture; an I picture is an
+    IDR picture) of a generated sequence (Seq: static, pan, bars_move, noise_p, cut; h264_gen.py --seq). The bench keeps the two
+    rebuilt buffers in the memory model across the pictures, and EVERY picture is checked: JM, OpenH264 and FFmpeg must decode
+    it byte-identical to the de-tiled rebuilt picture of that picture, and the PSNR floor of (sequence, QP) must hold for each
+    picture (h264_psnr_floors.txt; -Measure prints the candidate line, the minimum over the pictures minus 1 dB). A configuration
+    with AllSkip (the static scene) must code every P picture as skipped macroblocks only. The p_* configurations run only when
+    named with -Config (-Config p_*); without -Config the earlier set runs. -InjectBurstRef is the negative control of the
+    monitor's reference-read check (a 4-beat reference read; the bench must fail). -BuildToolsOnly builds the SPS/PPS tool and exits;
+    -ListConfigs prints the names of the selected configurations (h264_harness_par.ps1 runs them in parallel).
+Usage: powershell -NoProfile -ExecutionPolicy Bypass -File h264_harness.ps1 [-Config qcif_s1,720p_*] [-Inject] [-InjectBurst] [-InjectBurstRef] [-Pcm] [-Measure] [-Threads N] [-Gap pct] [-Lat clocks]
   -Gap and -Lat set the memory model's ready/valid gap percentage (default 20) and read latency in clocks (default 20; rtlnet_ddr_sim: gap 0, latency 20).
   Without -Config every configuration of the default set runs (several minutes per ten configurations: each one builds the bench).
-Revision: 11-09-2026
+Revision: 11-10-2026
   * 11-09-2026: initial version; QP/pattern configuration table, PSNR floors, bits per picture, -Pcm and -Measure.
+  * 11-10-2026: phase 2c-1: GOP and sequence configurations (p_*), one input buffer reloaded per picture, -InjectBurstRef.
 -------------------------------------------------------------------------------
 #>
 param(
     [string[]]$Config = @(),
     [switch]$Inject,
     [switch]$InjectBurst,
+    [switch]$InjectBurstRef,
+    [switch]$BuildToolsOnly,
+    [switch]$ListConfigs,
     [switch]$Pcm,
     [switch]$Measure,
     [int]$Threads = 1,
@@ -68,7 +81,7 @@ function Add-Cfg([string]$name, [int]$w, [int]$h, [int]$dh, [int]$e, [int]$s, [i
     $ring = 256; $mem = 17
     if ($w -eq 1280) { $ring = 2048; $mem = 20 }
     if ($w -eq 1920) { $ring = 4096; $mem = 20 }
-    $c = @{ Name = $name; W = $w; H = $h; DH = $dh; E = $e; S = $s; P = $p; Pat = $pat; Qp = $qp; Ring = $ring; Delay = 0; Mem = $mem }
+    $c = @{ Name = $name; W = $w; H = $h; DH = $dh; E = $e; S = $s; P = $p; Pat = $pat; Qp = $qp; Ring = $ring; Delay = 0; Mem = $mem; Gop = ('I' * $p); Seq = ''; AllSkip = $false; Group = 'i' }
     foreach ($k in $extra.Keys) { $c[$k] = $extra[$k] }
     $script:Configs += ,$c
 }
@@ -109,11 +122,59 @@ foreach ($sz in @(@('720p', 1280, 720, 720), @('1080p', 1920, 1088, 1080))) {
         }
     }
 }
+# P-picture configurations (phase 2c-1): a GOP of a generated sequence, every picture checked. QCIF structure and content set, then 720p
+# and 1080p on 1 and 2 engines with 1, 2 and 4 slices over QP 12 to 51.
+function Add-PCfg([string]$name, [int]$w, [int]$h, [int]$dh, [int]$e, [int]$s, [string]$gop, [string]$seq, [int]$qp, [hashtable]$extra = @{}) {
+    $x = @{ Gop = $gop; Seq = $seq; Group = 'p' }
+    foreach ($k in $extra.Keys) { $x[$k] = $extra[$k] }
+    Add-Cfg $name $w $h $dh $e $s $gop.Length @($seq) $qp $x
+}
+$g9  = 'IPPPPPPPP'
+$g10 = 'IPPPPIPPPP'
+$gc  = 'IPPPPPPPPP'   # the scene cut (picture 5) is inside a P run: the cut picture is coded as P
+# QCIF: sequences x QP (static = all-skip).
+foreach ($q in @(12, 28, 38, 51)) { Add-PCfg "p_qcif_static_q$q" 176 144 144 1 1 $g9 'static' $q @{ AllSkip = $true } }
+foreach ($q in @(12, 20, 28, 38, 51)) { Add-PCfg "p_qcif_pan_q$q" 176 144 144 1 1 $g10 'pan' $q }
+foreach ($q in @(12, 28, 51)) { Add-PCfg "p_qcif_bars_q$q" 176 144 144 1 1 $g9 'bars_move' $q }
+foreach ($q in @(12, 28, 51)) { Add-PCfg "p_qcif_noise_q$q" 176 144 144 1 1 $g9 'noise_p' $q }
+foreach ($q in @(12, 28, 38, 51)) { Add-PCfg "p_qcif_cut_q$q" 176 144 144 1 1 $gc 'cut' $q }
+# QCIF structure: slices (skip runs crossing slice boundaries reset), engines, a long GOP (frame_num wraps at 16), widths that are not a
+# multiple of the 4-macroblock strip, a small ring with a slow consumer.
+Add-PCfg 'p_qcif_pan_s3_q28'      176 144 144 1 3 $g10 'pan' 28
+Add-PCfg 'p_qcif_static_s3_q28'   176 144 144 1 3 $g9 'static' 28 @{ AllSkip = $true }
+Add-PCfg 'p_qcif_cut_s9_q28'      176 144 144 1 9 $gc 'cut' 28
+Add-PCfg 'p_qcif_pan_e2_s2_q28'   176 144 144 2 2 $g10 'pan' 28
+Add-PCfg 'p_qcif_cut_e2_s4_q38'   176 144 144 2 4 $gc 'cut' 38
+Add-PCfg 'p_qcif_static_e2_s2_q28' 176 144 144 2 2 $g9 'static' 28 @{ AllSkip = $true }
+Add-PCfg 'p_qcif_pan_gop20_q28'   176 144 144 1 1 'IPPPPPPPPPPPPPPPPPPP' 'pan' 28
+Add-PCfg 'p_strip_w13_s1_q28'     208 144 144 1 1 $g9 'pan' 28
+Add-PCfg 'p_strip_w5_e2_s2_q28'    80 144 144 2 2 $g9 'bars_move' 28
+Add-PCfg 'p_strip_w18_s3_q28'     288  96  96 1 3 $g9 'cut' 28
+Add-PCfg 'p_qcif_ring_q28'        176 144 144 1 3 $g9 'pan' 28 @{ Ring = 16; Delay = 30000 }
+# 720p and 1080p.
+$pseq = @('pan', 'bars_move', 'static', 'cut', 'noise_p', 'pan')
+$pqp = @(12, 28, 38, 51)
+$pi = 0
+foreach ($sz in @(@('720p', 1280, 720, 720), @('1080p', 1920, 1088, 1080))) {
+    foreach ($sh in @(@(1, 1), @(1, 2), @(2, 2), @(2, 4))) {
+        $seq = $pseq[$pi % $pseq.Count]
+        $q = $pqp[$pi % $pqp.Count]
+        $gop = if (($pi % 2) -eq 0) { 'IPPPPPPPP' } else { 'IPPPIPPP' }
+        $pi++
+        Add-PCfg ("p_{0}_e{1}_s{2}_q{3}" -f $sz[0], $sh[0], $sh[1], $q) $sz[1] $sz[2] $sz[3] $sh[0] $sh[1] $gop $seq $q @{ AllSkip = ($seq -eq 'static') }
+    }
+}
+# Throughput configurations: 1080p, two engines, QP 28, a moving picture and a static one, 9 pictures.
+Add-PCfg 'p_1080p_e2_s2_pan_q28'    1920 1088 1080 2 2 $g9 'pan' 28
+Add-PCfg 'p_1080p_e2_s2_static_q28' 1920 1088 1080 2 2 $g9 'static' 28 @{ AllSkip = $true }
 $Config = @($Config | ForEach-Object { $_ -split ',' } | Where-Object { $_ -ne '' })
 if ($Config.Count -gt 0) {
     $Configs = @($Configs | Where-Object { $n = $_.Name; @($Config | Where-Object { $n -like $_ }).Count -gt 0 })
+} else {
+    $Configs = @($Configs | Where-Object { $_.Group -ne 'p' })
 }
 if ($Configs.Count -eq 0) { throw 'no matching configuration' }
+if ($ListConfigs) { $Configs | ForEach-Object { Write-Output $_.Name }; exit 0 }
 
 function Invoke-Tool([string]$exe, [string[]]$toolArgs, [string]$workDir, [string]$outFile) {
     $err = "$outFile.err"
@@ -147,10 +208,14 @@ if (-not $HasMbMode) { Write-Output 'NOTE: RTL has no MB_MODE register (I_PCM-on
 $Floors = "$Tb/h264_psnr_floors.txt"
 $Measured = "$Sim/floors_measured.txt"
 
+if ($BuildToolsOnly) { Write-Output 'TOOLS READY'; exit 0 }
+# Verilator options that keep the model compile small: without them the bench's constant-bound loops (de-tiling, line spreading) unroll into a
+# 70 MB source file and one cc1plus needs 4 to 18 GB at 720p and 1080p; with them the largest file is 0.4 MB and the compile takes seconds.
+$VlExtra = '--unroll-count 8 --unroll-stmts 500 --output-split 5000'
 $allOk = $true
 foreach ($c in $Configs) {
     $name = $c.Name
-    $label = if ($InjectBurst) { "${name}_burstneg" } elseif ($Inject) { "${name}_neg" } else { $name }
+    $label = if ($InjectBurst) { "${name}_burstneg" } elseif ($InjectBurstRef) { "${name}_burstrefneg" } elseif ($Inject) { "${name}_neg" } else { $name }
     $dir = "$Sim/$label"
     if (Test-Path -LiteralPath $dir) { Remove-Item -LiteralPath $dir -Recurse -Force }
     New-Item -ItemType Directory -Force -Path $dir, "$dir/png" | Out-Null
@@ -159,13 +224,19 @@ foreach ($c in $Configs) {
 
     # Input frames and references.
     $refs = @()
-    for ($n = 0; $n -lt $c.P; $n++) {
-        $pat = $c.Pat[[Math]::Min($n, $c.Pat.Count - 1)]
-        $frame = 0
-        if ($pat -eq 'square') { $frame = 1 }
-        & $Py -I "$Tb/h264_gen.py" --pattern $pat --w $c.W --h $c.H --frame $frame --seed (7 + $n) --out "$dir/in$n" | Out-Null
+    if ($c.Seq -ne '') {
+        & $Py -I "$Tb/h264_gen.py" --seq $c.Seq --count $c.P --w $c.W --h $c.H --out "$dir/in" | Out-Null
         if ($LASTEXITCODE -ne 0) { throw "h264_gen.py failed for $name" }
-        $refs += "$dir/in${n}_ref.yuv"
+        for ($n = 0; $n -lt $c.P; $n++) { $refs += "$dir/in${n}_ref.yuv" }
+    } else {
+        for ($n = 0; $n -lt $c.P; $n++) {
+            $pat = $c.Pat[[Math]::Min($n, $c.Pat.Count - 1)]
+            $frame = 0
+            if ($pat -eq 'square') { $frame = 1 }
+            & $Py -I "$Tb/h264_gen.py" --pattern $pat --w $c.W --h $c.H --frame $frame --seed (7 + $n) --out "$dir/in$n" | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "h264_gen.py failed for $name" }
+            $refs += "$dir/in${n}_ref.yuv"
+        }
     }
 
     # Stream parameter sets from the driver.
@@ -181,12 +252,12 @@ foreach ($c in $Configs) {
     if ($Pcm -and $HasMbMode) { $defs += 'TB_PCM=1' }
     if ($c.ContainsKey('Stall')) { $defs += 'TB_EXPECT_STALL=1' }
     $fdir = $dir.Replace([string][char]92, '/')
-    $pa = @("IN0=$fdir/in0.hex", "OUT=$fdir/o")
-    if ($c.P -gt 1) { $pa += "IN1=$fdir/in1.hex" }
+    $pa = @("INPFX=$fdir/in", "OUT=$fdir/o", "GOP=$($c.Gop)")
     if ($Inject) { $pa += 'INJECT' }
     if ($InjectBurst) { $pa += 'INJECT_BURST' }
+    if ($InjectBurstRef) { $pa += 'INJECT_BURST_REF' }
     $simOut = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$Repo/scripts/rtlnet_run_verilator.ps1" -Bench tb_rtlnet_h264_top `
-        -Filelist cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_top.f -Tag $label -Defines ($defs -join ',') -PlusArgs ($pa -join ',') -Threads $Threads
+        -Filelist cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_top.f -Tag $label -Defines ($defs -join ',') -PlusArgs ($pa -join ',') -Threads $Threads -Extra $VlExtra
     $simLine = ($simOut | Select-Object -Last 1)
     $simSecs = $sw.Elapsed.TotalSeconds
     Write-Output "[$label] bench: $simLine"
@@ -199,17 +270,37 @@ foreach ($c in $Configs) {
         }
         continue
     }
+    if ($InjectBurstRef) {
+        if (($LASTEXITCODE -ne 0) -and ($runLog -match 'burst monitor: engine 0 reference read of 4 beats')) {
+            Write-Output "TEST PASS: rtlnet_h264_top_$label (negative control: the burst monitor fired on the injected 4-beat reference read)"
+        } else {
+            Write-Output "TEST FAIL: rtlnet_h264_top_$label (negative control: the burst monitor did not fire on the reference read)"; $allOk = $false
+        }
+        continue
+    }
     if ($LASTEXITCODE -ne 0) { $fails += 'bench'; $allOk = $false; Write-Output "TEST FAIL: rtlnet_h264_top_$label (bench)"; continue }
     foreach ($m in [regex]::Matches($runLog, '(?m)^(STAT|HIST|SUMMARY) [^\r\n]*')) { Write-Output "[$label] $($m.Value)" }
+    # Clocks per macroblock (PIC_CYC / MB_COUNT of an engine) over the I and the P pictures of the run: min, mean, max per picture type.
+    $cpm = @{ I = @(); P = @() }
+    foreach ($m in [regex]::Matches($runLog, '(?m)^STAT pic(\d+) eng(\d+) PIC_CYC=(\d+) type=([IP])\s*\r?\n^STAT pic\d+ eng\d+ MB_COUNT=(\d+)')) {
+        $cpm[$m.Groups[4].Value] += ([double]$m.Groups[3].Value / [double]$m.Groups[5].Value)
+    }
+    foreach ($t in 'I', 'P') {
+        if ($cpm[$t].Count -gt 0) {
+            $st = $cpm[$t] | Measure-Object -Minimum -Maximum -Average
+            Write-Output ("[{0}] CLK_PER_MB {1} pictures x engines {2}: min {3:N0} mean {4:N0} max {5:N0}" -f $label, $t, $st.Count, $st.Minimum, $st.Average, $st.Maximum)
+        }
+    }
 
     # Assemble stream and rebuilt YUV; rebuilt must equal the reference.
-    $asmExtra = @('--pattern', ($c.Pat -join ','), '--qp', "$($c.Qp)", '--floors', $Floors)
+    $asmExtra = @('--pattern', ($c.Pat -join ','), '--qp', "$($c.Qp)", '--floors', $Floors, '--gop', $c.Gop, '--slices', "$($c.S)")
+    if ($c.AllSkip) { $asmExtra += '--allskip' }
     if ($PcmChecks) { $asmExtra += '--pcm' }
     if ($Measure -or $Inject) { $asmExtra += '--measure' }
     $asm = & $Py -I "$Tb/h264_check.py" assemble --dir $dir --prefix "$dir/o" --spspps "$dir/sps.bin" --pics $c.P --disp-h $c.DH --refs @refs @asmExtra
     $asm | ForEach-Object {
         Write-Output "[$label] $_"
-        if ($Measure -and ($_ -match '^FLOOR \S+ \d+ [\d.]+$')) { [System.IO.File]::AppendAllText($Measured, "$_`n") }
+        if ($Measure -and ($_ -match '^FLOOR \S+ \d+ [\d.]+$')) { try { [System.IO.File]::AppendAllText($Measured, "$_`n") } catch { Start-Sleep -Milliseconds 200; try { [System.IO.File]::AppendAllText($Measured, "$_`n") } catch { } } }
     }
     if ($LASTEXITCODE -ne 0) { $fails += 'rebuilt vs reference' }
 

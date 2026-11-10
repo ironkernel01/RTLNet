@@ -7,6 +7,8 @@
 // Overview:
 //   * Stage 1: d = level * V(qp%6, class) (V = normAdjust4x4; LevelScale = 16 * V and the clause's shift of (qp/6 - 4)
 //     reduce to level * V * 2^(qp/6)); position (0,0) of row 0 takes in_dc instead (the already scaled luma or chroma DC).
+//     With in_full the DC position is an ordinary coefficient (luma blocks of an inter macroblock): level * V * 2^(qp/6) like
+//     the others and in_dc is ignored.
 //     Stage 2: left shift by qp/6 (not applied to the DC). Stage 3: row transform e0 = d0 + d2, e1 = d0 - d2,
 //     e2 = (d1 >> 1) - d3, e3 = d1 + (d3 >> 1); f0 = e0 + e3, f1 = e1 + e2, f2 = e1 - e2, f3 = e0 - e3 (arithmetic shifts).
 //     Stage 4: the same on the columns, then (h + 32) >> 6, saturated to 16 bits signed. Stage 5: row output register.
@@ -17,8 +19,9 @@
 //   * Cadence: four consecutive rows per block, the next block may follow on the next clock. No stall. Latency: out_row 0
 //     appears 8 clocks after in_first (in_first at clock t, out_valid first high at t + 8), then rows 1..3.
 // Language: SystemVerilog-2012.
-// Revision: 11-09-2026
+// Revision: 11-10-2026
 //   * 11-09-2026: initial version.
+//   * 11-10-2026: phase 2c-1: in_full (DC position dequantized like the AC positions) for inter luma blocks.
 // Clocks: clk.
 // -----------------------------------------------------------------------------
 module rtlnet_h264_invq (
@@ -33,6 +36,7 @@ module rtlnet_h264_invq (
   input  logic [47:0] in_lvl,
   input  logic [19:0] in_dc,
   input  logic [7:0]  in_tag,
+  input  logic        in_full,
 
   // Output rows, clk domain: four consecutive rows per block, fixed latency, no stall.
   output logic        out_valid,
@@ -68,6 +72,8 @@ module rtlnet_h264_invq (
   logic [7:0]  tag_a;
   logic [5:0]  qp_a;
   logic [19:0] dc_a;
+  logic        full_a;
+  logic        cur_full;
   logic [7:0]  cur_tag;
   logic [5:0]  cur_qp;
   logic [19:0] cur_dc;
@@ -87,6 +93,7 @@ module rtlnet_h264_invq (
   assign cur_tag = in_first ? in_tag : tag_a;
   assign cur_qp  = in_first ? qp : qp_a;
   assign cur_dc  = in_first ? in_dc : dc_a;
+  assign cur_full = in_first ? in_full : full_a;
   assign qm      = 3'(cur_qp % 6'd6);
   assign q6      = 4'(cur_qp / 6'd6);
 
@@ -114,13 +121,14 @@ module rtlnet_h264_invq (
       tag_a <= cur_tag;
       qp_a  <= cur_qp;
       dc_a  <= cur_dc;
+      full_a <= cur_full;
     end
     s1_row   <= row_idx;
     s1_tag   <= cur_tag;
     s1_q6    <= q6;
-    s1_dcpos <= (row_idx == 2'd0);
+    s1_dcpos <= (row_idx == 2'd0) && !cur_full;
     for (int c = 0; c < 4; c++) begin
-      if ((row_idx == 2'd0) && (c == 0)) s1_p[c] <= signed'(cur_dc);
+      if ((row_idx == 2'd0) && (c == 0) && !cur_full) s1_p[c] <= signed'(cur_dc);
       else                               s1_p[c] <= 20'(lv[c] * signed'({1'b0, v_of(qm, cls[c])}));
     end
   end
