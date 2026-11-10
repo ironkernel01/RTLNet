@@ -1,0 +1,10 @@
+# rtlnet_framebuf regression: <bench> <filelist> [tag] [defines=A,B] [plusargs=X,Y] [expectfail]
+# Defines: TB_N slots, TB_NR external reader ports (the firmware reader is extra), TB_FRAMES writer frames, TB_SLOWREL 1 = readers
+# hold long (frames drop for want of a free slot).
+tb_rtlnet_framebuf   cores/rtlnet_framebuf/testbench/tb_rtlnet_framebuf.f  n3_nr1        defines=TB_N=3,TB_NR=1
+tb_rtlnet_framebuf   cores/rtlnet_framebuf/testbench/tb_rtlnet_framebuf.f  n3_nr1_slow   defines=TB_N=3,TB_NR=1,TB_SLOWREL=1
+tb_rtlnet_framebuf   cores/rtlnet_framebuf/testbench/tb_rtlnet_framebuf.f  n4_nr2        defines=TB_N=4,TB_NR=2
+tb_rtlnet_framebuf   cores/rtlnet_framebuf/testbench/tb_rtlnet_framebuf.f  n5_nr3_slow   defines=TB_N=5,TB_NR=3,TB_SLOWREL=1
+tb_rtlnet_framebuf   cores/rtlnet_framebuf/testbench/tb_rtlnet_framebuf.f  n2_nr1        defines=TB_N=2,TB_NR=1
+tb_rtlnet_framebuf   cores/rtlnet_framebuf/testbench/tb_rtlnet_framebuf.f  neg           defines=TB_N=3,TB_NR=1  plusargs=INJECT_FAILURE  expectfail
+rtlnet_framebuf_driver_test  script:cores/rtlnet_framebuf/testbench/rtlnet_framebuf_driver_test.ps1

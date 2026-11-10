@@ -1,0 +1,11 @@
+# rtlnet_vdma_s2mm regression: <bench> <filelist> [tag] [defines=A,B] [plusargs=X,Y] [expectfail]
+#   or: <name> script:<host script path> [arguments]   (passes on exit code 0)
+rtlnet_vdma_s2mm_driver_test script:cores/rtlnet_vdma_s2mm/testbench/rtlnet_vdma_s2mm_driver_test.ps1
+# Defines: TB_GAP 1 = random gaps (stream valid, AW/W/B ready), TB_FULL 1 = also 1280x720 and 1920x1080 frames, TB_BURST
+# MAX_BURST_BEATS, TB_FKB FIFO kilobytes.
+tb_rtlnet_vdma_s2mm   cores/rtlnet_vdma_s2mm/testbench/tb_rtlnet_vdma_s2mm.f  gap          defines=TB_GAP=1
+tb_rtlnet_vdma_s2mm   cores/rtlnet_vdma_s2mm/testbench/tb_rtlnet_vdma_s2mm.f  nogap        defines=TB_GAP=0
+tb_rtlnet_vdma_s2mm   cores/rtlnet_vdma_s2mm/testbench/tb_rtlnet_vdma_s2mm.f  burst8       defines=TB_GAP=1,TB_BURST=8
+tb_rtlnet_vdma_s2mm   cores/rtlnet_vdma_s2mm/testbench/tb_rtlnet_vdma_s2mm.f  burst4_fkb1  defines=TB_GAP=1,TB_BURST=4,TB_FKB=1
+tb_rtlnet_vdma_s2mm   cores/rtlnet_vdma_s2mm/testbench/tb_rtlnet_vdma_s2mm.f  full         defines=TB_GAP=0,TB_FULL=1
+tb_rtlnet_vdma_s2mm   cores/rtlnet_vdma_s2mm/testbench/tb_rtlnet_vdma_s2mm.f  neg          defines=TB_GAP=1  plusargs=INJECT_FAILURE  expectfail

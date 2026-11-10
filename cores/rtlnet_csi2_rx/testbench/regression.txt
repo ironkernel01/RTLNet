@@ -1,0 +1,14 @@
+# rtlnet_csi2_rx regression: <bench> <filelist> [tag] [defines=A,B] [plusargs=X,Y] [expectfail]
+#   or: <name> script:<host script path> [arguments]   (passes on exit code 0)
+rtlnet_csi2_rx_driver_test   script:cores/rtlnet_csi2_rx/testbench/rtlnet_csi2_rx_driver_test.ps1
+csi2_bars_model             script:cores/rtlnet_csi2_rx/testbench/csi2_bars_model.ps1 -SelfTest
+# Defines: TB_REAL 1 = the real timing localparams (3,333,333 clocks per frame, line periods 4,444 and 2,962), TB_GAP 1 = random
+# output ready.
+tb_rtlnet_csi2_rx   cores/rtlnet_csi2_rx/testbench/tb_rtlnet_csi2_rx.f  fast        defines=TB_REAL=0,TB_GAP=0
+tb_rtlnet_csi2_rx   cores/rtlnet_csi2_rx/testbench/tb_rtlnet_csi2_rx.f  fast_gap    defines=TB_REAL=0,TB_GAP=1
+tb_rtlnet_csi2_rx   cores/rtlnet_csi2_rx/testbench/tb_rtlnet_csi2_rx.f  real        defines=TB_REAL=1,TB_GAP=0
+tb_rtlnet_csi2_rx   cores/rtlnet_csi2_rx/testbench/tb_rtlnet_csi2_rx.f  neg         defines=TB_REAL=0,TB_GAP=0  plusargs=INJECT_FAILURE  expectfail
+# Video path (csi2_rx into s2mm into framebuf, memory model): the frame CRC-32 in the slot equals the C model, TB_CRC720 and
+# TB_CRC1080 (decimal) are the values csi2_bars_model.c prints for 720p30 and 1080p30.
+tb_rtlnet_video_path   cores/rtlnet_csi2_rx/testbench/tb_rtlnet_video_path.f  crc_model   defines=TB_CRC720=1832777744,TB_CRC1080=2396646443
+tb_rtlnet_video_path   cores/rtlnet_csi2_rx/testbench/tb_rtlnet_video_path.f  neg         defines=TB_CRC720=1832777744,TB_CRC1080=2396646443  plusargs=INJECT_FAILURE  expectfail
