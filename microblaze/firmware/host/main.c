@@ -624,9 +624,10 @@ static void demo_ddr(void)
     demo_type("show ddr\r");
     demo_check(strstr(host_capture_text(), "Calibration     : done") != NULL &&
                strstr(host_capture_text(), "ID \"ARBT\" 0x41524254, version 11-09-2026 at 0x44A04000") != NULL &&
-               strstr(host_capture_text(), "1 master(s), 16-byte beats, ID width 1, 8 outstanding, high-priority mask 0x01") != NULL &&
+               strstr(host_capture_text(), "2 master(s), 16-byte beats, ID width 1, 8 outstanding, high-priority mask 0x02, narrow mask 0x01, wrap mask 0x01") != NULL &&
                strstr(host_capture_text(), "illegal-burst flag clear") != NULL &&
-               strstr(host_capture_text(), "Master 0 (CPU caches): AW bursts 0,") != NULL, "show ddr: calibrated, arbiter identity and counters");
+               strstr(host_capture_text(), "Master 0 (CPU caches): AW bursts 0,") != NULL &&
+               strstr(host_capture_text(), "Master 1 (video write DMA): AW bursts 0,") != NULL, "show ddr: calibrated, arbiter identity and counters");
     host_capture_clear();
     demo_type("ddr test\r");
     demo_check(strstr(host_capture_text(), "DDR3 test: 16 MiB at 0x80000000") != NULL &&
@@ -690,6 +691,159 @@ static void demo_ddr(void)
 
     host_model_ddr_set(0, 0);
     host_model_ddr_clear();
+    demo_type("disable\r");
+}
+
+/**
+ * @brief Check that the console output since the last capture clear holds a text.
+ * @param needle Text.
+ * @return 1 when found.
+ */
+static int demo_has(const char *needle)
+{
+    return strstr(host_capture_text(), needle) != NULL;
+}
+
+/**
+ * @brief Video path: show camera and show framebuffer without and with the cores, camera mode, source and rate
+ *        (names, rejections, the mode and period interplay), the core's own rejection flags, framebuffer crc at both
+ *        modes against the CRC-32 of the C bar model, with a stride, with no frame and after clear counters.
+ * @return None.
+ */
+static void demo_video(void)
+{
+    /* The CRC-32 of the frames of the C bar model (cores/rtlnet_csi2_rx/testbench/csi2_bars_model.c). */
+    static const char *const crc_720  = "0x6D3DF810 (frame 150, slot 2, 1280x720, pattern, 1843200 bytes)";
+    static const char *const crc_1080 = "0x8ED9EC2B (frame 150, slot 2, 1920x1080, pattern, 4147200 bytes)";
+
+    /* Cores absent. */
+    host_model_video_set(0);
+    host_capture_clear();
+    demo_type("show camera\r");
+    demo_check(demo_has("% rtlnet_csi2_rx not present in this build"), "show camera: core absent");
+    host_capture_clear();
+    demo_type("show framebuffer\r");
+    demo_check(demo_has("% rtlnet_framebuf not present in this build"), "show framebuffer: core absent");
+    demo_type("enable\r");
+    host_capture_clear();
+    demo_type("camera mode 1080p30\r");
+    demo_check(demo_has("% rtlnet_csi2_rx not present in this build"), "camera mode: core absent");
+    host_capture_clear();
+    demo_type("framebuffer crc\r");
+    demo_check(demo_has("% rtlnet_framebuf not present in this build"), "framebuffer crc: core absent");
+
+    /* Reset state: 720p30, auto, pattern active, 30.00 fps. */
+    host_model_video_set(1);
+    host_model_video_frames(150u);
+    host_capture_clear();
+    demo_type("show camera\r");
+    demo_check(demo_has("  Video mode      : 720p30 (1280x720)") && demo_has("  Source setting  : auto") &&
+               demo_has("  Active source   : pattern") && demo_has("  Frame period    : 3333333 ui_clk cycles (30.00 fps)") &&
+               demo_has("  Frame count     : 150") && demo_has("  Camera timeout  : 2 frame periods") &&
+               demo_has("  Status          : 0x00000001 (pattern-active)"), "show camera: reset state");
+    host_capture_clear();
+    demo_type("show framebuffer\r");
+    demo_check(demo_has("  Slots           : 3 x 4096 KiB from DDR3 offset 0x10000000 (CPU 0x90000000)") &&
+               demo_has("  Latest          : slot 2, frame 150, 1280x720, pattern, timestamp ") &&
+               demo_has("  Firmware holds  : none") && demo_has("  Published       : 150, dropped 0, bad 0") &&
+               demo_has("  Reference counts: slot 0 0, slot 1 0, slot 2 0") &&
+               demo_has("  Write DMA       : frames ok 150, bad 0, dropped 0, bursts "), "show framebuffer: published frames");
+
+    /* CRC at 720p30 and 1080p30 against the C model; the slot is released afterwards. */
+    host_capture_clear();
+    demo_type("framebuffer crc\r");
+    demo_check(demo_has("Framebuffer CRC-32 : ") && demo_has(crc_720) && !host_model_video_fw_holds(), "framebuffer crc: 720p30 equals the C model");
+    host_capture_clear();
+    demo_type("camera mode 1080p30\r");
+    demo_check(demo_has("Video mode 1080p30 (1920x1080), effective at the next frame"), "camera mode 1080p30");
+    host_capture_clear();
+    demo_type("show camera\r");
+    demo_check(demo_has("  Video mode      : 1080p30 (1920x1080)"), "show camera: 1080p30");
+    host_capture_clear();
+    demo_type("framebuffer crc\r");
+    demo_check(demo_has(crc_1080) && !host_model_video_fw_holds(), "framebuffer crc: 1080p30 equals the C model");
+    demo_type("camera mode 720p30\r");
+
+    /* A stride: the same frame at 5120 bytes per line gives the same CRC. */
+    demo_type("debug write 0x44A06014 5120\r");
+    host_capture_clear();
+    demo_type("framebuffer crc\r");
+    demo_check(demo_has(crc_720), "framebuffer crc: strided lines, same CRC");
+    demo_type("debug write 0x44A06014 0\r");
+
+    /* Modes, sources and rates: names, bad values, rejection flags. */
+    host_capture_clear();
+    demo_type("camera mode 4k\r");
+    demo_check(demo_has("% Invalid video mode (720p30 or 1080p30) \"4k\""), "camera mode: bad name rejected");
+    host_capture_clear();
+    demo_type("camera source camera\r");
+    demo_check(demo_has("Video source camera"), "camera source camera");
+    host_capture_clear();
+    demo_type("show camera\r");
+    demo_check(demo_has("  Source setting  : camera") && demo_has("  Active source   : camera") &&
+               demo_has("  Status          : 0x00000000 (none)"), "show camera: camera only");
+    demo_type("camera source pattern\r");
+    demo_type("camera source auto\r");
+    host_capture_clear();
+    demo_type("camera source radar\r");
+    demo_check(demo_has("% Invalid video source"), "camera source: bad name rejected");
+    host_capture_clear();
+    demo_type("camera rate 15\r");
+    demo_check(demo_has("Frame rate 15 fps (6666666 ui_clk cycles per frame)"), "camera rate 15");
+    host_capture_clear();
+    demo_type("show camera\r");
+    demo_check(demo_has("  Frame period    : 6666666 ui_clk cycles (15.00 fps)"), "show camera: 15 fps");
+    static const char *const bad_rate[] = { "camera rate 0\r", "camera rate 31\r", "camera rate abc\r", "camera rate -1\r" };
+    for (unsigned i = 0; i < sizeof(bad_rate) / sizeof(bad_rate[0]); i++) {
+        host_capture_clear();
+        demo_type(bad_rate[i]);
+        demo_check(demo_has("% Invalid frame rate in fps (1..30)") && !demo_has("Frame rate "), "camera rate: out of range rejected");
+    }
+    demo_type("camera rate 30\r");
+    /* The mode and period interplay: a period below the 720p30 minimum is legal at 1080p30 and blocks the switch back. */
+    demo_type("camera mode 1080p30\r");
+    demo_type("debug write 0x44A05018 3332500\r");
+    host_capture_clear();
+    demo_type("camera mode 720p30\r");
+    demo_check(demo_has("% Video mode 720p30 rejected: the frame period is below its minimum"), "camera mode: rejected below the minimum period");
+    host_capture_clear();
+    demo_type("show camera\r");
+    demo_check(demo_has("  Video mode      : 1080p30 (1920x1080)") && demo_has("  Frame period    : 3332500 ui_clk cycles (30.00 fps)") &&
+               demo_has("  Status          : 0x00000001 (pattern-active)"), "show camera: rejected mode leaves the register and clears the flag");
+    demo_type("debug write 0x44A05018 3333333\r");
+    demo_type("camera mode 720p30\r");
+    /* Writes the driver does not make: the core's flags show in show camera. */
+    demo_type("debug write 0x44A05010 5\r");
+    demo_type("debug write 0x44A05014 3\r");
+    host_capture_clear();
+    demo_type("show camera\r");
+    demo_check(demo_has("MODE_ERR") && demo_has("SOURCE_ERR") && demo_has("  Video mode      : 720p30"), "show camera: MODE_ERR and SOURCE_ERR flags");
+    demo_type("debug write 0x44A05020 0x3C\r");
+
+    /* No frame, then a slot held by the firmware, then clear counters. */
+    host_model_video_frames(0u);
+    host_capture_clear();
+    demo_type("show framebuffer\r");
+    demo_check(demo_has("  Latest          : none published"), "show framebuffer: none published");
+    host_capture_clear();
+    demo_type("framebuffer crc\r");
+    demo_check(demo_has("% No frame published yet"), "framebuffer crc: no frame published");
+    host_model_video_frames(150u);
+    demo_type("debug write 0x44A0700C 1\r");
+    host_capture_clear();
+    demo_type("show framebuffer\r");
+    demo_check(demo_has("  Firmware holds  : slot 2") && demo_has("  Reference counts: slot 0 0, slot 1 0, slot 2 1"), "show framebuffer: firmware holds a slot");
+    host_capture_clear();
+    demo_type("framebuffer crc\r");
+    demo_check(demo_has("% No frame published yet (or the firmware already holds a slot)"), "framebuffer crc: refused while a slot is held");
+    demo_type("debug write 0x44A0700C 2\r");
+    demo_check(!host_model_video_fw_holds(), "framebuffer: release by register");
+    demo_type("clear counters\r");
+    host_capture_clear();
+    demo_type("show framebuffer\r");
+    demo_check(demo_has("  Published       : 0, dropped 0, bad 0") && demo_has("  Write DMA       : frames ok 0, bad 0, dropped 0, bursts 0, beats 0"),
+               "clear counters clears the video counters");
+    host_model_video_set(0);
     demo_type("disable\r");
 }
 
@@ -891,6 +1045,9 @@ static int demo_run(int inject_failure)
 
     /* DDR3 path: show ddr, ddr test, fault detection. */
     demo_ddr();
+
+    /* Video path: show camera, camera mode/source/rate, show framebuffer, framebuffer crc. */
+    demo_video();
 
     /* Reload restarts the console in user exec mode with default settings. */
     demo_type("enable\r");

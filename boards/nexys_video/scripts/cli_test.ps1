@@ -38,6 +38,8 @@ Revision: 11-09-2026
   * 10-22-2026: CPU network path steps (BSP-based firmware).
   * 11-09-2026: register map 11-09-2026; DDR3 steps (show ddr, ddr test, bad size).
   * 11-09-2026: takes the machine-wide board lock (rtlnet_board_lock.ps1) before touching the board.
+  * 11-09-2026: arbiter with two masters (CPU caches, video write DMA); video steps (show camera, show framebuffer, camera
+    mode, rate and source, framebuffer crc).
   * 11-09-2026: DDR3 image (banner "DDR3 image" or the show version Image line): the three ddr test steps are
     skipped, reported as skipped and not counted as passed.
 -------------------------------------------------------------------------------
@@ -162,8 +164,9 @@ try {
     $ddrImage = (($script:log.ToString() -replace "`r", '') -match '(DDR3 image|(?m)^\s*Image\s+: DDR3)')
     Send-Step $sp 'show ddr' "show ddr`r" @(
         'Calibration\s+: done', 'Arbiter\s+: ID "ARBT" 0x41524254, version 11-09-2026 at 0x44A04000',
-        'Arbiter config\s+: 1 master\(s\), 16-byte beats, ID width 1, 8 outstanding', 'illegal-burst flag clear',
-        'Master 0 \(CPU caches\): AW bursts \d+') 'rtlnet#'
+        'Arbiter config\s+: 2 master\(s\), 16-byte beats, ID width 1, 8 outstanding, high-priority mask 0x02, narrow mask 0x01, wrap mask 0x01',
+        'illegal-burst flag clear', 'Master 0 \(CPU caches\): AW bursts \d+',
+        'Master 1 \(video write DMA\): AW bursts \d+, .* errors 0,') 'rtlnet#'
     if ($ddrImage) {
         Skip-Step 'ddr test (bad size)' 'DDR3 image refuses ddr test'
         Skip-Step 'ddr test (default)' 'DDR3 image refuses ddr test'
@@ -180,7 +183,31 @@ try {
             'Master 0 \(CPU caches\):.* errors 0,', 'DDR3 test PASS') 'rtlnet#' 300000
     }
     Send-Step $sp 'show ddr (after)' "show ddr`r" @('Calibration\s+: done', 'illegal-burst flag clear',
-        'Master 0 \(CPU caches\): AW bursts [1-9]\d*, AR bursts [1-9]\d*, W beats [1-9]\d*, R beats [1-9]\d*, errors 0,') 'rtlnet#'
+        'Master 0 \(CPU caches\): AW bursts [1-9]\d*, AR bursts [1-9]\d*, W beats [1-9]\d*, R beats [1-9]\d*, errors 0,',
+        'Master 1 \(video write DMA\): AW bursts \d+, .* errors 0,') 'rtlnet#'
+    # Video (Phase 1): the commands and their output formats; no CRC value is asserted here (phase1_gate.ps1 compares it).
+    Send-Step $sp 'show camera' "show camera`r" @(
+        'ID "CSI2" 0x43534932', 'Video mode\s+: (720p30 \(1280x720\)|1080p30 \(1920x1080\))', 'Source setting\s+: (auto|camera|pattern)',
+        'Active source\s+: (pattern|camera)', 'Frame period\s+: \d+ ui_clk cycles \(\d+\.\d\d fps\)', 'Frame count\s+: \d+',
+        'Camera timeout\s+: \d+ frame periods', 'Status\s+: 0x[0-9A-F]{8} \(') 'rtlnet#'
+    Send-Step $sp 'show framebuffer' "show framebuffer`r" @(
+        'ID "FBUF" 0x46425546', 'ID "S2MM" 0x53324D4D', 'Slots\s+: 3 x 4096 KiB from DDR3 offset 0x[0-9A-F]{8} \(CPU 0x[0-9A-F]{8}\)',
+        'Latest\s+: (slot \d, frame \d+, \d+x\d+, (pattern|camera), timestamp \d+|none published)', 'Firmware holds\s+: (none|slot \d)',
+        'Published\s+: \d+, dropped \d+, bad \d+', 'Reference counts: slot 0 \d+, slot 1 \d+, slot 2 \d+',
+        'Write DMA\s+: frames ok \d+, bad \d+, dropped \d+, bursts \d+, beats \d+, status 0x[0-9A-F]{8}') 'rtlnet#'
+    Send-Step $sp 'camera mode 1080p30' "camera mode 1080p30`r" @('Video mode 1080p30 \(1920x1080\)') 'rtlnet#'
+    Send-Step $sp 'show camera (1080p30)' "show camera`r" @('Video mode\s+: 1080p30 \(1920x1080\)') 'rtlnet#'
+    Send-Step $sp 'camera mode 720p30' "camera mode 720p30`r" @('Video mode 720p30 \(1280x720\)') 'rtlnet#'
+    Send-Step $sp 'camera mode (bad)' "camera mode 4k`r" @('% Invalid video mode \(720p30 or 1080p30\) "4k"') 'rtlnet#'
+    Send-Step $sp 'camera rate 15' "camera rate 15`r" @('Frame rate 15 fps \(6666666 ui_clk cycles per frame\)') 'rtlnet#'
+    Send-Step $sp 'show camera (15 fps)' "show camera`r" @('Frame period\s+: 6666666 ui_clk cycles \(15\.00 fps\)') 'rtlnet#'
+    Send-Step $sp 'camera rate (bad)' "camera rate 31`r" @('% Invalid frame rate in fps \(1\.\.30\) "31"') 'rtlnet#'
+    Send-Step $sp 'camera rate 30' "camera rate 30`r" @('Frame rate 30 fps \(3333333 ui_clk cycles per frame\)') 'rtlnet#'
+    Send-Step $sp 'camera source (bad)' "camera source radar`r" @('% Invalid video source \(auto, camera or pattern\) "radar"') 'rtlnet#'
+    Send-Step $sp 'camera source pattern' "camera source pattern`r" @('Video source pattern') 'rtlnet#'
+    Send-Step $sp 'camera source auto' "camera source auto`r" @('Video source auto') 'rtlnet#'
+    Send-Step $sp 'framebuffer crc' "framebuffer crc`r" @(
+        'Framebuffer CRC-32 : 0x[0-9A-F]{8} \(frame \d+, slot \d, \d+x\d+, (pattern|camera), \d+ bytes\)') 'rtlnet#' 60000
     Send-Step $sp 'conf t (tcp)' "configure terminal`r" @() 'rtlnet(config)#'
     Send-Step $sp 'tcp echo port 2007' "tcp echo port 2007`r" @() 'rtlnet(config)#'
     Send-Step $sp 'end (tcp)' "end`r" @() 'rtlnet#'

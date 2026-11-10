@@ -51,6 +51,9 @@
 
 #include "cli_commands.h"
 #include "rtlnet_axi_arbiter.h"
+#include "rtlnet_csi2_rx.h"
+#include "rtlnet_framebuf.h"
+#include "rtlnet_vdma_s2mm.h"
 #include "rtlnet_classifier.h"
 #include "rtlnet_ddrtest.h"
 #include "rtlnet_mmio.h"
@@ -86,13 +89,13 @@ static uint32_t  g_cls_mem[HOST_CLS_WORDS];   /* every other register word as wr
 /* DDR3 window (sparse 4 KiB pages) and the arbiter register model. */
 #define HOST_DDR_PAGE_BYTES  4096u
 #define HOST_DDR_PAGES       (RTLNET_PLAT_DDR_SIZE / HOST_DDR_PAGE_BYTES)
-#define HOST_ARB_CAPS        0x01081101u   /* 1 master, 16-byte beat, ID_W 1, 8 outstanding, high-priority mask 1 */
+#define HOST_ARB_CAPS        0x02081102u   /* 2 masters, 16-byte beat, ID_W 1, 8 outstanding, high-priority mask 2 */
 static int       g_ddr_arb_on;
 static int       g_ddr_cal;
 static unsigned  g_ddr_alias;
 static uint32_t  g_ddr_and = 0xFFFFFFFFu;
 static int       g_arb_err;
-static uint32_t  g_arb_cnt[6];             /* AW bursts, AR bursts, W beats, R beats, errors, wait cycles */
+static uint32_t  g_arb_cnt[2][6];             /* AW bursts, AR bursts, W beats, R beats, errors, wait cycles */
 static uint32_t *g_ddr_page[HOST_DDR_PAGES];
 
 /* Protocol wrapper CAPS / CPU_CAPS model. */
@@ -457,7 +460,7 @@ void host_model_ddr_data_and(uint32_t mask)
 void host_model_ddr_error(void)
 {
     g_arb_err = 1;
-    g_arb_cnt[4]++;
+    g_arb_cnt[0][4]++;
 }
 
 /**
@@ -522,8 +525,8 @@ static uint32_t host_ddr_word(uintptr_t addr)
 uint32_t rtlnet_host_mem_read32(uintptr_t addr)
 {
     uint32_t *pg = host_ddr_page(addr, 0);
-    g_arb_cnt[1]++;
-    g_arb_cnt[3]++;
+    g_arb_cnt[0][1]++;
+    g_arb_cnt[0][3]++;
     return ((pg != NULL) ? pg[host_ddr_word(addr)] : 0u) & g_ddr_and;
 }
 
@@ -536,8 +539,8 @@ uint32_t rtlnet_host_mem_read32(uintptr_t addr)
 void rtlnet_host_mem_write32(uintptr_t addr, uint32_t value)
 {
     uint32_t *pg = host_ddr_page(addr, 1);
-    g_arb_cnt[0]++;
-    g_arb_cnt[2]++;
+    g_arb_cnt[0][0]++;
+    g_arb_cnt[0][2]++;
     if (pg != NULL) {
         pg[host_ddr_word(addr)] = value;
     }
@@ -555,10 +558,13 @@ static uint32_t host_arb_read(uint32_t off)
     case RTLNET_REG_VERSION:      return RTLNET_ARB_VERSION_VALUE;
     case RTLNET_REG_CAPS:         return HOST_ARB_CAPS;
     case RTLNET_ARB_REG_STATUS:   return g_arb_err ? RTLNET_ARB_STATUS_ERR : 0u;
+    case RTLNET_ARB_REG_NARROW:   return 0x01u;      /* master 0 (CPU caches) */
+    case RTLNET_ARB_REG_WRAP:     return 0x01u;
     default:
-        if (off >= RTLNET_ARB_MASTER_BASE && off < RTLNET_ARB_MASTER_BASE + RTLNET_ARB_MASTER_STRIDE && (off & 3u) == 0u &&
-            (off - RTLNET_ARB_MASTER_BASE) / 4u < 6u) {
-            return g_arb_cnt[(off - RTLNET_ARB_MASTER_BASE) / 4u];
+        if (off >= RTLNET_ARB_MASTER_BASE && off < RTLNET_ARB_MASTER_BASE + 2u * RTLNET_ARB_MASTER_STRIDE && (off & 3u) == 0u &&
+            ((off - RTLNET_ARB_MASTER_BASE) % RTLNET_ARB_MASTER_STRIDE) / 4u < 6u) {
+            return g_arb_cnt[(off - RTLNET_ARB_MASTER_BASE) / RTLNET_ARB_MASTER_STRIDE]
+                            [((off - RTLNET_ARB_MASTER_BASE) % RTLNET_ARB_MASTER_STRIDE) / 4u];
         }
         return 0u;
     }
@@ -577,6 +583,315 @@ static void host_arb_write(uint32_t off, uint32_t value)
     } else if (off == RTLNET_ARB_REG_STATUS && (value & RTLNET_ARB_STATUS_ERR) != 0u) {
         g_arb_err = 0;
     }
+}
+
+/* ---------------------------------------------------------------------------
+ * Video cores model (Phase 1): the register windows of rtlnet_csi2_rx, rtlnet_vdma_s2mm and rtlnet_framebuf, with
+ * bar frames written into the memory window when the firmware takes a slot. The frame count is set by the harness
+ * (host_model_video_frames); the model publishes frame k into slot (k - 1) % 3.
+ * ------------------------------------------------------------------------- */
+#define HOST_VID_VERSION     0x11092026u
+#define HOST_VID_FB_OFFSET   0x10000000u   /* DDR3 offset of slot 0 */
+#define HOST_VID_SLOTS       3u
+#define HOST_VID_SLOT_LOG2   22u
+#define HOST_VID_SLOT_BYTES  (1u << HOST_VID_SLOT_LOG2)
+#define HOST_VID_PERIOD_RST  3333333u
+#define HOST_VID_BARS        8u
+#define HOST_VID_ERR_FB      (1u << 3)     /* FBUF STATUS.FW_ERR */
+
+static int       g_vid_on;
+static uint32_t  g_vid_frames;             /* frames the model has sent */
+static uint32_t  g_vid_base;               /* frame count at the last CNT_CLEAR */
+static uint32_t  g_csi_mode;
+static uint32_t  g_csi_src;
+static uint32_t  g_csi_period = HOST_VID_PERIOD_RST;
+static uint32_t  g_csi_timeout = RTLNET_CSI2_CAM_TIMEOUT_RESET;
+static uint32_t  g_csi_err;                /* STATUS bits [5:2] */
+static uint32_t  g_dma_ctrl = RTLNET_S2MM_CTRL_ENABLE;
+static uint32_t  g_dma_stride;
+static int       g_fb_holds;
+static uint32_t  g_fb_fw_slot;
+static uint32_t  g_fb_fw_frame;
+static uint32_t  g_fb_fw_mode;
+static uint32_t  g_fb_err;
+static uint32_t  g_fb_takes;
+
+/* Bar colors of gige.md section 5.4: Y, Cb, Cr of white, yellow, cyan, green, magenta, red, blue, black. */
+static const uint8_t g_vid_bar[HOST_VID_BARS][3] = {
+    { 180u, 128u, 128u }, { 168u, 44u, 136u }, { 145u, 147u, 44u }, { 133u, 63u, 52u },
+    { 63u, 193u, 204u }, { 51u, 109u, 212u }, { 28u, 212u, 120u }, { 16u, 128u, 128u }
+};
+
+/**
+ * @brief Present or remove the video cores (the three windows answer 0 when absent).
+ * @param present 1 when the windows answer.
+ * @return None.
+ */
+void host_model_video_set(int present)
+{
+    g_vid_on      = present;
+    g_vid_frames  = 0u;
+    g_vid_base    = 0u;
+    g_csi_mode    = RTLNET_CSI2_MODE_720P30;
+    g_csi_src     = RTLNET_CSI2_SRC_AUTO;
+    g_csi_period  = HOST_VID_PERIOD_RST;
+    g_csi_timeout = RTLNET_CSI2_CAM_TIMEOUT_RESET;
+    g_csi_err     = 0u;
+    g_dma_ctrl    = RTLNET_S2MM_CTRL_ENABLE;
+    g_dma_stride  = 0u;
+    g_fb_holds    = 0;
+    g_fb_err      = 0u;
+    g_fb_takes    = 0u;
+}
+
+/**
+ * @brief Set the number of frames the model has sent and published.
+ * @param frames Frame count.
+ * @return None.
+ */
+void host_model_video_frames(uint32_t frames)
+{
+    g_vid_frames = frames;
+}
+
+/**
+ * @brief Slot a frame was published into.
+ * @param frame Frame number (1-based).
+ * @return Slot index.
+ */
+static uint32_t host_vid_slot(uint32_t frame)
+{
+    return (frame == 0u) ? 0u : ((frame - 1u) % HOST_VID_SLOTS);
+}
+
+/**
+ * @brief Minimum FRAME_PERIOD of a mode.
+ * @param mode VIDEO_MODE value.
+ * @return ui_clk cycles.
+ */
+static uint32_t host_vid_min_period(uint32_t mode)
+{
+    return (mode == RTLNET_CSI2_MODE_1080P30) ? RTLNET_CSI2_PERIOD_MIN_1080P30 : RTLNET_CSI2_PERIOD_MIN_720P30;
+}
+
+/**
+ * @brief Write the bar frame of a mode into a slot of the memory window, lines at the STRIDE (0 = packed).
+ * @param slot Slot index.
+ * @param mode VIDEO_MODE value.
+ * @return None.
+ */
+static void host_vid_fill(uint32_t slot, uint32_t mode)
+{
+    uint32_t w = rtlnet_csi2_rx_mode_width(mode);
+    uint32_t h = rtlnet_csi2_rx_mode_height(mode);
+    uint32_t stride = (g_dma_stride != 0u) ? g_dma_stride : (w * RTLNET_CSI2_BYTES_PER_PIXEL);
+    uintptr_t base = RTLNET_PLAT_DDR_BASE + HOST_VID_FB_OFFSET + ((uintptr_t)slot * HOST_VID_SLOT_BYTES);
+
+    for (uint32_t y = 0u; y < h; y++) {
+        for (uint32_t x = 0u; x < w / 2u; x++) {
+            uint32_t bar = (x * 2u) / (w / HOST_VID_BARS);
+            uint32_t yy = g_vid_bar[bar][0];
+            uint32_t word = yy | ((uint32_t)g_vid_bar[bar][1] << 8) | (yy << 16) | ((uint32_t)g_vid_bar[bar][2] << 24);
+            uintptr_t a = base + ((uintptr_t)y * stride) + ((uintptr_t)x * 4u);
+            uint32_t *pg = host_ddr_page(a, 1);
+            if (pg != NULL) {
+                pg[host_ddr_word(a)] = word;
+            }
+        }
+    }
+}
+
+/**
+ * @brief Model of the rtlnet_csi2_rx register read mux.
+ * @param off Register offset.
+ * @return Register value.
+ */
+static uint32_t host_csi2_read(uint32_t off)
+{
+    switch (off) {
+    case RTLNET_REG_ID:                  return RTLNET_CSI2_ID_VALUE;
+    case RTLNET_REG_VERSION:             return HOST_VID_VERSION;
+    case RTLNET_REG_CAPS:                return RTLNET_CSI2_MODE_COUNT | RTLNET_CSI2_CAPS_PATTERN;
+    case RTLNET_CSI2_REG_VIDEO_MODE:     return g_csi_mode;
+    case RTLNET_CSI2_REG_SOURCE:         return g_csi_src;
+    case RTLNET_CSI2_REG_FRAME_PERIOD:   return g_csi_period;
+    case RTLNET_CSI2_REG_CAM_TIMEOUT:    return g_csi_timeout;
+    case RTLNET_CSI2_REG_STATUS:         return ((g_csi_src != RTLNET_CSI2_SRC_CAMERA) ? RTLNET_CSI2_STATUS_PATTERN : 0u) | g_csi_err;
+    case RTLNET_CSI2_REG_FRAME_COUNT:    return g_vid_frames;
+    case RTLNET_CSI2_REG_ACTIVE:         return g_csi_mode;
+    default:                             return 0u;
+    }
+}
+
+/**
+ * @brief Model of the rtlnet_csi2_rx register writes: rejections set the sticky flags, STATUS is write-1-to-clear.
+ * @param off   Register offset.
+ * @param value Value.
+ * @return None.
+ */
+static void host_csi2_write(uint32_t off, uint32_t value)
+{
+    switch (off) {
+    case RTLNET_CSI2_REG_VIDEO_MODE:
+        if (value >= RTLNET_CSI2_MODE_COUNT) {
+            g_csi_err |= RTLNET_CSI2_STATUS_MODE_ERR;
+        } else if (g_csi_period < host_vid_min_period(value)) {
+            g_csi_err |= RTLNET_CSI2_STATUS_PERIOD_ERR;
+        } else {
+            g_csi_mode = value;
+        }
+        break;
+    case RTLNET_CSI2_REG_SOURCE:
+        if (value > RTLNET_CSI2_SRC_PATTERN) {
+            g_csi_err |= RTLNET_CSI2_STATUS_SOURCE_ERR;
+        } else {
+            g_csi_src = value;
+        }
+        break;
+    case RTLNET_CSI2_REG_FRAME_PERIOD:
+        if (value < host_vid_min_period(g_csi_mode)) {
+            g_csi_err |= RTLNET_CSI2_STATUS_PERIOD_ERR;
+        } else {
+            g_csi_period = value;
+        }
+        break;
+    case RTLNET_CSI2_REG_CAM_TIMEOUT:
+        g_csi_timeout = value;
+        break;
+    case RTLNET_CSI2_REG_STATUS:
+        g_csi_err &= ~(value & RTLNET_CSI2_STATUS_ERR_MASK);
+        break;
+    default:
+        break;
+    }
+}
+
+/**
+ * @brief Model of the rtlnet_vdma_s2mm register read mux.
+ * @param off Register offset.
+ * @return Register value.
+ */
+static uint32_t host_s2mm_read(uint32_t off)
+{
+    uint32_t ok = g_vid_frames - g_vid_base;
+    uint32_t beats = rtlnet_csi2_rx_mode_height(g_csi_mode) * ((rtlnet_csi2_rx_mode_width(g_csi_mode) * RTLNET_CSI2_BYTES_PER_PIXEL) /
+                                                              RTLNET_S2MM_BEAT_BYTES);
+    switch (off) {
+    case RTLNET_REG_ID:                      return RTLNET_S2MM_ID_VALUE;
+    case RTLNET_REG_VERSION:                 return HOST_VID_VERSION;
+    case RTLNET_REG_CAPS:                    return RTLNET_S2MM_MAX_BURST_BEATS | (RTLNET_S2MM_BEAT_BYTES << RTLNET_S2MM_CAPS_BYTES_SHIFT) |
+                                                    (29u << RTLNET_S2MM_CAPS_ADDR_SHIFT);
+    case RTLNET_S2MM_REG_CTRL:               return g_dma_ctrl & RTLNET_S2MM_CTRL_ENABLE;
+    case RTLNET_S2MM_REG_STATUS:             return 0u;
+    case RTLNET_S2MM_REG_STRIDE:             return g_dma_stride;
+    case RTLNET_S2MM_REG_FRAMES_OK:          return ok;
+    case RTLNET_S2MM_REG_BURSTS:             return ok * (beats / RTLNET_S2MM_MAX_BURST_BEATS);
+    case RTLNET_S2MM_REG_BEATS:              return ok * beats;
+    case RTLNET_S2MM_REG_LAST_BASE:          return HOST_VID_FB_OFFSET + (host_vid_slot(g_vid_frames) * HOST_VID_SLOT_BYTES);
+    default:                                 return 0u;
+    }
+}
+
+/**
+ * @brief Model of the rtlnet_vdma_s2mm register writes.
+ * @param off   Register offset.
+ * @param value Value.
+ * @return None.
+ */
+static void host_s2mm_write(uint32_t off, uint32_t value)
+{
+    if (off == RTLNET_S2MM_REG_CTRL) {
+        g_dma_ctrl = value & RTLNET_S2MM_CTRL_ENABLE;
+        if ((value & RTLNET_S2MM_CTRL_CNT_CLEAR) != 0u) {
+            g_vid_base = g_vid_frames;
+        }
+    } else if (off == RTLNET_S2MM_REG_STRIDE) {
+        g_dma_stride = value;
+    }
+}
+
+/**
+ * @brief Model of the rtlnet_framebuf register read mux.
+ * @param off Register offset.
+ * @return Register value.
+ */
+static uint32_t host_fb_read(uint32_t off)
+{
+    uint32_t latest = host_vid_slot(g_vid_frames);
+    uint32_t lmode = g_csi_mode;
+    switch (off) {
+    case RTLNET_REG_ID:                  return RTLNET_FB_ID_VALUE;
+    case RTLNET_REG_VERSION:             return HOST_VID_VERSION;
+    case RTLNET_REG_CAPS:                return HOST_VID_SLOTS | (1u << RTLNET_FB_CAPS_READERS_SHIFT) |
+                                                (HOST_VID_SLOT_LOG2 << RTLNET_FB_CAPS_SLOTLOG2_SHIFT) | (29u << RTLNET_FB_CAPS_ADDR_SHIFT);
+    case RTLNET_FB_REG_STATUS:           return ((g_vid_frames != 0u) ? RTLNET_FB_STATUS_LATEST_VALID : 0u) |
+                                                (g_fb_holds ? RTLNET_FB_STATUS_FW_HOLDS : 0u) | g_fb_err |
+                                                (latest << RTLNET_FB_STATUS_LATEST_SHIFT) | (g_fb_fw_slot << RTLNET_FB_STATUS_FWSLOT_SHIFT);
+    case RTLNET_FB_REG_FB_BASE:          return HOST_VID_FB_OFFSET;
+    case RTLNET_FB_REG_SLOT_BYTES:       return HOST_VID_SLOT_BYTES;
+    case RTLNET_FB_REG_LATEST_BASE:      return HOST_VID_FB_OFFSET + (latest * HOST_VID_SLOT_BYTES);
+    case RTLNET_FB_REG_LATEST_FRAME:     return g_vid_frames;
+    case RTLNET_FB_REG_LATEST_TS:        return g_vid_frames * g_csi_period;
+    case RTLNET_FB_REG_LATEST_WH:        return (rtlnet_csi2_rx_mode_height(lmode) << 16) | rtlnet_csi2_rx_mode_width(lmode);
+    case RTLNET_FB_REG_LATEST_SRC:       return 1u;
+    case RTLNET_FB_REG_FW_BASE:          return HOST_VID_FB_OFFSET + (g_fb_fw_slot * HOST_VID_SLOT_BYTES);
+    case RTLNET_FB_REG_FW_FRAME:         return g_fb_fw_frame;
+    case RTLNET_FB_REG_FW_TS:            return g_fb_fw_frame * g_csi_period;
+    case RTLNET_FB_REG_FW_WH:            return (rtlnet_csi2_rx_mode_height(g_fb_fw_mode) << 16) | rtlnet_csi2_rx_mode_width(g_fb_fw_mode);
+    case RTLNET_FB_REG_FW_SRC:           return 1u;
+    case RTLNET_FB_REG_PUBLISHED:        return g_vid_frames - g_vid_base;
+    case RTLNET_FB_REG_FW_TAKES:         return g_fb_takes;
+    case RTLNET_FB_REG_REFCNT + 0u:      return (g_fb_holds && g_fb_fw_slot == 0u) ? 1u : 0u;
+    case RTLNET_FB_REG_REFCNT + 4u:      return (g_fb_holds && g_fb_fw_slot == 1u) ? 1u : 0u;
+    case RTLNET_FB_REG_REFCNT + 8u:      return (g_fb_holds && g_fb_fw_slot == 2u) ? 1u : 0u;
+    default:                             return 0u;
+    }
+}
+
+/**
+ * @brief Model of the rtlnet_framebuf register writes: FW_TAKE and FW_RELEASE with the sticky FW_ERR, CNT_CLEAR.
+ * @param off   Register offset.
+ * @param value Value.
+ * @return None.
+ */
+static void host_fb_write(uint32_t off, uint32_t value)
+{
+    if (off == RTLNET_FB_REG_STATUS) {
+        g_fb_err &= ~(value & HOST_VID_ERR_FB);
+    } else if (off == RTLNET_FB_REG_CTRL) {
+        if ((value & RTLNET_FB_CTRL_FW_TAKE) != 0u) {
+            if (g_vid_frames == 0u || g_fb_holds) {
+                g_fb_err |= HOST_VID_ERR_FB;
+            } else {
+                g_fb_holds    = 1;
+                g_fb_fw_slot  = host_vid_slot(g_vid_frames);
+                g_fb_fw_frame = g_vid_frames;
+                g_fb_fw_mode  = g_csi_mode;
+                g_fb_takes++;
+                host_vid_fill(g_fb_fw_slot, g_fb_fw_mode);
+            }
+        }
+        if ((value & RTLNET_FB_CTRL_FW_RELEASE) != 0u) {
+            if (!g_fb_holds) {
+                g_fb_err |= HOST_VID_ERR_FB;
+            } else {
+                g_fb_holds = 0;
+            }
+        }
+        if ((value & RTLNET_FB_CTRL_CNT_CLEAR) != 0u) {
+            g_vid_base = g_vid_frames;
+            g_fb_takes = 0u;
+        }
+    }
+}
+
+/**
+ * @brief Held-slot state of the framebuf model, for the harness checks.
+ * @return 1 while the firmware holds a slot.
+ */
+int host_model_video_fw_holds(void)
+{
+    return g_fb_holds;
 }
 
 /**
@@ -626,6 +941,15 @@ uint32_t rtlnet_host_reg_read32(uintptr_t addr)
     if (g_txo_on && addr >= RTLNET_PLAT_TXO_BASE && addr < RTLNET_PLAT_TXO_BASE + RTLNET_TXO_WINDOW_BYTES) {
         return host_txo_read((uint32_t)(addr - RTLNET_PLAT_TXO_BASE));
     }
+    if (g_vid_on && addr >= RTLNET_PLAT_CSI2_BASE && addr < RTLNET_PLAT_CSI2_BASE + 0x1000u) {
+        return host_csi2_read((uint32_t)(addr - RTLNET_PLAT_CSI2_BASE));
+    }
+    if (g_vid_on && addr >= RTLNET_PLAT_S2MM_BASE && addr < RTLNET_PLAT_S2MM_BASE + 0x1000u) {
+        return host_s2mm_read((uint32_t)(addr - RTLNET_PLAT_S2MM_BASE));
+    }
+    if (g_vid_on && addr >= RTLNET_PLAT_FB_BASE && addr < RTLNET_PLAT_FB_BASE + 0x1000u) {
+        return host_fb_read((uint32_t)(addr - RTLNET_PLAT_FB_BASE));
+    }
     if (g_ddr_arb_on && addr >= RTLNET_PLAT_ARB_BASE && addr < RTLNET_PLAT_ARB_BASE + 0x1000u) {
         return host_arb_read((uint32_t)(addr - RTLNET_PLAT_ARB_BASE));
     }
@@ -670,6 +994,18 @@ void rtlnet_host_reg_write32(uintptr_t addr, uint32_t value)
     }
     if (g_txo_on && addr >= RTLNET_PLAT_TXO_BASE && addr < RTLNET_PLAT_TXO_BASE + RTLNET_TXO_WINDOW_BYTES) {
         host_txo_write((uint32_t)(addr - RTLNET_PLAT_TXO_BASE), value);
+        return;
+    }
+    if (g_vid_on && addr >= RTLNET_PLAT_CSI2_BASE && addr < RTLNET_PLAT_CSI2_BASE + 0x1000u) {
+        host_csi2_write((uint32_t)(addr - RTLNET_PLAT_CSI2_BASE), value);
+        return;
+    }
+    if (g_vid_on && addr >= RTLNET_PLAT_S2MM_BASE && addr < RTLNET_PLAT_S2MM_BASE + 0x1000u) {
+        host_s2mm_write((uint32_t)(addr - RTLNET_PLAT_S2MM_BASE), value);
+        return;
+    }
+    if (g_vid_on && addr >= RTLNET_PLAT_FB_BASE && addr < RTLNET_PLAT_FB_BASE + 0x1000u) {
+        host_fb_write((uint32_t)(addr - RTLNET_PLAT_FB_BASE), value);
         return;
     }
     if (g_ddr_arb_on && addr >= RTLNET_PLAT_ARB_BASE && addr < RTLNET_PLAT_ARB_BASE + 0x1000u) {

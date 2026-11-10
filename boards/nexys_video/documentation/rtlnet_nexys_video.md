@@ -24,7 +24,8 @@
 | `scripts/build.ps1` | bitstream + XSA, firmware (BSP from the XSA) + merge (+ `-Network`, `-Program`, `-Test`) |
 | `scripts/merge_elf.ps1` | updatemem: firmware ELF into the LMB BRAM |
 | `scripts/program.ps1`, `scripts/program.tcl` | JTAG programming (hw_server, `program_hw_devices`) |
-| `scripts/cli_test.ps1` | console test over the USB-UART (COM4), either build |
+| `scripts/cli_test.ps1` | console test over the USB-UART (COM4), either build; Phase 1 adds the video commands |
+| `scripts/phase1_gate.ps1` | Phase 1 board gate: color bars with no firmware writes, `framebuffer crc` against the C model at 720p30 and 1080p30, arbiter errors 0 |
 | `scripts/net_test.ps1` | hardware network test: board side over the CLI, host side from the PC NIC when it is up |
 | `../../scripts/rtlnet_board.ps1`, `../../scripts/rtlnet_board_lock.ps1` | machine-wide board lock shared with the other session that uses the board (section 5.3) |
 | `scripts/tcp_test.ps1` | hardware test of the CPU network path: lwIP TCP echo, TCP iperf (rtlnet_lwiperf: PC -> board, `-R`, `-r`, `-d`), both together with the RTL UDP iperf |
@@ -58,8 +59,9 @@ glitch argument). `u_rst_ddr` (clk `ui_clk`) takes `rst_arstn` alone; the MIG ui
 
 ## 3. RTLNet window and system registers
 
-Decoder `u_decoder` (`rtlnet_axil_decoder`, N = 6), windows of architecture 6.1: SYS 0x44A0_0000,
-MAC 0x44A0_1000, MDIO 0x44A0_2000, ECHO 0x44A0_3000, PROTOCOL 0x44A1_0000 (64 KiB),
+Decoder `u_decoder` (`rtlnet_axil_decoder`, N = 10), windows of architecture 6.1: SYS 0x44A0_0000,
+MAC 0x44A0_1000, MDIO 0x44A0_2000, ECHO 0x44A0_3000, ARBITER 0x44A0_4000, and the Phase 1 video cores CSI2 0x44A0_5000
+(`rtlnet_csi2_rx`), S2MM 0x44A0_6000 (`rtlnet_vdma_s2mm`), FRAMEBUF 0x44A0_7000 (`rtlnet_framebuf`), PROTOCOL 0x44A1_0000 (64 KiB),
 CLASSIFIER 0x44A2_0000 (reserved for a main-ingress classifier; the CPU-path classifier is inside the protocol
 wrapper at PROTOCOL + 0x8000 = 0x44A1_8000; the checksum offload `rtlnet_tcp_offload` at PROTOCOL + 0x9000 =
 0x44A1_9000). Windows without a core are `rtlnet_axil_slave` stubs: OKAY,
@@ -730,6 +732,58 @@ The board stays in the release (LMB) state.
 The DDR3 image gives about 25 to 55 % lower TCP rates than the LMB image (code and data in DDR3 behind 8 KiB caches); the release firmware stays in the LMB. Phase 0 is complete: the DDR3-linked ELF loads over
 JTAG, runs the console, `net_test` and `tcp_test` with 0 arbiter errors, and the release image passes all three tests.
 
+### 6.10 Phase 1: color bars into the frame buffer (11-09-2026)
+
+Change: three cores on `ui_clk` (`documentation/gige.md` sections 5 and 6): `u_csi2` (`rtlnet_csi2_rx`: register block, 75 % color bars at 720p30
+or 1080p30, source switch; the camera stream input is tied off, valid 0), `u_s2mm` (`rtlnet_vdma_s2mm`: 2D write DMA, INCR bursts of at most 16 beats
+that never cross 4 KiB) and `u_fb` (`rtlnet_framebuf`: 3 slots of 4 MiB at DDR3 offset 0x1000_0000, CPU address 0x9000_0000, the reader port tied off, the
+firmware reads through the register window). `u_s2mm` is arbiter master 1 at fixed top priority (`HIGH_PRIO_MASK` 2'b10); `NUM_MASTERS` 2 with `NARROW_MASK`
+and `WRAP_MASK` 2'b01, so the CPU caches stay master 0 and keep both. Register windows on the existing decoder (slaves 7 to 9: 0x44A0_5000, 0x44A0_6000, 0x44A0_7000), each core
+crossing from `cpu_clk` through its own `rtlnet_axil_cdc`. Bench: the board bench reads the three windows' ID, CAPS and reset values and a rejected `VIDEO_MODE` write through the decoder and the
+crossings, and the arbiter's two-master CAPS (`0x02081102`); the unmapped test address is now 0x44A0_8000.
+
+CDC gate (`build_bitstream.tcl`): only `rtlnet_axil_cdc` grows, +1 per video core (`u_csi2`, `u_s2mm`, `u_fb`), so the expectation goes
+`axil_cdc 6` to `9` (network) and `1` to `4` (CPU-only), with the reason in the script; `fifo` and `gray` are unchanged (the write DMA's beat FIFO is one clock
+domain, no new packet FIFO or Gray crossing). The gate is not relaxed and nothing is waived. The `sync` class lists 6 more instances (the two toggle synchronizers of each added crossing).
+
+First build (`phase1_build_run1_timingfail.txt`): timing gate failed, WNS -1.061 ns with 171 failing endpoints, all in `u_s2mm` (the AW address,
+burst length and 4 KiB split computed in one clock). Fix: the next burst is computed in three registered steps (documentation `rtlnet_vdma_s2mm.md`); the benches pass unchanged.
+
+Build (`build.ps1 -Network`, `phase1_build.txt`): `rtlnet_cdc: PASS` (`fifo 15 axil_cdc 9 gray 6`), `RTLNET_BUILD: PASS`.
+
+| Network build | LUT | FF | BRAM tiles | WNS / WHS / WPWS (ns) | CDC classes (instances) |
+|---|---|---|---|---|---|
+| before (Phase 0 close-out, `phase0_final_build_info_before.txt`) | 32600 (24.36 %) | 42345 (15.82 %) | 239.5 (65.62 %) | 0.103 / 0.008 / 0.000 | fifo 15, sync 33, axil_cdc 6, gray 6, reset 9 |
+| first Phase 1 build (timing failed) | | | | -1.061 / 0.050 / 0.000 | |
+| after (u_csi2, u_s2mm, u_fb) | 34135 (25.51 %) | 44743 (16.72 %) | 241.5 (66.16 %) | 0.101 / 0.008 / 0.000 | fifo 15, sync 39, axil_cdc 9, gray 6, reset 9 |
+| delta | +1535 | +2398 | +2.0 (the 2 KiB beat FIFO) | | axil_cdc +3, sync +6 |
+
+CPU-only variant (`build.ps1 -Tag cpu`, `phase1_cpu_build.txt`, outputs in `build/cpu/`): `rtlnet_cdc: PASS` (`fifo 5 axil_cdc 4 gray 0`, the three video cores' crossings counted), `RTLNET_BUILD: PASS`, WNS 0.269 ns, WHS 0.007 ns, WPWS 0.000 ns, 17833 LUT (13.33 %), 19189 FF (7.17 %), 176 BRAM tiles (48.22 %), 4 DSP; not programmed (no firmware merge).
+
+Firmware (`phase1_fw_build.txt`, release image, LMB): text 124,692, data 1,128, bss 268,816 bytes (385 KiB of the 512 KiB LMB). The host harness demo passes with the new commands
+(`TEST PASS: menu_demo checks=412`).
+
+Board (lock held; JTAG, COM3, 1000 Mb/s, `-Nic Wi-Fi -Speed 1000`, 192.168.68.68; release image):
+
+| Step | Result | Log |
+|---|---|---|
+| `program.ps1` | PASS | `phase1_program.txt` |
+| `phase1_gate.ps1` (no firmware writes before step b) | `PHASE1_GATE: PASS 19/19` | `phase1_gate.txt`, `phase1_gate_transcript.txt` |
+| `show camera` after programming, no writes | 720p30, source pattern, 30.00 fps period 3,333,333; FRAME_COUNT 29.908 fps over 124 frames (4 s of the PC clock, tolerance 0.3) | `phase1_gate.txt` |
+| `framebuffer crc` at 720p30 | board `0x6D3DF810` (1280x720, 1,843,200 bytes), C model `0x6D3DF810` | `phase1_gate.txt` |
+| `camera mode 1080p30`, `framebuffer crc` twice | board `0x8ED9EC2B` and `0x8ED9EC2B` (frames 853 and 878, 4,147,200 bytes), C model `0x8ED9EC2B` | `phase1_gate.txt` |
+| `show ddr` | arbiter 2 masters, high-priority mask 0x02; master 0 and master 1 `errors 0`, illegal-burst flag clear | `phase1_gate.txt`, `phase1_final_state.txt` |
+| `show framebuffer` | published above 0, dropped 0, bad 0, firmware holds none, reference counts 0 | `phase1_gate.txt`, `phase1_final_state.txt` |
+| `camera rate 15`, `camera rate 30`, `camera source`, bad inputs | 15.027 fps measured against 15.000 from the period; bad mode, rate 0 and rate 31 rejected, nothing changed | `phase1_gate.txt` |
+| `cli_test.ps1` | `CLI_TEST: PASS 47/47` (the 30 earlier steps with the 2-master `show ddr`, `ddr test` 16 and 64 MiB with the video DMA running, and 14 video steps) | `phase1_cli_test.txt` |
+| `net_test.ps1` | `NET_TEST: PASS 25/25` (UDP 900 Mbit/s PC to board 436 Mbit/s 0 lost, board to PC 942 Mbit/s 574 of 401242 lost) | `phase1_net_test.txt` |
+| `tcp_test.ps1` | `TCP_TEST: PASS 8/8` (TCP iperf PC to board 68.9 Mbit/s, `-R` 96.8, `-r` 87.7, `-d` 87.3; together 64.6 TCP and 20.9 UDP) | `phase1_tcp_test.txt` |
+| `show ddr`, `show camera`, `show framebuffer`, `framebuffer crc` after all tests | master 0 and master 1 `errors 0`, `First illegal : none captured`; 8,250 frames published, dropped 0, bad 0; CRC `0x6D3DF810` | `phase1_final_state.txt` |
+
+Observation: `STATUS.OVERRUN` of `rtlnet_csi2_rx` was set at the first `show camera` after programming (the first frame waits for the DDR3 calibration, so
+a frame tick found it still running); cleared by writing 1 it stayed clear over 20 s idle, `ddr test 64`, `framebuffer crc` and two mode changes
+(`phase1_overrun_probe.txt`). The flag is startup-only and does not count a lost or bad frame.
+
 ## 7. Network integration (done 10-22-2026) and what remains
 
 Integrated: `u_mac`, `u_mdio`, `u_protocol` (every leaf, the CPU network path and its classifier), `u_echo` under
@@ -763,3 +817,4 @@ Open:
 | 11-09-2026 | Phase 0 stage 1: DDR3 (`rtlnet_ddr`, `rtlnet_axi_arbiter`, bridge `u_ddr_cdc`), MicroBlaze V caches; build gates (MIG ASYNC_REG, three required MIG waivers, fifo 15 / CPU-only 5); results in section 6.8 |
 | 11-09-2026 | Phase 0 stage 3: arbiter `WRAP_MASK` and illegal-burst capture, board top `WRAP_MASK` 1, `show ddr` capture, machine-wide board lock (section 5.3), `cli_test` skips `ddr test` in the DDR3 image; results in section 6.9 |
 | 11-09-2026 | Phase 0 stage 2: `C_PC_WIDTH` 32, `build.ps1 -Tag` variant builds, `jtag_load_elf` with calibration wait, download check and `-Image`, DDR3 image (`build.ps1 -Ddr`); CPU-only counts `fifo 5 axil_cdc 1 gray 0` built and passing; results and the open arbiter finding in section 6.9 |
+| 11-09-2026 | Phase 1 (section 6.10): video cores `u_csi2`, `u_s2mm`, `u_fb` on decoder slaves 7 to 9, arbiter with two masters, CDC expectation `axil_cdc 9` (network) and `4` (CPU-only), firmware video commands and the Phase 1 gate |

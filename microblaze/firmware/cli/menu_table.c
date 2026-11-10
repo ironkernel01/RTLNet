@@ -40,6 +40,7 @@
  *  10-22-2026  MenuBuilder AI / Steve Spano    TCP iperf server (lwiperf), phy reset, phy mmd / c45, LED and EEE in show phy
  *  10-22-2026  MenuBuilder AI / Steve Spano    Checksum offload: show offload, offload tx-ip / tx-l4 / rx / all on|off
  *  11-09-2026  MenuBuilder AI / Steve Spano    DDR3: show ddr, ddr test [size in MiB]; clear counters also clears the DDR3 arbiter
+ *  11-09-2026  MenuBuilder AI / Steve Spano    Video (Phase 1): show camera, show framebuffer, camera mode|source|rate, framebuffer crc; clear counters clears the video cores
  * ===========================================================================
  */
 #include "menu.h"
@@ -100,12 +101,24 @@ const MenuCommandDef g_menu_commands[] = {
       "Checksum offload: discovery, CTRL, lwIP flags, counters, zero-copy options", cli_show_offload, MENU_MODE_NONE },
     { "cli_show_ddr", MENU_MODE_EXEC, "SHOW DDR",
       "DDR3 calibration, caches, arbiter identity, error status and counters", cli_show_ddr, MENU_MODE_NONE },
+    { "cli_show_camera", MENU_MODE_EXEC, "SHOW CAMERA",
+      "Video source: mode, source switch, active source, frame rate and count", cli_show_camera, MENU_MODE_NONE },
+    { "cli_show_framebuffer", MENU_MODE_EXEC, "SHOW FRAMEBUFFER",
+      "Video frame buffer: slots, latest published frame, reference counts, write DMA", cli_show_framebuffer, MENU_MODE_NONE },
     { "cli_show_running", MENU_MODE_PRIV, "SHOW RUNNING-CONFIG",
       "Current configuration", cli_show_running, MENU_MODE_NONE },
     { "cli_disable", MENU_MODE_PRIV, "DISABLE",
       "Leave privileged exec mode", cli_disable, MENU_MODE_NONE },
     { "cli_ddr_test", MENU_MODE_PRIV, "DDR TEST {SIZE}",
       "DDR3 memory test from 0x80000000: data bus, address bus, random fill and verify, with MB/s (SIZE in MiB, 1..512, default 16)", cli_ddr_test, MENU_MODE_NONE },
+    { "cli_camera_mode", MENU_MODE_PRIV, "CAMERA MODE [MODE]",
+      "Video mode: 720p30 or 1080p30 (effective at the next frame)", cli_camera_mode, MENU_MODE_NONE },
+    { "cli_camera_source", MENU_MODE_PRIV, "CAMERA SOURCE [SOURCE]",
+      "Video source: auto, camera or pattern", cli_camera_source, MENU_MODE_NONE },
+    { "cli_camera_rate", MENU_MODE_PRIV, "CAMERA RATE [FPS]",
+      "Frame rate in frames per second, 1..30 (30 is the reset value)", cli_camera_rate, MENU_MODE_NONE },
+    { "cli_framebuffer_crc", MENU_MODE_PRIV, "FRAMEBUFFER CRC",
+      "CRC-32 of the latest published frame, read through the cache", cli_framebuffer_crc, MENU_MODE_NONE },
     { "cli_debug_read", MENU_MODE_PRIV, "DEBUG READ [ADDR]",
       "Read a 32-bit word (hex 0x... or decimal address)", cli_debug_read, MENU_MODE_NONE },
     { "cli_debug_write", MENU_MODE_PRIV, "DEBUG WRITE [ADDR] [VALUE]",
@@ -240,6 +253,8 @@ const MenuKeywordDef g_menu_keywords[] = {
     { MENU_MODE_EXEC, "SHOW", "Show running system information" },
     { MENU_MODE_PRIV, "DEBUG", "Raw register access" },
     { MENU_MODE_PRIV, "DDR", "DDR3 memory" },
+    { MENU_MODE_PRIV, "CAMERA", "Video source: mode, source switch, frame rate" },
+    { MENU_MODE_PRIV, "FRAMEBUFFER", "Video frame buffer in DDR3" },
     { MENU_MODE_PRIV, "LED", "Set a user LED (2..7)" },
     { MENU_MODE_PRIV, "PHY", "PHY registers over MDIO" },
     { MENU_MODE_PRIV, "PHY MMD", "MMD registers, Clause 45 over Clause 22 (registers 13/14)" },

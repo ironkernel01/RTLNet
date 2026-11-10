@@ -50,6 +50,7 @@
  *  11-09-2026  MenuBuilder AI / Steve Spano    Boot banner names the image (LMB or DDR3)
  *  11-09-2026  MenuBuilder AI / Steve Spano    show ddr: wrap mask and the arbiter's first-illegal-burst capture
  *  11-09-2026  MenuBuilder AI / Steve Spano    show version: Image line (LMB or DDR3)
+ *  11-09-2026  MenuBuilder AI / Steve Spano    Video (Phase 1): show camera, show framebuffer, camera mode|source|rate, framebuffer crc
  * ===========================================================================
  */
 #include "cli_commands.h"
@@ -61,11 +62,14 @@
 #include "rtlnet_arp.h"
 #include "rtlnet_board.h"
 #include "rtlnet_axi_arbiter.h"
+#include "rtlnet_csi2_rx.h"
 #include "rtlnet_cpupath.h"
 #include "rtlnet_ddrtest.h"
 #include "rtlnet_dhcp.h"
 #include "rtlnet_eth_mac.h"
 #include "rtlnet_eth_protocol.h"
+#include "rtlnet_fbcrc.h"
+#include "rtlnet_framebuf.h"
 #include "rtlnet_fmt.h"
 #include "rtlnet_icmp.h"
 #include "rtlnet_iperf.h"
@@ -79,6 +83,7 @@
 #include "rtlnet_tcp_iperf.h"
 #include "rtlnet_udp_echo.h"
 #include "rtlnet_udp_socket.h"
+#include "rtlnet_vdma_s2mm.h"
 
 #define CLI_LED_FIRST_USER  2u
 #define CLI_LED_LAST        7u
@@ -105,6 +110,9 @@ static const cli_core_t g_core_dhcp  = { "DHCP",       RTLNET_PLAT_DHCP_BASE,  R
 static const cli_core_t g_core_iperf = { "IPERF",      RTLNET_PLAT_IPERF_BASE, RTLNET_ID_IPERF };
 static const cli_core_t g_core_udp   = { "UDP socket", RTLNET_PLAT_UDP_BASE,   RTLNET_ID_UDP };
 static const cli_core_t g_core_echo  = { "UDP echo",   RTLNET_PLAT_ECHO_BASE,  RTLNET_ID_ECHO };
+static const cli_core_t g_core_csi2  = { "rtlnet_csi2_rx",   RTLNET_PLAT_CSI2_BASE, RTLNET_ID_CSI2 };
+static const cli_core_t g_core_s2mm  = { "rtlnet_vdma_s2mm", RTLNET_PLAT_S2MM_BASE, RTLNET_ID_S2MM };
+static const cli_core_t g_core_fb    = { "rtlnet_framebuf",  RTLNET_PLAT_FB_BASE,   RTLNET_ID_FB };
 
 /* ------------------------------------------------------------------------- */
 /* Helpers                                                                   */
@@ -1438,6 +1446,13 @@ int cli_clear_counters(const MenuCommandContext *ctx)
     if (rtlnet_axi_arbiter_probe(RTLNET_PLAT_ARB_BASE, NULL) == 0) {
         rtlnet_axi_arbiter_clear(RTLNET_PLAT_ARB_BASE);
         rtlnet_axi_arbiter_err_clear(RTLNET_PLAT_ARB_BASE);
+    }
+    if (rtlnet_vdma_s2mm_probe(RTLNET_PLAT_S2MM_BASE, NULL) == 0) {
+        rtlnet_vdma_s2mm_clear(RTLNET_PLAT_S2MM_BASE);
+        rtlnet_vdma_s2mm_err_clear(RTLNET_PLAT_S2MM_BASE);
+    }
+    if (rtlnet_framebuf_probe(RTLNET_PLAT_FB_BASE, NULL) == 0) {
+        rtlnet_framebuf_clear(RTLNET_PLAT_FB_BASE);
     }
     rtlnet_offload_reset_stats();
     rtlnet_lwip_clear_counters();
@@ -3090,7 +3105,7 @@ static void cli_print_rate(uint32_t x100)
  */
 static void cli_print_arb_master(uint32_t m)
 {
-    static const char *const names[] = { "CPU caches" };
+    static const char *const names[] = { "CPU caches", "video write DMA" };
     rtlnet_axi_arbiter_counters_t c;
     if (rtlnet_axi_arbiter_read_counters(RTLNET_PLAT_ARB_BASE, m, &c) != 0) {
         return;
@@ -3232,4 +3247,270 @@ int cli_ddr_test(const MenuCommandContext *ctx)
     cli_print_arb_master(0u);
     fmt_printf("DDR3 test %s\n", r.pass ? "PASS" : "FAIL");
     return r.pass ? 0 : -1;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Video: camera source, frame buffer                                        */
+/* ------------------------------------------------------------------------- */
+
+#define CLI_VIDEO_FPS_X100     10000000000ull   /* RTLNET_CSI2_UI_CLK_HZ * 100: fps times 100 from a period */
+#define CLI_VIDEO_PCT          100u
+
+static const char *const g_mode_name[RTLNET_CSI2_MODE_COUNT] = { "720p30", "1080p30" };
+static const char *const g_source_name[]                     = { "auto", "camera", "pattern" };
+
+/**
+ * @brief Print a core identity line: name, ID text, ID value, version and window address.
+ * @param core    Core descriptor.
+ * @param version VERSION register value.
+ * @return None.
+ */
+static void cli_print_core_line(const cli_core_t *core, uint32_t version)
+{
+    char txt[5];
+    board_id_text(core->id, txt);
+    fmt_printf("  %-16s: ID \"%s\" 0x%08X, version ", core->name, txt, (unsigned)core->id);
+    cli_print_datecode(version);
+    fmt_printf(" at 0x%08X\n", (unsigned)core->base);
+}
+
+/**
+ * @brief Print the CSI2 STATUS register: the value and the names of the set bits.
+ * @param status STATUS value.
+ * @return None.
+ */
+static void cli_print_csi2_status(uint32_t status)
+{
+    static const struct {
+        uint32_t    bit;
+        const char *name;
+    } flags[] = {
+        { RTLNET_CSI2_STATUS_PATTERN,    "pattern-active" },
+        { RTLNET_CSI2_STATUS_CLK_RUN,    "camera-clock-running" },
+        { RTLNET_CSI2_STATUS_MODE_ERR,   "MODE_ERR" },
+        { RTLNET_CSI2_STATUS_PERIOD_ERR, "PERIOD_ERR" },
+        { RTLNET_CSI2_STATUS_SOURCE_ERR, "SOURCE_ERR" },
+        { RTLNET_CSI2_STATUS_OVERRUN,    "OVERRUN" },
+    };
+    int first = 1;
+    fmt_printf("0x%08X (", (unsigned)status);
+    for (unsigned i = 0; i < sizeof(flags) / sizeof(flags[0]); i++) {
+        if ((status & flags[i].bit) != 0u) {
+            fmt_printf("%s%s", first ? "" : ", ", flags[i].name);
+            first = 0;
+        }
+    }
+    fmt_printf("%s)\n", first ? "none" : "");
+}
+
+/**
+ * @brief SHOW CAMERA: the video source core: mode, source setting, active source, frame period and rate, frame
+ *        count, camera timeout and status flags.
+ * @param ctx Unused.
+ * @return 0 (also when the core is absent: the message says so).
+ */
+int cli_show_camera(const MenuCommandContext *ctx)
+{
+    rtlnet_csi2_rx_caps_t caps;
+    rtlnet_csi2_rx_state_t st;
+    uint32_t fps_x100;
+    (void)ctx;
+    if (!cli_core_check(&g_core_csi2)) {
+        return 0;
+    }
+    if (rtlnet_csi2_rx_probe(RTLNET_PLAT_CSI2_BASE, &caps) != 0 || rtlnet_csi2_rx_read_state(RTLNET_PLAT_CSI2_BASE, &st) != 0) {
+        fmt_printf("%% %s answers with an unexpected VERSION\n", g_core_csi2.name);
+        return 0;
+    }
+    fmt_printf("Camera\n");
+    cli_print_core_line(&g_core_csi2, board_debug_read32(RTLNET_PLAT_CSI2_BASE + RTLNET_REG_VERSION));
+    fmt_printf("  Capabilities    : %u video modes, test pattern %s, camera front end %s\n", (unsigned)caps.modes,
+               caps.pattern ? "yes" : "no", caps.camera ? "yes" : "no");
+    if (st.video_mode < RTLNET_CSI2_MODE_COUNT) {
+        fmt_printf("  Video mode      : %s (%ux%u)\n", g_mode_name[st.video_mode],
+                   (unsigned)rtlnet_csi2_rx_mode_width(st.video_mode), (unsigned)rtlnet_csi2_rx_mode_height(st.video_mode));
+    } else {
+        fmt_printf("  Video mode      : unknown (%u)\n", (unsigned)st.video_mode);
+    }
+    if (st.active_mode < RTLNET_CSI2_MODE_COUNT) {
+        fmt_printf("  Active mode     : %s (frame in progress)\n", g_mode_name[st.active_mode]);
+    }
+    fmt_printf("  Source setting  : %s\n", (st.source <= RTLNET_CSI2_SRC_PATTERN) ? g_source_name[st.source] : "unknown");
+    fmt_printf("  Active source   : %s\n", ((st.status & RTLNET_CSI2_STATUS_PATTERN) != 0u) ? "pattern" : "camera");
+    fps_x100 = (st.frame_period != 0u) ? (uint32_t)(CLI_VIDEO_FPS_X100 / st.frame_period) : 0u;
+    fmt_printf("  Frame period    : %u ui_clk cycles (%u.%02u fps)\n", (unsigned)st.frame_period,
+               (unsigned)(fps_x100 / CLI_VIDEO_PCT), (unsigned)(fps_x100 % CLI_VIDEO_PCT));
+    fmt_printf("  Frame count     : %u\n", (unsigned)st.frame_count);
+    fmt_printf("  Camera timeout  : %u frame periods\n", (unsigned)st.cam_timeout);
+    fmt_printf("  Status          : ");
+    cli_print_csi2_status(st.status);
+    return 0;
+}
+
+/**
+ * @brief SHOW FRAMEBUFFER: slots, the latest published frame, what the firmware holds, counters, reference counts
+ *        and the write DMA.
+ * @param ctx Unused.
+ * @return 0 (also when a core is absent: the message says so).
+ */
+int cli_show_framebuffer(const MenuCommandContext *ctx)
+{
+    rtlnet_framebuf_caps_t caps;
+    rtlnet_framebuf_state_t st;
+    rtlnet_vdma_s2mm_state_t dma;
+    (void)ctx;
+    if (!cli_core_check(&g_core_fb) || !cli_core_check(&g_core_s2mm)) {
+        return 0;
+    }
+    if (rtlnet_framebuf_probe(RTLNET_PLAT_FB_BASE, &caps) != 0 || rtlnet_framebuf_read_state(RTLNET_PLAT_FB_BASE, &st) != 0 ||
+        rtlnet_vdma_s2mm_probe(RTLNET_PLAT_S2MM_BASE, NULL) != 0 ||
+        rtlnet_vdma_s2mm_read_state(RTLNET_PLAT_S2MM_BASE, &dma) != 0) {
+        fmt_printf("%% a video core answers with an unexpected VERSION\n");
+        return 0;
+    }
+    fmt_printf("Frame buffer\n");
+    cli_print_core_line(&g_core_fb, board_debug_read32(RTLNET_PLAT_FB_BASE + RTLNET_REG_VERSION));
+    cli_print_core_line(&g_core_s2mm, board_debug_read32(RTLNET_PLAT_S2MM_BASE + RTLNET_REG_VERSION));
+    fmt_printf("  Slots           : %u x %u KiB from DDR3 offset 0x%08X (CPU 0x%08X)\n", (unsigned)caps.slots,
+               (unsigned)(caps.slot_bytes / 1024u), (unsigned)st.fb_base, (unsigned)(RTLNET_PLAT_DDR_BASE + st.fb_base));
+    if ((st.status & RTLNET_FB_STATUS_LATEST_VALID) != 0u) {
+        fmt_printf("  Latest          : slot %u, frame %u, %ux%u, %s, timestamp %u\n",
+                   (unsigned)((st.status >> RTLNET_FB_STATUS_LATEST_SHIFT) & RTLNET_FB_STATUS_FIELD_MASK),
+                   (unsigned)st.latest.frame, (unsigned)st.latest.width, (unsigned)st.latest.height,
+                   st.latest.pattern ? "pattern" : "camera", (unsigned)st.latest.timestamp);
+    } else {
+        fmt_printf("  Latest          : none published\n");
+    }
+    if ((st.status & RTLNET_FB_STATUS_FW_HOLDS) != 0u) {
+        fmt_printf("  Firmware holds  : slot %u\n",
+                   (unsigned)((st.status >> RTLNET_FB_STATUS_FWSLOT_SHIFT) & RTLNET_FB_STATUS_FIELD_MASK));
+    } else {
+        fmt_printf("  Firmware holds  : none\n");
+    }
+    fmt_printf("  Published       : %u, dropped %u, bad %u\n", (unsigned)st.published, (unsigned)st.dropped, (unsigned)st.bad);
+    fmt_printf("  Reference counts:");
+    for (uint32_t i = 0; i < caps.slots && i < RTLNET_FB_MAX_SLOTS; i++) {
+        fmt_printf("%s slot %u %u", (i == 0u) ? "" : ",", (unsigned)i, (unsigned)st.refcnt[i]);
+    }
+    fmt_printf("\n");
+    fmt_printf("  Write DMA       : frames ok %u, bad %u, dropped %u, bursts %u, beats %u, status 0x%08X\n",
+               (unsigned)dma.frames_ok, (unsigned)dma.frames_bad, (unsigned)dma.frames_dropped, (unsigned)dma.bursts,
+               (unsigned)dma.beats, (unsigned)dma.status);
+    return 0;
+}
+
+/**
+ * @brief CAMERA MODE [MODE]: select 720p30 or 1080p30; effective at the next frame start.
+ * @param ctx argv[0] = mode name.
+ * @return 0, or -1 for a bad name, an absent core or a mode the core rejects.
+ */
+int cli_camera_mode(const MenuCommandContext *ctx)
+{
+    uint32_t mode = RTLNET_CSI2_MODE_COUNT;
+    int rc;
+    for (uint32_t i = 0; i < RTLNET_CSI2_MODE_COUNT; i++) {
+        if (cli_word_is(ctx->argv[0], (i == RTLNET_CSI2_MODE_720P30) ? "720p30" : "1080p30")) {
+            mode = i;
+        }
+    }
+    if (mode >= RTLNET_CSI2_MODE_COUNT) {
+        return cli_bad_value("video mode (720p30 or 1080p30)", ctx->argv[0]);
+    }
+    if (!cli_core_check(&g_core_csi2)) {
+        return -1;
+    }
+    rc = rtlnet_csi2_rx_set_mode(RTLNET_PLAT_CSI2_BASE, mode);
+    if (rc == RTLNET_CSI2_ERR_REJECTED) {
+        fmt_printf("%% Video mode %s rejected: the frame period is below its minimum (see camera rate)\n", g_mode_name[mode]);
+        return -1;
+    }
+    if (rc != RTLNET_CSI2_OK) {
+        return cli_bad_value("video mode (720p30 or 1080p30)", ctx->argv[0]);
+    }
+    fmt_printf("Video mode %s (%ux%u), effective at the next frame\n", g_mode_name[mode],
+               (unsigned)rtlnet_csi2_rx_mode_width(mode), (unsigned)rtlnet_csi2_rx_mode_height(mode));
+    return 0;
+}
+
+/**
+ * @brief CAMERA SOURCE [SOURCE]: auto, camera or pattern.
+ * @param ctx argv[0] = source name.
+ * @return 0, or -1 for a bad name, an absent core or a value the core rejects.
+ */
+int cli_camera_source(const MenuCommandContext *ctx)
+{
+    uint32_t src = RTLNET_CSI2_SRC_PATTERN + 1u;
+    int rc;
+    for (uint32_t i = 0; i <= RTLNET_CSI2_SRC_PATTERN; i++) {
+        if (cli_word_is(ctx->argv[0], g_source_name[i])) {
+            src = i;
+        }
+    }
+    if (src > RTLNET_CSI2_SRC_PATTERN) {
+        return cli_bad_value("video source (auto, camera or pattern)", ctx->argv[0]);
+    }
+    if (!cli_core_check(&g_core_csi2)) {
+        return -1;
+    }
+    rc = rtlnet_csi2_rx_set_source(RTLNET_PLAT_CSI2_BASE, src);
+    if (rc != RTLNET_CSI2_OK) {
+        fmt_printf("%% Video source %s rejected by the core\n", g_source_name[src]);
+        return -1;
+    }
+    fmt_printf("Video source %s, effective at the next frame\n", g_source_name[src]);
+    return 0;
+}
+
+/**
+ * @brief CAMERA RATE [FPS]: frame rate of the test pattern, 1..30 frames per second.
+ * @param ctx argv[0] = frames per second.
+ * @return 0, or -1 for a value outside 1..30, an absent core or a period the core rejects.
+ */
+int cli_camera_rate(const MenuCommandContext *ctx)
+{
+    uint32_t fps;
+    int rc;
+    if (cli_parse_u32(ctx->argv[0], &fps) != 0 || fps < 1u || fps > RTLNET_CSI2_FPS_MAX) {
+        return cli_bad_value("frame rate in fps (1..30)", ctx->argv[0]);
+    }
+    if (!cli_core_check(&g_core_csi2)) {
+        return -1;
+    }
+    rc = rtlnet_csi2_rx_set_rate_fps(RTLNET_PLAT_CSI2_BASE, fps);
+    if (rc != RTLNET_CSI2_OK) {
+        fmt_printf("%% Frame rate %u fps rejected: the period is below the minimum of the video mode\n", (unsigned)fps);
+        return -1;
+    }
+    fmt_printf("Frame rate %u fps (%u ui_clk cycles per frame)\n", (unsigned)fps, (unsigned)(RTLNET_CSI2_UI_CLK_HZ / fps));
+    return 0;
+}
+
+/**
+ * @brief FRAMEBUFFER CRC: CRC-32 of the latest published frame, read through the data cache.
+ * @param ctx Unused.
+ * @return 0 when the CRC was computed, -1 for an absent core, no published frame or an unusable frame.
+ */
+int cli_framebuffer_crc(const MenuCommandContext *ctx)
+{
+    fbcrc_result_t r;
+    int rc;
+    (void)ctx;
+    if (!cli_core_check(&g_core_fb) || !cli_core_check(&g_core_s2mm)) {
+        return -1;
+    }
+    rc = fbcrc_latest(RTLNET_PLAT_FB_BASE, RTLNET_PLAT_S2MM_BASE, RTLNET_PLAT_DDR_BASE, &r);
+    if (rc == FBCRC_ERR_NO_FRAME) {
+        fmt_printf("%% No frame published yet (or the firmware already holds a slot)\n");
+        return -1;
+    }
+    if (rc != FBCRC_OK) {
+        fmt_printf("%% Framebuffer CRC failed (code %d: %s)\n", rc,
+                   (rc == FBCRC_ERR_TIMEOUT) ? "take timed out" :
+                   (rc == FBCRC_ERR_GEOMETRY) ? "frame geometry does not fit the slot" : "core");
+        return -1;
+    }
+    fmt_printf("Framebuffer CRC-32 : 0x%08X (frame %u, slot %u, %ux%u, %s, %u bytes)\n", (unsigned)r.crc,
+               (unsigned)r.frame.frame, (unsigned)r.slot, (unsigned)r.frame.width, (unsigned)r.frame.height,
+               r.frame.pattern ? "pattern" : "camera", (unsigned)r.bytes);
+    return 0;
 }

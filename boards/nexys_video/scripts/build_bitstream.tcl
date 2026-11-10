@@ -50,6 +50,9 @@
 #   * 11-09-2026: tag argument: outputs in build/<tag>/ (variant builds do not overwrite the network image).
 #   * 11-09-2026: DDR3 controller IP generated from the MIG project; expected rtlnet_axil_cdc instances +1 (the
 #     arbiter's register crossing) in both builds.
+#   * 11-09-2026: Phase 1 video cores u_csi2, u_s2mm and u_fb (cpu_clk to ui_clk register windows, one rtlnet_axil_cdc each):
+#     expected rtlnet_axil_cdc instances +3 in both builds (network 6 to 9, CPU-only 1 to 4); no new FIFO, Gray or
+#     synchronizer crossing (the beat FIFO of the write DMA is one clock domain).
 # -----------------------------------------------------------------------------
 
 # Script-relative roots (survive tree moves; no dependence on the caller's cwd).
@@ -200,7 +203,7 @@ write_checkpoint -force [file join $BUILD_DIR post_synth.dcp]
 # u_protocol/u_egress_fifo and the socket layer's u_rx_fifo, u_tx_fifo and
 # u_tx_desc_fifo, and the CPU network path queues u_protocol/u_cpu_rx_fifo and
 # u_protocol/u_cpu_tx_fifo, plus the checksum offload's u_protocol/g_cpu.g_offload.u_cpu_offload/u_tx/u_tx_fifo, and the DDR3 bridge u_ddr_cdc's five FIFOs u_aw/w/b/ar/r_fifo (fifo 15); register crossings of the MAC, the protocol wrapper
-# and the UDP echo, plus the CPU-path classifier's and the checksum offload's u_axil_cdc and the DDR3 arbiter's (axil_cdc 6); Gray counters u_mac/u_tx_count_sync and the
+# and the UDP echo, plus the CPU-path classifier's and the checksum offload's u_axil_cdc, the DDR3 arbiter's and the video cores' u_csi2, u_s2mm and u_fb u_axil_cdc (axil_cdc 9); Gray counters u_mac/u_tx_count_sync and the
 # wrapper's four ingress/egress counter crossings and its CPU transmit reject
 # counter u_cnt_cpu_reject_sync (gray 6). A change of these
 # counts fails the build until the expectation is reviewed and updated here.
@@ -209,10 +212,10 @@ if {$NETWORK} {
   if {![file exists $rgmii_xdc]} { nv_exit 11 "XDC not found: $rgmii_xdc" }
   if {[catch {read_xdc $rgmii_xdc} err]} { nv_exit 13 "RGMII constraints: $err" }
   set ::rtlnet_cdc_required {sync reset gray fifo axil_cdc}
-  set ::rtlnet_cdc_expect   {fifo 15 axil_cdc 6 gray 6}
+  set ::rtlnet_cdc_expect   {fifo 15 axil_cdc 9 gray 6}
 } else {
   set ::rtlnet_cdc_required {sync reset axil_cdc fifo}
-  set ::rtlnet_cdc_expect   {fifo 5 axil_cdc 1 gray 0}
+  set ::rtlnet_cdc_expect   {fifo 5 axil_cdc 4 gray 0}
 }
 # CDC-8 (asynchronous reset synchronized with missing ASYNC_REG): the AMD memory controller IP
 # (u_ddr/g_amd.u_ddr/u_mig) synchronizes the reset into its reference-clock and divided-clock domains

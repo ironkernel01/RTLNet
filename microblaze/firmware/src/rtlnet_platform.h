@@ -21,6 +21,9 @@
  *     0x44A0_2000   4 KiB  MDIO rtlnet_mdio           "MDIO"
  *     0x44A0_3000   4 KiB  ECHO rtlnet_udp_echo       "ECHO"
  *     0x44A0_4000   4 KiB  ARB  rtlnet_axi_arbiter     "ARBT" (DDR3 arbiter)
+ *     0x44A0_5000   4 KiB  CSI2 rtlnet_csi2_rx        "CSI2" (color bars, source switch)
+ *     0x44A0_6000   4 KiB  S2MM rtlnet_vdma_s2mm      "S2MM" (video write DMA)
+ *     0x44A0_7000   4 KiB  FBUF rtlnet_framebuf       "FBUF" (frame buffer manager)
  *     0x44A1_0000  64 KiB  PROTOCOL rtlnet_eth_protocol, sub-map:
  *       0x44A1_0000        wrapper                    "PROT"
  *       0x44A1_1000        ARP leaf                   "ARP1"
@@ -45,6 +48,7 @@
  * hold the per-function commentary.
  *
  * Revision: 11-09-2026
+ *   * 11-09-2026: video windows CSI2, S2MM and FBUF (Phase 1).
  *   * 11-09-2026: RTLNET_FW_IMAGE ("LMB" release image, "DDR3" development image of build.ps1 -Ddr).
  */
 #ifndef RTLNET_PLATFORM_H
@@ -74,6 +78,9 @@
 #define RTLNET_PLAT_MDIO_BASE       (RTLNET_PLAT_WINDOW_BASE + 0x02000u)
 #define RTLNET_PLAT_ECHO_BASE       (RTLNET_PLAT_WINDOW_BASE + 0x03000u)
 #define RTLNET_PLAT_ARB_BASE        (RTLNET_PLAT_WINDOW_BASE + 0x04000u)
+#define RTLNET_PLAT_CSI2_BASE       (RTLNET_PLAT_WINDOW_BASE + 0x05000u)
+#define RTLNET_PLAT_S2MM_BASE       (RTLNET_PLAT_WINDOW_BASE + 0x06000u)
+#define RTLNET_PLAT_FB_BASE         (RTLNET_PLAT_WINDOW_BASE + 0x07000u)
 #define RTLNET_PLAT_PROT_BASE       (RTLNET_PLAT_WINDOW_BASE + 0x10000u)
 #define RTLNET_PLAT_ARP_BASE        (RTLNET_PLAT_PROT_BASE + 0x1000u)
 #define RTLNET_PLAT_ICMP_BASE       (RTLNET_PLAT_PROT_BASE + 0x2000u)
@@ -98,6 +105,9 @@
 #define RTLNET_ID_ARB               0x41524254u   /* "ARBT" */
 #define RTLNET_ID_CLS               0x434C5346u   /* "CLSF" */
 #define RTLNET_ID_TXO               0x5443504Fu   /* "TCPO" */
+#define RTLNET_ID_CSI2              0x43534932u   /* "CSI2" */
+#define RTLNET_ID_S2MM              0x53324D4Du   /* "S2MM" */
+#define RTLNET_ID_FB                0x46425546u   /* "FBUF" */
 
 /* Firmware identity. */
 #define RTLNET_FW_NAME              "rtlnet-fw"

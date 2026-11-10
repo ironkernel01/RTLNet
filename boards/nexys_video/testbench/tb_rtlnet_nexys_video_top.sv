@@ -16,8 +16,12 @@
 //     CLASSIFIER): OKAY and ID 0; an unmapped address: DECERR.
 //   * DDR3 path (RTLNET_DDR_SIM: the controller is rtlnet_ddr_sim): the ui_clk reset releases,
 //     init_calib_complete is low right after reset release and CLK_STATUS bit 1 reads 1 later;
-//     the arbiter window (0x44A0_4000) reads ID "ARBT", VERSION, CAPS (1 master, 16-byte beat),
-//     idle STATUS and zero counters; an unmapped address next to it gives DECERR.
+//     the arbiter window (0x44A0_4000) reads ID "ARBT", VERSION, CAPS (2 masters, 16-byte beat, master 1 high priority),
+//     idle STATUS and zero counters; an unmapped address (0x44A0_8000) gives DECERR.
+//   * Video windows (Phase 1): CSI2 0x44A0_5000 ("CSI2", VIDEO_MODE 0, SOURCE 0, FRAME_PERIOD 3,333,333, a rejected
+//     VIDEO_MODE write sets MODE_ERR and changes nothing, a valid write reads back), S2MM 0x44A0_6000 ("S2MM", ENABLE 1),
+//     FRAMEBUF 0x44A0_7000 ("FBUF", 3 slots, FB_BASE 0x1000_0000, nothing published): ID, CAPS and reset values through the
+//     decoder and the rtlnet_axil_cdc of each core; arbiter master 1 counters read 0 before the first frame.
 //   * DDR3 data path through u_ddr_cdc, the arbiter and the memory model, driven by the stub's
 //     ddr_write / ddr_read (one beat) and ddr_write_burst / ddr_read_burst (4 beats): data
 //     compare, a partial-strobe write, arbiter AW_BURSTS 3 and ERRORS 0.
@@ -33,6 +37,7 @@
 //   * 10-22-2026: initial version.
 //   * 11-09-2026: DDR3 calibration status, arbiter window, VERSION 11-09-2026.
 //   * 11-09-2026: DDR3 data path test through the cpu_clk to ui_clk bridge.
+//   * 11-09-2026: Phase 1 video windows (CSI2, S2MM, FRAMEBUF), arbiter with two masters.
 // -----------------------------------------------------------------------------
 `timescale 1ns / 1ps
 
@@ -311,10 +316,39 @@ module tb_rtlnet_nexys_video_top;
     // Arbiter window: identity, build configuration, idle status, zero counters.
     check_reg(WIN + 32'h0_4000, 32'h4152_4254, "ARBITER ID");
     check_reg(WIN + 32'h0_4004, 32'h1109_2026, "ARBITER VERSION");
-    check_reg(WIN + 32'h0_4008, 32'h0108_1101, "ARBITER CAPS (1 master, 16-byte beat, ID_W 1, 8 outstanding, HP mask 1)");
+    check_reg(WIN + 32'h0_4008, 32'h0208_1102, "ARBITER CAPS (2 masters, 16-byte beat, ID_W 1, 8 outstanding, HP mask 2)");
     check_reg(WIN + 32'h0_4010, 32'h0000_0000, "ARBITER STATUS idle");
     check_reg(WIN + 32'h0_4100, 32'h0000_0000, "ARBITER master 0 AW_BURSTS");
     check_reg(WIN + 32'h0_4110, 32'h0000_0000, "ARBITER master 0 ERRORS");
+    check_reg(WIN + 32'h0_4120, 32'h0000_0000, "ARBITER master 1 (video write DMA) AW_BURSTS");
+    check_reg(WIN + 32'h0_4130, 32'h0000_0000, "ARBITER master 1 ERRORS");
+    check_reg(WIN + 32'h0_4014, 32'h0000_0001, "ARBITER NARROW_MASK (master 0)");
+    check_reg(WIN + 32'h0_4018, 32'h0000_0001, "ARBITER WRAP_MASK (master 0)");
+    // Video windows through the decoder and each core's register crossing.
+    check_reg(WIN + 32'h0_5000, 32'h4353_4932, "CSI2 ID");
+    check_reg(WIN + 32'h0_5004, 32'h1109_2026, "CSI2 VERSION");
+    check_reg(WIN + 32'h0_5008, 32'h0000_0012, "CSI2 CAPS (2 modes, pattern, no camera front end)");
+    check_reg(WIN + 32'h0_5010, 32'h0000_0000, "CSI2 VIDEO_MODE resets to 720p30");
+    check_reg(WIN + 32'h0_5014, 32'h0000_0000, "CSI2 SOURCE resets to auto");
+    check_reg(WIN + 32'h0_5018, 32'h0032_DCD5, "CSI2 FRAME_PERIOD resets to 3,333,333");
+    check_reg(WIN + 32'h0_501C, 32'h0000_0002, "CSI2 CAM_TIMEOUT resets to 2");
+    wr(WIN + 32'h0_5010, 32'h0000_0002, 4'hF, r);
+    tb_check(r == RESP_OKAY, "CSI2 VIDEO_MODE write OKAY");
+    rd(WIN + 32'h0_5020, d, r);
+    tb_check((d & 32'h0000_0004) != 0, $sformatf("CSI2 STATUS 0x%08x: MODE_ERR expected after VIDEO_MODE 2", d));
+    check_reg(WIN + 32'h0_5010, 32'h0000_0000, "CSI2 VIDEO_MODE unchanged by a rejected write");
+    wr(WIN + 32'h0_5010, 32'h0000_0001, 4'hF, r);
+    check_reg(WIN + 32'h0_5010, 32'h0000_0001, "CSI2 VIDEO_MODE 1080p30 accepted");
+    wr(WIN + 32'h0_5010, 32'h0000_0000, 4'hF, r);
+    wr(WIN + 32'h0_5020, 32'h0000_000C, 4'hF, r);
+    check_reg(WIN + 32'h0_5010, 32'h0000_0000, "CSI2 VIDEO_MODE back to 720p30");
+    check_reg(WIN + 32'h0_6000, 32'h5332_4D4D, "S2MM ID");
+    check_reg(WIN + 32'h0_6008, 32'h001D_1010, "S2MM CAPS (16 beats, 16 bytes, 29 address bits)");
+    check_reg(WIN + 32'h0_600C, 32'h0000_0001, "S2MM CTRL.ENABLE resets to 1");
+    check_reg(WIN + 32'h0_7000, 32'h4642_5546, "FRAMEBUF ID");
+    check_reg(WIN + 32'h0_7008, 32'h001D_1613, "FRAMEBUF CAPS (3 slots, 1 reader, 4 MiB slots, 29 address bits)");
+    check_reg(WIN + 32'h0_7014, 32'h1000_0000, "FRAMEBUF FB_BASE");
+    check_reg(WIN + 32'h0_7018, 32'h0040_0000, "FRAMEBUF SLOT_BYTES");
     wr(WIN + 32'h0_400C, 32'h0001_0000, 4'hF, r);
     tb_check(r == RESP_OKAY, "ARBITER CNT_CLEAR write OKAY");
 
@@ -343,8 +377,8 @@ module tb_rtlnet_nexys_video_top;
 
     wr(WIN + 32'h0_1004, 32'hDEAD_BEEF, 4'hF, r);
     tb_check(r == RESP_OKAY, "stub write OKAY");
-    rd(WIN + 32'h0_5000, d, r);
-    tb_check(r == RESP_DECERR && d == 32'h0, $sformatf("unmapped 0x44A05000: resp %b data 0x%08x, expected DECERR 0", r, d));
+    rd(WIN + 32'h0_8000, d, r);
+    tb_check(r == RESP_DECERR && d == 32'h0, $sformatf("unmapped 0x44A08000: resp %b data 0x%08x, expected DECERR 0", r, d));
     wr(WIN + 32'h3_0000, 32'h1, 4'hF, r);
     tb_check(r == RESP_DECERR, "unmapped write DECERR");
 

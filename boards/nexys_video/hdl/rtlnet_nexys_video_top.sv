@@ -18,6 +18,12 @@
 //     registers are decoder slave 6. The ui_clk reset ddr_resetn is an
 //     rtlnet_reset_sync (clk ui_clk) of rst_arstn, ANDed with the MIG ui reset after the chain;
 //     init_calib_complete enters the system registers through rtlnet_sync.
+//   * Video path (documentation/gige.md sections 5, 6; ui_clk): u_csi2 (rtlnet_csi2_rx) sends 720p30 or 1080p30 color bars (the camera
+//     stream input is tied off, valid 0) into u_s2mm (rtlnet_vdma_s2mm), which writes each frame into a slot granted by u_fb
+//     (rtlnet_framebuf, 3 slots of 4 MiB at DDR3 offset 0x1000_0000, CPU address 0x9000_0000) through arbiter master 1 (fixed top
+//     priority: HIGH_PRIO_MASK 2'b10); master 0 stays the CPU caches (NARROW_MASK and WRAP_MASK bit 0). The framebuf reader port
+//     is tied off in Phase 1; the firmware reads the latest slot through the framebuf register window. The three register
+//     windows cross from cpu_clk to ui_clk inside each core (rtlnet_axil_cdc).
 //   * Resets: one assertion, rst_arstn = cpu_resetn (button, low = pressed)
 //     AND mmcm_locked, enters one rtlnet_reset_sync per clock. Glitch argument
 //     for the AND: either input low asserts every domain at once (safe in any
@@ -35,6 +41,9 @@
 //       slave 4 PROTOCOL   0x44A1_0000  64 KiB  u_protocol  (stub without network)
 //       slave 5 CLASSIFIER 0x44A2_0000   4 KiB  reserved: always the stub
 //       slave 6 ARBITER    0x44A0_4000   4 KiB  u_arb       (DDR3 arbiter)
+//       slave 7 CSI2       0x44A0_5000   4 KiB  u_csi2      (color bars, source switch; camera stubbed)
+//       slave 8 S2MM       0x44A0_6000   4 KiB  u_s2mm      (video write DMA, arbiter master 1)
+//       slave 9 FRAMEBUF   0x44A0_7000   4 KiB  u_fb        (tear-free frame buffer, 3 slots at DDR3 offset 0x1000_0000)
 //     A stub answers every access OKAY with read data 0, so firmware probing a
 //     core's ID reads 0 ("not present"); other addresses get DECERR.
 //   * PHY: the board top owns the eth_mdio IOBUF. Without the network cores
@@ -61,6 +70,7 @@
 //   * 11-09-2026: u_ddr_cdc (rtlnet_axi_cdc) between the CPU DDR3 master (cpu_clk) and the arbiter (ui_clk).
 //   * 11-09-2026: the MIG ui reset is ANDed after the ui_clk reset chain (no LUT on the chain's asynchronous pin).
 //   * 11-09-2026: u_arb WRAP_MASK 1 (the CPU caches' WRAP line fills are legal).
+//   * 11-09-2026: Phase 1 video path: u_csi2, u_s2mm, u_fb (decoder slaves 7 to 9), the arbiter takes a second master.
 // Clocks: sysclk (100 MHz pin) -> MMCM (CLKOUT6 -> MIG PLL); clk125, clk125_90, clk200, axis_clk,
 //   proto_clk, cpu_clk as above; ui_clk (MIG user clock, 100 MHz, DDR3 AXI4 side); the MAC's
 //   receive clock is internal to it.
@@ -155,7 +165,7 @@ module rtlnet_nexys_video_top #(
   // ---------------------------------------------------------------------------
   localparam int          CPU_CLK_HZ   = 100_000_000;
   localparam int          PROTO_CLK_HZ = 50_000_000;
-  localparam int          NUM_SLV      = 7;
+  localparam int          NUM_SLV      = 10;
   localparam int          AW           = 32;
   localparam int          SLV_SYS      = 0;
   localparam int          SLV_MAC      = 1;
@@ -164,6 +174,11 @@ module rtlnet_nexys_video_top #(
   localparam int          SLV_PROT     = 4;
   localparam int          SLV_CLS      = 5;
   localparam int          SLV_ARB      = 6;
+  localparam int          SLV_CSI2     = 7;
+  localparam int          SLV_S2MM     = 8;
+  localparam int          SLV_FB       = 9;
+  localparam logic [31:0] FB_BASE_OFF  = 32'h1000_0000;     // DDR3 byte offset of frame-buffer slot 0
+  localparam int          FB_SLOT_LOG2 = 22;                // 4 MiB per slot
   localparam int          DDR_ADDR_W   = 29;           // 512 MiB
   localparam int          DDR_DATA_W   = 128;
   localparam int          ARB_ID_W     = 1;            // CPU master: no IDs, one constant ID bit
@@ -173,6 +188,9 @@ module rtlnet_nexys_video_top #(
   localparam logic [31:0] WIN_64K      = 32'h0001_0000;
   // Slave i at [i*AW +: AW]; listed highest index first.
   localparam logic [NUM_SLV*AW-1:0] SLAVE_BASE = {
+    RTLNET_BASE + 32'h0000_7000,    // 9 FRAMEBUF
+    RTLNET_BASE + 32'h0000_6000,    // 8 S2MM
+    RTLNET_BASE + 32'h0000_5000,    // 7 CSI2
     RTLNET_BASE + 32'h0000_4000,    // 6 ARBITER
     RTLNET_BASE + 32'h0002_0000,    // 5 CLASSIFIER (reserved)
     RTLNET_BASE + 32'h0001_0000,    // 4 PROTOCOL
@@ -181,13 +199,13 @@ module rtlnet_nexys_video_top #(
     RTLNET_BASE + 32'h0000_1000,    // 1 MAC
     RTLNET_BASE + 32'h0000_0000     // 0 SYS
   };
-  localparam logic [NUM_SLV*AW-1:0] SLAVE_SIZE = {WIN_4K, WIN_4K, WIN_64K, WIN_4K, WIN_4K, WIN_4K, WIN_4K};
+  localparam logic [NUM_SLV*AW-1:0] SLAVE_SIZE = {WIN_4K, WIN_4K, WIN_4K, WIN_4K, WIN_4K, WIN_64K, WIN_4K, WIN_4K, WIN_4K, WIN_4K};
 `ifdef RTLNET_WITH_NETWORK
   localparam logic        NETWORK      = 1'b1;
-  localparam logic [NUM_SLV-1:0] STUB_MASK = 7'b010_0000;   // classifier only
+  localparam logic [NUM_SLV-1:0] STUB_MASK = 10'b00_0010_0000;   // classifier only
 `else
   localparam logic        NETWORK      = 1'b0;
-  localparam logic [NUM_SLV-1:0] STUB_MASK = 7'b011_1110;   // every window but SYS and ARBITER
+  localparam logic [NUM_SLV-1:0] STUB_MASK = 10'b00_0011_1110;   // every window but SYS, ARBITER and the video cores
 `endif
 
   // ---------------------------------------------------------------------------
@@ -348,6 +366,53 @@ module rtlnet_nexys_video_top #(
   logic                  mem_rlast;
   logic                  mem_rvalid;
   logic                  mem_rready;
+
+  // Video path (ui_clk): csi2_rx -> s2mm stream with its sideband, s2mm <-> framebuf slot interface, s2mm AXI4 write
+  // master (arbiter master 1).
+  logic [31:0]           vid_tdata;
+  logic                  vid_tvalid;
+  logic                  vid_tready;
+  logic                  vid_tlast;
+  logic                  vid_tuser;
+  logic [31:0]           vid_frame_num;
+  logic [31:0]           vid_timestamp;
+  logic [15:0]           vid_width;
+  logic [15:0]           vid_height;
+  logic                  vid_src_pattern;
+  logic                  fb_req;
+  logic                  fb_rsp_valid;
+  logic                  fb_rsp_ok;
+  logic [DDR_ADDR_W-1:0] fb_rsp_base;
+  logic                  fb_done;
+  logic                  fb_done_good;
+  logic [31:0]           fb_done_frame_num;
+  logic [31:0]           fb_done_timestamp;
+  logic [15:0]           fb_done_width;
+  logic [15:0]           fb_done_height;
+  logic                  fb_done_src_pattern;
+  logic [ARB_ID_W-1:0]   v_awid;
+  logic [DDR_ADDR_W-1:0] v_awaddr;
+  logic [7:0]            v_awlen;
+  logic [2:0]            v_awsize;
+  logic [1:0]            v_awburst;
+  logic                  v_awvalid;
+  logic                  v_awready;
+  logic [DDR_DATA_W-1:0] v_wdata;
+  logic [DDR_DATA_W/8-1:0] v_wstrb;
+  logic                  v_wlast;
+  logic                  v_wvalid;
+  logic                  v_wready;
+  logic [ARB_ID_W-1:0]   v_bid;
+  logic [1:0]            v_bresp;
+  logic                  v_bvalid;
+  logic                  v_bready;
+  logic                  v_arready_nc;               // the video master has no read channel
+  logic [ARB_ID_W-1:0]   v_rid_nc;
+  logic [DDR_DATA_W-1:0] v_rdata_nc;
+  logic [1:0]            v_rresp_nc;
+  logic                  v_rlast_nc;
+  logic                  v_rvalid_nc;
+  logic                  cam_tready_nc;
 
   // CPU network path (cpu_clk): eth_tx = frames the CPU sends, eth_rx =
   // frames to the CPU.
@@ -781,52 +846,53 @@ module rtlnet_nexys_video_top #(
     .m_axi_rready  (br_rready)
   );
 
-  // DDR3 memory path. u_arb: one master (the CPU caches through u_ddr_cdc), ui_clk datapath and register file,
+  // DDR3 memory path. u_arb: master 0 the CPU caches through u_ddr_cdc, master 1 the video write DMA u_s2mm (fixed top priority),
+  // ui_clk datapath and register file,
   // register port on cpu_clk (window ARBITER). The bridge carries a one-bit ID, always 0. The CPU byte address is 0x8000_0000 + offset; the
   // low 29 bits address the 512 MiB.
   rtlnet_axi_arbiter #(
-    .NUM_MASTERS     (1),
+    .NUM_MASTERS     (2),
     .ADDR_W          (DDR_ADDR_W),
     .DATA_W          (DDR_DATA_W),
     .ID_W            (ARB_ID_W),
-    .HIGH_PRIO_MASK  (1'b1),
-    .NARROW_MASK     (1'b1),   // the CPU's write-through data cache issues 32-bit stores
-    .WRAP_MASK       (1'b1),   // the CPU caches fill critical word first (WRAP bursts of 2..16 beats)
+    .HIGH_PRIO_MASK  (2'b10),  // master 1, the video write DMA, wins over the round-robin group (a frame must not stall)
+    .NARROW_MASK     (2'b01),  // master 0: the CPU's write-through data cache issues 32-bit stores
+    .WRAP_MASK       (2'b01),  // master 0: the CPU caches fill critical word first (WRAP bursts of 2..16 beats)
     .MAX_OUTSTANDING (8)
   ) u_arb (
     .clk           (ui_clk),
     .resetn        (ddr_resetn),
     .s_axi_aclk    (cpu_clk),
     .s_axi_aresetn (cpu_resetn_sync),
-    .s_awid        (br_awid),
-    .s_awaddr      (br_awaddr),
-    .s_awlen       (br_awlen),
-    .s_awsize      (br_awsize),
-    .s_awburst     (br_awburst),
-    .s_awvalid     (br_awvalid),
-    .s_awready     (br_awready),
-    .s_wdata       (br_wdata),
-    .s_wstrb       (br_wstrb),
-    .s_wlast       (br_wlast),
-    .s_wvalid      (br_wvalid),
-    .s_wready      (br_wready),
-    .s_bid         (br_bid),
-    .s_bresp       (br_bresp),
-    .s_bvalid      (br_bvalid),
-    .s_bready      (br_bready),
-    .s_arid        (br_arid),
-    .s_araddr      (br_araddr),
-    .s_arlen       (br_arlen),
-    .s_arsize      (br_arsize),
-    .s_arburst     (br_arburst),
-    .s_arvalid     (br_arvalid),
-    .s_arready     (br_arready),
-    .s_rid         (br_rid),
-    .s_rdata       (br_rdata),
-    .s_rresp       (br_rresp),
-    .s_rlast       (br_rlast),
-    .s_rvalid      (br_rvalid),
-    .s_rready      (br_rready),
+    .s_awid        ({v_awid, br_awid}),
+    .s_awaddr      ({v_awaddr, br_awaddr}),
+    .s_awlen       ({v_awlen, br_awlen}),
+    .s_awsize      ({v_awsize, br_awsize}),
+    .s_awburst     ({v_awburst, br_awburst}),
+    .s_awvalid     ({v_awvalid, br_awvalid}),
+    .s_awready     ({v_awready, br_awready}),
+    .s_wdata       ({v_wdata, br_wdata}),
+    .s_wstrb       ({v_wstrb, br_wstrb}),
+    .s_wlast       ({v_wlast, br_wlast}),
+    .s_wvalid      ({v_wvalid, br_wvalid}),
+    .s_wready      ({v_wready, br_wready}),
+    .s_bid         ({v_bid, br_bid}),
+    .s_bresp       ({v_bresp, br_bresp}),
+    .s_bvalid      ({v_bvalid, br_bvalid}),
+    .s_bready      ({v_bready, br_bready}),
+    .s_arid        ({{ARB_ID_W{1'b0}}, br_arid}),
+    .s_araddr      ({{DDR_ADDR_W{1'b0}}, br_araddr}),
+    .s_arlen       ({8'd0, br_arlen}),
+    .s_arsize      ({3'd4, br_arsize}),
+    .s_arburst     ({2'b01, br_arburst}),
+    .s_arvalid     ({1'b0, br_arvalid}),
+    .s_arready     ({v_arready_nc, br_arready}),
+    .s_rid         ({v_rid_nc, br_rid}),
+    .s_rdata       ({v_rdata_nc, br_rdata}),
+    .s_rresp       ({v_rresp_nc, br_rresp}),
+    .s_rlast       ({v_rlast_nc, br_rlast}),
+    .s_rvalid      ({v_rvalid_nc, br_rvalid}),
+    .s_rready      ({1'b1, br_rready}),
     .m_axi_awid    (mem_awid),
     .m_axi_awaddr  (mem_awaddr),
     .m_axi_awlen   (mem_awlen),
@@ -882,6 +948,169 @@ module rtlnet_nexys_video_top #(
     .s_axi_rvalid  (dec_rvalid[SLV_ARB]),
     .s_axi_rready  (dec_rready[SLV_ARB]),
     .err_irq       ()
+  );
+
+  // Video path. u_csi2: color bars at 720p30 (reset default) or 1080p30, camera front end not built (stream input tied off,
+  // valid 0); u_s2mm: 2D write DMA into the slot u_fb grants; u_fb: three 4 MiB slots at DDR3 offset FB_BASE_OFF. All three run
+  // on ui_clk with the ui_clk reset; their AXI4-Lite windows come from cpu_clk through the rtlnet_axil_cdc inside each core.
+  rtlnet_csi2_rx u_csi2 (
+    .clk             (ui_clk),
+    .resetn          (ddr_resetn),
+    .s_axi_aclk      (cpu_clk),
+    .s_axi_aresetn   (cpu_resetn_sync),
+    .s_cam_tdata     (32'd0),
+    .s_cam_tvalid    (1'b0),
+    .s_cam_tready    (cam_tready_nc),
+    .s_cam_tlast     (1'b0),
+    .s_cam_tuser     (1'b0),
+    .cam_clk_running (1'b0),
+    .m_axis_tdata    (vid_tdata),
+    .m_axis_tvalid   (vid_tvalid),
+    .m_axis_tready   (vid_tready),
+    .m_axis_tlast    (vid_tlast),
+    .m_axis_tuser    (vid_tuser),
+    .m_frame_num     (vid_frame_num),
+    .m_timestamp     (vid_timestamp),
+    .m_width         (vid_width),
+    .m_height        (vid_height),
+    .m_src_pattern   (vid_src_pattern),
+    .s_axi_awaddr    (dec_awaddr[SLV_CSI2*AW +: 12]),
+    .s_axi_awvalid   (dec_awvalid[SLV_CSI2]),
+    .s_axi_awready   (dec_awready[SLV_CSI2]),
+    .s_axi_wdata     (dec_wdata[SLV_CSI2*32 +: 32]),
+    .s_axi_wstrb     (dec_wstrb[SLV_CSI2*4 +: 4]),
+    .s_axi_wvalid    (dec_wvalid[SLV_CSI2]),
+    .s_axi_wready    (dec_wready[SLV_CSI2]),
+    .s_axi_bresp     (dec_bresp[SLV_CSI2*2 +: 2]),
+    .s_axi_bvalid    (dec_bvalid[SLV_CSI2]),
+    .s_axi_bready    (dec_bready[SLV_CSI2]),
+    .s_axi_araddr    (dec_araddr[SLV_CSI2*AW +: 12]),
+    .s_axi_arvalid   (dec_arvalid[SLV_CSI2]),
+    .s_axi_arready   (dec_arready[SLV_CSI2]),
+    .s_axi_rdata     (dec_rdata[SLV_CSI2*32 +: 32]),
+    .s_axi_rresp     (dec_rresp[SLV_CSI2*2 +: 2]),
+    .s_axi_rvalid    (dec_rvalid[SLV_CSI2]),
+    .s_axi_rready    (dec_rready[SLV_CSI2])
+  );
+
+  rtlnet_vdma_s2mm #(
+    .ADDR_W          (DDR_ADDR_W),
+    .ID_W            (ARB_ID_W),
+    .MAX_BURST_BEATS (16),
+    .FIFO_KB         (2),
+    .RAM_STYLE       ("block")
+  ) u_s2mm (
+    .clk                 (ui_clk),
+    .resetn              (ddr_resetn),
+    .s_axi_aclk          (cpu_clk),
+    .s_axi_aresetn       (cpu_resetn_sync),
+    .s_axis_tdata        (vid_tdata),
+    .s_axis_tvalid       (vid_tvalid),
+    .s_axis_tready       (vid_tready),
+    .s_axis_tlast        (vid_tlast),
+    .s_axis_tuser        (vid_tuser),
+    .s_width             (vid_width),
+    .s_height            (vid_height),
+    .s_frame_num         (vid_frame_num),
+    .s_timestamp         (vid_timestamp),
+    .s_src_pattern       (vid_src_pattern),
+    .fb_req              (fb_req),
+    .fb_rsp_valid        (fb_rsp_valid),
+    .fb_rsp_ok           (fb_rsp_ok),
+    .fb_rsp_base         (fb_rsp_base),
+    .fb_done             (fb_done),
+    .fb_done_good        (fb_done_good),
+    .fb_done_frame_num   (fb_done_frame_num),
+    .fb_done_timestamp   (fb_done_timestamp),
+    .fb_done_width       (fb_done_width),
+    .fb_done_height      (fb_done_height),
+    .fb_done_src_pattern (fb_done_src_pattern),
+    .m_axi_awid          (v_awid),
+    .m_axi_awaddr        (v_awaddr),
+    .m_axi_awlen         (v_awlen),
+    .m_axi_awsize        (v_awsize),
+    .m_axi_awburst       (v_awburst),
+    .m_axi_awvalid       (v_awvalid),
+    .m_axi_awready       (v_awready),
+    .m_axi_wdata         (v_wdata),
+    .m_axi_wstrb         (v_wstrb),
+    .m_axi_wlast         (v_wlast),
+    .m_axi_wvalid        (v_wvalid),
+    .m_axi_wready        (v_wready),
+    .m_axi_bid           (v_bid),
+    .m_axi_bresp         (v_bresp),
+    .m_axi_bvalid        (v_bvalid),
+    .m_axi_bready        (v_bready),
+    .s_axi_awaddr        (dec_awaddr[SLV_S2MM*AW +: 12]),
+    .s_axi_awvalid       (dec_awvalid[SLV_S2MM]),
+    .s_axi_awready       (dec_awready[SLV_S2MM]),
+    .s_axi_wdata         (dec_wdata[SLV_S2MM*32 +: 32]),
+    .s_axi_wstrb         (dec_wstrb[SLV_S2MM*4 +: 4]),
+    .s_axi_wvalid        (dec_wvalid[SLV_S2MM]),
+    .s_axi_wready        (dec_wready[SLV_S2MM]),
+    .s_axi_bresp         (dec_bresp[SLV_S2MM*2 +: 2]),
+    .s_axi_bvalid        (dec_bvalid[SLV_S2MM]),
+    .s_axi_bready        (dec_bready[SLV_S2MM]),
+    .s_axi_araddr        (dec_araddr[SLV_S2MM*AW +: 12]),
+    .s_axi_arvalid       (dec_arvalid[SLV_S2MM]),
+    .s_axi_arready       (dec_arready[SLV_S2MM]),
+    .s_axi_rdata         (dec_rdata[SLV_S2MM*32 +: 32]),
+    .s_axi_rresp         (dec_rresp[SLV_S2MM*2 +: 2]),
+    .s_axi_rvalid        (dec_rvalid[SLV_S2MM]),
+    .s_axi_rready        (dec_rready[SLV_S2MM])
+  );
+
+  rtlnet_framebuf #(
+    .N           (3),
+    .NUM_READERS (1),
+    .ADDR_W      (DDR_ADDR_W),
+    .SLOT_LOG2   (FB_SLOT_LOG2),
+    .FB_BASE     (FB_BASE_OFF)
+  ) u_fb (
+    .clk                (ui_clk),
+    .resetn             (ddr_resetn),
+    .s_axi_aclk         (cpu_clk),
+    .s_axi_aresetn      (cpu_resetn_sync),
+    .w_req              (fb_req),
+    .w_rsp_valid        (fb_rsp_valid),
+    .w_rsp_ok           (fb_rsp_ok),
+    .w_rsp_base         (fb_rsp_base),
+    .w_done             (fb_done),
+    .w_done_good        (fb_done_good),
+    .w_done_frame_num   (fb_done_frame_num),
+    .w_done_timestamp   (fb_done_timestamp),
+    .w_done_width       (fb_done_width),
+    .w_done_height      (fb_done_height),
+    .w_done_src_pattern (fb_done_src_pattern),
+    .r_take             (1'b0),                  // the encoder takes this reader port in a later phase
+    .r_release          (1'b0),
+    .r_rsp_valid        (),
+    .r_rsp_ok           (),
+    .r_holds            (),
+    .r_slot             (),
+    .r_base             (),
+    .r_frame_num        (),
+    .r_timestamp        (),
+    .r_width            (),
+    .r_height           (),
+    .r_src_pattern      (),
+    .s_axi_awaddr       (dec_awaddr[SLV_FB*AW +: 12]),
+    .s_axi_awvalid      (dec_awvalid[SLV_FB]),
+    .s_axi_awready      (dec_awready[SLV_FB]),
+    .s_axi_wdata        (dec_wdata[SLV_FB*32 +: 32]),
+    .s_axi_wstrb        (dec_wstrb[SLV_FB*4 +: 4]),
+    .s_axi_wvalid       (dec_wvalid[SLV_FB]),
+    .s_axi_wready       (dec_wready[SLV_FB]),
+    .s_axi_bresp        (dec_bresp[SLV_FB*2 +: 2]),
+    .s_axi_bvalid       (dec_bvalid[SLV_FB]),
+    .s_axi_bready       (dec_bready[SLV_FB]),
+    .s_axi_araddr       (dec_araddr[SLV_FB*AW +: 12]),
+    .s_axi_arvalid      (dec_arvalid[SLV_FB]),
+    .s_axi_arready      (dec_arready[SLV_FB]),
+    .s_axi_rdata        (dec_rdata[SLV_FB*32 +: 32]),
+    .s_axi_rresp        (dec_rresp[SLV_FB*2 +: 2]),
+    .s_axi_rvalid       (dec_rvalid[SLV_FB]),
+    .s_axi_rready       (dec_rready[SLV_FB])
   );
 
   // DDR3 controller: sys_clk is MMCM CLKOUT6 (ddr_sys_clk), ref_clk clk200.

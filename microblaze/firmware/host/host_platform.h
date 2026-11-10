@@ -58,6 +58,13 @@ void        host_model_ddr_alias_bit(unsigned bit);
 void        host_model_ddr_data_and(uint32_t mask);
 void        host_model_ddr_error(void);
 void        host_model_ddr_clear(void);
+/* Video cores (Phase 1): the CSI2, S2MM and FBUF windows present or absent (reset state), the frames the model has
+ * sent and published (frame k lands in slot (k - 1) % 3; a firmware take writes the bar frame of the present mode into
+ * the memory window), and whether the firmware holds a slot. */
+void        host_model_video_set(int present);
+void        host_model_video_frames(uint32_t frames);
+int         host_model_video_fw_holds(void);
+
 
 /* Checksum offload window: present with this CAPS (0 removes it); STATUS.TX_IDLE after this many STATUS
  * reads (0xFFFFFFFF: never); CTRL bits that do not stick; CTRL and counters as the harness sees them. */
