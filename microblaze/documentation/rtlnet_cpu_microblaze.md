@@ -56,7 +56,7 @@ not use them). The frame streams are in `clk`; the protocol wrapper's CPU FIFOs 
 | `axi_intc_0` | AXI INTC 4.1 | 12 inputs from `irq_concat`; kinds detected from the sources (level; UART edge) |
 | `irq_concat` | inline concat 1.0 | `{dma_s2mm, dma_mm2s, uart, timer, irq[7:0]}` |
 | `axi_dma_0` | AXI DMA 7.1 | simple (direct register) mode, no scatter-gather, 64-bit memory side and 64-bit streams, realignment engine on MM2S only (transmit buffers at any byte address) and none on S2MM, `c_sg_length_width` 14 (16383-byte transfers), bursts 16 |
-| `axi_bram_ctrl_0` + `axi_bram` | AXI BRAM controller 4.1 + Block Memory Generator 8.4 | AXI4, 64-bit, single port; **128 KiB = 32 RAMB36**, the DMA frame buffers |
+| `axi_bram_ctrl_0` + `axi_bram` | AXI BRAM controller 4.1 + Block Memory Generator 8.4 | AXI4, 64-bit, single port; **64 KiB = 16 RAMB36** (128 KiB = 32 RAMB36 until 11-10-2026), the DMA frame buffers |
 | `axi_periph` | AXI Interconnect 2.1 | 1 slave (M_AXI_DP), 6 masters: UART, timer, INTC, `M_AXI_RTLNET`, DMA registers, memory path |
 | `axi_mem` | AXI Interconnect 2.1 | 3 slaves (memory path from `axi_periph`, DMA MM2S, DMA S2MM), 1 master (AXI BRAM controller); 32 -> 64-bit conversion for the CPU path |
 | `rst_cpu` | Processor System Reset 5.0 | `ext_reset_in` = port `resetn` (active low), `mb_debug_sys_rst` from the MDM; `dcm_locked` tied 1 |
@@ -77,7 +77,7 @@ block RAM; no firmware section is placed in DDR3, which the `ddr test` memory te
 | 0x41C0_0000 | 64 KiB | AXI Timer |
 | 0x44A0_0000 | 1 MiB | `M_AXI_RTLNET` (RTLNet register window, decoded by the board top) |
 | 0x8000_0000 | 512 MiB | `M_AXI_DDR` (DDR3 through the 8 KiB instruction cache and the 8 KiB write-back data cache, 64-byte lines; only this window is cacheable; decoded by `sc_ddr`, carried to `ui_clk` by `rtlnet_axi_cdc`, served by `rtlnet_axi_arbiter` and `rtlnet_ddr`) |
-| 0xC000_0000 | 128 KiB | AXI BRAM: DMA frame buffers (MicroBlaze data side and both DMA channels) |
+| 0xC000_0000 | 64 KiB | AXI BRAM: DMA frame buffers (MicroBlaze data side and both DMA channels) |
 
 Interrupt inputs: 0..7 = `irq[7:0]`, 8 = timer, 9 = UART, 10 = DMA MM2S, 11 = DMA S2MM. Reset vector 0x0 (`C_BASE_VECTORS`); exceptions and
 interrupts enter through `mtvec`, which the BSP start-up code sets. The single
@@ -88,7 +88,7 @@ instead of the INTC input bits; the firmware uses the header's numbering, which 
 
 Names other flows depend on: the MMI written by `write_mem_info` names the processor
 `u_cpu/u_bd/rtlnet_cpu_i/microblaze_0` (board instance `u_cpu`), the path `updatemem -proc` takes; the
-MMI lists two address spaces (LMB 0..524287 with 128 RAMB36 lanes, AXI BRAM 0xC000_0000..0xC001_FFFF); `write_mem_info` labels the MicroBlaze V processor `Big` although it is little endian, and updatemem places the ELF words identically for either label, so `merge_elf.ps1` accepts both;
+MMI lists two address spaces (LMB 0..524287 with 128 RAMB36 lanes, AXI BRAM 0xC000_0000..0xC000_FFFF); `write_mem_info` labels the MicroBlaze V processor `Big` although it is little endian, and updatemem places the ELF words identically for either label, so `merge_elf.ps1` accepts both;
 the firmware places nothing loadable in the AXI BRAM, so updatemem fills the LMB only.
 
 ## 5. Hardware export and BSP
@@ -505,7 +505,7 @@ server copies the data it echoes (`TCP_WRITE_FLAG_COPY`); four connections of 8 
 | LMB, 512 KiB | text and read-only data 158.5 KiB, data 2.1 KiB, bss 232.7 KiB (lwIP heap 64 KiB, pool 97 KiB, MEMP 9 KiB, CLI and firmware 62 KiB), heap 2 KiB, stack 8 KiB: ends at 381 KiB, 131 KiB free |
 | lwIP heap | 64 KiB; maximum used 37272 B (four echo connections), 3276 B in the iperf runs |
 | pbuf pool | 64 x 1552 B = 97 KiB; maximum used 3 (echo) |
-| AXI BRAM, 128 KiB | 12 KiB: 4 RX + 2 TX buffers of 2 KiB; 116 KiB free |
+| AXI BRAM, 64 KiB (128 KiB until 11-10-2026) | 12 KiB: 4 RX + 2 TX buffers of 2 KiB; 52 KiB free |
 
 **Profile.** `RTLNET_NETIF_PROFILE` (`rtlnet_lwip_netif.h`, default 0) adds timers around the copies, the lwIP
 input and the DMA wait; they cost about 3 % of the RX throughput, so the speed rows above use the build without
@@ -576,7 +576,7 @@ computing and checking in software (desktop demo and `show offload` cover every 
 `RTLNET_NETIF_ZERO_COPY_RX` (default **on**) hands the DMA buffer to lwIP as a custom `PBUF_REF` pbuf;
 `RTLNET_NETIF_ZERO_COPY_TX` (default **off**) puts lwIP's heap in the AXI BRAM and DMAs a single-pbuf frame in
 place. The copy routines of section 9.10 (`axi_put_chain`, `axi_get_words`) remain the paths of the options that
-are off, and `axi_put_chain` also copies the chained pbufs of a zero-copy transmit build. The AXI BRAM is 128 KiB:
+are off, and `axi_put_chain` also copies the chained pbufs of a zero-copy transmit build. The AXI BRAM is 64 KiB (128 KiB until 11-10-2026; the zero-copy transmit column no longer fits):
 
 | Item | RX off, TX off | **default: RX on, TX off** | RX on, TX on |
 |---|---|---|---|
@@ -584,7 +584,7 @@ are off, and `axi_put_chain` also copies the chained pbufs of a zero-copy transm
 | transmit buffers | 2 = 4 KiB | 2 = 4 KiB | 2 = 4 KiB |
 | lwIP heap (`MEM_SIZE` 64 KiB + 128) | LMB | LMB | 64.1 KiB |
 | `.axi_bram` section (linker) | 12288 B | **36864 B** | 102528 B |
-| free of 131072 B | 118784 B | 94208 B | 28544 B |
+| free of 65536 B | 53248 B | 28672 B | does not fit (-36992 B) |
 
 The default image: text 167408 B, data 2108 B, bss 263336 B (of which 36864 B are the AXI BRAM section), 387 KiB
 of the 512 KiB LMB (the AXI BRAM section does not count against it).
@@ -775,6 +775,8 @@ Details: `boards/nexys_video/documentation/rtlnet_nexys_video.md` sections 6.3 a
 | 11-09-2026 | JTAG UART of the MDM removed (CDC gate passes); address 0x4140_0000 unmapped; `axi_periph` has 6 masters; JTAG load of an ELF with `boards/nexys_video/scripts/jtag_load_elf.ps1` |
 | 11-09-2026 | Phase 0 stage 1: 8 KiB instruction and 8 KiB write-through data caches over `0x8000_0000..0x9FFF_FFFF`, SmartConnect `sc_ddr` (one clock, `cpu_clk`), exported 128-bit `M_AXI_DDR` on `clk`; the board top crosses it to `ui_clk` in `rtlnet_axi_cdc`; results in `boards/nexys_video/documentation/rtlnet_nexys_video.md` section 6.8 |
 | 11-09-2026 | Phase 0 stage 2: `build.ps1 -Ddr` (DDR3-linked development image, banner names the image), `jtag_load_elf` waits for DDR3 calibration and verifies the download, block design `C_PC_WIDTH` 32 (section 9.12) |
+| 11-10-2026 | Burst-only DDR3 access: 64-byte cache lines, write-back data cache (section 11) |
+| 11-10-2026 | Wide cache bus: `C_*CACHE_DATA_WIDTH` 1, caches 32 KiB, AXI BRAM 128 -> 64 KiB, probe and build numbers (section 11.1); board results pending |
 
 ## 11. Cache lines and DDR3 burst shape (11-10-2026)
 
@@ -796,6 +798,34 @@ rose from 12.90 to 19.58 MB/s, write rate 28.39 to 24.28 MB/s. Not changed furth
 about 12 more RAMB36 per cache pair) or reading through a block-design AXI data-width converter with a modifiable-cache attribute; both need a new build and a measurement of AR bursts per line.
 
 `NARROW_MASK` and `WRAP_MASK` of arbiter master 0 stay set (no illegal burst was captured; the narrow bit is now unused by stores but kept as a margin until the read shape is settled).
+
+### 11.1 Wide cache bus (11-10-2026)
+
+Change: `C_ICACHE_DATA_WIDTH` and `C_DCACHE_DATA_WIDTH` 1 (full line, one 512-bit transfer per 64-byte line), both caches 32 KiB, 16-word lines and the write-back data cache unchanged. IP validation (probe log
+`IP_Flow 19-3478`): "Full I-cache cacheline data width is not available with cache size 8192. Please change the I-cache size to at least 32768."; at 16 KiB the width request is ignored (`IP_Flow 19-3374`, width stays 0);
+at 32 KiB both settings 1 and 2 are accepted (valid values 0, 1, 2). Setting 2 gives identical pin properties to setting 1 for 16-word lines (table), so setting 1 is used.
+
+Vivado property probe of the block design (setting 1; setting 2 identical):
+
+| Interface | Data width | Max burst length | Note |
+|---|---|---|---|
+| `microblaze_0/M_AXI_IC` | 512 | 1 | one transfer per line, no narrow burst |
+| `microblaze_0/M_AXI_DC` | 512 | 1 | one transfer per line, no narrow burst |
+| `sc_ddr/S00_AXI`, `S01_AXI` | 512 | 1 | |
+| `sc_ddr/M00_AXI` (`M_AXI_DDR`) | 128 | 4 | a 512-bit transfer is 4 beats of 128 bits |
+
+The probe shows the 512-bit transfer and the 4-beat maximum at M00; the actual burst shape at the memory controller (AR bursts per line) is only shown by the board counters.
+
+The first wide-cache build (AXI BRAM still 128 KiB) met timing (WNS +0.147 ns, WHS +0.050 ns) but needed 286.5 RAMB tiles (251 RAMB36 + 71 RAMB18, 75,061 LUT, 74,027 FF), above the 280 limit. The CPU AXI BRAM was therefore reduced from 128 KiB to 64 KiB
+(`AXI_BRAM_SIZE` 64K in `rtlnet_cpu_bd.tcl`, `RTLNET_CPU_AXI_BRAM_SIZE` 0x10000, linker region `axi_bram` LENGTH 0x10000 in `microblaze/firmware/build.ps1`; the firmware `.axi_bram` section is 0x9000 = 36 KiB, margin 0x7000 = 28,672 B in `firmware.map`).
+The zero-copy transmit option (`RTLNET_NETIF_ZERO_COPY_TX`, off by default, needs 102,528 B) no longer fits.
+
+Build (`build.ps1 -Network`, clean worktree at 1e1ba48 plus this change, log `boards/nexys_video/build/phase2b5_build.txt`, `RTLNET_BUILD: PASS`): WNS +0.169 ns, WHS +0.008 ns, WPWS +0.131 ns;
+75,041 LUT (56.08 %, was 71,413), 74,024 FF (was 69,004), 270.5 RAMB tiles (74.11 %, 235 RAMB36 + 71 RAMB18; was 259.5, +11.0; limit 280), 80 DSP; CDC `fifo 10 axil_cdc 5 gray 6` unchanged.
+Board (release image built at 1e1ba48 plus this change, QP 28, 11-10-2026; logs `boards/nexys_video/build/phase2b5_*.txt`): `phase1_gate` PASS 19/19, `cli_test` PASS 55/55, `stream_test` PASS 15/15.
+`ddr test 16` PASS, write 25.06 MB/s, read 19.67 MB/s (before 24.28 and 19.58). `show ddr` master 0 (CPU caches): AW bursts 262,723, W beats 1,050,892 (4.0 per burst); AR bursts 264,698, R beats 1,058,792 (4.0 per burst, before 1.0); errors 0; wait cycles 354 (before 4,966,604); illegal-burst flag clear.
+The line fill is now one 4-beat burst at the memory controller. The `ddr test` read rate is unchanged because that test is bound by the CPU-side data-cache maintenance and compares, not by the memory controller. The `Caches` line printed by `show ddr` still says 8 KiB (stale firmware text, not changed).
+
 
 Coherency (the data cache is write-back): every buffer the CPU writes and hardware reads, and every buffer hardware writes and the CPU reads, in DDR3:
 

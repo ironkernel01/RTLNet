@@ -209,7 +209,7 @@ if (-not $NoFirmware) {
 MEMORY
 {
    ddr3 : ORIGIN = 0x80000000, LENGTH = 0x4000000
-   axi_bram : ORIGIN = 0xC0000000, LENGTH = 0x20000
+   axi_bram : ORIGIN = 0xC0000000, LENGTH = 0x10000
 }
 "@
     } else {
@@ -218,7 +218,7 @@ MEMORY
 MEMORY
 {
    lmb_bram : ORIGIN = 0x0, LENGTH = 0x80000
-   axi_bram : ORIGIN = 0xC0000000, LENGTH = 0x20000
+   axi_bram : ORIGIN = 0xC0000000, LENGTH = 0x10000
 }
 "@
     }

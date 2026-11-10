@@ -10,29 +10,29 @@
 #     Zbb and Zbs, performance pipeline, little endian, no MMU, no FPU, no
 #     atomics, no bus exceptions, debug enabled, ILMB, DLMB, the AXI data port
 #     M_AXI_DP and the cache ports M_AXI_IC / M_AXI_DC, reset vector 0x0;
-#     8 KiB instruction cache and 8 KiB write-through data cache, both covering
-#     only 0x8000_0000-0x9FFF_FFFF), 512 KiB LMB block RAM at
+#     32 KiB instruction cache and 32 KiB write-back data cache, both covering
+#     only 0x8000_0000-0x9FFF_FFFF, 64-byte lines, full-line cache buses), 512 KiB LMB block RAM at
 #     0x0000_0000 for instructions and data, MDM RISC-V (mdm_riscv 1.0, serial
 #     JTAG debug interface, no JTAG UART and no AXI slave), AXI UART Lite
 #     115200 8N1, AXI Timer, AXI INTC, the exported AXI4-Lite master
 #     M_AXI_RTLNET (0x44A0_0000, 1 MiB), and the CPU network path: an AXI DMA
 #     in simple (direct register) mode between the exported streams
 #     S_AXIS_ETH (frames from the network, S2MM) / M_AXIS_ETH (frames to the
-#     network, MM2S), 64-bit tdata with tkeep, and a 128 KiB AXI block RAM
+#     network, MM2S), 64-bit tdata with tkeep, and a 64 KiB AXI block RAM
 #     (DMA buffers, lwIP pools and heap) shared by the MicroBlaze data side and
 #     both DMA channels.
-#   * DDR3 path: M_AXI_IC and M_AXI_DC (both 32-bit, 64-byte lines: a line fill or a
-#     line write-back is one 16-beat burst) join in the SmartConnect sc_ddr, which
-#     packs each 16 x 32-bit burst into one 4-beat 128-bit burst (M00_AXI max burst
+#   * DDR3 path: M_AXI_IC and M_AXI_DC (both 512-bit, 64-byte lines: a line fill or a
+#     line write-back is one 512-bit transfer) join in the SmartConnect sc_ddr, which
+#     down-sizes each transfer to one 4-beat 128-bit burst (M00_AXI max burst
 #     length 4); its master M00_AXI is the exported 128-bit AXI4 port M_AXI_DDR on
 #     the clock clk (cpu_clk, 90 MHz) with the CPU reset; the clock crossing to the
 #     memory controller is outside the block design (rtlnet_axi_cdc in the board
 #     top). The interface has no ID signals. Cache lines of 64 bytes
 #     never cross a 4 KiB boundary. The data cache is write-back (every DDR3 store
 #     leaves as part of a line write-back burst). The IP forces C_DCACHE_DATA_WIDTH to
-#     0 (32-bit bus) unless the cache is write-back, and the wide settings (one 512-bit
-#     transfer per line) need 32 KiB caches: the 32-bit bus with 16-beat bursts keeps
-#     both caches at 8 KiB.
+#     0 (32-bit bus) unless the cache is write-back, and the wide settings (1 full line,
+#     2 also 512-bit here) need caches of at least 32 KiB (validated: 16 KiB is
+#     refused for 16-word lines); C_*CACHE_DATA_WIDTH 1 with CACHE_BYTES 32768.
 #   * Interconnect: axi_periph (MicroBlaze M_AXI_DP, 6 masters: UART, timer,
 #     INTC, RTLNet window, DMA registers, memory path) and axi_mem
 #     (3 slaves: the memory path from axi_periph, DMA MM2S, DMA S2MM; one
@@ -52,17 +52,17 @@
 #       0x41C0_0000   64 KiB  AXI Timer
 #       0x44A0_0000    1 MiB  M_AXI_RTLNET (RTLNet register window)
 #       0x8000_0000  512 MiB  M_AXI_DDR (DDR3, cached, instruction and data)
-#       0xC000_0000  128 KiB  AXI BRAM (MicroBlaze data side and DMA)
+#       0xC000_0000   64 KiB  AXI BRAM (MicroBlaze data side and DMA)
 #   * Cell names are part of the build interface: the MMI written by
 #     write_mem_info names microblaze_0 and the lmb_bram cell; updatemem uses
 #     the processor path <hier>/rtlnet_cpu_i/microblaze_0; the BSP flow
 #     (microblaze/firmware/build.ps1) names microblaze_0 and finds the DMA,
 #     UART, timer and INTC by their XSA instance names.
 # Language: Vivado Tcl (2026.1).
-# Revision: 11-09-2026
+# Revision: 11-10-2026
 #   * 10-22-2026: initial version.
 #   * 10-22-2026: LMB 512 KiB (code, data, stack, lwIP); AXI DMA (simple mode, 64-bit streams) with the
-#     exported S_AXIS_ETH / M_AXIS_ETH, 128 KiB AXI BRAM, axi_mem interconnect,
+#     exported S_AXIS_ETH / M_AXIS_ETH, 128 KiB AXI BRAM (64 KiB since 11-10-2026), axi_mem interconnect,
 #     DMA interrupts on INTC inputs 10 and 11.
 #   * 11-09-2026: processor MicroBlaze V (microblaze_riscv) and mdm_riscv; cell
 #     names, address map, interrupt numbering and exported ports unchanged.
@@ -73,6 +73,9 @@
 #   * 11-09-2026: C_PC_WIDTH 32 (the propagated 19 bits confine execution to the LMB).
 #   * 11-10-2026: burst-only DDR3 access: 64-byte cache lines (C_ICACHE_LINE_LEN and C_DCACHE_LINE_LEN 16 words),
 #     32-bit cache buses (C_*CACHE_DATA_WIDTH 0), write-back data cache.
+#   * 11-10-2026: wide cache bus: C_*CACHE_DATA_WIDTH 1 (one 512-bit transfer per line), caches 32 KiB each
+#     (smallest size the IP accepts for this setting).
+#   * 11-10-2026: AXI BRAM 128 KiB -> 64 KiB (the firmware uses 36 KiB of it); recovers 16 RAMB36 for the 32 KiB caches.
 # Clocks: clk (cpu_clk 90 MHz) for every cell.
 # -----------------------------------------------------------------------------
 
@@ -87,13 +90,13 @@ namespace eval rtlnet_cpu_bd {
   variable INTC_BASE      0x41200000
   variable TIMER_BASE     0x41C00000
   variable AXI_BRAM_BASE  0xC0000000
-  variable AXI_BRAM_SIZE  128K
+  variable AXI_BRAM_SIZE  64K
   variable DDR_BASE       0x80000000
   variable DDR_SIZE       512M
   # Cacheable window (inclusive high address, 64-bit property format).
   variable CACHE_BASE     0x0000000080000000
   variable CACHE_HIGH     0x000000009FFFFFFF
-  variable CACHE_BYTES    8192
+  variable CACHE_BYTES    32768
   # DMA length register width: 2^14 - 1 = 16383 bytes per simple transfer,
   # above the 1518-byte frame and the 2 KiB buffer.
   variable DMA_LEN_W      14
@@ -178,8 +181,8 @@ proc rtlnet_cpu_bd_create {bd_dir} {
     CONFIG.C_DCACHE_HIGHADDR         $::rtlnet_cpu_bd::CACHE_HIGH \
     CONFIG.C_ICACHE_LINE_LEN         16 \
     CONFIG.C_DCACHE_LINE_LEN         16 \
-    CONFIG.C_ICACHE_DATA_WIDTH       0 \
-    CONFIG.C_DCACHE_DATA_WIDTH       0 \
+    CONFIG.C_ICACHE_DATA_WIDTH       1 \
+    CONFIG.C_DCACHE_DATA_WIDTH       1 \
     CONFIG.C_DCACHE_USE_WRITEBACK    1 \
     CONFIG.C_USE_BRANCH_TARGET_CACHE 0 \
     CONFIG.C_DEBUG_ENABLED           1 \
@@ -268,7 +271,7 @@ proc rtlnet_cpu_bd_create {bd_dir} {
     CONFIG.c_s2mm_burst_size         16] $dma
 
   # DMA buffer memory: AXI BRAM controller (AXI4, 64-bit, single port) and its
-  # block RAM; the size follows the address range (128 KiB = 32 RAMB36).
+  # block RAM; the size follows the address range (64 KiB = 16 RAMB36).
   set bctl [create_bd_cell -type ip -vlnv xilinx.com:ip:axi_bram_ctrl:4.1 axi_bram_ctrl_0]
   set_property -dict [list \
     CONFIG.PROTOCOL         AXI4 \

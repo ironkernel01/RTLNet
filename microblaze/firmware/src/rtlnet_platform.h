@@ -35,7 +35,7 @@
  *       0x44A1_9000        CPU-path checksum offload  "TCPO"
  *     0x44A2_0000   4 KiB  CLASSIFIER (reserved, reads 0)
  *   0x8000_0000  512 MiB  DDR3 SDRAM (cached, M_AXI_DDR)           CPU core
- *   0xC000_0000  128 KiB  AXI BRAM (DMA frame buffers only)        CPU core
+ *   0xC000_0000   64 KiB  AXI BRAM (DMA frame buffers only)        CPU core
  *
  * The CPU-core part comes from microblaze/driver/
  * rtlnet_cpu_microblaze.h (single definition, matches rtlnet_cpu_bd.tcl);

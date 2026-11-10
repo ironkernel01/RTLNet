@@ -4,9 +4,9 @@
 //   section 15.6) around the MicroBlaze block design `rtlnet_cpu`
 //   (microblaze/hdl/rtlnet_cpu_bd.tcl).
 // Overview:
-//   * The block design holds MicroBlaze V (RV32) with 8 KiB instruction and 8 KiB
-//     write-through data caches over 0x8000_0000-0x9FFF_FFFF, 512 KiB LMB BRAM, MDM, UART Lite
-//     (115200 8N1), AXI Timer, AXI INTC, the AXI DMA with its 128 KiB AXI
+//   * The block design holds MicroBlaze V (RV32) with 32 KiB instruction and 32 KiB
+//     write-back data caches over 0x8000_0000-0x9FFF_FFFF, 512 KiB LMB BRAM, MDM, UART Lite
+//     (115200 8N1), AXI Timer, AXI INTC, the AXI DMA with its 64 KiB AXI
 //     BRAM and the interconnects; its exported AXI4-Lite master M_AXI_RTLNET
 //     (0x44A0_0000, 1 MiB) is this core's m_axi_* register master, full
 //     32-bit addresses.

@@ -23,10 +23,11 @@
  *
  * This header holds constants and contract prose only.
  *
- * Revision: 11-09-2026
+ * Revision: 11-10-2026
  *   * 11-09-2026: MicroBlaze V; classic vector slots replaced by the reset
  *     vector (traps use mtvec).
  *   * 11-09-2026: DDR3 window 0x8000_0000 (512 MiB, cached), cache sizes and line length.
+ *   * 11-10-2026: AXI BRAM 64 KiB (was 128 KiB).
  */
 #ifndef RTLNET_CPU_MICROBLAZE_H
 #define RTLNET_CPU_MICROBLAZE_H
@@ -38,7 +39,7 @@
 /* AXI block RAM on the data side, shared with the AXI DMA: DMA buffers and
  * the lwIP heap and pools (linker section .axi_bram, NOLOAD). */
 #define RTLNET_CPU_AXI_BRAM_BASE    0xC0000000u
-#define RTLNET_CPU_AXI_BRAM_SIZE    0x00020000u
+#define RTLNET_CPU_AXI_BRAM_SIZE    0x00010000u
 
 /* DDR3 SDRAM, 512 MiB, behind the M_AXI_DDR master (instruction and data caches, then the
  * rtlnet_axi_arbiter and the MIG controller). Only this window is cached: 8 KiB instruction

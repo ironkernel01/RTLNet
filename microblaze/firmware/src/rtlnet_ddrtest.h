@@ -4,7 +4,7 @@
  * Copyright (C) 2026 IronKernel. All rights reserved.
  *
  * Role: the memory test behind the CLI command "ddr test". It runs on the DDR3
- * window as the processor sees it, through the 8 KiB instruction and 8 KiB
+ * window as the processor sees it, through the 32 KiB instruction and 32 KiB
  * write-back data caches (64-byte lines), with explicit cache maintenance around every write and read
  * that must come from the SDRAM. Three phases:
  *

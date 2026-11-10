@@ -846,6 +846,12 @@ CPU master 0: writes 4.0 beats per burst (`ddr test`), reads 1 beat per burst (o
 `ddr test 16`: PASS, write 24.28 MB/s, read 19.58 MB/s. `net_test` and `tcp_test` could not run meaningfully: the PC NIC `Ethernet` (direct link) is Disconnected (BLOCKED, not counted as a failure of this work).
 Transcripts: `build/phase2b3_stream_transcript.txt`, `build/phase2b4_ddr_test.txt`.
 
+Wide cache bus (11-10-2026, `rtlnet_cpu_microblaze.md` section 11.1; 512-bit cache buses, 32 KiB caches, CPU AXI BRAM 64 KiB; build at 1e1ba48 plus this change, `build/phase2b5_build.txt`): WNS +0.169 ns, WHS +0.008 ns, WPWS +0.131 ns; 75,041 LUT (56.08 %), 74,024 FF, 270.5 RAMB tiles (74.11 %), 80 DSP; CDC `fifo 10 axil_cdc 5 gray 6` unchanged.
+Board (release image, QP 28): `phase1_gate` PASS 19/19, `cli_test` PASS 55/55, `ddr test 16` PASS and `show ddr` master 0 AR 264,698 bursts / 1,058,792 beats = 4.0 per burst (was 1.0), AW 4.0 beats per burst, errors 0 (`build/phase2b5_ddr_test.txt`).
+`stream_test` 60 s per mode PASS 15/15 (`build/phase2b5_stream_test.txt`): 720p30 1804 pictures, 0 dropped, 0 continuity errors, 0 PTS gaps, PSNR minimum 51.14 dB, 1037 kb/s, TS-mux load 3.2 % (was 3.3 %), 423 and 425 clocks per macroblock;
+1080p30 1802 pictures, 0 dropped, 0 continuity errors, 0 PTS gaps, PSNR minimum 51.08 dB, 3143 kb/s (was 2210), TS-mux load 9.8 % (was 7.0 %), 435 and 436 clocks per macroblock.
+`net_test` and `tcp_test` skipped: the direct PC NIC `Ethernet` is Disconnected.
+
 ## 7. Network integration (done 10-22-2026) and what remains
 
 Integrated: `u_mac`, `u_mdio`, `u_protocol` (every leaf, the CPU network path and its classifier), `u_echo` under
@@ -880,3 +886,4 @@ Open:
 | 11-09-2026 | Phase 0 stage 3: arbiter `WRAP_MASK` and illegal-burst capture, board top `WRAP_MASK` 1, `show ddr` capture, machine-wide board lock (section 5.3), `cli_test` skips `ddr test` in the DDR3 image; results in section 6.9 |
 | 11-09-2026 | Phase 0 stage 2: `C_PC_WIDTH` 32, `build.ps1 -Tag` variant builds, `jtag_load_elf` with calibration wait, download check and `-Image`, DDR3 image (`build.ps1 -Ddr`); CPU-only counts `fifo 5 axil_cdc 1 gray 0` built and passing; results and the open arbiter finding in section 6.9 |
 | 11-09-2026 | Phase 1 (section 6.10): video cores `u_csi2`, `u_s2mm`, `u_fb` on decoder slaves 7 to 9, arbiter with two masters, CDC expectation `axil_cdc 9` (network) and `4` (CPU-only), firmware video commands and the Phase 1 gate |
+| 11-10-2026 | Wide cache bus (512-bit cache buses, 32 KiB caches, AXI BRAM 64 KiB): build and board results in section 6.12 |

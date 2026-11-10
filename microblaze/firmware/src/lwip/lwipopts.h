@@ -16,7 +16,7 @@
  * the sizes below hold both.
  *
  * Memory (all in the LMB block RAM, .bss; only the DMA buffers live in the
- * AXI BRAM, rtlnet_lwip_netif.c: 16 x 2 KiB receive + 2 x 2 KiB transmit = 36 KiB of the 128 KiB by default;
+ * AXI BRAM, rtlnet_lwip_netif.c: 16 x 2 KiB receive + 2 x 2 KiB transmit = 36 KiB of the 64 KiB by default;
  * with RTLNET_NETIF_ZERO_COPY_TX the 64 KiB heap moves there too: 100 KiB):
  *   MEM_SIZE                      64 KiB heap: tcp_write copies of echoed
  *                                 data (TCP_WRITE_FLAG_COPY: up to TCP_WND
