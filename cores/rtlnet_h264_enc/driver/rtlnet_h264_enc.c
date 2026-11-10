@@ -414,7 +414,9 @@ int rtlnet_h264_enc_configure(uintptr_t base, const rtlnet_h264_enc_cfg_t *cfg)
     rtlnet_reg_write32(base, RTLNET_H264_REG_MB_W, cfg->mb_w);
     rtlnet_reg_write32(base, RTLNET_H264_REG_MB_H, cfg->mb_h);
     rtlnet_reg_write32(base, RTLNET_H264_REG_SLICES, cfg->slices);
-    rtlnet_reg_write32(base, RTLNET_H264_REG_QP, cfg->qp);
+    rtlnet_reg_write32(base, RTLNET_H264_REG_QP,
+                       (cfg->qp < RTLNET_H264_QP_MIN_REALTIME) ? RTLNET_H264_QP_MIN_REALTIME : cfg->qp);
+    rtlnet_reg_write32(base, RTLNET_H264_REG_MB_MODE, (cfg->mb_pcm != 0u) ? 1u : 0u);
     rtlnet_reg_write32(base, RTLNET_H264_REG_IN_BASE, cfg->in_base);
     rtlnet_reg_write32(base, RTLNET_H264_REG_IN_STRIDE, cfg->in_stride);
     rtlnet_reg_write32(base, RTLNET_H264_REG_RY_BASE, cfg->ry_base);

@@ -18,15 +18,26 @@ Overview:
   * PNGs per configuration in <work>/png: src_<n>.png (generator reference), jm_<n>.png, oh_<n>.png, ff_<n>.png and
     side_<n>.png (source, JM, OpenH264, FFmpeg side by side).
   * Work directories: .sim/h264/<config>/ (gitignored).
-Usage: powershell -NoProfile -ExecutionPolicy Bypass -File h264_harness.ps1 [-Config qcif_s1,720p_s1] [-Inject] [-Threads N]
-  Without -Config every configuration of the default set runs ('1080p_s1' and '1080p_s4' included).
+  * Macroblock mode: with the intra 16x16 encoder (register MB_MODE present in rtlnet_h264_enc_regs.sv) the rebuilt picture is lossy:
+    h264_check.py prints PSNR per picture and BITS per picture and enforces the floor of the (pattern, QP) pair from
+    h264_psnr_floors.txt. -Measure prints candidate floor lines (also appended to .sim/h264/floors_measured.txt) instead of
+    failing on a missing floor. -Pcm selects the I_PCM macroblock mode (bench define TB_PCM=1 writes MB_MODE = 1); the rebuilt
+    picture must then equal the generator's 4:2:0 reference exactly. An RTL without the MB_MODE register (the I_PCM-only
+    encoder) runs the I_PCM checks automatically, with a NOTE line.
+  * Configurations: <size>_e<engines>_s<slices>_q<QP> for 720p and 1080p (slices of the whole picture; e1_s2 is one engine
+    with two slices), qcif_<pattern>_q<QP> for QCIF, and the named QCIF structure checks (qcif_s1, qcif_s3, qcif_ring, qcif_e2_*,
+    qcif_2pic, ... at QP 28). -Config takes names or wildcards (qcif_*_q0, 720p_e2_*).
+Usage: powershell -NoProfile -ExecutionPolicy Bypass -File h264_harness.ps1 [-Config qcif_s1,720p_*] [-Inject] [-Pcm] [-Measure] [-Threads N]
+  Without -Config every configuration of the default set runs (several minutes per ten configurations: each one builds the bench).
 Revision: 11-09-2026
-  * 11-09-2026: initial version.
+  * 11-09-2026: initial version; QP/pattern configuration table, PSNR floors, bits per picture, -Pcm and -Measure.
 -------------------------------------------------------------------------------
 #>
 param(
     [string[]]$Config = @(),
     [switch]$Inject,
+    [switch]$Pcm,
+    [switch]$Measure,
     [int]$Threads = 1,
     [switch]$NoPng
 )
@@ -43,26 +54,53 @@ $Tb    = Join-Path $Repo 'cores/rtlnet_h264_enc/testbench'
 $Sim   = Join-Path $Repo '.sim/h264'
 New-Item -ItemType Directory -Force -Path $Sim | Out-Null
 
-# name, coded w, coded h, display h, slices, pics, pattern 0, pattern 1 (or square frame 1), ring KB, consumer delay, memory log2 (16-byte words)
-$Configs = @(
-    @{ Name = 'qcif_s1';     W = 176;  H = 144;  DH = 144;  E = 1; S = 1; P = 1; Pat = @('noise');          Ring = 256;  Delay = 0;     Mem = 17 },
-    @{ Name = 'qcif_s3';     W = 176;  H = 144;  DH = 144;  E = 1; S = 3; P = 1; Pat = @('gradient');       Ring = 256;  Delay = 0;     Mem = 17 },
-    @{ Name = 'qcif_bars';   W = 176;  H = 144;  DH = 144;  E = 1; S = 1; P = 1; Pat = @('bars');           Ring = 256;  Delay = 0;     Mem = 17 },
-    @{ Name = 'qcif_2pic';   W = 176;  H = 144;  DH = 144;  E = 1; S = 3; P = 2; Pat = @('bars', 'square'); Ring = 256;  Delay = 0;     Mem = 17 },
-    @{ Name = 'qcif_zeros';  W = 176;  H = 144;  DH = 144;  E = 1; S = 1; P = 1; Pat = @('zeros');          Ring = 256;  Delay = 0;     Mem = 17 },
-    @{ Name = 'qcif_ring';   W = 176;  H = 144;  DH = 144;  E = 1; S = 3; P = 1; Pat = @('noise');          Ring = 24;   Delay = 30000; Mem = 17; Stall = 1 },
-    @{ Name = 'qcif_e2_s2';  W = 176;  H = 144;  DH = 144;  E = 2; S = 2; P = 1; Pat = @('gradient');       Ring = 256;  Delay = 0;     Mem = 17 },
-    @{ Name = 'qcif_e2_s4';  W = 176;  H = 144;  DH = 144;  E = 2; S = 4; P = 1; Pat = @('noise');          Ring = 256;  Delay = 0;     Mem = 17 },
-    @{ Name = 'qcif_e2_2pic'; W = 176; H = 144;  DH = 144;  E = 2; S = 2; P = 2; Pat = @('bars', 'square'); Ring = 256;  Delay = 0;     Mem = 17 },
-    @{ Name = '720p_e1_s1';  W = 1280; H = 720;  DH = 720;  E = 1; S = 1; P = 1; Pat = @('gradient');       Ring = 2048; Delay = 0;     Mem = 20 },
-    @{ Name = '720p_e2_s2';  W = 1280; H = 720;  DH = 720;  E = 2; S = 2; P = 1; Pat = @('gradient');       Ring = 2048; Delay = 0;     Mem = 20 },
-    @{ Name = '720p_e2_s4';  W = 1280; H = 720;  DH = 720;  E = 2; S = 4; P = 1; Pat = @('bars');           Ring = 2048; Delay = 0;     Mem = 20 },
-    @{ Name = '1080p_e1_s1'; W = 1920; H = 1088; DH = 1080; E = 1; S = 1; P = 1; Pat = @('bars');           Ring = 4096; Delay = 0;     Mem = 20 },
-    @{ Name = '1080p_e2_s2'; W = 1920; H = 1088; DH = 1080; E = 2; S = 2; P = 1; Pat = @('gradient');       Ring = 4096; Delay = 0;     Mem = 20 },
-    @{ Name = '1080p_e2_s4'; W = 1920; H = 1088; DH = 1080; E = 2; S = 4; P = 1; Pat = @('bars');           Ring = 4096; Delay = 0;     Mem = 20 }
-)
+# Configuration table. Fields: Name, W/H coded size, DH display height, E engines, S slices (whole picture), P pictures,
+# Pat patterns (per picture), Qp slice QP, Ring KiB, Delay (consumer clocks), Mem log2 (16-byte words).
+$Configs = @()
+function Add-Cfg([string]$name, [int]$w, [int]$h, [int]$dh, [int]$e, [int]$s, [int]$p, [string[]]$pat, [int]$qp, [hashtable]$extra = @{}) {
+    $ring = 256; $mem = 17
+    if ($w -eq 1280) { $ring = 2048; $mem = 20 }
+    if ($w -eq 1920) { $ring = 4096; $mem = 20 }
+    $c = @{ Name = $name; W = $w; H = $h; DH = $dh; E = $e; S = $s; P = $p; Pat = $pat; Qp = $qp; Ring = $ring; Delay = 0; Mem = $mem }
+    foreach ($k in $extra.Keys) { $c[$k] = $extra[$k] }
+    $script:Configs += ,$c
+}
+# Named QCIF structure checks (QP 28): slices, engines, two pictures, small ring with a slow consumer.
+Add-Cfg 'qcif_s1'      176 144 144 1 1 1 @('noise') 28
+Add-Cfg 'qcif_s3'      176 144 144 1 3 1 @('gradient') 28
+Add-Cfg 'qcif_bars'    176 144 144 1 1 1 @('bars') 28
+Add-Cfg 'qcif_2pic'    176 144 144 1 3 2 @('bars', 'square') 28
+Add-Cfg 'qcif_zeros'   176 144 144 1 1 1 @('zeros') 28
+Add-Cfg 'qcif_ring'    176 144 144 1 3 1 @('noise') 28 @{ Ring = 16; Delay = 30000; Stall = 1 }
+Add-Cfg 'qcif_e2_s2'   176 144 144 2 2 1 @('gradient') 28
+Add-Cfg 'qcif_e2_s4'   176 144 144 2 4 1 @('noise') 28
+Add-Cfg 'qcif_e2_2pic' 176 144 144 2 2 2 @('bars', 'square') 28
+# QCIF content and QP matrix.
+foreach ($pq in @(
+        @('photo', 0), @('photo', 18), @('photo', 28), @('photo', 38), @('photo', 51),
+        @('gradnoise', 0), @('gradnoise', 18), @('gradnoise', 28), @('gradnoise', 38), @('gradnoise', 51),
+        @('zoneplate', 18), @('zoneplate', 28), @('zoneplate', 38),
+        @('edges', 0), @('edges', 18), @('edges', 28), @('edges', 38),
+        @('checker', 0), @('checker', 18), @('checker', 28), @('checker', 38),
+        @('noise', 0), @('noise', 18), @('noise', 38), @('noise', 51), @('gradient', 28), @('gradient', 51),
+        @('bars', 18), @('bars', 51), @('zeros', 38))) {
+    Add-Cfg ("qcif_{0}_q{1}" -f $pq[0], $pq[1]) 176 144 144 1 1 1 @($pq[0]) $pq[1]
+}
+# 720p and 1080p: shapes x QP, patterns rotating through the textured set so every pattern appears at both sizes.
+$rot = @('photo', 'gradnoise', 'edges', 'zoneplate', 'bars', 'checker')
+$ri = 0
+foreach ($sz in @(@('720p', 1280, 720, 720), @('1080p', 1920, 1088, 1080))) {
+    foreach ($sh in @(@(1, 1), @(1, 2), @(2, 2), @(2, 4))) {
+        foreach ($qp in @(18, 28, 38, 51)) {
+            $pat = $rot[$ri % $rot.Count]; $ri++
+            Add-Cfg ("{0}_e{1}_s{2}_q{3}" -f $sz[0], $sh[0], $sh[1], $qp) $sz[1] $sz[2] $sz[3] $sh[0] $sh[1] 1 @($pat) $qp
+        }
+    }
+}
 $Config = @($Config | ForEach-Object { $_ -split ',' } | Where-Object { $_ -ne '' })
-if ($Config.Count -gt 0) { $Configs = @($Configs | Where-Object { $Config -contains $_.Name }) }
+if ($Config.Count -gt 0) {
+    $Configs = @($Configs | Where-Object { $n = $_.Name; @($Config | Where-Object { $n -like $_ }).Count -gt 0 })
+}
 if ($Configs.Count -eq 0) { throw 'no matching configuration' }
 
 function Invoke-Tool([string]$exe, [string[]]$toolArgs, [string]$workDir, [string]$outFile) {
@@ -79,15 +117,23 @@ function Read-Text([string]$path) {
 }
 
 # SPS/PPS tool, built from the driver with the host gcc.
+# The MinGW runtime next to the host gcc is on PATH for the tool builds and for the OpenH264 decoder (built with that gcc).
+$env:PATH = "$(Split-Path -Parent $Cc);$env:PATH"
 $ToolDir = Get-RtlnetToolDir 'h264_enc'
 $SpsTool = "$ToolDir/h264_spspps_tool.exe"
 $srcNewest = (Get-ChildItem "$Repo/cores/rtlnet_h264_enc/driver/*", "$Tb/h264_spspps_tool.c" | Sort-Object LastWriteTime -Descending | Select-Object -First 1).LastWriteTime
 if (-not (Test-Path -LiteralPath $SpsTool) -or ((Get-Item -LiteralPath $SpsTool).LastWriteTime -lt $srcNewest)) {
-    $env:PATH = "$(Split-Path -Parent $Cc);$env:PATH"
     & $Cc -std=c11 -Wall -Wextra -Werror -DRTLNET_HOST_TEST "-I$Repo/cores/rtlnet_common/driver" "-I$Repo/cores/rtlnet_h264_enc/driver" `
         "$Repo/cores/rtlnet_h264_enc/driver/rtlnet_h264_enc.c" "$Tb/h264_spspps_tool.c" -o $SpsTool
     if ($LASTEXITCODE -ne 0) { throw 'h264_spspps_tool build failed' }
 }
+
+# MB_MODE register present in the RTL? Without it the encoder is the I_PCM-only one: I_PCM checks run automatically.
+$HasMbMode = (Select-String -Path "$Repo/cores/rtlnet_h264_enc/hdl/rtlnet_h264_enc_regs.sv" -Pattern 'MB_MODE' -Quiet)
+$PcmChecks = $Pcm.IsPresent -or (-not $HasMbMode)
+if (-not $HasMbMode) { Write-Output 'NOTE: RTL has no MB_MODE register (I_PCM-only encoder): running the I_PCM checks (exact rebuilt picture, no PSNR floors)' }
+$Floors = "$Tb/h264_psnr_floors.txt"
+$Measured = "$Sim/floors_measured.txt"
 
 $allOk = $true
 foreach ($c in $Configs) {
@@ -119,7 +165,8 @@ foreach ($c in $Configs) {
 
     # Encode in Verilator.
     $defs = @("TB_MBW=$($c.W / 16)", "TB_MBH=$($c.H / 16)", "TB_SLICES=$($c.S)", "TB_ENGINES=$($c.E)", "TB_PICS=$($c.P)", "TB_RING_KB=$($c.Ring)",
-              "TB_CONSUMER_DELAY=$($c.Delay)", "TB_MEM_LOG2=$($c.Mem)", 'TB_GAP=20', 'TB_LAT=20')
+              "TB_CONSUMER_DELAY=$($c.Delay)", "TB_MEM_LOG2=$($c.Mem)", 'TB_GAP=20', 'TB_LAT=20', "TB_QP=$($c.Qp)")
+    if ($Pcm -and $HasMbMode) { $defs += 'TB_PCM=1' }
     if ($c.ContainsKey('Stall')) { $defs += 'TB_EXPECT_STALL=1' }
     $fdir = $dir.Replace([string][char]92, '/')
     $pa = @("IN0=$fdir/in0.hex", "OUT=$fdir/o")
@@ -135,8 +182,14 @@ foreach ($c in $Configs) {
     foreach ($m in [regex]::Matches($runLog, '(?m)^STAT [^\r\n]*')) { Write-Output "[$label] $($m.Value)" }
 
     # Assemble stream and rebuilt YUV; rebuilt must equal the reference.
-    $asm = & $Py -I "$Tb/h264_check.py" assemble --dir $dir --prefix "$dir/o" --spspps "$dir/sps.bin" --pics $c.P --disp-h $c.DH --refs @refs
-    $asm | ForEach-Object { Write-Output "[$label] $_" }
+    $asmExtra = @('--pattern', ($c.Pat -join ','), '--qp', "$($c.Qp)", '--floors', $Floors)
+    if ($PcmChecks) { $asmExtra += '--pcm' }
+    if ($Measure -or $Inject) { $asmExtra += '--measure' }
+    $asm = & $Py -I "$Tb/h264_check.py" assemble --dir $dir --prefix "$dir/o" --spspps "$dir/sps.bin" --pics $c.P --disp-h $c.DH --refs @refs @asmExtra
+    $asm | ForEach-Object {
+        Write-Output "[$label] $_"
+        if ($Measure -and ($_ -match '^FLOOR \S+ \d+ [\d.]+$')) { [System.IO.File]::AppendAllText($Measured, "$_`n") }
+    }
     if ($LASTEXITCODE -ne 0) { $fails += 'rebuilt vs reference' }
 
     # Decode with the three decoders and compare each to the rebuilt YUV.

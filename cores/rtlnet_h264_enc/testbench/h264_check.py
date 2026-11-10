@@ -5,15 +5,26 @@ Purpose: stream assembly and picture comparison of the rtlnet_h264_top decoder h
 Overview:
   * assemble: turns the bench's dumps into the files the decoders and the comparison use.
       python -I h264_check.py assemble --dir D --prefix D/o --spspps D/sps.bin --pics N --disp-h H [--refs a.yuv b.yuv]
+          [--pcm] [--pattern P[,P2] --qp Q --floors FILE] [--measure]
     Reads <prefix>_info.txt, <prefix>_stream.hex, <prefix>_rec<n>.hex. Writes D/stream.264 (SPS + PPS + the
     encoder's Annex B stream), D/rebuilt<n>.yuv (the engine's rebuilt picture n, 4:2:0 planar, cropped to
-    the display height) and, when --refs is given, checks each rebuilt picture against the generator's
-    reference 4:2:0 picture (cropped the same way): exit code 1 and the first differing macroblock on a mismatch.
+    the display height) and, when --refs is given, compares each rebuilt picture with the generator's
+    reference 4:2:0 picture (cropped the same way).
+      - With --pcm (I_PCM macroblock mode) the rebuilt picture must equal the reference exactly: exit code 1 and the
+        first differing macroblock on a mismatch.
+      - Without --pcm the picture is lossy and is judged by PSNR. It prints
+        `PSNR pic<n> Y <dB> Cb <dB> Cr <dB> all <dB>` (display area, rebuilt against the reference) and enforces the
+        floor of the pattern/QP pair from the floors file (lines `<pattern> <qp> <floor_dB>`, `#` comments): the
+        overall PSNR must be >= the floor, else exit code 1. A pair that is absent from the file is an error, unless
+        --measure is given: then a candidate line `FLOOR <pattern> <qp> <value>` is printed (the measured overall PSNR
+        minus 1.0 dB, rounded down to 0.1 dB) and the picture passes.
+    Always prints `BITS pic<n> <bits>` (the stream bits of the picture: the access unit delimiters split the
+    pictures; SPS and PPS are not counted) and `BITS_PER_MB pic<n> <bits per macroblock>`.
   * compare: python -I h264_check.py compare --a X.yuv --b Y.yuv --w W --h H --label NAME
     Byte comparison of two 4:2:0 YUV files (all frames); prints PSNR, and on a mismatch the first differing
     frame, plane and macroblock (x, y); exit code 1 on any difference or size mismatch.
 Revision: 11-09-2026
-  * 11-09-2026: initial version.
+  * 11-09-2026: initial version; PSNR report and floors, bits per picture, --pcm switch (intra 16x16 phase).
 """
 import argparse
 import math
@@ -90,6 +101,47 @@ def psnr(a, b):
     return 10.0 * math.log10(255.0 * 255.0 * n / se)
 
 
+def psnr_planes(a, b, w, h):
+    """PSNR of b against a (both 4:2:0 planar, w x h): [Y, Cb, Cr, all]."""
+    ysz = w * h
+    csz = (w // 2) * (h // 2)
+    vals = []
+    tot_se = 0
+    for off, n in ((0, ysz), (ysz, csz), (ysz + csz, csz)):
+        se = sum((x - y) * (x - y) for x, y in zip(a[off:off + n], b[off:off + n]))
+        tot_se += se
+        vals.append(math.inf if se == 0 else 10.0 * math.log10(255.0 * 255.0 * n / se))
+    n_all = ysz + 2 * csz
+    vals.append(math.inf if tot_se == 0 else 10.0 * math.log10(255.0 * 255.0 * n_all / tot_se))
+    return vals
+
+
+def read_floors(path):
+    floors = {}
+    if path:
+        try:
+            with open(path) as f:
+                for line in f:
+                    line = line.split("#", 1)[0].strip()
+                    if line:
+                        pat, qp, db = line.split()
+                        floors[(pat, int(qp))] = float(db)
+        except FileNotFoundError:
+            pass
+    return floors
+
+
+def split_pictures(stream):
+    """Byte offsets of the access unit delimiters (00 00 00 01 09) in the stream."""
+    marker = bytes([0, 0, 0, 1, 9])
+    marks = []
+    i = stream.find(marker)
+    while i >= 0:
+        marks.append(i)
+        i = stream.find(marker, i + 5)
+    return marks
+
+
 def cmd_compare(args):
     a = open(args.a, "rb").read()
     b = open(args.b, "rb").read()
@@ -111,27 +163,57 @@ def cmd_assemble(args):
     with open(args.dir + "/stream.264", "wb") as f:
         f.write(sps + stream)
     rc = 0
+    floors = read_floors(args.floors)
+    marks = split_pictures(stream)
     for n in range(args.pics):
         rec = hex_to_bytes("%s_rec%d.hex" % (args.prefix, n))
         yuv, w, h = rebuilt_to_yuv(rec, info, args.disp_h)
         with open("%s/rebuilt%d.yuv" % (args.dir, n), "wb") as f:
             f.write(yuv)
-        if args.refs:
-            ref = open(args.refs[n], "rb").read()
-            # Crop the reference (coded size) to the display height.
-            ys = ref[:w * h][:w * args.disp_h]
-            cw = w // 2
-            us = ref[w * h:w * h + cw * (h // 2)][:cw * (args.disp_h // 2)]
-            vs = ref[w * h + cw * (h // 2):][:cw * (args.disp_h // 2)]
-            refc = ys + us + vs
-            with open("%s/ref%d.yuv" % (args.dir, n), "wb") as f:
-                f.write(refc)
+        if n < len(marks):
+            end = marks[n + 1] if n + 1 < len(marks) else len(stream)
+            bits = (end - marks[n]) * 8
+            print("BITS pic%d %d" % (n, bits))
+            print("BITS_PER_MB pic%d %.1f" % (n, bits / float(info["mbw"] * info["mbh"])))
+        if not args.refs:
+            continue
+        ref = open(args.refs[n], "rb").read()
+        # Crop the reference (coded size) to the display height.
+        ys = ref[:w * h][:w * args.disp_h]
+        cw = w // 2
+        us = ref[w * h:w * h + cw * (h // 2)][:cw * (args.disp_h // 2)]
+        vs = ref[w * h + cw * (h // 2):][:cw * (args.disp_h // 2)]
+        refc = ys + us + vs
+        with open("%s/ref%d.yuv" % (args.dir, n), "wb") as f:
+            f.write(refc)
+        if len(refc) != len(yuv):
+            print("MISMATCH rebuilt%d vs generator reference: size %d, expected %d" % (n, len(yuv), len(refc)))
+            rc = 1
+            continue
+        py, pu, pv, pa = psnr_planes(refc, yuv, w, args.disp_h)
+        print("PSNR pic%d Y %.2f Cb %.2f Cr %.2f all %.2f" % (n, py, pu, pv, pa))
+        if args.pcm:
             d = first_diff(refc, yuv, w, args.disp_h)
-            if d or len(refc) != len(yuv):
+            if d:
                 print("MISMATCH rebuilt%d vs generator reference: %s" % (n, d))
                 rc = 1
             else:
                 print("MATCH rebuilt%d equals the generator's 4:2:0 reference (%d bytes), PSNR inf" % (n, len(yuv)))
+            continue
+        pats = args.pattern.split(",")
+        key = (pats[min(n, len(pats) - 1)], args.qp)
+        if key in floors:
+            if pa < floors[key]:
+                print("FLOOR FAIL pic%d %s qp %d: PSNR %.2f dB below the floor %.2f dB" % (n, key[0], args.qp, pa, floors[key]))
+                rc = 1
+            else:
+                print("FLOOR OK pic%d %s qp %d: PSNR %.2f dB >= %.2f dB" % (n, key[0], args.qp, pa, floors[key]))
+        elif args.measure:
+            val = 99.0 if pa == math.inf else max(0.0, math.floor((pa - 1.0) * 10.0) / 10.0)
+            print("FLOOR %s %d %.1f" % (key[0], args.qp, val))
+        else:
+            print("FLOOR MISSING pic%d %s qp %d: add a line to the floors file (run the harness with -Measure)" % (n, key[0], args.qp))
+            rc = 1
     print("stream %d bytes (+%d SPS/PPS)" % (len(stream), len(sps)))
     return rc
 
@@ -152,6 +234,11 @@ def main():
     s.add_argument("--pics", type=int, default=1)
     s.add_argument("--disp-h", type=int, required=True)
     s.add_argument("--refs", nargs="*")
+    s.add_argument("--pcm", action="store_true")
+    s.add_argument("--pattern", default="")
+    s.add_argument("--qp", type=int, default=-1)
+    s.add_argument("--floors", default="")
+    s.add_argument("--measure", action="store_true")
     a = ap.parse_args()
     return cmd_compare(a) if a.cmd == "compare" else cmd_assemble(a)
 

@@ -10,9 +10,13 @@
 //     TB_LAT (memory read latency), TB_GAP (percent of clocks without ready/valid on the memory port),
 //     TB_MEM_LOG2 (memory model size in 16-byte words, power of two).
 //   * Plusargs: +IN0=<hex file> picture 0 input, +IN1=<hex file> picture 1 input (optional), +OUT=<path prefix>
-//     for <prefix>_stream.hex, <prefix>_rec<n>.hex and <prefix>_info.txt, +INJECT corrupts one sample byte of the
-//     stream after the rebuilt picture is written (the harness negative control), +INJECT_FAILURE forces a
+//     for <prefix>_stream.hex, <prefix>_rec<n>.hex and <prefix>_info.txt, +INJECT flips one bit of one residual
+//     (coefficient or sample) byte inside the first slice, after the rebuilt picture is written (the harness negative
+//     control: every decoder must then differ from the rebuilt picture or report an error), +INJECT_FAILURE forces a
 //     failed check (the bench negative control).
+//   * TB_PCM (define, 1; the MB_MODE note): the bench writes MB_MODE (register 0x03C, bit 0 = 1) before the pictures, which selects the
+//     I_PCM macroblock mode (debug fallback). With TB_PCM undefined the register is not written (reset value 0 =
+//     intra 16x16 macroblocks, and an RTL without the register works too).
 //   * Input memory format: packed YUYV 4:2:2, byte order Y0 U0 Y1 V0, line stride MBW * 32 bytes, as
 //     128-bit words, byte 0 in bits [7:0], one word per hex line ($readmemh).
 //   * Memory map built from the picture size (all 4 KiB aligned): input 0, input 1 (two-picture runs), rebuilt Y,
@@ -82,7 +86,7 @@ module tb_rtlnet_h264_top;
   localparam logic [11:0] R_ID = 12'h000, R_VERSION = 12'h004, R_CAPS = 12'h008, R_CTRL = 12'h00C,
                           R_STATUS = 12'h010, R_ERR_CODE = 12'h014, R_MB_W = 12'h020, R_MB_H = 12'h024,
                           R_SLICES = 12'h028, R_QP = 12'h02C, R_FRAME_NUM = 12'h030, R_IDR_PIC_ID = 12'h034,
-                          R_PIC_CFG = 12'h038, R_IN_BASE = 12'h040, R_IN_STRIDE = 12'h044, R_RY_BASE = 12'h048,
+                          R_PIC_CFG = 12'h038, R_MB_MODE = 12'h03C, R_IN_BASE = 12'h040, R_IN_STRIDE = 12'h044, R_RY_BASE = 12'h048,
                           R_RY_STRIDE = 12'h04C, R_RU_BASE = 12'h050, R_RV_BASE = 12'h054, R_RC_STRIDE = 12'h058,
                           R_RING_BASE = 12'h060, R_RING_SIZE = 12'h064, R_RING_WPTR = 12'h068,
                           R_RING_RPTR = 12'h06C, R_RING_FILL = 12'h070, R_IDX_BASE = 12'h078,
@@ -556,6 +560,9 @@ module tb_rtlnet_h264_top;
     reg_write(R_MB_H, MBH);
     reg_write(R_SLICES, SLICES);
     reg_write(R_QP, QP);
+`ifdef TB_PCM
+    reg_write(R_MB_MODE, 32'h1);
+`endif
     reg_write(R_IN_STRIDE, IN_STRIDE);
     reg_write(R_RY_BASE, RY_BASE);
     reg_write(R_RY_STRIDE, RY_STRIDE);
@@ -573,12 +580,13 @@ module tb_rtlnet_h264_top;
     for (int p = 0; p < PICS; p++) run_picture(p);
 
     if (inject) begin
-      // Negative control: corrupt one sample byte inside the first macroblock of the first slice.
+      // Negative control: flip one bit of a residual byte of the first slice, well past the slice header and the first
+      // macroblock header (byte 150 of the stream, or the middle of a short stream), clear of emulation-prevention bytes.
       int k;
-      k = 150;
-      while ((stream[k-1] <= 3) || (stream[k] <= 3) || (stream[k+1] <= 3)) k++;
+      k = (stream.size() > 300) ? 150 : (stream.size() / 2);
+      while ((stream[k-1] <= 3) || (stream[k] <= 3) || (stream[k+1] <= 3) || ((stream[k] ^ 8'h40) <= 3)) k++;
       stream[k] = stream[k] ^ 8'h40;
-      $display("NOTE: INJECT corrupts stream byte %0d", k);
+      $display("NOTE: INJECT flips bit 6 of stream byte %0d", k);
     end
     dump_stream();
     $display("STAT ring_stall_cycles=%0d", stall_cycles);

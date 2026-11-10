@@ -30,7 +30,10 @@ module rtlnet_h264_top #(
   parameter int    MAX_MB_H    = 68,     // tallest picture in macroblocks (1088 / 16)
   parameter int    ADDR_W      = 32,
   parameter int    ID_W        = 4,
-  parameter int    MB_BUF_KB   = 1,      // macroblock buffer: two banks of 24 words (needs >= 1 KiB)
+  parameter int    MB_BUF_KB   = 1,      // source macroblock buffer: two banks of 24 words (needs >= 1 KiB)
+  parameter int    REC_BUF_KB  = 1,      // rebuilt macroblock buffer: two banks of 96 words of 4 samples
+  parameter int    COEF_BUF_KB = 1,      // coefficient buffer: two banks of 102 words of 48 bits (needs 1)
+  parameter int    LINE_KB     = 4,      // rebuilt bottom-row line buffer: 2 x 16 bytes per macroblock column
   parameter int    FIFO_KB     = 1,      // compressed-ring word FIFO
   parameter string RAM_STYLE   = "block"  // "block" | "distributed", for every engine memory (RAM instancing rule)
 )(
@@ -147,6 +150,7 @@ module rtlnet_h264_top #(
   logic [31:0] cfg_rv_base;
   logic [31:0] cfg_rc_stride;
   logic [5:0]  cfg_qp;
+  logic        cfg_mb_pcm;
   logic [15:0] cfg_frame_num;
   logic [15:0] cfg_idr_pic_id;
   logic        cfg_idr;
@@ -264,7 +268,8 @@ module rtlnet_h264_top #(
     .cfg_mb_w(cfg_mb_w), .cfg_mb_h(cfg_mb_h), .cfg_slices(cfg_slices),
     .cfg_in_base(cfg_in_base), .cfg_in_stride(cfg_in_stride),
     .cfg_ry_base(cfg_ry_base), .cfg_ry_stride(cfg_ry_stride), .cfg_ru_base(cfg_ru_base), .cfg_rv_base(cfg_rv_base),
-    .cfg_rc_stride(cfg_rc_stride), .cfg_qp(cfg_qp), .cfg_frame_num(cfg_frame_num), .cfg_idr_pic_id(cfg_idr_pic_id),
+    .cfg_rc_stride(cfg_rc_stride), .cfg_qp(cfg_qp), .cfg_mb_pcm(cfg_mb_pcm), .cfg_frame_num(cfg_frame_num),
+    .cfg_idr_pic_id(cfg_idr_pic_id),
     .cfg_idr(cfg_idr), .cfg_log2_fn(cfg_log2_fn), .cfg_pic_no(cfg_pic_no),
     .cfg_ring_base(cfg_ring_base), .cfg_ring_size(cfg_ring_size), .cfg_idx_base(cfg_idx_base),
     .cfg_idx_entries(cfg_idx_entries),
@@ -282,7 +287,7 @@ module rtlnet_h264_top #(
     for (e = 0; e < NUM_ENGINES; e++) begin : g_engine
       rtlnet_h264_engine #(
         .ADDR_W(ADDR_W), .ID_W(ID_W), .MAX_MB_W(MAX_MB_W), .MAX_MB_H(MAX_MB_H), .MB_BUF_KB(MB_BUF_KB),
-        .FIFO_KB(FIFO_KB), .EMIT_AUD(e == 0), .RAM_STYLE(RAM_STYLE)
+        .REC_BUF_KB(REC_BUF_KB), .COEF_BUF_KB(COEF_BUF_KB), .LINE_KB(LINE_KB), .FIFO_KB(FIFO_KB), .EMIT_AUD(e == 0), .RAM_STYLE(RAM_STYLE)
       ) u_engine (
         .clk(enc_clk), .resetn(enc_resetn),
         .start(start), .busy(eng_busy[e]), .done(eng_done[e]), .err_cfg(eng_err_cfg[e]), .err_axi(eng_err_axi[e]),
@@ -290,7 +295,7 @@ module rtlnet_h264_top #(
         .cfg_mb_w(cfg_mb_w), .cfg_mb_h(cfg_mb_h), .eng_slices(eng_slices_w), .slice_base(slice_base[e]),
         .cfg_in_base(cfg_in_base),
         .cfg_in_stride(cfg_in_stride), .cfg_ry_base(cfg_ry_base), .cfg_ry_stride(cfg_ry_stride),
-        .cfg_ru_base(cfg_ru_base), .cfg_rv_base(cfg_rv_base), .cfg_rc_stride(cfg_rc_stride), .cfg_qp(cfg_qp),
+        .cfg_ru_base(cfg_ru_base), .cfg_rv_base(cfg_rv_base), .cfg_rc_stride(cfg_rc_stride), .cfg_qp(cfg_qp), .cfg_mb_pcm(cfg_mb_pcm),
         .cfg_frame_num(cfg_frame_num), .cfg_idr_pic_id(cfg_idr_pic_id), .cfg_idr(cfg_idr), .cfg_log2_fn(cfg_log2_fn),
         .cfg_pic_no(cfg_pic_no), .band_first_row(band_first[e]), .band_rows(band_rows[e]),
         .cfg_ring_base(cfg_ring_base + 32'(e) * ring_size_e), .cfg_ring_size(ring_size_e),

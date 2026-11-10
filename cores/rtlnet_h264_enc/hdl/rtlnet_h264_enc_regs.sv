@@ -56,6 +56,7 @@ module rtlnet_h264_enc_regs #(
   output logic [31:0] cfg_rv_base,
   output logic [31:0] cfg_rc_stride,
   output logic [5:0]  cfg_qp,
+  output logic        cfg_mb_pcm,
   output logic [15:0] cfg_frame_num,
   output logic [15:0] cfg_idr_pic_id,
   output logic        cfg_idr,
@@ -113,6 +114,7 @@ module rtlnet_h264_enc_regs #(
   localparam logic [11:0] REG_FRAME_NUM   = 12'h030;
   localparam logic [11:0] REG_IDR_PIC_ID  = 12'h034;
   localparam logic [11:0] REG_PIC_CFG     = 12'h038;
+  localparam logic [11:0] REG_MB_MODE     = 12'h03C;
   localparam logic [11:0] REG_IN_BASE     = 12'h040;
   localparam logic [11:0] REG_IN_STRIDE   = 12'h044;
   localparam logic [11:0] REG_RY_BASE     = 12'h048;
@@ -194,6 +196,7 @@ module rtlnet_h264_enc_regs #(
       cfg_mb_h        <= '0;
       cfg_slices      <= 8'd1;
       cfg_qp          <= 6'(PIC_INIT_QP);
+      cfg_mb_pcm      <= 1'b0;
       cfg_frame_num   <= '0;
       cfg_idr_pic_id  <= '0;
       cfg_idr         <= 1'b1;
@@ -273,6 +276,7 @@ module rtlnet_h264_enc_regs #(
           REG_MB_H:        cfg_mb_h        <= reg_wr_data[7:0];
           REG_SLICES:      cfg_slices      <= reg_wr_data[7:0];
           REG_QP:          cfg_qp          <= reg_wr_data[5:0];
+          REG_MB_MODE:     cfg_mb_pcm      <= reg_wr_data[0];
           REG_FRAME_NUM:   cfg_frame_num   <= reg_wr_data[15:0];
           REG_IDR_PIC_ID:  cfg_idr_pic_id  <= reg_wr_data[15:0];
           REG_PIC_CFG: begin
@@ -352,6 +356,7 @@ module rtlnet_h264_enc_regs #(
         REG_MB_H:        reg_rd_data <= {24'd0, cfg_mb_h};
         REG_SLICES:      reg_rd_data <= {24'd0, cfg_slices};
         REG_QP:          reg_rd_data <= {26'd0, cfg_qp};
+        REG_MB_MODE:     reg_rd_data <= {31'd0, cfg_mb_pcm};
         REG_FRAME_NUM:   reg_rd_data <= {16'd0, cfg_frame_num};
         REG_IDR_PIC_ID:  reg_rd_data <= {16'd0, cfg_idr_pic_id};
         REG_PIC_CFG:     reg_rd_data <= {19'd0, cfg_log2_fn, 7'd0, cfg_idr};

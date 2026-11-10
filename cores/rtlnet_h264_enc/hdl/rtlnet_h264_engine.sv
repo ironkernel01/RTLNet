@@ -14,18 +14,26 @@
 //     pic_parameter_set_id ue(v) = 0, frame_num u(log2_max_frame_num), idr_pic_id ue(v) (IDR only),
 //     dec_ref_pic_marking (clause 7.3.3.3: IDR no_output_of_prior_pics_flag 0 and long_term_reference_flag 0;
 //     non-IDR adaptive_ref_pic_marking_mode_flag 0), slice_qp_delta se(v) = QP - 26, disable_deblocking_filter_idc
-//     ue(v) = 1. nal_ref_idc is 3; nal_unit_type is 5 (IDR) or 1.
-//   * Macroblock pipeline: the fetch sequencer fills two macroblock-buffer banks through the read DMA in raster
-//     order while the macroblock coder (I_PCM) and the rebuilt-picture writer drain the other bank. A bank is
-//     released when both are done. The coder is the throughput limit: one sample byte per clock.
+//     ue(v) = 1 (deblocking off). nal_ref_idc is 3; nal_unit_type is 5 (IDR) or 1.
+//   * Macroblock pipeline: the fetch sequencer fills two source banks through the read DMA in raster order. Stage A
+//     (rtlnet_h264_mb_enc: Intra16x16 decision, transform, quantizer, rebuild loop) codes one macroblock from a source
+//     bank into a coefficient bank and a rebuilt bank; stage B (rtlnet_h264_mb_cavlc) turns the coefficient bank of the
+//     previous macroblock into packer commands meanwhile; the rebuilt-picture writer drains the rebuilt bank. The
+//     source bank is released when stage A is done, so stage A (about 375 clocks) is the throughput limit for smooth
+//     content; stage B (two block coders in ping-pong, two levels and two run_before codes per command) stays below it for
+//     content at QP 12 and above. A macroblock whose levels reach the baseline limit or whose estimated CAVLC size
+//     exceeds the I_PCM size is coded as I_PCM: stage A copies the source into the rebuilt bank and the coefficient bank
+//     (a_pcm), and stage B writes the I_PCM macroblock layer from the coefficient bank. cfg_mb_pcm forces that for every
+//     macroblock (debug).
 //   * Band: band_first_row and band_rows select the macroblock rows of this engine (the whole picture for
 //     NUM_ENGINES = 1); eng_slices slices of whole rows are coded inside the band, numbered from slice_base in
 //     the picture. Only the engine with EMIT_AUD writes the access unit delimiter.
 //   * Statistics (cleared at start): cycles between successive macroblock starts (last, max), cycles of
-//     the whole picture, and busy cycles of the read DMA, the coder and the write master.
+//     the whole picture, and busy cycles of the read DMA, the macroblock coder (stage A, B or I_PCM) and the write master.
 // Language: SystemVerilog-2012.
 // Revision: 11-09-2026
-//   * 11-09-2026: initial version.
+//   * 11-09-2026: initial version (I_PCM); phase 2b-2: stage A / stage B macroblock coder, rebuilt and coefficient RAMs,
+//     per-macroblock I_PCM fallback (rtlnet_h264_mb_pcm removed).
 // Clocks: clk (all logic).
 // -----------------------------------------------------------------------------
 module rtlnet_h264_engine #(
@@ -34,6 +42,9 @@ module rtlnet_h264_engine #(
   parameter int    MAX_MB_W  = 120,
   parameter int    MAX_MB_H  = 68,
   parameter int    MB_BUF_KB = 1,
+  parameter int    REC_BUF_KB = 1,
+  parameter int    COEF_BUF_KB = 1,
+  parameter int    LINE_KB   = 4,
   parameter int    FIFO_KB   = 1,
   parameter bit    EMIT_AUD  = 1'b1,   // this engine writes the access unit delimiter (engine 0)
   parameter string RAM_STYLE = "block"
@@ -66,6 +77,7 @@ module rtlnet_h264_engine #(
   input  logic [ADDR_W-1:0] cfg_rv_base,
   input  logic [ADDR_W-1:0] cfg_rc_stride,
   input  logic [5:0]        cfg_qp,
+  input  logic              cfg_mb_pcm,
   input  logic [15:0]       cfg_frame_num,
   input  logic [15:0]       cfg_idr_pic_id,
   input  logic              cfg_idr,
@@ -136,6 +148,10 @@ module rtlnet_h264_engine #(
 
   localparam int BANK_WORDS = 32;
   localparam int RAM_AW     = $clog2(MB_BUF_KB * 1024 / 16);
+  localparam int REC_AW     = $clog2(REC_BUF_KB * 1024 / 4);
+  localparam int REC_BANK   = 128;
+  localparam int CRAM_AW    = $clog2(COEF_BUF_KB * 1024 * 8 / 48);
+  localparam int COEF_BANK  = 128;
 
   // Sequencer states.
   localparam logic [4:0] E_IDLE   = 5'd0;
@@ -160,6 +176,7 @@ module rtlnet_h264_engine #(
   localparam logic [4:0] E_SLWAIT = 5'd19;
   localparam logic [4:0] E_FLUSH  = 5'd20;
   localparam logic [4:0] E_DONE   = 5'd21;
+  localparam logic [4:0] E_DRAIN  = 5'd22;
 
   // Fetch sequencer states.
   localparam logic [1:0] F_IDLE = 2'd0;
@@ -179,7 +196,7 @@ module rtlnet_h264_engine #(
   logic [7:0]        skip_left;
   logic [31:0]       mbn;
 
-  // Pointers of the consumer (coder and rebuilt writer) and the fetch sequencer.
+  // Pointers of the rebuilt-picture writer and the fetch sequencer.
   logic [ADDR_W-1:0] in_ptr;
   logic [ADDR_W-1:0] ry_ptr;
   logic [ADDR_W-1:0] ru_ptr;
@@ -190,14 +207,35 @@ module rtlnet_h264_engine #(
   logic [7:0]        f_rows_left;
   logic              fetch_go;
   logic              fb;
-  logic              cb;
   logic [1:0]        full;
-  logic              mb_run;
-  logic              cd_f;
-  logic              rc_f;
-  logic              coder_start;
+
+  // Macroblock pipeline control: source bank cb, coefficient banks ab (stage A) and bb (stage B), rebuilt banks
+  // rb (stage A) and rr (writer); a_x / a_first_row track the macroblock position of stage A.
+  logic              cb;
+  logic              ab;
+  logic              bb;
+  logic              rb;
+  logic              rr;
+  logic [1:0]        cfull;
+  logic [1:0]        rfull;
+  logic              src_busy;
+  logic [2:0]        mb_out;
+  logic [7:0]        a_x;
+  logic              a_first_row;
+  logic              a_last;
+  logic              a_go;
+  logic              b_go;
+  logic              b_run;
+  logic              rec_run;
   logic              rec_start;
-  logic              mb_fin;
+  logic [1:0]        bi_mode [2];
+  logic [1:0]        bi_cm [2];
+  logic [1:0]        bi_cbpc [2];
+  logic              bi_cbpl [2];
+  logic              bi_pcm [2];
+  logic [7:0]        bi_x [2];
+  logic              bi_avt [2];
+  logic              bi_avl [2];
 
   // Statistics.
   logic [31:0]       gap;
@@ -222,24 +260,50 @@ module rtlnet_h264_engine #(
   logic [5:0]        pk_cmd_len;
   logic              pk_cmd_kind;
 
-  // Coder and DMA wires.
+  // Macroblock coder wires: stage A, stage B (CAVLC), the I_PCM coder, the rebuilt-picture writer.
+  logic              a_busy;
+  logic              a_done;
+  logic [1:0]        a_i16;
+  logic [1:0]        a_cm;
+  logic [1:0]        a_cbpc;
+  logic              a_cbpl;
+  logic              a_pcm;
+  logic              b_busy;
+  logic              b_done;
   logic              coder_busy;
-  logic              coder_done;
   logic              cod_valid;
   logic [2:0]        cod_op;
   logic [31:0]       cod_val;
   logic [5:0]        cod_len;
-  logic              cod_ram_en;
-  logic [RAM_AW-1:0] cod_ram_addr;
-  logic [127:0]      cod_ram_data;
+  logic              cav_valid;
+  logic [2:0]        cav_op;
+  logic [31:0]       cav_val;
+  logic [5:0]        cav_len;
+  logic              a_src_en;
+  logic [RAM_AW-1:0] a_src_addr;
+  logic              src_rd_en;
+  logic [RAM_AW-1:0] src_rd_addr;
+  logic [127:0]      src_rd_data;
+  logic              reb_we;
+  logic [REC_AW-1:0] reb_waddr;
+  logic [31:0]       reb_wdata;
+  logic              cof_we;
+  logic [CRAM_AW-1:0] cof_waddr;
+  logic [47:0]       cof_wdata;
+  logic              cofa_rd_en;
+  logic [CRAM_AW-1:0] cofa_raddr;
+  logic [47:0]       cofa_rdata;
+  logic              cofb_rd_en;
+  logic [CRAM_AW-1:0] cofb_raddr;
+  logic [47:0]       cofb_rdata;
   // The rebuilt-picture writer's busy output is not needed: the engine waits for its done pulse.
   /* verilator lint_off UNUSEDSIGNAL */
   logic              rec_busy;
   /* verilator lint_on UNUSEDSIGNAL */
   logic              rec_done;
   logic              rec_ram_en;
-  logic [RAM_AW-1:0] rec_ram_addr;
-  logic [127:0]      rec_ram_data;
+  logic [REC_AW-1:0] rec_ram_addr;
+  logic [31:0]       rec_ram_data;
   logic              rd_start;
   logic              rd_busy;
   logic              rd_done;
@@ -291,6 +355,10 @@ module rtlnet_h264_engine #(
   logic [ADDR_W-1:0] v_addr;
   logic [RAM_AW-1:0] bank_base_c;
   logic [RAM_AW-1:0] bank_base_f;
+  logic [REC_AW-1:0] reb_base_a;
+  logic [REC_AW-1:0] reb_base_r;
+  logic [CRAM_AW-1:0] cof_base_a;
+  logic [CRAM_AW-1:0] cof_base_b;
   logic              slice_is_last;
   logic [7:0]        rows_next;
 
@@ -304,7 +372,21 @@ module rtlnet_h264_engine #(
   assign v_addr      = rv_ptr + ADDR_W'({c_x, 3'b000});
   assign slice_is_last = (slice_idx == (eng_slices - 8'd1));
   assign rows_next   = d_q + (((slice_idx + 8'd1) < d_rem) ? 8'd1 : 8'd0);
-  assign mb_fin      = mb_run && (cd_f || coder_done) && (rc_f || rec_done);
+  assign reb_base_a  = rb ? REC_AW'(REC_BANK) : REC_AW'(0);
+  assign reb_base_r  = rr ? REC_AW'(REC_BANK) : REC_AW'(0);
+  assign cof_base_a  = ab ? CRAM_AW'(COEF_BANK) : CRAM_AW'(0);
+  assign cof_base_b  = bb ? CRAM_AW'(COEF_BANK) : CRAM_AW'(0);
+  assign coder_busy  = a_busy || b_busy;
+
+  // Stage A starts on a full source bank when the coefficient and rebuilt banks of its turn are free. Stage B starts
+  // on a full coefficient bank. Both are combinational decisions that act in the clock they are made.
+  assign a_go  = (st == E_MB) && !a_last && !src_busy && full[cb] && !cfull[ab] && !rfull[rb];
+  assign b_go  = ((st == E_MB) || (st == E_DRAIN)) && !b_run && cfull[bb];
+  assign cod_valid = cav_valid;
+  assign cod_op    = cav_op;
+  assign cod_val   = cav_val;
+  assign cod_len   = cav_len;
+  assign rec_start = !rec_run && rfull[rr] && (st != E_IDLE);
 
   // Configuration check: sizes in range, bases and strides aligned, strides wide enough.
   always_comb begin
@@ -418,12 +500,30 @@ module rtlnet_h264_engine #(
       fetch_go       <= 1'b0;
       fb             <= 1'b0;
       cb             <= 1'b0;
+      ab             <= 1'b0;
+      bb             <= 1'b0;
+      rb             <= 1'b0;
+      rr             <= 1'b0;
       full           <= '0;
-      mb_run         <= 1'b0;
-      cd_f           <= 1'b0;
-      rc_f           <= 1'b0;
-      coder_start    <= 1'b0;
-      rec_start      <= 1'b0;
+      cfull          <= '0;
+      rfull          <= '0;
+      src_busy       <= 1'b0;
+      mb_out         <= '0;
+      a_x            <= '0;
+      a_first_row    <= 1'b1;
+      a_last         <= 1'b0;
+      b_run          <= 1'b0;
+      rec_run        <= 1'b0;
+      for (int i = 0; i < 2; i++) begin
+        bi_mode[i] <= '0;
+        bi_cm[i]   <= '0;
+        bi_cbpc[i] <= '0;
+        bi_cbpl[i] <= 1'b0;
+        bi_pcm[i]  <= 1'b0;
+        bi_x[i]    <= '0;
+        bi_avt[i]  <= 1'b0;
+        bi_avl[i]  <= 1'b0;
+      end
       rd_start       <= 1'b0;
       gap            <= '0;
       first_seen     <= 1'b0;
@@ -438,8 +538,6 @@ module rtlnet_h264_engine #(
     end else begin
       done           <= 1'b0;
       fetch_go       <= 1'b0;
-      coder_start    <= 1'b0;
-      rec_start      <= 1'b0;
       rd_start       <= 1'b0;
       st_slice_pulse <= 1'b0;
       gap            <= gap + 32'd1;
@@ -467,10 +565,20 @@ module rtlnet_h264_engine #(
             rv_ptr      <= cfg_rv_base;
             c_x         <= '0;
             cb          <= 1'b0;
+            ab          <= 1'b0;
+            bb          <= 1'b0;
+            rb          <= 1'b0;
+            rr          <= 1'b0;
             full        <= '0;
-            mb_run      <= 1'b0;
-            cd_f        <= 1'b0;
-            rc_f        <= 1'b0;
+            cfull       <= '0;
+            rfull       <= '0;
+            src_busy    <= 1'b0;
+            mb_out      <= '0;
+            a_x         <= '0;
+            a_first_row <= 1'b1;
+            a_last      <= 1'b0;
+            b_run       <= 1'b0;
+            rec_run     <= 1'b0;
             first_seen  <= 1'b0;
             gap         <= '0;
             st_mb_count <= '0;
@@ -528,38 +636,31 @@ module rtlnet_h264_engine #(
           if (pk_in_ready) st <= E_H7;
         end
         E_MB: begin
-          if (!mb_run && full[cb]) begin
-            coder_start <= 1'b1;
-            rec_start   <= 1'b1;
-            mb_run      <= 1'b1;
+          if (a_go) begin
+            src_busy    <= 1'b1;
             gap         <= 32'd1;
             first_seen  <= 1'b1;
+            mbn         <= mbn + 32'd1;
+            bi_x[ab]    <= a_x;
+            bi_avt[ab]  <= !a_first_row;
+            bi_avl[ab]  <= (a_x != 8'd0);
             if (first_seen) begin
               st_cyc_last <= gap;
               if (gap > st_cyc_max) st_cyc_max <= gap;
             end
-          end
-          if (coder_done) cd_f <= 1'b1;
-          if (rec_done)   rc_f <= 1'b1;
-          if (mb_fin) begin
-            mb_run      <= 1'b0;
-            cd_f        <= 1'b0;
-            rc_f        <= 1'b0;
-            full[cb]    <= 1'b0;
-            cb          <= ~cb;
-            mbn         <= mbn + 32'd1;
-            st_mb_count <= st_mb_count + 32'd1;
-            if (c_x == (cfg_mb_w - 8'd1)) begin
-              c_x    <= '0;
-              ry_ptr <= ry_ptr + {cfg_ry_stride[ADDR_W-5:0], 4'd0};
-              ru_ptr <= ru_ptr + {cfg_rc_stride[ADDR_W-4:0], 3'd0};
-              rv_ptr <= rv_ptr + {cfg_rc_stride[ADDR_W-4:0], 3'd0};
-              rows_left <= rows_left - 8'd1;
-              if (rows_left == 8'd1) st <= E_SLEND;
+            if (a_x == (cfg_mb_w - 8'd1)) begin
+              a_x         <= '0;
+              a_first_row <= 1'b0;
+              rows_left   <= rows_left - 8'd1;
+              if (rows_left == 8'd1) a_last <= 1'b1;
             end else begin
-              c_x <= c_x + 8'd1;
+              a_x <= a_x + 8'd1;
             end
           end
+          if (a_last) st <= E_DRAIN;
+        end
+        E_DRAIN: begin
+          if (mb_out == 3'd0) st <= E_SLEND;
         end
         E_SLWAIT: begin
           if (nal_done) begin
@@ -574,7 +675,8 @@ module rtlnet_h264_engine #(
           end
         end
         E_FLUSH: begin
-          if (ring_idle && pk_idle && (wm_out == 5'd0) && !wm_busy && (ft == F_IDLE)) st <= E_DONE;
+          if (ring_idle && pk_idle && (wm_out == 5'd0) && !wm_busy && (ft == F_IDLE) && (mb_out == 3'd0) && !rec_run &&
+              !rfull[0] && !rfull[1]) st <= E_DONE;
         end
         E_DONE: begin
           done <= 1'b1;
@@ -582,6 +684,53 @@ module rtlnet_h264_engine #(
         end
         default: st <= E_IDLE;
       endcase
+
+      // Slice start: stage A's row flags.
+      if (st == E_H1) begin
+        a_first_row <= 1'b1;
+        a_last      <= 1'b0;
+      end
+
+      // Stage A finished a macroblock: the rebuilt bank is complete, the source bank is released and the coefficient bank
+      // (levels, or the I_PCM sample words) goes to stage B.
+      if (a_done) begin
+        rfull[rb]    <= 1'b1;
+        rb           <= ~rb;
+        full[cb]     <= 1'b0;
+        cb           <= ~cb;
+        src_busy     <= 1'b0;
+        cfull[ab]    <= 1'b1;
+        bi_mode[ab]  <= a_i16;
+        bi_cm[ab]    <= a_cm;
+        bi_cbpc[ab]  <= a_cbpc;
+        bi_cbpl[ab]  <= a_cbpl;
+        bi_pcm[ab]   <= a_pcm;
+        ab           <= ~ab;
+      end
+      if (b_go) b_run <= 1'b1;
+      if (b_done) begin
+        b_run  <= 1'b0;
+        cfull[bb] <= 1'b0;
+        bb     <= ~bb;
+      end
+      if (b_done) st_mb_count <= st_mb_count + 32'd1;
+      mb_out <= mb_out + {2'b00, a_go} - {2'b00, b_done};
+
+      // Rebuilt-picture writer: starts on a full rebuilt bank, advances the picture pointers when it is done.
+      if (rec_start) rec_run <= 1'b1;
+      if (rec_done) begin
+        rec_run  <= 1'b0;
+        rfull[rr] <= 1'b0;
+        rr       <= ~rr;
+        if (c_x == (cfg_mb_w - 8'd1)) begin
+          c_x    <= '0;
+          ry_ptr <= ry_ptr + {cfg_ry_stride[ADDR_W-5:0], 4'd0};
+          ru_ptr <= ru_ptr + {cfg_rc_stride[ADDR_W-4:0], 3'd0};
+          rv_ptr <= rv_ptr + {cfg_rc_stride[ADDR_W-4:0], 3'd0};
+        end else begin
+          c_x <= c_x + 8'd1;
+        end
+      end
 
       // Fetch sequencer: fills the free bank with the next macroblock.
       case (ft)
@@ -635,26 +784,56 @@ module rtlnet_h264_engine #(
     .err_resp(rd_err)
   );
 
-  // Two copies of the macroblock buffer: one read by the coder, one by the rebuilt-picture writer.
-  rtlnet_ram_core #(.RAM_STYLE(RAM_STYLE), .CLOCKING("COMMON"), .DATA_W(128), .ADDR_W(RAM_AW), .READ_LATENCY(1)) u_mb_ram_cod (
+  // Source macroblock buffer (two banks): read by stage A.
+  assign src_rd_en   = a_src_en;
+  assign src_rd_addr = a_src_addr;
+  rtlnet_ram_core #(.RAM_STYLE(RAM_STYLE), .CLOCKING("COMMON"), .DATA_W(128), .ADDR_W(RAM_AW), .READ_LATENCY(1)) u_mb_ram (
     .wr_clk(clk), .wr_en(rd_ram_we), .wr_addr(rd_ram_addr), .wr_data(rd_ram_data),
-    .rd_clk(clk), .rd_resetn(resetn), .rd_en(cod_ram_en), .rd_addr(cod_ram_addr), .rd_data(cod_ram_data)
+    .rd_clk(clk), .rd_resetn(resetn), .rd_en(src_rd_en), .rd_addr(src_rd_addr), .rd_data(src_rd_data)
   );
-  rtlnet_ram_core #(.RAM_STYLE(RAM_STYLE), .CLOCKING("COMMON"), .DATA_W(128), .ADDR_W(RAM_AW), .READ_LATENCY(1)) u_mb_ram_rec (
-    .wr_clk(clk), .wr_en(rd_ram_we), .wr_addr(rd_ram_addr), .wr_data(rd_ram_data),
+
+  // Rebuilt macroblock buffer (two banks of 96 words of 4 samples): written by stage A, read by the picture writer.
+  rtlnet_ram_core #(.RAM_STYLE(RAM_STYLE), .CLOCKING("COMMON"), .DATA_W(32), .ADDR_W(REC_AW), .READ_LATENCY(1)) u_reb_ram (
+    .wr_clk(clk), .wr_en(reb_we), .wr_addr(reb_waddr), .wr_data(reb_wdata),
     .rd_clk(clk), .rd_resetn(resetn), .rd_en(rec_ram_en), .rd_addr(rec_ram_addr), .rd_data(rec_ram_data)
   );
 
-  rtlnet_h264_mb_pcm #(.RAM_AW(RAM_AW)) u_coder (
-    .clk(clk), .resetn(resetn),
-    .start(coder_start), .base(bank_base_c), .busy(coder_busy), .done(coder_done),
-    .ram_rd_en(cod_ram_en), .ram_rd_addr(cod_ram_addr), .ram_rd_data(cod_ram_data),
-    .cmd_valid(cod_valid), .cmd_ready(pk_in_ready), .cmd_op(cod_op), .cmd_val(cod_val), .cmd_len(cod_len)
+  // Coefficient buffer (two banks): two copies written together, one read back by stage A, one read by stage B.
+  rtlnet_ram_core #(.RAM_STYLE(RAM_STYLE), .CLOCKING("COMMON"), .DATA_W(48), .ADDR_W(CRAM_AW), .READ_LATENCY(1)) u_cof_a (
+    .wr_clk(clk), .wr_en(cof_we), .wr_addr(cof_waddr), .wr_data(cof_wdata),
+    .rd_clk(clk), .rd_resetn(resetn), .rd_en(cofa_rd_en), .rd_addr(cofa_raddr), .rd_data(cofa_rdata)
+  );
+  rtlnet_ram_core #(.RAM_STYLE(RAM_STYLE), .CLOCKING("COMMON"), .DATA_W(48), .ADDR_W(CRAM_AW), .READ_LATENCY(1)) u_cof_b (
+    .wr_clk(clk), .wr_en(cof_we), .wr_addr(cof_waddr), .wr_data(cof_wdata),
+    .rd_clk(clk), .rd_resetn(resetn), .rd_en(cofb_rd_en), .rd_addr(cofb_raddr), .rd_data(cofb_rdata)
   );
 
-  rtlnet_h264_recon_wr #(.ADDR_W(ADDR_W), .RAM_AW(RAM_AW)) u_recon (
+  rtlnet_h264_mb_enc #(
+    .MAX_MB_W(MAX_MB_W), .LINE_KB(LINE_KB), .RAM_STYLE(RAM_STYLE), .SRC_AW(RAM_AW), .REC_AW(REC_AW), .CRAM_AW(CRAM_AW)
+  ) u_mb_enc (
     .clk(clk), .resetn(resetn),
-    .start(rec_start), .base(bank_base_c), .y_addr(y_addr), .u_addr(u_addr), .v_addr(v_addr),
+    .start(a_go), .pcm_mode(cfg_mb_pcm), .mb_x(a_x), .av_top(!a_first_row), .av_left(a_x != 8'd0), .qp(cfg_qp),
+    .src_base(bank_base_c), .reb_base(reb_base_a), .coef_base(cof_base_a),
+    .busy(a_busy), .done(a_done),
+    .o_i16_mode(a_i16), .o_chroma_mode(a_cm), .o_cbp_chroma(a_cbpc), .o_cbp_luma(a_cbpl), .o_pcm(a_pcm),
+    .src_rd_en(a_src_en), .src_rd_addr(a_src_addr), .src_rd_data(src_rd_data),
+    .reb_we(reb_we), .reb_waddr(reb_waddr), .reb_wdata(reb_wdata),
+    .cof_we(cof_we), .cof_waddr(cof_waddr), .cof_wdata(cof_wdata),
+    .cof_rd_en(cofa_rd_en), .cof_raddr(cofa_raddr), .cof_rdata(cofa_rdata)
+  );
+
+  rtlnet_h264_mb_cavlc #(.MAX_MB_W(MAX_MB_W), .RAM_STYLE(RAM_STYLE), .CRAM_AW(CRAM_AW)) u_cavlc (
+    .clk(clk), .resetn(resetn),
+    .start(b_go), .mb_x(bi_x[bb]), .av_top(bi_avt[bb]), .av_left(bi_avl[bb]), .pcm(bi_pcm[bb]), .i16_mode(bi_mode[bb]),
+    .cbp_chroma(bi_cbpc[bb]), .cbp_luma(bi_cbpl[bb]), .chroma_mode(bi_cm[bb]), .cbase(cof_base_b),
+    .busy(b_busy), .done(b_done),
+    .cram_rd_en(cofb_rd_en), .cram_rd_addr(cofb_raddr), .cram_rd_data(cofb_rdata),
+    .cmd_valid(cav_valid), .cmd_ready(pk_in_ready), .cmd_op(cav_op), .cmd_val(cav_val), .cmd_len(cav_len)
+  );
+
+  rtlnet_h264_recon_wr #(.ADDR_W(ADDR_W), .RAM_AW(REC_AW)) u_recon (
+    .clk(clk), .resetn(resetn),
+    .start(rec_start), .base(reb_base_r), .y_addr(y_addr), .u_addr(u_addr), .v_addr(v_addr),
     .y_stride(cfg_ry_stride), .c_stride(cfg_rc_stride), .busy(rec_busy), .done(rec_done),
     .ram_rd_en(rec_ram_en), .ram_rd_addr(rec_ram_addr), .ram_rd_data(rec_ram_data),
     .req_valid(rc_valid), .req_addr(rc_addr), .req_data(rc_data), .req_strb(rc_strb), .req_ack(rc_ack)

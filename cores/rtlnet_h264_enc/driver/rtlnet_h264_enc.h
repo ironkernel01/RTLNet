@@ -13,7 +13,8 @@
  * through rtlnet_mmio.h.
  *
  * Behaviour. The core encodes one picture per start: it reads packed YUYV 4:2:2 from the input frame, codes
- * it as one or more slices of whole macroblock rows (phase 2b-1: every macroblock is I_PCM), writes the
+ * it as one or more slices of whole macroblock rows (phase 2b-2: Intra16x16 macroblocks, or I_PCM macroblocks
+ * with mb_pcm set), writes the
  * Annex B stream (access unit delimiter, then the slice NAL units) into the compressed ring, one index
  * entry per slice and one per picture into the index ring, and the rebuilt 4:2:0 picture into three planes.
  * Firmware writes the SPS and PPS (rtlnet_h264_enc_write_sps_pps) in front of the first picture.
@@ -36,7 +37,13 @@
 
 #define RTLNET_H264_ID_VALUE             0x48323634u   /* "H264" */
 #define RTLNET_H264_VERSION_VALUE        0x11092026u
-/* Revision 11-09-2026: initial register map (phase 2b-1). */
+/* Revision 11-09-2026: initial register map (phase 2b-1); MB_MODE register and cfg->mb_pcm (phase 2b-2);
+ * RTLNET_H264_QP_MIN_REALTIME (the QP clamp of rtlnet_h264_enc_configure). */
+
+/* Real-time QP floor: rtlnet_h264_enc_configure writes max(cfg->qp, RTLNET_H264_QP_MIN_REALTIME) into the QP register. Below
+ * this QP dense macroblocks leave the macroblock coder over its clock budget (documentation section "Throughput"); the
+ * encoder stays correct at lower QP, only slower. Laboratory runs at lower QP write the QP register directly. */
+#define RTLNET_H264_QP_MIN_REALTIME      12u
 
 /* Registers (ID, VERSION, CAPS at RTLNET_REG_* of rtlnet_mmio.h). */
 #define RTLNET_H264_REG_CTRL             0x00Cu   /* START and RING_RESET self-clear, IRQ_EN holds */
@@ -49,6 +56,7 @@
 #define RTLNET_H264_REG_FRAME_NUM        0x030u   /* frame_num, written in log2_max_frame_num bits */
 #define RTLNET_H264_REG_IDR_PIC_ID       0x034u   /* idr_pic_id of an IDR picture */
 #define RTLNET_H264_REG_PIC_CFG          0x038u   /* [0] IDR picture, [12:8] log2_max_frame_num */
+#define RTLNET_H264_REG_MB_MODE          0x03Cu   /* [0] 1 = I_PCM macroblocks (debug fallback), 0 = Intra16x16 */
 #define RTLNET_H264_REG_IN_BASE          0x040u   /* input frame base, multiple of 32 */
 #define RTLNET_H264_REG_IN_STRIDE        0x044u   /* input line stride in bytes, multiple of 32, >= MB_W * 32 */
 #define RTLNET_H264_REG_RY_BASE          0x048u   /* rebuilt luma plane base */
@@ -151,7 +159,8 @@ typedef struct {
     uint32_t mb_w;
     uint32_t mb_h;
     uint32_t slices;
-    uint32_t qp;
+    uint32_t qp;                   /* 0..51; values below RTLNET_H264_QP_MIN_REALTIME are raised to it */
+    uint32_t mb_pcm;               /* 0: Intra16x16 macroblocks (default), 1: I_PCM debug fallback */
     uint32_t log2_max_frame_num;   /* 4..16, equal to the SPS value */
     uint32_t in_base;
     uint32_t in_stride;

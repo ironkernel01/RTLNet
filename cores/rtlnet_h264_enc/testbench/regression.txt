@@ -1,16 +1,31 @@
 # rtlnet_h264_top regression: <bench> <filelist> [tag] [defines=A,B] [plusargs=X,Y] [expectfail] [sim=verilator] [threads=N]
 #   or: <name> script:<host script path> [arguments]   (passes on exit code 0)
-# All H.264 RTL benches run in Verilator. The encoder bench itself (tb_rtlnet_h264_top) needs generated input images and
-# is run by the decoder harness entries below: h264_harness.ps1 runs every configuration (176x144 with 1 and 3 slices,
-# bars, zeros, a 2-picture run, a small-ring run with a slow consumer, 176x144 on 2 engines, 1280x720 and 1920x1080 on 1 and
-# 2 engines with 1, 2 and 4 slices, including the uneven 23/22 band split at 720p) and decodes each
-# stream with JM, OpenH264 and FFmpeg; the _neg entry is its negative control (one corrupted PCM byte, all three decoder
-# comparisons must fail). Build the decoders once with h264_build_decoders.ps1.
+# All H.264 RTL benches run in Verilator. Phase 2b-2 (Intra16x16 + transform + quantizer + CAVLC, per-macroblock I_PCM fallback):
+# the unit benches check the CAVLC block coder (tb_rtlnet_h264_cavlc), the macroblock layer and nC with I_PCM macroblocks
+# (tb_rtlnet_h264_mbcavlc), forward and inverse transform and quantizers (tb_rtlnet_h264_xform) and intra prediction
+# (tb_rtlnet_h264_ipred) against reference functions written from the clause text, each with a +INJECT_FAILURE negative control.
+# The encoder bench tb_rtlnet_h264_top needs generated input images and is run by the decoder harness entries below:
+# h264_harness.ps1 runs every configuration (176x144 structure checks with 1 and 3 slices, bars, zeros, a 2-picture run, a
+# small-ring run with a slow consumer, 176x144 on 2 engines, a QP and content matrix at 176x144 including QP 0 checker and noise,
+# 1280x720 and 1920x1080 on 1 and 2 engines with 1, 2 and 4 slices at QP 18, 28, 38 and 51, including the uneven 23/22 band split
+# at 720p) and decodes each stream with JM, OpenH264 and FFmpeg; each decoder must be byte-identical to the rebuilt picture and the
+# PSNR of the rebuilt picture against the source must reach the floor of its (pattern, QP) pair (h264_psnr_floors.txt). The _neg
+# entry is its negative control (one corrupted stream byte, all three decoder comparisons must fail); the _pcm entry runs the
+# global I_PCM mode (MB_MODE 1: exact picture). Build the decoders once with h264_build_decoders.ps1.
 tb_rtlnet_h264_bitpack  cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_bitpack.f  sim=verilator
 tb_rtlnet_h264_bitpack  cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_bitpack.f  neg  plusargs=INJECT_FAILURE  expectfail  sim=verilator
 tb_rtlnet_h264_c422     cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_c422.f     sim=verilator
 tb_rtlnet_h264_c422     cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_c422.f     neg  plusargs=INJECT_FAILURE  expectfail  sim=verilator
+tb_rtlnet_h264_cavlc    cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_cavlc.f    sim=verilator
+tb_rtlnet_h264_cavlc    cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_cavlc.f    neg  plusargs=INJECT_FAILURE  expectfail  sim=verilator
+tb_rtlnet_h264_mbcavlc  cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_mbcavlc.f  sim=verilator
+tb_rtlnet_h264_mbcavlc  cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_mbcavlc.f  neg  plusargs=INJECT_FAILURE  expectfail  sim=verilator
+tb_rtlnet_h264_xform    cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_xform.f    sim=verilator
+tb_rtlnet_h264_xform    cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_xform.f    neg  plusargs=INJECT_FAILURE  expectfail  sim=verilator
+tb_rtlnet_h264_ipred    cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_ipred.f    sim=verilator
+tb_rtlnet_h264_ipred    cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_ipred.f    neg  plusargs=INJECT_FAILURE  expectfail  sim=verilator
 h264_driver_test        script:cores/rtlnet_h264_enc/testbench/h264_driver_test.ps1
 h264_harness            script:cores/rtlnet_h264_enc/testbench/h264_harness.ps1
-h264_harness_neg        script:cores/rtlnet_h264_enc/testbench/h264_harness.ps1 -Config qcif_s1,qcif_s3 -Inject
+h264_harness_neg        script:cores/rtlnet_h264_enc/testbench/h264_harness.ps1 -Config qcif_s1,qcif_e2_s4,qcif_photo_q28,qcif_edges_q18 -Inject
+h264_harness_pcm        script:cores/rtlnet_h264_enc/testbench/h264_harness.ps1 -Pcm -Config qcif_s1,qcif_s3,qcif_e2_s4
 h264_lint               script:cores/rtlnet_h264_enc/testbench/h264_lint.ps1
