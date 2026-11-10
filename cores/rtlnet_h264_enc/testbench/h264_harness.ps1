@@ -17,6 +17,9 @@ Overview:
     (`TEST PASS: rtlnet_h264_top_<config>_neg`) only when all three decoder comparisons fail.
   * PNGs per configuration in <work>/png: src_<n>.png (generator reference), jm_<n>.png, oh_<n>.png, ff_<n>.png and
     side_<n>.png (source, JM, OpenH264, FFmpeg side by side).
+  * Burst monitor: the bench prints HIST (beat-count histogram per master and kind) and SUMMARY lines; the harness echoes them.
+    -InjectBurst is the monitor's negative control: the bench shows its monitor one single-beat rebuilt-picture AW and must
+    fail with the monitor's message (`TEST PASS: rtlnet_h264_top_<config>_burstneg`).
   * Work directories: .sim/h264/<config>/ (gitignored).
   * Macroblock mode: with the intra 16x16 encoder (register MB_MODE present in rtlnet_h264_enc_regs.sv) the rebuilt picture is lossy:
     h264_check.py prints PSNR per picture and BITS per picture and enforces the floor of the (pattern, QP) pair from
@@ -27,7 +30,8 @@ Overview:
   * Configurations: <size>_e<engines>_s<slices>_q<QP> for 720p and 1080p (slices of the whole picture; e1_s2 is one engine
     with two slices), qcif_<pattern>_q<QP> for QCIF, and the named QCIF structure checks (qcif_s1, qcif_s3, qcif_ring, qcif_e2_*,
     qcif_2pic, ... at QP 28). -Config takes names or wildcards (qcif_*_q0, 720p_e2_*).
-Usage: powershell -NoProfile -ExecutionPolicy Bypass -File h264_harness.ps1 [-Config qcif_s1,720p_*] [-Inject] [-Pcm] [-Measure] [-Threads N]
+Usage: powershell -NoProfile -ExecutionPolicy Bypass -File h264_harness.ps1 [-Config qcif_s1,720p_*] [-Inject] [-InjectBurst] [-Pcm] [-Measure] [-Threads N] [-Gap pct] [-Lat clocks]
+  -Gap and -Lat set the memory model's ready/valid gap percentage (default 20) and read latency in clocks (default 20; rtlnet_ddr_sim: gap 0, latency 20).
   Without -Config every configuration of the default set runs (several minutes per ten configurations: each one builds the bench).
 Revision: 11-09-2026
   * 11-09-2026: initial version; QP/pattern configuration table, PSNR floors, bits per picture, -Pcm and -Measure.
@@ -36,10 +40,13 @@ Revision: 11-09-2026
 param(
     [string[]]$Config = @(),
     [switch]$Inject,
+    [switch]$InjectBurst,
     [switch]$Pcm,
     [switch]$Measure,
     [int]$Threads = 1,
-    [switch]$NoPng
+    [switch]$NoPng,
+    [int]$Gap = 20,
+    [int]$Lat = 20
 )
 $ErrorActionPreference = 'Stop'
 $Repo = (Resolve-Path (Join-Path $PSScriptRoot '../../..')).Path
@@ -75,6 +82,11 @@ Add-Cfg 'qcif_ring'    176 144 144 1 3 1 @('noise') 28 @{ Ring = 16; Delay = 300
 Add-Cfg 'qcif_e2_s2'   176 144 144 2 2 1 @('gradient') 28
 Add-Cfg 'qcif_e2_s4'   176 144 144 2 4 1 @('noise') 28
 Add-Cfg 'qcif_e2_2pic' 176 144 144 2 2 2 @('bars', 'square') 28
+# Widths that are not a multiple of the 4-macroblock read strip (the last strip of a row has fewer macroblocks: 13 = 3 x 4 + 1,
+# 5 = 4 + 1, 18 = 4 x 4 + 2): bursts of 2 beats (one macroblock row) and 4 beats at the end of a row, one and two engines.
+Add-Cfg 'strip_w13_s1'    208 144 144 1 1 1 @('photo') 28
+Add-Cfg 'strip_w5_e2_s2'   80 144 144 2 2 1 @('gradnoise') 28
+Add-Cfg 'strip_w18_s3'    288  96  96 1 3 1 @('edges') 28
 # QCIF content and QP matrix.
 foreach ($pq in @(
         @('photo', 0), @('photo', 18), @('photo', 28), @('photo', 38), @('photo', 51),
@@ -138,7 +150,7 @@ $Measured = "$Sim/floors_measured.txt"
 $allOk = $true
 foreach ($c in $Configs) {
     $name = $c.Name
-    $label = if ($Inject) { "${name}_neg" } else { $name }
+    $label = if ($InjectBurst) { "${name}_burstneg" } elseif ($Inject) { "${name}_neg" } else { $name }
     $dir = "$Sim/$label"
     if (Test-Path -LiteralPath $dir) { Remove-Item -LiteralPath $dir -Recurse -Force }
     New-Item -ItemType Directory -Force -Path $dir, "$dir/png" | Out-Null
@@ -165,21 +177,30 @@ foreach ($c in $Configs) {
 
     # Encode in Verilator.
     $defs = @("TB_MBW=$($c.W / 16)", "TB_MBH=$($c.H / 16)", "TB_SLICES=$($c.S)", "TB_ENGINES=$($c.E)", "TB_PICS=$($c.P)", "TB_RING_KB=$($c.Ring)",
-              "TB_CONSUMER_DELAY=$($c.Delay)", "TB_MEM_LOG2=$($c.Mem)", 'TB_GAP=20', 'TB_LAT=20', "TB_QP=$($c.Qp)")
+              "TB_CONSUMER_DELAY=$($c.Delay)", "TB_MEM_LOG2=$($c.Mem)", "TB_GAP=$Gap", "TB_LAT=$Lat", "TB_QP=$($c.Qp)")
     if ($Pcm -and $HasMbMode) { $defs += 'TB_PCM=1' }
     if ($c.ContainsKey('Stall')) { $defs += 'TB_EXPECT_STALL=1' }
     $fdir = $dir.Replace([string][char]92, '/')
     $pa = @("IN0=$fdir/in0.hex", "OUT=$fdir/o")
     if ($c.P -gt 1) { $pa += "IN1=$fdir/in1.hex" }
     if ($Inject) { $pa += 'INJECT' }
+    if ($InjectBurst) { $pa += 'INJECT_BURST' }
     $simOut = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$Repo/scripts/rtlnet_run_verilator.ps1" -Bench tb_rtlnet_h264_top `
         -Filelist cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_top.f -Tag $label -Defines ($defs -join ',') -PlusArgs ($pa -join ',') -Threads $Threads
     $simLine = ($simOut | Select-Object -Last 1)
     $simSecs = $sw.Elapsed.TotalSeconds
     Write-Output "[$label] bench: $simLine"
-    if ($LASTEXITCODE -ne 0) { $fails += 'bench'; $allOk = $false; Write-Output "TEST FAIL: rtlnet_h264_top_$label (bench)"; continue }
     $runLog = Read-Text "$Repo/.sim/verilator/tb_rtlnet_h264_top_$label/run.log"
-    foreach ($m in [regex]::Matches($runLog, '(?m)^STAT [^\r\n]*')) { Write-Output "[$label] $($m.Value)" }
+    if ($InjectBurst) {
+        if (($LASTEXITCODE -ne 0) -and ($runLog -match 'burst monitor: engine 0 single-beat rebuilt-picture AW')) {
+            Write-Output "TEST PASS: rtlnet_h264_top_$label (negative control: the burst monitor fired on the injected single-beat AW)"
+        } else {
+            Write-Output "TEST FAIL: rtlnet_h264_top_$label (negative control: the burst monitor did not fire)"; $allOk = $false
+        }
+        continue
+    }
+    if ($LASTEXITCODE -ne 0) { $fails += 'bench'; $allOk = $false; Write-Output "TEST FAIL: rtlnet_h264_top_$label (bench)"; continue }
+    foreach ($m in [regex]::Matches($runLog, '(?m)^(STAT|HIST|SUMMARY) [^\r\n]*')) { Write-Output "[$label] $($m.Value)" }
 
     # Assemble stream and rebuilt YUV; rebuilt must equal the reference.
     $asmExtra = @('--pattern', ($c.Pat -join ','), '--qp', "$($c.Qp)", '--floors', $Floors)

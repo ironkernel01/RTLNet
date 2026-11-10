@@ -163,6 +163,7 @@ static void ddrt_address_bus(uintptr_t base, uint32_t words, ddrtest_settle_fn s
     r->addr_offsets = n;
     for (unsigned i = 0; i < n; i++) {
         ddrt_wr(base + 4u * offsets[i], DDRT_PATTERN);
+        plat_dcache_flush_range(base + 4u * offsets[i], 4u);   /* write-back cache: the store must reach the SDRAM */
     }
     ddrt_wr(base, DDRT_ANTIPATTERN);
     plat_dcache_flush_range(base, 4u);
@@ -236,6 +237,8 @@ static void ddrt_random_pass(uintptr_t base, uint32_t size, ddrtest_settle_fn se
         for (uint32_t i = first; i < first + n; i++) {
             ddrt_wr(base + 4u * i, g_block[i % DDRT_BLOCK_WORDS] ^ ((i / DDRT_BLOCK_WORDS) * DDRT_SALT_MUL));
         }
+        /* Write-back cache: write the chunk's lines back inside the timed span, so the rate counts completed writes. */
+        plat_dcache_flush_range(base + 4u * first, 4u * n);
         ddrt_settle(settle);
         r->write_ticks += (uint32_t)(plat_ticks() - t0);
         r->write_bytes += 4u * n;

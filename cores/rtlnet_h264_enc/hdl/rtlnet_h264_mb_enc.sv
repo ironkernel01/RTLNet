@@ -305,7 +305,7 @@ module rtlnet_h264_mb_enc #(
   assign it_r     = iss_n[1:0];
   assign it_plane = blk_plane(it_b);
   assign it_y     = blk_y(it_b, it_r);
-  assign it_addr  = sbase_q + SRC_AW'((it_plane == 2'd0) ? {1'b0, it_y} : (5'd16 + {2'b00, it_y[2:0]}));
+  assign it_addr  = sbase_q + ((it_plane == 2'd0) ? SRC_AW'(it_y) : (SRC_AW'(16) + SRC_AW'(it_y[2:0])));
 
   // Level cost estimate in bits: 0 for a zero level, else a table by the bit length of |level| (1 .. 12).
   function automatic logic [6:0] lcost(input logic signed [11:0] l);

@@ -44,12 +44,23 @@ PTS minus 9000 ticks (100 ms of receiver buffering).
 | Region | Offset | Size |
 |---|---|---|
 | frame buffer (3 slots) | 0x1000_0000 | 12 MiB (`gige.md` section 6) |
-| rebuilt picture Y / Cb / Cr | 0x1100_0000 / 0x1130_0000 / 0x1138_0000 | strides 2048 / 1024 / 1024 |
+| rebuilt picture A, luma tiles / chroma tiles | 0x1100_0000 / 0x1120_0000 | 256 B and 128 B per macroblock (macroblock-tiled, raster order), 2 MiB areas; 1080p needs 2,088,960 B and 1,044,480 B (3,133,440 B per picture) |
+| rebuilt picture B, luma tiles / chroma tiles (reserved) | 0x1140_0000 / 0x1160_0000 | the second reference picture of the motion-search phase (ping-pong); not written by the intra-only encoder |
 | compressed rings | 0x1200_0000 | 8 MiB, split by the core into one share per engine (4 MiB each) |
-| index rings | 0x1300_0000 | 256 entries of 16 bytes, 128 per engine |
+| index rings | 0x1300_0000 | 256 records of 128 bytes (32 KiB), 128 per engine |
 
-The rings are read through the data cache: the lines of each chunk are invalidated first (`plat_dcache_invalidate_range`); the cache
-is write-through, so no dirty line exists in these regions.
+The rebuilt picture is written by the encoder only (one 16-beat burst for the luma tile and one 8-beat burst for the chroma tile of each
+macroblock) and is not read by the firmware. An index record is one 8-beat burst of 128 bytes: the four entry words
+(`rtlnet_h264_enc.md` section 7) in the first 16 bytes and 112 reserved bytes written as zero; the firmware reads the first 16 bytes
+(`RTLNET_H264_IDX_ENTRY_BYTES` is the record pitch, `RTLNET_H264_IDX_WORDS` the entry words). The record is 128 bytes so that every index
+write is a burst of 8 beats (the DDR3 rule: no single-beat transaction); the index ring holds a few records per picture, so the
+extra 112 bytes cost nothing measurable (5 records per picture at 2 engines and 2 slices).
+
+The rings and the index records are written by hardware and read by the CPU through the data cache, which is write-back with 64-byte lines
+(8 KiB, over the DDR3 window). Before every read the lines of the range are invalidated (`plat_dcache_invalidate_range`, whole 64-byte
+lines); the CPU never writes these regions, so no dirty line exists in them and the invalidate cannot discard CPU data. The rings and the
+index ring are 64-byte aligned (offsets 0x1200_0000 and 0x1300_0000, records of 128 bytes). The CPU's own DDR3 stores
+(only the `ddr test` region) are written back with `plat_dcache_flush_range` before hardware or the test's read-back needs them.
 
 ## 5. Picture flow (`venc_poll`, from the main loop)
 

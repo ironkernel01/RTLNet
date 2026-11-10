@@ -46,7 +46,7 @@ not use them). The frame streams are in `clk`; the protocol wrapper's CPU FIFOs 
 
 | Cell | IP | Configuration |
 |---|---|---|
-| `microblaze_0` | MicroBlaze V 1.0 (`microblaze_riscv`) | RV32, little endian, RV32I with M (hardware multiply, standard divider, `C_USE_MULDIV` 1), C (compressed, `C_USE_COMPRESSION` 1), Zicsr, Zba/Zbb/Zbs (`C_USE_BITMAN_A/_B/_S` 1), barrel shifter (performance), performance pipeline (`C_OPTIMIZATION` 0), no MMU, **8 KiB instruction cache and 8 KiB write-through data cache** (`C_USE_ICACHE` 1, `C_USE_DCACHE` 1, `C_DCACHE_USE_WRITEBACK` 0, 16-byte lines, both over `0x8000_0000`..`0x9FFF_FFFF` only; the LMB and the AXI BRAM are uncached), no FPU, no atomics, **no branch target cache** (kept off: no measured need, and it is not free in LUTs and timing), misaligned-access exceptions on (the BSP handles them transparently), interrupt input (normal), debug enabled (serial JTAG interface), D-AXI (`M_AXI_DP`) on, I-AXI off, ILMB and DLMB, `C_BASE_VECTORS` 0 (reset vector 0x0), bus exceptions off (a DECERR reads as data) |
+| `microblaze_0` | MicroBlaze V 1.0 (`microblaze_riscv`) | RV32, little endian, RV32I with M (hardware multiply, standard divider, `C_USE_MULDIV` 1), C (compressed, `C_USE_COMPRESSION` 1), Zicsr, Zba/Zbb/Zbs (`C_USE_BITMAN_A/_B/_S` 1), barrel shifter (performance), performance pipeline (`C_OPTIMIZATION` 0), no MMU, **8 KiB instruction cache and 8 KiB write-back data cache** (`C_USE_ICACHE` 1, `C_USE_DCACHE` 1, `C_DCACHE_USE_WRITEBACK` 1, 64-byte lines (`C_ICACHE_LINE_LEN` and `C_DCACHE_LINE_LEN` 16 words), 32-bit cache buses (`C_ICACHE_DATA_WIDTH` and `C_DCACHE_DATA_WIDTH` 0: a line is one 16-beat burst), both over `0x8000_0000`..`0x9FFF_FFFF` only; the LMB and the AXI BRAM are uncached), no FPU, no atomics, **no branch target cache** (kept off: no measured need, and it is not free in LUTs and timing), misaligned-access exceptions on (the BSP handles them transparently), interrupt input (normal), debug enabled (serial JTAG interface), D-AXI (`M_AXI_DP`) on, I-AXI off, ILMB and DLMB, `C_BASE_VECTORS` 0 (reset vector 0x0), bus exceptions off (a DECERR reads as data) |
 | `ilmb_v10`, `dlmb_v10` | LMB 3.0 | instruction and data local memory buses |
 | `ilmb_bram_if_cntlr`, `dlmb_bram_if_cntlr` | LMB BRAM controller 4.0 | no ECC |
 | `lmb_bram` | Block Memory Generator 8.4 | true dual port, BRAM controller mode; **512 KiB = 128 RAMB36** (code, data, stack, heap, lwIP) |
@@ -76,7 +76,7 @@ block RAM; no firmware section is placed in DDR3, which the `ddr test` memory te
 | 0x4120_0000 | 64 KiB | AXI INTC |
 | 0x41C0_0000 | 64 KiB | AXI Timer |
 | 0x44A0_0000 | 1 MiB | `M_AXI_RTLNET` (RTLNet register window, decoded by the board top) |
-| 0x8000_0000 | 512 MiB | `M_AXI_DDR` (DDR3 through the 8 KiB instruction cache and the 8 KiB write-through data cache; only this window is cacheable; decoded by `sc_ddr`, carried to `ui_clk` by `rtlnet_axi_cdc`, served by `rtlnet_axi_arbiter` and `rtlnet_ddr`) |
+| 0x8000_0000 | 512 MiB | `M_AXI_DDR` (DDR3 through the 8 KiB instruction cache and the 8 KiB write-back data cache, 64-byte lines; only this window is cacheable; decoded by `sc_ddr`, carried to `ui_clk` by `rtlnet_axi_cdc`, served by `rtlnet_axi_arbiter` and `rtlnet_ddr`) |
 | 0xC000_0000 | 128 KiB | AXI BRAM: DMA frame buffers (MicroBlaze data side and both DMA channels) |
 
 Interrupt inputs: 0..7 = `irq[7:0]`, 8 = timer, 9 = UART, 10 = DMA MM2S, 11 = DMA S2MM. Reset vector 0x0 (`C_BASE_VECTORS`); exceptions and
@@ -775,3 +775,36 @@ Details: `boards/nexys_video/documentation/rtlnet_nexys_video.md` sections 6.3 a
 | 11-09-2026 | JTAG UART of the MDM removed (CDC gate passes); address 0x4140_0000 unmapped; `axi_periph` has 6 masters; JTAG load of an ELF with `boards/nexys_video/scripts/jtag_load_elf.ps1` |
 | 11-09-2026 | Phase 0 stage 1: 8 KiB instruction and 8 KiB write-through data caches over `0x8000_0000..0x9FFF_FFFF`, SmartConnect `sc_ddr` (one clock, `cpu_clk`), exported 128-bit `M_AXI_DDR` on `clk`; the board top crosses it to `ui_clk` in `rtlnet_axi_cdc`; results in `boards/nexys_video/documentation/rtlnet_nexys_video.md` section 6.8 |
 | 11-09-2026 | Phase 0 stage 2: `build.ps1 -Ddr` (DDR3-linked development image, banner names the image), `jtag_load_elf` waits for DDR3 calibration and verifies the download, block design `C_PC_WIDTH` 32 (section 9.12) |
+
+## 11. Cache lines and DDR3 burst shape (11-10-2026)
+
+Rule: all DDR3 access is bursts. Change: `C_ICACHE_LINE_LEN` and `C_DCACHE_LINE_LEN` 16 words (64-byte lines), `C_ICACHE_DATA_WIDTH` and
+`C_DCACHE_DATA_WIDTH` 0 (32-bit cache buses, a line is one 16-beat burst), `C_DCACHE_USE_WRITEBACK` 1, both caches 8 KiB. Vivado property probe of the block design
+(`M_AXI_IC`/`M_AXI_DC`, `sc_ddr`):
+
+| Setting | M_AXI_IC | M_AXI_DC | `sc_ddr` M00 max burst |
+|---|---|---|---|
+| before (16-byte lines, write-through) | 128-bit, single beat | 32-bit, 4-beat burst (the IP forces `C_DCACHE_DATA_WIDTH` to 0 unless the cache is write-back; the old setting 1 had no effect) | 1 beat (4 x 32 bits packed to one 128-bit beat) |
+| now (64-byte lines, 32-bit buses) | 32-bit, 16-beat burst | 32-bit, 16-beat burst | 4 beats of 128 bits |
+| full-line width (`DATA_WIDTH` 1, write-back, 64-byte lines) | 512-bit single transfer | 512-bit single transfer | needs 32 KiB caches (IP rule: size >= 2048 x line words); not built |
+
+Measured on the board (`show ddr`, `ddr test 16`, 128-bit arbiter master 0): writes 262,723 AW bursts for 1,050,718 W beats = 4.0 beats per burst (the 64-byte line write-back is one
+4-beat burst, no narrow store reaches the memory controller any more; before: 16.8 million single-beat bursts for the same kind of test). Reads: 4,293,248 AR bursts and
+4,293,248 R beats, 1 beat per burst: the SmartConnect does not pack the 16 x 32-bit read burst of a line fill into a 4-beat burst, it issues the beats as separate single-beat reads (about 16 per line). The read
+side therefore still violates the burst rule at the memory controller, and costs 16 reads per line instead of one. CPU read traffic in streaming is small (the TS mux copies about 2 MB/s from the rings), the `ddr test` read rate
+rose from 12.90 to 19.58 MB/s, write rate 28.39 to 24.28 MB/s. Not changed further (stop condition of the task): the next candidates are the full-line width (512-bit transfer, 32 KiB caches,
+about 12 more RAMB36 per cache pair) or reading through a block-design AXI data-width converter with a modifiable-cache attribute; both need a new build and a measurement of AR bursts per line.
+
+`NARROW_MASK` and `WRAP_MASK` of arbiter master 0 stay set (no illegal burst was captured; the narrow bit is now unused by stores but kept as a margin until the read shape is settled).
+
+Coherency (the data cache is write-back): every buffer the CPU writes and hardware reads, and every buffer hardware writes and the CPU reads, in DDR3:
+
+| Buffer | Direction | Maintenance | Where |
+|---|---|---|---|
+| compressed rings (engines) | hardware writes, CPU reads | `plat_dcache_invalidate_range` before each chunk | `microblaze/firmware/src/video/rtlnet_venc.c` `mem_copy` (line 81), `ring_feed` (line 110) |
+| index ring records | hardware writes, CPU reads | invalidate in `mem_copy` before the 16-byte entry read | `rtlnet_venc.c` `venc_poll` index loop (`mem_copy(raw, VENC_IDX_BASE + ...)`) |
+| frame buffer slots | hardware writes, CPU reads (CRC) | invalidate per line | `microblaze/firmware/src/rtlnet_fbcrc.c:96` |
+| `ddr test` region | CPU writes, CPU re-reads from the SDRAM | flush after each store group and each 64 KiB chunk (added: write-back), invalidate before each read | `rtlnet_ddrtest.c` lines around 105, 125, 168, 180, 197 and the chunk flush in `ddrt_random_pass` |
+| lwIP buffers, AXI DMA TX/RX buffers, heap | CPU and DMA | none needed: they are in the AXI BRAM and the LMB, outside the cached window | `rtlnet_lwip_netif.c` (`.axi_bram`) |
+| DDR3 descriptors or tables | none exist | | |
+

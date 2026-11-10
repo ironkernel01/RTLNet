@@ -271,13 +271,21 @@ int main(void)
 
     memset(&cfg, 0, sizeof(cfg));
     cfg.mb_w = 11u; cfg.mb_h = 9u; cfg.slices = 3u; cfg.qp = 26u; cfg.log2_max_frame_num = 4u;
-    cfg.in_base = 0u; cfg.in_stride = 352u; cfg.ry_base = 0x10000u; cfg.ry_stride = 176u;
-    cfg.ru_base = 0x20000u; cfg.rv_base = 0x30000u; cfg.rc_stride = 96u;
+    cfg.in_base = 0u; cfg.in_stride = 384u; cfg.ry_base = 0x10000u;
+    cfg.ru_base = 0x20000u;
     cfg.ring_base = 0x40000u; cfg.ring_size = 0x8000u; cfg.idx_base = 0x50000u; cfg.idx_entries = 64u;
     check(rtlnet_h264_enc_configure(TEST_BASE, &cfg) == 0, "configure");
     check(g_reg[RTLNET_H264_REG_MB_W / 4u] == 11u, "MB_W written");
     check(g_reg[RTLNET_H264_REG_SLICES / 4u] == 3u, "SLICES written");
-    check(g_reg[RTLNET_H264_REG_RC_STRIDE / 4u] == 96u, "RC_STRIDE written");
+    check(g_reg[RTLNET_H264_REG_RY_BASE / 4u] == 0x10000u, "RY_BASE (luma tile base) written");
+    check(g_reg[RTLNET_H264_REG_RU_BASE / 4u] == 0x20000u, "RU_BASE (chroma tile base) written");
+    cfg.in_stride = 352u;
+    check(rtlnet_h264_enc_configure(TEST_BASE, &cfg) != 0, "configure rejects an input stride that is not a multiple of 128");
+    cfg.in_stride = 384u; cfg.ry_base = 0x10080u;
+    check(rtlnet_h264_enc_configure(TEST_BASE, &cfg) != 0, "configure rejects a luma tile base that is not a multiple of 256");
+    cfg.ry_base = 0x10000u; cfg.idx_base = 0x50010u;
+    check(rtlnet_h264_enc_configure(TEST_BASE, &cfg) != 0, "configure rejects an index base that is not a multiple of 128");
+    cfg.idx_base = 0x50000u;
     check(g_reg[RTLNET_H264_REG_IDX_ENTRIES / 4u] == 64u, "IDX_ENTRIES written");
     check(g_reg[RTLNET_H264_REG_QP / 4u] == 26u, "QP written");
     check(g_reg[RTLNET_H264_REG_MB_MODE / 4u] == 0u, "MB_MODE 0 (Intra16x16) by default");

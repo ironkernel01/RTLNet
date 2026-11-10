@@ -50,7 +50,7 @@ All data ports are packed vectors, master `i` at `[i*W +: W]`, on one clock.
 | `DATA_W` | 128 | 32, 64 or 128 (`$fatal` otherwise); a beat is `DATA_W/8` bytes |
 | `ID_W` | 4 | master-side ID width, 1..15; the memory-side ID is `ID_W + IDX_W` bits |
 | `HIGH_PRIO_MASK` | `'b1` | masters that win over the round-robin group |
-| `NARROW_MASK` | `'0` | masters whose bursts may use any `AxSIZE` up to the full width (a write-through CPU cache issues 32-bit stores); the other masters must use the full width |
+| `NARROW_MASK` | `'0` | masters whose bursts may use any `AxSIZE` up to the full width (the CPU's former write-through cache issued 32-bit stores; since 11-10-2026 the data cache is write-back and its stores are 4-beat full-width bursts, measured on the board, so the bit is a margin on the board and unused by stores); the other masters must use the full width |
 | `WRAP_MASK` | `'0` | masters whose WRAP bursts of 2, 4, 8 or 16 beats at a size-aligned address are legal (the CPU caches fill a line critical word first); for every other master a WRAP is illegal |
 | `MAX_OUTSTANDING` | 8 | bursts in flight per direction, whole arbiter, 1..255 |
 
@@ -337,3 +337,8 @@ The memory-controller wrapper connects to the `m_axi_*` ports; widths follow `ID
 - No W-order skid: a master's W beat is accepted only when the memory controller accepts it (legal burst) or at once
   (illegal burst).
 - Resets of the two clock domains must come from one assertion.
+
+## 10. Board master mix (11-10-2026)
+
+Board configuration unchanged (`NARROW_MASK` 1, `WRAP_MASK` 1 for master 0). Beats per burst measured with the per-master counters after a 60 s 1080p30 stream: video DMA 16.0,
+encoder engines 12.0 writes (ring, index record, tiles) and 8.0 reads, CPU writes 4.0 (64-byte line write-back), CPU reads 1.0 (open, see `microblaze/documentation/rtlnet_cpu_microblaze.md` section 11). No error captured.

@@ -1,22 +1,25 @@
 // -----------------------------------------------------------------------------
 // File: rtlnet_h264_wr_master.sv
 // Purpose: the write side of the encoder's single AXI4 master: carries three kinds of write from
-//   the encoder (compressed-ring bursts, index entries, rebuilt-picture rows) one burst at a time.
+//   the encoder (compressed-ring bursts, index records, rebuilt-picture tiles) one burst at a time.
 // Overview:
-//   * Three requesters, served round robin one burst per grant: the ring (a descriptor with address and
-//     length, the data beats pulled from the ring word FIFO), the index writer (one 16-byte beat) and the
-//     rebuilt-picture writer (one 16-byte beat with byte strobes). Every burst is INCR, size 16 bytes
-//     (the full 128-bit data width), at most 16 beats and, by construction of the requesters, never
-//     crosses a 4 KiB boundary.
+//   * Three requesters, served round robin one burst per grant: the ring and the rebuilt-picture writer (each a
+//     descriptor with address and length, the data beats pulled from the requester's own beat stream) and the index
+//     writer (one 128-byte record: 8 beats, the first carries the entry, the other 7 are zero). Every burst is
+//     INCR, size 16 bytes (the full 128-bit data width), at most 16 beats and, by construction of the requesters,
+//     never crosses a 4 KiB boundary. No requester issues a single-beat burst except the ring's end-of-slice tail.
 //   * AWID selects the requester (0 ring, 1 index, 2 rebuilt picture); the B response is routed back
 //     to the requester by BID as an event pulse. At most MAX_OUT writes are outstanding; a new grant
 //     waits while the limit is reached (counter overflow is gated in logic and checked in simulation).
+//     The count is per burst, so it is the same for a 1-beat and a 16-beat burst.
 //   * A B response other than OKAY pulses err_resp.
 //   * A simulation check reports an AW that is not INCR, not full width, longer than 16 beats or
 //     crossing 4 KiB.
 // Language: SystemVerilog-2012.
-// Revision: 11-09-2026
+// Revision: 11-10-2026
 //   * 11-09-2026: initial version.
+//   * 11-10-2026: burst-only DDR3 access: the rebuilt-picture writer requests a tile burst with a beat stream (rc_w_*),
+//     the index entry is an 8-beat record.
 // Clocks: clk.
 // -----------------------------------------------------------------------------
 module rtlnet_h264_wr_master #(
@@ -39,18 +42,22 @@ module rtlnet_h264_wr_master #(
   input  logic [15:0]       rg_w_strb,
   output logic              rg_w_pop,
 
-  // Index entry request from rtlnet_h264_ring_wr: one 16-byte beat; ix_ack pulses in the grant clock.
+  // Index record request from rtlnet_h264_ring_wr: one 128-byte record (the 16-byte entry in beat 0); ix_ack pulses in
+  // the grant clock.
   input  logic              ix_valid,
   input  logic [ADDR_W-1:0] ix_addr,
   input  logic [127:0]      ix_data,
   output logic              ix_ack,
 
-  // Rebuilt-picture row request from rtlnet_h264_recon_wr: one beat with strobes; rc_ack pulses in the grant clock.
+  // Rebuilt-picture tile burst request from rtlnet_h264_recon_wr: descriptor valid with address and beats-1; rc_pop pulses
+  // in the grant clock; the beats (full strobe) come from rc_w_*: rc_w_pop pulses per beat taken.
   input  logic              rc_valid,
   input  logic [ADDR_W-1:0] rc_addr,
-  input  logic [127:0]      rc_data,
-  input  logic [15:0]       rc_strb,
-  output logic              rc_ack,
+  input  logic [3:0]        rc_len,
+  output logic              rc_pop,
+  input  logic              rc_w_valid,
+  input  logic [127:0]      rc_w_data,
+  output logic              rc_w_pop,
 
   // AXI4 write channels, clk domain.
   output logic [ID_W-1:0]   awid,
@@ -85,6 +92,8 @@ module rtlnet_h264_wr_master #(
   output logic [4:0]        outstanding
 );
 
+  import rtlnet_h264_pkg::*;
+
   localparam logic       M_IDLE = 1'b0;
   localparam logic       M_XFER = 1'b1;
   localparam logic [1:0] SEL_RING = 2'd0;
@@ -96,13 +105,13 @@ module rtlnet_h264_wr_master #(
   logic [1:0]  rr;
   logic [4:0]  w_left;
   logic [127:0] ld_data;
-  logic [15:0]  ld_strb;
   logic        can_grant;
   logic [1:0]  gnt;
   logic        gnt_valid;
   logic        done_xfer;
   logic        w_hs;
   logic        b_dec;
+  logic        src_valid;
 
   assign can_grant = (st == M_IDLE) && (outstanding < 5'(MAX_OUT));
   assign busy      = (st == M_XFER);
@@ -127,14 +136,26 @@ module rtlnet_h264_wr_master #(
 
   assign rg_pop = can_grant && gnt_valid && (gnt == SEL_RING);
   assign ix_ack = can_grant && gnt_valid && (gnt == SEL_IDX);
-  assign rc_ack = can_grant && gnt_valid && (gnt == SEL_REC);
+  assign rc_pop = can_grant && gnt_valid && (gnt == SEL_REC);
 
-  assign wvalid   = (st == M_XFER) && (w_left != 5'd0) && ((sel == SEL_RING) ? rg_w_valid : 1'b1);
-  assign wdata    = (sel == SEL_RING) ? rg_w_data : ld_data;
-  assign wstrb    = (sel == SEL_RING) ? rg_w_strb : ld_strb;
+  // Beat source of the burst in progress: the ring and tile streams hold their beat until it is taken; the index record
+  // is generated here (beat 0 the entry, the others zero).
+  always_comb begin
+    case (sel)
+      SEL_RING: src_valid = rg_w_valid;
+      SEL_REC:  src_valid = rc_w_valid;
+      default:  src_valid = 1'b1;
+    endcase
+  end
+
+  assign wvalid   = (st == M_XFER) && (w_left != 5'd0) && src_valid;
+  assign wdata    = (sel == SEL_RING) ? rg_w_data : ((sel == SEL_REC) ? rc_w_data :
+                    ((w_left == 5'(IDX_REC_BEATS)) ? ld_data : 128'd0));
+  assign wstrb    = (sel == SEL_RING) ? rg_w_strb : 16'hFFFF;
   assign wlast    = (w_left == 5'd1);
   assign w_hs     = wvalid && wready;
   assign rg_w_pop = w_hs && (sel == SEL_RING);
+  assign rc_w_pop = w_hs && (sel == SEL_REC);
   assign done_xfer = (st == M_XFER) && !awvalid && ((w_left == 5'd0) || (w_hs && (w_left == 5'd1)));
 
   assign ev_b_ring = bvalid && (bid[1:0] == 2'd0);
@@ -150,7 +171,6 @@ module rtlnet_h264_wr_master #(
       rr          <= 2'd0;
       w_left      <= '0;
       ld_data     <= '0;
-      ld_strb     <= '0;
       awid        <= '0;
       awaddr      <= '0;
       awlen       <= '0;
@@ -173,17 +193,14 @@ module rtlnet_h264_wr_master #(
               end
               SEL_IDX: begin
                 awaddr  <= ix_addr;
-                awlen   <= 8'd0;
-                w_left  <= 5'd1;
+                awlen   <= 8'(IDX_REC_BEATS - 1);
+                w_left  <= 5'(IDX_REC_BEATS);
                 ld_data <= ix_data;
-                ld_strb <= 16'hFFFF;
               end
               default: begin
-                awaddr  <= rc_addr;
-                awlen   <= 8'd0;
-                w_left  <= 5'd1;
-                ld_data <= rc_data;
-                ld_strb <= rc_strb;
+                awaddr <= rc_addr;
+                awlen  <= {4'd0, rc_len};
+                w_left <= {1'b0, rc_len} + 5'd1;
               end
             endcase
           end

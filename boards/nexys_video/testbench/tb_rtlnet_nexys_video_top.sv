@@ -174,8 +174,7 @@ module tb_rtlnet_nexys_video_top;
     localparam logic [31:0] FBW      = WIN + 32'h0_7000;
     localparam logic [31:0] ARBW     = WIN + 32'h0_4000;
     localparam logic [31:0] RY_BASE  = 32'h1100_0000;
-    localparam logic [31:0] RU_BASE  = 32'h1130_0000;
-    localparam logic [31:0] RV_BASE  = 32'h1138_0000;
+    localparam logic [31:0] RU_BASE  = 32'h1120_0000;     // chroma tiles (Cb then Cr, 128 B per macroblock); luma tiles are 256 B per macroblock
     localparam logic [31:0] RING     = 32'h1200_0000;
     localparam logic [31:0] RING_SZ  = 32'h0004_0000;
     localparam logic [31:0] IDX      = 32'h1300_0000;
@@ -223,10 +222,7 @@ module tb_rtlnet_nexys_video_top;
     wr(H264 + 32'h040, base, 4'hF, r);
     wr(H264 + 32'h044, IN_STRIDE, 4'hF, r);
     wr(H264 + 32'h048, RY_BASE, 4'hF, r);
-    wr(H264 + 32'h04C, 32'd2048, 4'hF, r);
     wr(H264 + 32'h050, RU_BASE, 4'hF, r);
-    wr(H264 + 32'h054, RV_BASE, 4'hF, r);
-    wr(H264 + 32'h058, 32'd1024, 4'hF, r);
     wr(H264 + 32'h060, RING, 4'hF, r);
     wr(H264 + 32'h064, RING_SZ, 4'hF, r);
     wr(H264 + 32'h078, IDX, 4'hF, r);
@@ -259,15 +255,15 @@ module tb_rtlnet_nexys_video_top;
     // Engine 1 ring share starts with its first slice start code and a slice NAL header (nal_ref_idc 3, IDR type 5 = 0x65).
     dut.u_cpu.ddr_read(CPU_DDR + RING + RING_SZ / 2, b128, r);
     tb_check(r == 2'b00 && b128[39:0] === 40'h65_0100_0000, $sformatf("VIDEO: ring 1 starts with an IDR slice, 0x%010x", b128[39:0]));
-    // Index rings: engine 0 share at IDX, engine 1 at IDX + 16 * 16: slice entry then picture entry.
+    // Index rings (128-byte records): engine 0 share at IDX, engine 1 at IDX + 16 * 128: slice entry then picture entry.
     dut.u_cpu.ddr_read(CPU_DDR + IDX, a128, r);
     w0 = a128[31:0]; w1 = a128[63:32]; w2 = a128[95:64]; w3 = a128[127:96];
     tb_check(w0 == 6 && w1 > 6 && w3[24] == 1'b0 && w3[7:0] == 8'd7 && w3[15:8] == 8'd28 && w3[17] == 1'b1,
              $sformatf("VIDEO: index 0 slice entry off %0d len %0d word3 0x%08x", w0, w1, w3));
-    dut.u_cpu.ddr_read(CPU_DDR + IDX + 32'd16, a128, r);
+    dut.u_cpu.ddr_read(CPU_DDR + IDX + 32'd128, a128, r);
     w3 = a128[127:96];
     tb_check(w3[24] == 1'b1 && a128[63:32] > 6, $sformatf("VIDEO: index 0 picture entry len %0d word3 0x%08x", a128[63:32], w3));
-    dut.u_cpu.ddr_read(CPU_DDR + IDX + 32'd256, a128, r);
+    dut.u_cpu.ddr_read(CPU_DDR + IDX + 32'd2048, a128, r);
     w3 = a128[127:96];
     tb_check(a128[31:0] == 0 && a128[63:32] > 6 && w3[24] == 1'b0 && w3[16] == 1'b1,
              $sformatf("VIDEO: index 1 slice entry off %0d len %0d word3 0x%08x", a128[31:0], a128[63:32], w3));
@@ -276,7 +272,7 @@ module tb_rtlnet_nexys_video_top;
     sse = 0;
     for (y = 0; y < MBH * 16; y++) begin
       for (k = 0; k < 11; k++) begin
-        dut.u_cpu.ddr_read(CPU_DDR + RY_BASE + y * 2048 + k * 16, a128, r);          // 16 rebuilt luma samples
+        dut.u_cpu.ddr_read(CPU_DDR + RY_BASE + 256 * ((y / 16) * MBW + k) + (y % 16) * 16, a128, r);   // 16 rebuilt luma samples (tile row)
         dut.u_cpu.ddr_read(CPU_DDR + base + y * IN_STRIDE + k * 32, b128, r);        // 16 pixels, Y at even bytes
         dut.u_cpu.ddr_read(CPU_DDR + base + y * IN_STRIDE + k * 32 + 16, w128, r);
         for (x = 0; x < 16; x++) begin
@@ -462,7 +458,7 @@ module tb_rtlnet_nexys_video_top;
     check_reg(WIN + 32'h0_4004, 32'h1109_2026, "ARBITER VERSION");
     check_reg(WIN + 32'h0_4008, 32'h0208_2104, "ARBITER CAPS (4 masters, 16-byte beat, ID_W 2, 8 outstanding, HP mask 2)");
     check_reg(WIN + 32'h0_8000, 32'h4832_3634, "H264 ID");
-    check_reg(WIN + 32'h0_8004, 32'h1109_2026, "H264 VERSION");
+    check_reg(WIN + 32'h0_8004, 32'h1110_2026, "H264 VERSION");
     check_reg(WIN + 32'h0_8008, 32'h0002_4478, "H264 CAPS (120 x 68 macroblocks, 2 engines)");
     check_reg(WIN + 32'h0_4010, 32'h0000_0000, "ARBITER STATUS idle");
     check_reg(WIN + 32'h0_4100, 32'h0000_0000, "ARBITER master 0 AW_BURSTS");

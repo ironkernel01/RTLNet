@@ -385,7 +385,7 @@ int rtlnet_h264_enc_probe(uintptr_t base, rtlnet_h264_enc_caps_t *caps)
  * rtlnet_h264_enc_configure -- see the header
  * Steps:
  *   1. Read CAPS and reject a picture larger than the build.
- *   2. Reject sizes, alignments and strides the core rejects at start.
+ *   2. Reject sizes and alignments the core rejects at start (input in 128-byte granules, tile bases, index records).
  *   3. Write the configuration registers.
  * Returns: 0 or -1; nothing is written on -1.
  */
@@ -401,14 +401,14 @@ int rtlnet_h264_enc_configure(uintptr_t base, const rtlnet_h264_enc_cfg_t *cfg)
         (cfg->log2_max_frame_num < RTLNET_H264_LOG2_FN_MIN) || (cfg->log2_max_frame_num > RTLNET_H264_LOG2_FN_MAX)) {
         return -1;
     }
-    if (((cfg->in_base % 32u) != 0u) || ((cfg->in_stride % 32u) != 0u) || (cfg->in_stride < (cfg->mb_w * 32u)) ||
-        ((cfg->ry_base % 16u) != 0u) || ((cfg->ry_stride % 16u) != 0u) || (cfg->ry_stride < (cfg->mb_w * 16u)) ||
-        ((cfg->ru_base % 16u) != 0u) || ((cfg->rv_base % 16u) != 0u) || ((cfg->rc_stride % 16u) != 0u) ||
-        (cfg->rc_stride < (cfg->mb_w * 8u))) {
+    if (((cfg->in_base % RTLNET_H264_IN_ALIGN) != 0u) || ((cfg->in_stride % RTLNET_H264_IN_ALIGN) != 0u) ||
+        (cfg->in_stride < (cfg->mb_w * 32u)) ||
+        ((cfg->ry_base % RTLNET_H264_REC_LUMA_TILE_BYTES) != 0u) ||
+        ((cfg->ru_base % RTLNET_H264_REC_CHROMA_TILE_BYTES) != 0u)) {
         return -1;
     }
     if (((cfg->ring_base % 16u) != 0u) || ((cfg->ring_size % 16u) != 0u) || (cfg->ring_size < 1024u) ||
-        ((cfg->idx_base % 16u) != 0u) || (cfg->idx_entries == 0u)) {
+        ((cfg->idx_base % RTLNET_H264_IDX_ENTRY_BYTES) != 0u) || (cfg->idx_entries == 0u)) {
         return -1;
     }
     rtlnet_reg_write32(base, RTLNET_H264_REG_MB_W, cfg->mb_w);
@@ -420,10 +420,7 @@ int rtlnet_h264_enc_configure(uintptr_t base, const rtlnet_h264_enc_cfg_t *cfg)
     rtlnet_reg_write32(base, RTLNET_H264_REG_IN_BASE, cfg->in_base);
     rtlnet_reg_write32(base, RTLNET_H264_REG_IN_STRIDE, cfg->in_stride);
     rtlnet_reg_write32(base, RTLNET_H264_REG_RY_BASE, cfg->ry_base);
-    rtlnet_reg_write32(base, RTLNET_H264_REG_RY_STRIDE, cfg->ry_stride);
     rtlnet_reg_write32(base, RTLNET_H264_REG_RU_BASE, cfg->ru_base);
-    rtlnet_reg_write32(base, RTLNET_H264_REG_RV_BASE, cfg->rv_base);
-    rtlnet_reg_write32(base, RTLNET_H264_REG_RC_STRIDE, cfg->rc_stride);
     rtlnet_reg_write32(base, RTLNET_H264_REG_RING_BASE, cfg->ring_base);
     rtlnet_reg_write32(base, RTLNET_H264_REG_RING_SIZE, cfg->ring_size);
     rtlnet_reg_write32(base, RTLNET_H264_REG_IDX_BASE, cfg->idx_base);

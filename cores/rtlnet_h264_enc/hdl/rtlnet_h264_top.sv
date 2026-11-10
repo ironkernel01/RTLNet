@@ -31,7 +31,8 @@ module rtlnet_h264_top #(
   parameter int    MAX_MB_H    = 68,     // tallest picture in macroblocks (1088 / 16)
   parameter int    ADDR_W      = 32,
   parameter int    ID_W        = 4,
-  parameter int    MB_BUF_KB   = 1,      // source macroblock buffer: two banks of 24 words (needs >= 1 KiB)
+  parameter int    RD_STRIP_MB = 4,      // macroblocks per input-read burst strip: row bursts of 2 * RD_STRIP_MB beats (2, 4 or 8)
+  parameter int    MB_BUF_KB   = 4,      // strip buffer: two halves of RD_STRIP_MB macroblock banks of 32 words (needs >= RD_STRIP_MB KiB)
   parameter int    REC_BUF_KB  = 1,      // rebuilt macroblock buffer: two banks of 96 words of 4 samples
   parameter int    COEF_BUF_KB = 1,      // coefficient buffer: two banks of 102 words of 48 bits (needs 1)
   parameter int    LINE_KB     = 4,      // rebuilt bottom-row line buffer: 2 x 16 bytes per macroblock column
@@ -100,6 +101,8 @@ module rtlnet_h264_top #(
   output logic              irq
 );
 
+  import rtlnet_h264_pkg::*;
+
   generate
     if (NUM_ENGINES < 1 || NUM_ENGINES > 4) begin : g_bad_engines
       $fatal(1, "rtlnet_h264_top: NUM_ENGINES=%0d, must be 1..4", NUM_ENGINES);
@@ -107,8 +110,11 @@ module rtlnet_h264_top #(
     if (ADDR_W != 32) begin : g_bad_addr
       $fatal(1, "rtlnet_h264_top: ADDR_W=%0d, only 32 is supported", ADDR_W);
     end
-    if (MB_BUF_KB < 1) begin : g_bad_mbbuf
-      $fatal(1, "rtlnet_h264_top: MB_BUF_KB=%0d, the macroblock buffer needs at least 1 KiB", MB_BUF_KB);
+    if (RD_STRIP_MB != 2 && RD_STRIP_MB != 4 && RD_STRIP_MB != 8) begin : g_bad_strip
+      $fatal(1, "rtlnet_h264_top: RD_STRIP_MB=%0d, must be 2, 4 or 8", RD_STRIP_MB);
+    end
+    if (MB_BUF_KB < RD_STRIP_MB) begin : g_bad_mbbuf
+      $fatal(1, "rtlnet_h264_top: MB_BUF_KB=%0d, the strip buffer needs at least RD_STRIP_MB=%0d KiB", MB_BUF_KB, RD_STRIP_MB);
     end
   endgenerate
 
@@ -146,10 +152,7 @@ module rtlnet_h264_top #(
   logic [31:0] cfg_in_base;
   logic [31:0] cfg_in_stride;
   logic [31:0] cfg_ry_base;
-  logic [31:0] cfg_ry_stride;
   logic [31:0] cfg_ru_base;
-  logic [31:0] cfg_rv_base;
-  logic [31:0] cfg_rc_stride;
   logic [5:0]  cfg_qp;
   logic        cfg_mb_pcm;
   logic [15:0] cfg_frame_num;
@@ -268,8 +271,8 @@ module rtlnet_h264_top #(
     .start(start), .ring_reset(ring_reset),
     .cfg_mb_w(cfg_mb_w), .cfg_mb_h(cfg_mb_h), .cfg_slices(cfg_slices),
     .cfg_in_base(cfg_in_base), .cfg_in_stride(cfg_in_stride),
-    .cfg_ry_base(cfg_ry_base), .cfg_ry_stride(cfg_ry_stride), .cfg_ru_base(cfg_ru_base), .cfg_rv_base(cfg_rv_base),
-    .cfg_rc_stride(cfg_rc_stride), .cfg_qp(cfg_qp), .cfg_mb_pcm(cfg_mb_pcm), .cfg_frame_num(cfg_frame_num),
+    .cfg_ry_base(cfg_ry_base), .cfg_ru_base(cfg_ru_base),
+    .cfg_qp(cfg_qp), .cfg_mb_pcm(cfg_mb_pcm), .cfg_frame_num(cfg_frame_num),
     .cfg_idr_pic_id(cfg_idr_pic_id),
     .cfg_idr(cfg_idr), .cfg_log2_fn(cfg_log2_fn), .cfg_pic_no(cfg_pic_no),
     .cfg_ring_base(cfg_ring_base), .cfg_ring_size(cfg_ring_size), .cfg_idx_base(cfg_idx_base),
@@ -287,7 +290,7 @@ module rtlnet_h264_top #(
   generate
     for (e = 0; e < NUM_ENGINES; e++) begin : g_engine
       rtlnet_h264_engine #(
-        .ADDR_W(ADDR_W), .ID_W(ID_W), .MAX_MB_W(MAX_MB_W), .MAX_MB_H(MAX_MB_H), .MB_BUF_KB(MB_BUF_KB),
+        .ADDR_W(ADDR_W), .ID_W(ID_W), .MAX_MB_W(MAX_MB_W), .MAX_MB_H(MAX_MB_H), .MB_BUF_KB(MB_BUF_KB), .RD_STRIP_MB(RD_STRIP_MB),
         .REC_BUF_KB(REC_BUF_KB), .COEF_BUF_KB(COEF_BUF_KB), .LINE_KB(LINE_KB), .FIFO_KB(FIFO_KB), .EMIT_AUD(e == 0), .RAM_STYLE(RAM_STYLE)
       ) u_engine (
         .clk(enc_clk), .resetn(enc_resetn),
@@ -295,12 +298,12 @@ module rtlnet_h264_top #(
         .err_rptr(eng_err_rp[e]), .err_busy(eng_err_bsy[e]),
         .cfg_mb_w(cfg_mb_w), .cfg_mb_h(cfg_mb_h), .eng_slices(eng_slices_w), .slice_base(slice_base[e]),
         .cfg_in_base(cfg_in_base),
-        .cfg_in_stride(cfg_in_stride), .cfg_ry_base(cfg_ry_base), .cfg_ry_stride(cfg_ry_stride),
-        .cfg_ru_base(cfg_ru_base), .cfg_rv_base(cfg_rv_base), .cfg_rc_stride(cfg_rc_stride), .cfg_qp(cfg_qp), .cfg_mb_pcm(cfg_mb_pcm),
+        .cfg_in_stride(cfg_in_stride), .cfg_ry_base(cfg_ry_base),
+        .cfg_ru_base(cfg_ru_base), .cfg_qp(cfg_qp), .cfg_mb_pcm(cfg_mb_pcm),
         .cfg_frame_num(cfg_frame_num), .cfg_idr_pic_id(cfg_idr_pic_id), .cfg_idr(cfg_idr), .cfg_log2_fn(cfg_log2_fn),
         .cfg_pic_no(cfg_pic_no), .band_first_row(band_first[e]), .band_rows(band_rows[e]),
         .cfg_ring_base(cfg_ring_base + 32'(e) * ring_size_e), .cfg_ring_size(ring_size_e),
-        .cfg_idx_base(cfg_idx_base + 32'(e) * idx_entries_e * 32'd16), .cfg_idx_entries(idx_entries_e),
+        .cfg_idx_base(cfg_idx_base + 32'(e) * idx_entries_e * 32'(IDX_REC_BYTES)), .cfg_idx_entries(idx_entries_e),
         .ring_reset(ring_reset), .rptr_wr(rptr_wr[e]), .rptr_val(rptr_val[e*32 +: 32]),
         .idx_rptr_wr(idx_rptr_wr[e]), .idx_rptr_val(idx_rptr_val[e*32 +: 32]),
         .ring_wptr(eng_wptr[e*32 +: 32]), .ring_fill(eng_fill[e*32 +: 32]), .idx_wptr(eng_iwptr[e*32 +: 32]),

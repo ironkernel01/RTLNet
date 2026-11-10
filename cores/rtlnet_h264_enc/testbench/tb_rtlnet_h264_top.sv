@@ -19,15 +19,23 @@
 //     intra 16x16 macroblocks, and an RTL without the register works too).
 //   * Input memory format: packed YUYV 4:2:2, byte order Y0 U0 Y1 V0, line stride MBW * 32 bytes, as
 //     128-bit words, byte 0 in bits [7:0], one word per hex line ($readmemh).
-//   * Memory map built from the picture size (all 4 KiB aligned): input 0, input 1 (two-picture runs), rebuilt Y,
-//     rebuilt U, rebuilt V (stride MBW * 16 and ceil16(MBW * 8) bytes), compressed ring, index ring (64 entries).
+//   * Memory map built from the picture size (all 4 KiB aligned): input 0, input 1 (two-picture runs), the rebuilt
+//     picture as macroblock tiles (luma 256 B and chroma 128 B per macroblock, raster order), compressed ring, index ring
+//     (64 records of 128 bytes). The input lines are padded to a multiple of 128 bytes (the strip burst size): the
+//     generator's dense hex file is spread to that stride after loading. The rebuilt planes are de-tiled when they are
+//     dumped (dense planes: Y stride MBW * 16, Cb and Cr stride ceil16(MBW * 8)), so the decoder harness compares them
+//     unchanged.
+//   * Burst monitor (tb_h264_burst_mon) on every encoder AXI port: fails on any single-beat read, index or rebuilt-picture
+//     write and prints the beat-count histogram per master at the end; +INJECT_BURST forces one single-beat AW into the
+//     monitor's view (its negative control: the bench must then fail).
 //   * Checks: register reads, no error flag, per-slice index entries and the picture entry, NAL framing and the
 //     slice header's first_mb_in_slice against an independent computation, read-pointer protocol, the AXI protocol
 //     checks of the memory model, and the RTL assertions.
 //   * Race-free: every bench output changes at the falling clock edge and every input is sampled there.
 // Language: SystemVerilog-2012 (simulation only; Verilator 5 --timing and Active-HDL).
-// Revision: 11-09-2026
+// Revision: 11-10-2026
 //   * 11-09-2026: initial version.
+//   * 11-10-2026: tiled rebuilt picture, 128-byte index records, padded input stride, burst monitor.
 // Clocks: enc_clk 150 MHz, s_axi_aclk 100 MHz.
 // -----------------------------------------------------------------------------
 `timescale 1ns / 1ps
@@ -80,6 +88,8 @@ module tb_rtlnet_h264_top;
   localparam int QP       = `TB_QP;
   localparam int RING_KB  = `TB_RING_KB;
   localparam int IDX_ENTRIES = 64;
+  localparam int IDX_REC     = 128;      // bytes per index record
+  localparam int STRIP_BYTES = 128;      // input line padding (RD_STRIP_MB * 32)
   localparam int MAX_CLK  = 400_000_000;
 
   // Register offsets (mirror driver/rtlnet_h264_enc.h).
@@ -87,7 +97,7 @@ module tb_rtlnet_h264_top;
                           R_STATUS = 12'h010, R_ERR_CODE = 12'h014, R_MB_W = 12'h020, R_MB_H = 12'h024,
                           R_SLICES = 12'h028, R_QP = 12'h02C, R_FRAME_NUM = 12'h030, R_IDR_PIC_ID = 12'h034,
                           R_PIC_CFG = 12'h038, R_MB_MODE = 12'h03C, R_IN_BASE = 12'h040, R_IN_STRIDE = 12'h044, R_RY_BASE = 12'h048,
-                          R_RY_STRIDE = 12'h04C, R_RU_BASE = 12'h050, R_RV_BASE = 12'h054, R_RC_STRIDE = 12'h058,
+                          R_RU_BASE = 12'h050,
                           R_RING_BASE = 12'h060, R_RING_SIZE = 12'h064, R_RING_WPTR = 12'h068,
                           R_RING_RPTR = 12'h06C, R_RING_FILL = 12'h070, R_IDX_BASE = 12'h078,
                           R_IDX_ENTRIES = 12'h07C, R_IDX_WPTR = 12'h080, R_IDX_RPTR = 12'h084,
@@ -256,10 +266,12 @@ module tb_rtlnet_h264_top;
   endfunction
 
   int unsigned IN_STRIDE, IN_SIZE, RY_STRIDE, RY_SIZE, RC_STRIDE, RC_SIZE;
-  int unsigned IN0_BASE, IN1_BASE, RY_BASE, RU_BASE, RV_BASE, RING_BASE, RING_SIZE, IDX_BASE, MEM_END;
+  int unsigned IN0_BASE, IN1_BASE, RY_BASE, RU_BASE, RING_BASE, RING_SIZE, IDX_BASE, MEM_END;
+  int unsigned IN_DENSE;
 
   task automatic build_map();
-    IN_STRIDE = MBW * 32;
+    IN_DENSE  = MBW * 32;
+    IN_STRIDE = (IN_DENSE + STRIP_BYTES - 1) / STRIP_BYTES * STRIP_BYTES;
     IN_SIZE   = IN_STRIDE * MBH * 16;
     RY_STRIDE = MBW * 16;
     RY_SIZE   = RY_STRIDE * MBH * 16;
@@ -268,12 +280,11 @@ module tb_rtlnet_h264_top;
     IN0_BASE  = 0;
     IN1_BASE  = align4k(IN0_BASE + IN_SIZE);
     RY_BASE   = (PICS > 1) ? align4k(IN1_BASE + IN_SIZE) : IN1_BASE;
-    RU_BASE   = align4k(RY_BASE + RY_SIZE);
-    RV_BASE   = align4k(RU_BASE + RC_SIZE);
-    RING_BASE = align4k(RV_BASE + RC_SIZE);
+    RU_BASE   = align4k(RY_BASE + MBW * MBH * 256);
+    RING_BASE = align4k(RU_BASE + MBW * MBH * 128);
     RING_SIZE = RING_KB * 1024;
     IDX_BASE  = align4k(RING_BASE + RING_SIZE);
-    MEM_END   = IDX_BASE + IDX_ENTRIES * 16;
+    MEM_END   = IDX_BASE + IDX_ENTRIES * IDX_REC;
   endtask
 
   // ---------------------------------------------------------------------------
@@ -353,22 +364,75 @@ module tb_rtlnet_h264_top;
   endfunction
 
   function automatic int unsigned idx_base_e(input int e);
-    return IDX_BASE + e * (IDX_ENTRIES / NE) * 16;
+    return IDX_BASE + e * (IDX_ENTRIES / NE) * IDX_REC;
   endfunction
 
   function automatic int idx_entries_e();
     return IDX_ENTRIES / NE;
   endfunction
 
+  function automatic byte unsigned mem_byte(input int unsigned byte_addr);
+    logic [127:0] w;
+    w = u_mem.mem[byte_addr >> 4];
+    return w[8*(byte_addr & 15) +: 8];
+  endfunction
+
+  // De-tile the rebuilt picture into dense planes (Y stride MBW * 16, Cb and Cr stride RC_STRIDE) and dump them as 16-byte
+  // hex lines: Y plane, Cb plane, Cr plane. Luma tile of macroblock m: 16 rows of 16 bytes at RY_BASE + 256 * m. Chroma tile:
+  // Cb rows 0..7 (8 bytes each) then Cr rows 0..7 at RU_BASE + 128 * m.
+  byte unsigned plane_y [];
+  byte unsigned plane_u [];
+  byte unsigned plane_v [];
+
   task automatic dump_rec(input int p);
     integer f;
     string  name;
+    logic [127:0] w;
+    plane_y = new[RY_SIZE];
+    plane_u = new[RC_SIZE];
+    plane_v = new[RC_SIZE];
+    for (int i = 0; i < RY_SIZE; i++) plane_y[i] = 8'h00;
+    for (int i = 0; i < RC_SIZE; i++) begin plane_u[i] = 8'h00; plane_v[i] = 8'h00; end
+    for (int my = 0; my < MBH; my++) begin
+      for (int mx = 0; mx < MBW; mx++) begin
+        int unsigned m;
+        m = my * MBW + mx;
+        for (int y = 0; y < 16; y++)
+          for (int x = 0; x < 16; x++)
+            plane_y[(my * 16 + y) * RY_STRIDE + mx * 16 + x] = mem_byte(RY_BASE + 256 * m + y * 16 + x);
+        for (int y = 0; y < 8; y++)
+          for (int x = 0; x < 8; x++) begin
+            plane_u[(my * 8 + y) * RC_STRIDE + mx * 8 + x] = mem_byte(RU_BASE + 128 * m + y * 8 + x);
+            plane_v[(my * 8 + y) * RC_STRIDE + mx * 8 + x] = mem_byte(RU_BASE + 128 * m + 64 + y * 8 + x);
+          end
+      end
+    end
     name = $sformatf("%s_rec%0d.hex", out_prefix, p);
     f = $fopen(name, "w");
-    for (int unsigned a = RY_BASE; a < RY_BASE + RY_SIZE; a += 16) $fdisplay(f, "%032x", mem_word(a));
-    for (int unsigned a = RU_BASE; a < RU_BASE + RC_SIZE; a += 16) $fdisplay(f, "%032x", mem_word(a));
-    for (int unsigned a = RV_BASE; a < RV_BASE + RC_SIZE; a += 16) $fdisplay(f, "%032x", mem_word(a));
+    for (int a = 0; a < RY_SIZE; a += 16) begin
+      for (int b = 0; b < 16; b++) w[8*b +: 8] = plane_y[a + b];
+      $fdisplay(f, "%032x", w);
+    end
+    for (int a = 0; a < RC_SIZE; a += 16) begin
+      for (int b = 0; b < 16; b++) w[8*b +: 8] = plane_u[a + b];
+      $fdisplay(f, "%032x", w);
+    end
+    for (int a = 0; a < RC_SIZE; a += 16) begin
+      for (int b = 0; b < 16; b++) w[8*b +: 8] = plane_v[a + b];
+      $fdisplay(f, "%032x", w);
+    end
     $fclose(f);
+  endtask
+
+  // The generator's hex file is dense (line stride MBW * 32); spread its lines to the padded stride, last line first so no
+  // line overwrites a source line that is still to be moved.
+  task automatic spread_lines(input int unsigned base);
+    if (IN_STRIDE != IN_DENSE) begin
+      for (int y = MBH * 16 - 1; y >= 0; y--) begin
+        for (int w = (IN_DENSE / 16) - 1; w >= 0; w--) u_mem.mem[(base + y * IN_STRIDE) / 16 + w] = u_mem.mem[(base + y * IN_DENSE) / 16 + w];
+        for (int w = IN_DENSE / 16; w < (IN_STRIDE / 16); w++) u_mem.mem[(base + y * IN_STRIDE) / 16 + w] = '0;
+      end
+    end
   endtask
 
   task automatic dump_stream();
@@ -405,7 +469,7 @@ module tb_rtlnet_h264_top;
     reg_read(ereg(e, R_IDX_WPTR), wp);
     rsz = ring_size_e();
     while (idx_rd[e] != int'(wp)) begin
-      en = mem_word(idx_base_e(e) + idx_rd[e] * 16);
+      en = mem_word(idx_base_e(e) + idx_rd[e] * IDX_REC);
       off = en[31:0];
       len = en[63:32];
       if (en[120]) begin
@@ -538,9 +602,14 @@ module tb_rtlnet_h264_top;
     tb_check(MEM_END <= (16 << `TB_MEM_LOG2), $sformatf("memory model too small: need %0d bytes", MEM_END));
     tb_check((SLICES % NE) == 0, "TB_SLICES must be a multiple of TB_ENGINES");
     if (have_in0) $readmemh(in0_file, u_mem.mem, IN0_BASE >> 4);
+    if (have_in0) spread_lines(IN0_BASE);
     if (PICS > 1) begin
-      if (have_in1) $readmemh(in1_file, u_mem.mem, IN1_BASE >> 4);
-      else          for (int unsigned a = 0; a < IN_SIZE; a += 16) u_mem.mem[(IN1_BASE + a) >> 4] = u_mem.mem[(IN0_BASE + a) >> 4];
+      if (have_in1) begin
+        $readmemh(in1_file, u_mem.mem, IN1_BASE >> 4);
+        spread_lines(IN1_BASE);
+      end else begin
+        for (int unsigned a = 0; a < IN_SIZE; a += 16) u_mem.mem[(IN1_BASE + a) >> 4] = u_mem.mem[(IN0_BASE + a) >> 4];
+      end
     end
     for (int e = 0; e < 4; e++) begin
       idx_rd[e] = 0;
@@ -565,10 +634,7 @@ module tb_rtlnet_h264_top;
 `endif
     reg_write(R_IN_STRIDE, IN_STRIDE);
     reg_write(R_RY_BASE, RY_BASE);
-    reg_write(R_RY_STRIDE, RY_STRIDE);
     reg_write(R_RU_BASE, RU_BASE);
-    reg_write(R_RV_BASE, RV_BASE);
-    reg_write(R_RC_STRIDE, RC_STRIDE);
     reg_write(R_RING_BASE, RING_BASE);
     reg_write(R_RING_SIZE, RING_SIZE);
     reg_write(R_IDX_BASE, IDX_BASE);
@@ -590,12 +656,41 @@ module tb_rtlnet_h264_top;
     end
     dump_stream();
     $display("STAT ring_stall_cycles=%0d", stall_cycles);
+    // Burst shapes: one single-beat ring tail is possible per slice end, ring wrap or 4 KiB end.
+    u_bmon.report(2 * SE * PICS + (stream.size() / (RING_SIZE / NE)) + 4);
+    tb_check(u_bmon.viol_count == 0, "burst monitor reported a violation");
 `ifdef TB_EXPECT_STALL
     tb_check(stall_cycles > 0, "the ring-full guard never stalled the writer");
 `endif
     $display("NOTE: stream %0d bytes, %0d picture(s) %0dx%0d macroblocks, %0d slice(s), %0d engine(s)", stream.size(), PICS, MBW, MBH, SLICES, NE);
     tb_verdict("tb_rtlnet_h264_top");
   end
+
+  // Burst monitor on the engine ports, with its negative control: +INJECT_BURST shows the monitor one single-beat AW (ID 2,
+  // the rebuilt-picture writer) in addition to the real traffic.
+  logic [NE-1:0] mon_awvalid, mon_awready;
+  logic [NE*8-1:0] mon_awlen;
+  logic [NE*4-1:0] mon_awid;
+  bit inj_burst;
+  int unsigned inj_cnt = 0;
+  initial inj_burst = $test$plusargs("INJECT_BURST");
+  always @(posedge enc_clk) if (resetn) inj_cnt <= inj_cnt + 1;
+  always_comb begin
+    mon_awvalid = e_awvalid;
+    mon_awready = e_awready;
+    mon_awlen   = e_awlen;
+    mon_awid    = e_awid;
+    if (inj_burst && (inj_cnt == 20000)) begin
+      mon_awvalid[0]     = 1'b1;
+      mon_awready[0]     = 1'b1;
+      mon_awlen[7:0]     = 8'd0;
+      mon_awid[3:0]      = 4'd2;
+    end
+  end
+  tb_h264_burst_mon #(.NE(NE), .ID_W(4)) u_bmon (
+    .clk(enc_clk), .resetn(resetn), .awid(mon_awid), .awlen(mon_awlen), .awvalid(mon_awvalid), .awready(mon_awready),
+    .arlen(e_arlen), .arvalid(e_arvalid), .arready(e_arready)
+  );
 
   // Ring-full stall observation (the full guard).
   int unsigned stall_cycles = 0;

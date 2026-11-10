@@ -142,9 +142,11 @@ uint32_t plat_led_state(void);
 void     plat_reload(void);
 
 /* Data cache maintenance for the DDR3 window. The range is widened to whole cache lines
- * (RTLNET_PLAT_CACHE_LINE). Flush writes back and invalidates (the data cache is write-through,
- * so nothing is dirty; the call keeps the sequence valid for a write-back cache); invalidate
- * drops the lines so the next read comes from memory. No-ops where the build has no caches. */
+ * (RTLNET_PLAT_CACHE_LINE, 64 bytes). The data cache is write-back: flush writes dirty lines back to memory and
+ * invalidates them (call it on a buffer the CPU wrote before hardware reads it); invalidate drops the lines,
+ * dirty data included, so the next read comes from memory (call it on a buffer hardware wrote before the CPU
+ * reads it, and keep such buffers 64-byte aligned and sized in 64-byte multiples so no CPU-written data
+ * shares a line). No-ops where the build has no caches. */
 void     plat_dcache_flush_range(uintptr_t addr, size_t len);
 void     plat_dcache_invalidate_range(uintptr_t addr, size_t len);
 void     plat_dcache_flush_all(void);

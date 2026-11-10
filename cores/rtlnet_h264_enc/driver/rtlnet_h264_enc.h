@@ -19,12 +19,16 @@
  * entry per slice and one per picture into the index ring, and the rebuilt 4:2:0 picture into three planes.
  * Firmware writes the SPS and PPS (rtlnet_h264_enc_write_sps_pps) in front of the first picture.
  *
- * Memory formats (all byte addresses are multiples of 16, the input base and stride of 32):
+ * Memory formats (all byte addresses are multiples of 16, the input base and stride of 128, the luma tile base of 256, the
+ * chroma tile base and the index base of 128):
  *   input frame  packed YUYV, byte order Y0 U0 Y1 V0 per pixel pair, line stride in_stride bytes
- *   rebuilt      Y plane (ry_stride per line), U plane and V plane (rc_stride per line, width / 2 samples)
+ *   rebuilt      macroblock tiles in raster order of the picture: macroblock m owns 256 bytes of luma (16 rows of 16
+ *                samples) at ry_base + 256 * m and 128 bytes of chroma (Cb 8 x 8 then Cr 8 x 8) at ru_base + 128 * m;
+ *                each tile is one burst. The picture occupies mb_w * mb_h * 384 bytes (3,133,440 bytes at 1080p).
  *   ring         compressed bytes; the core writes at the write pointer, firmware reads and reports the read
  *                pointer; the core stalls when the ring is full
- *   index entry  16 bytes, little endian words (see RTLNET_H264_IDX_*)
+ *   index entry  one 128-byte record per entry (8 beats, one burst): the first 16 bytes hold four little endian words
+ *                (see RTLNET_H264_IDX_*), the other 112 bytes are reserved and written as zero
  *
  * This header holds the register map, the types and the function rules; rtlnet_h264_enc.c holds the
  * per-function commentary.
@@ -36,9 +40,12 @@
 #include <stdint.h>   /* uint32_t, uint8_t, uintptr_t */
 
 #define RTLNET_H264_ID_VALUE             0x48323634u   /* "H264" */
-#define RTLNET_H264_VERSION_VALUE        0x11092026u
+#define RTLNET_H264_VERSION_VALUE        0x11102026u
 /* Revision 11-09-2026: initial register map (phase 2b-1); MB_MODE register and cfg->mb_pcm (phase 2b-2);
- * RTLNET_H264_QP_MIN_REALTIME (the QP clamp of rtlnet_h264_enc_configure). */
+ * RTLNET_H264_QP_MIN_REALTIME (the QP clamp of rtlnet_h264_enc_configure).
+ * Revision 11-10-2026 (VERSION 0x11102026, burst-only DDR3 access): the rebuilt picture is macroblock-tiled (RY_BASE and
+ * RU_BASE are the luma and chroma tile bases; the stride registers and RV_BASE are reserved), index entries are 128-byte
+ * records, in_base and in_stride are multiples of RTLNET_H264_IN_ALIGN. */
 
 /* Real-time QP floor: rtlnet_h264_enc_configure writes max(cfg->qp, RTLNET_H264_QP_MIN_REALTIME) into the QP register. Below
  * this QP dense macroblocks leave the macroblock coder over its clock budget (documentation section "Throughput"); the
@@ -57,20 +64,19 @@
 #define RTLNET_H264_REG_IDR_PIC_ID       0x034u   /* idr_pic_id of an IDR picture */
 #define RTLNET_H264_REG_PIC_CFG          0x038u   /* [0] IDR picture, [12:8] log2_max_frame_num */
 #define RTLNET_H264_REG_MB_MODE          0x03Cu   /* [0] 1 = I_PCM macroblocks (debug fallback), 0 = Intra16x16 */
-#define RTLNET_H264_REG_IN_BASE          0x040u   /* input frame base, multiple of 32 */
-#define RTLNET_H264_REG_IN_STRIDE        0x044u   /* input line stride in bytes, multiple of 32, >= MB_W * 32 */
-#define RTLNET_H264_REG_RY_BASE          0x048u   /* rebuilt luma plane base */
-#define RTLNET_H264_REG_RY_STRIDE        0x04Cu   /* rebuilt luma line stride, multiple of 16, >= MB_W * 16 */
-#define RTLNET_H264_REG_RU_BASE          0x050u   /* rebuilt Cb plane base */
-#define RTLNET_H264_REG_RV_BASE          0x054u   /* rebuilt Cr plane base */
-#define RTLNET_H264_REG_RC_STRIDE        0x058u   /* rebuilt chroma line stride, multiple of 16, >= MB_W * 8 */
+#define RTLNET_H264_REG_IN_BASE          0x040u   /* input frame base, multiple of RTLNET_H264_IN_ALIGN */
+#define RTLNET_H264_REG_IN_STRIDE        0x044u   /* input line stride in bytes, multiple of RTLNET_H264_IN_ALIGN, >= MB_W * 32 */
+#define RTLNET_H264_REG_RY_BASE          0x048u   /* rebuilt picture luma tile base, multiple of 256 (256 bytes per macroblock) */
+/* 0x04C (former rebuilt luma stride) is reserved: reads 0, writes ignored */
+#define RTLNET_H264_REG_RU_BASE          0x050u   /* rebuilt picture chroma tile base (Cb then Cr), multiple of 128 (128 bytes per macroblock) */
+/* 0x054 (former Cr base) and 0x058 (former chroma stride) are reserved: read 0, writes ignored */
 #define RTLNET_H264_REG_RING_BASE        0x060u   /* compressed ring base, multiple of 16 */
 #define RTLNET_H264_REG_RING_SIZE        0x064u   /* compressed ring size in bytes, multiple of 16, >= 1024 */
 #define RTLNET_H264_REG_RING_WPTR        0x068u   /* RO, byte offset after the last completed burst */
 #define RTLNET_H264_REG_RING_RPTR        0x06Cu   /* RW, byte offset firmware has consumed up to */
 #define RTLNET_H264_REG_RING_FILL        0x070u   /* RO, bytes written and not consumed */
-#define RTLNET_H264_REG_IDX_BASE         0x078u   /* index ring base, multiple of 16 */
-#define RTLNET_H264_REG_IDX_ENTRIES      0x07Cu   /* index ring size in entries (16 bytes each) */
+#define RTLNET_H264_REG_IDX_BASE         0x078u   /* index ring base, multiple of 128 */
+#define RTLNET_H264_REG_IDX_ENTRIES      0x07Cu   /* index ring size in entries (128 bytes each) */
 #define RTLNET_H264_REG_IDX_WPTR         0x080u   /* RO, index of the next entry to be written */
 #define RTLNET_H264_REG_IDX_RPTR         0x084u   /* RW, index firmware has consumed up to */
 #define RTLNET_H264_REG_IDX_FILL         0x088u   /* RO, entries written and not consumed */
@@ -115,7 +121,7 @@
 #define RTLNET_H264_CAPS_ENG_MASK        0xFu
 
 /*
- * Index entry: four little-endian 32-bit words, 16 bytes, at idx_base + 16 * index.
+ * Index entry: four little-endian 32-bit words at the start of the 128-byte record at idx_base + 128 * index.
  *   word 0  byte offset in the ring of the NAL unit's first byte (picture entry: of the access unit
  *           delimiter that opens the picture)
  *   word 1  length in bytes, start code and emulation-prevention bytes included (picture entry: the sum
@@ -126,7 +132,14 @@
  * A slice entry appears when every byte of its NAL unit is in memory; the picture entry follows the last
  * slice entry. Slices and the picture are contiguous in the ring and may wrap the ring end.
  */
-#define RTLNET_H264_IDX_ENTRY_BYTES      16u
+#define RTLNET_H264_IDX_ENTRY_BYTES      128u   /* record size in memory; words 0..3 of it are the entry */
+#define RTLNET_H264_IDX_WORDS            4u     /* entry words at the start of a record */
+#define RTLNET_H264_IN_ALIGN             128u   /* input base and stride granule: the strip burst (RD_STRIP_MB * 32 bytes) */
+#define RTLNET_H264_REC_LUMA_TILE_BYTES  256u   /* rebuilt luma tile of one macroblock (16 beats) */
+#define RTLNET_H264_REC_CHROMA_TILE_BYTES 128u  /* rebuilt chroma tile of one macroblock, Cb then Cr (8 beats) */
+/* Bytes of the rebuilt picture of mb_w x mb_h macroblocks (both tile areas together). */
+#define RTLNET_H264_REC_PICTURE_BYTES(mb_w, mb_h) \
+    ((mb_w) * (mb_h) * (RTLNET_H264_REC_LUMA_TILE_BYTES + RTLNET_H264_REC_CHROMA_TILE_BYTES))
 #define RTLNET_H264_IDX_PIC_MASK         0xFFFFu
 #define RTLNET_H264_IDX_SLICE_SHIFT      16u
 #define RTLNET_H264_IDX_TYPE_MASK        0xFFu
@@ -162,13 +175,10 @@ typedef struct {
     uint32_t qp;                   /* 0..51; values below RTLNET_H264_QP_MIN_REALTIME are raised to it */
     uint32_t mb_pcm;               /* 0: Intra16x16 macroblocks (default), 1: I_PCM debug fallback */
     uint32_t log2_max_frame_num;   /* 4..16, equal to the SPS value */
-    uint32_t in_base;
-    uint32_t in_stride;
-    uint32_t ry_base;
-    uint32_t ry_stride;
-    uint32_t ru_base;
-    uint32_t rv_base;
-    uint32_t rc_stride;
+    uint32_t in_base;              /* multiple of RTLNET_H264_IN_ALIGN */
+    uint32_t in_stride;            /* multiple of RTLNET_H264_IN_ALIGN, >= mb_w * 32 */
+    uint32_t ry_base;              /* rebuilt luma tile base, multiple of 256 */
+    uint32_t ru_base;              /* rebuilt chroma tile base, multiple of 128 */
     uint32_t ring_base;
     uint32_t ring_size;
     uint32_t idx_base;

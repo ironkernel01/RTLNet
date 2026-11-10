@@ -795,7 +795,7 @@ arbiter, csi2, s2mm, framebuf and h264 use `rtlnet_axil_cdc` with `SYNC` 1 (pass
 Pattern timing at 90 MHz: `FRAME_PERIOD` 3,000,000 (30.000 fps), line periods 4,000 (720p) and 2,666 (1080p), minimums 3,000,000 and 2,999,250; the PTS step is `FRAME_PERIOD / 1000` = 3000.
 
 Memory map (DDR3 offsets): frame buffer 0x1000_0000 (3 slots, N = 3: the firmware is the only reader, one take per picture for both engines),
-rebuilt picture 0x1100_0000 / 0x1130_0000 / 0x1138_0000, compressed rings 0x1200_0000 (8 MiB, 4 MiB per engine), index rings 0x1300_0000.
+rebuilt picture 0x1100_0000 / 0x1130_0000 / 0x1138_0000 (phase 2b-3; tiled since 2b-4, section 6.12), compressed rings 0x1200_0000 (8 MiB, 4 MiB per engine), index rings 0x1300_0000.
 
 CDC gate (`build_bitstream.tcl`): network `fifo 15 axil_cdc 9 gray 6` before (Phase 1) and `fifo 10 axil_cdc 5 gray 6` now: the five FIFOs of `u_ddr_cdc` are gone (the CPU
 shares the arbiter clock) and the four register crossings of the arbiter, csi2, s2mm and framebuf are SYNC pass-throughs; the encoder adds none; the MAC, protocol, echo, classifier
@@ -827,6 +827,24 @@ Board results (release image, 11-10-2026): `phase1_gate` PASS 19/19 (the first r
 * 720p30: PASS on every check: 1802 pictures, 0 dropped, 0 continuity errors, 0 PTS gaps (step 3000), ffprobe h264 Constrained Baseline 1280x720 30.00 fps, PSNR minimum 51.14 dB (floor 30), bit rate 1037 kb/s, TS-mux CPU load 3.5 % (3.6 % with picture handling), 0 UDP drops. The VLC snapshot on `udp://@:5004` shows the eight color bars, equal to the decoded PNG (`phase2b3_decoded_720p30.png`).
 * 1080p30: FAIL. 1344 pictures sent, 459 dropped (frame numbers skipped, 25 %), 22.4 pictures per second, PTS steps of 6000 where a picture is dropped; the decoded pictures are correct (PSNR minimum 51.09 dB), bit rate 1621 kb/s, TS-mux load 5.6 %, no continuity errors. Cause: `show encoder` reports 928 to 929 clocks per macroblock per engine against the 735 budget (720p: 859 and 880, which fit its 1,800 macroblock budget of 1,666 clocks per macroblock). Busy cycles show the write path (`recon_wr`: 32 single-beat writes per macroblock) at 3.4 to 3.6 million of 3.8 million picture cycles, against about 373 per macroblock in simulation. Open.
 * net_test and tcp_test could not run: the PC NIC `Ethernet` (the direct link, board 192.169.1.199) is Disconnected; the stream used the board's DHCP lease on the LAN. The 100 MHz TCP figures (68.9 and 96.8 Mbit/s) were not re-measured.
+
+### 6.12 Phase 2b-4: burst-only DDR3 access (11-10-2026)
+
+Changes: tiled rebuilt picture with burst writes, strip input reads, 128-byte index records (`rtlnet_h264_enc.md` section 14), 64-byte cache lines and a write-back data cache
+(`rtlnet_cpu_microblaze.md` section 11). Memory map: rebuilt picture A luma 0x1100_0000 and chroma 0x1120_0000 (256 B and 128 B tiles per macroblock), picture B reserved at
+0x1140_0000 / 0x1160_0000, rings 0x1200_0000, index records 0x1300_0000.
+
+Build (`build.ps1 -Network`, `RTLNET_BUILD: PASS`, log `build/phase2b4_build.txt`): WNS +0.002 ns, WHS +0.050 ns, WPWS +0.131 ns; 71,413 LUT (53.37 %), 69,004 FF, 259.5 RAMB tiles (71.10 %, was 257.5), 80 DSP;
+CDC `fifo 10 axil_cdc 5 gray 6` unchanged; waivers as before; timing, CDC and methodology gates unchanged. Firmware: rebuilt on the new XSA and merged (updatemem 0 warnings).
+Out-of-context encoder: WNS +1.455 ns, 38,995 LUT (-494), 25,759 FF (+382), 22 RAMB36 (+4), 2 RAMB18, 74 DSP.
+
+Board (release image, QP 28): `phase1_gate` PASS 19/19, `cli_test` PASS 55/55, `stream_test` 60 s per mode PASS 14/14: 720p30 1805 pictures, 0 dropped, 0 continuity errors, 0 PTS gaps, PSNR minimum 51.14 dB, 1037 kb/s,
+3.3 % TS-mux load, 423 and 425 clocks per macroblock; 1080p30 1802 pictures, 0 dropped (was 459 dropped), 0 continuity errors, 0 PTS gaps, PSNR minimum 51.09 dB, 2210 kb/s, 7.0 % load,
+435 clocks per macroblock on both engines (was 928; budget 735). `show ddr`: errors 0 on all four masters, no illegal burst captured. Arbiter counters after the 1080p30 run:
+engine 0 AW 14,837,273 bursts / 178,131,158 beats (12.0 per burst), AR 29,604,480 / 236,835,840 (8.0 per burst); engine 1 the same; video DMA 16.0 beats per burst.
+CPU master 0: writes 4.0 beats per burst (`ddr test`), reads 1 beat per burst (open point in `rtlnet_cpu_microblaze.md` section 11).
+`ddr test 16`: PASS, write 24.28 MB/s, read 19.58 MB/s. `net_test` and `tcp_test` could not run meaningfully: the PC NIC `Ethernet` (direct link) is Disconnected (BLOCKED, not counted as a failure of this work).
+Transcripts: `build/phase2b3_stream_transcript.txt`, `build/phase2b4_ddr_test.txt`.
 
 ## 7. Network integration (done 10-22-2026) and what remains
 

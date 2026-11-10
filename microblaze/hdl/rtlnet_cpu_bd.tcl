@@ -21,13 +21,18 @@
 #     network, MM2S), 64-bit tdata with tkeep, and a 128 KiB AXI block RAM
 #     (DMA buffers, lwIP pools and heap) shared by the MicroBlaze data side and
 #     both DMA channels.
-#   * DDR3 path: M_AXI_IC (128-bit, full 16-byte line per beat) and M_AXI_DC
-#     (32-bit, 4-beat line fill, write-through stores) join in the SmartConnect
-#     sc_ddr; its master M00_AXI is the exported 128-bit AXI4 port M_AXI_DDR on
+#   * DDR3 path: M_AXI_IC and M_AXI_DC (both 32-bit, 64-byte lines: a line fill or a
+#     line write-back is one 16-beat burst) join in the SmartConnect sc_ddr, which
+#     packs each 16 x 32-bit burst into one 4-beat 128-bit burst (M00_AXI max burst
+#     length 4); its master M00_AXI is the exported 128-bit AXI4 port M_AXI_DDR on
 #     the clock clk (cpu_clk, 90 MHz) with the CPU reset; the clock crossing to the
 #     memory controller is outside the block design (rtlnet_axi_cdc in the board
-#     top). The interface has no ID signals. Cache lines of 16 bytes
-#     never cross a 4 KiB boundary.
+#     top). The interface has no ID signals. Cache lines of 64 bytes
+#     never cross a 4 KiB boundary. The data cache is write-back (every DDR3 store
+#     leaves as part of a line write-back burst). The IP forces C_DCACHE_DATA_WIDTH to
+#     0 (32-bit bus) unless the cache is write-back, and the wide settings (one 512-bit
+#     transfer per line) need 32 KiB caches: the 32-bit bus with 16-beat bursts keeps
+#     both caches at 8 KiB.
 #   * Interconnect: axi_periph (MicroBlaze M_AXI_DP, 6 masters: UART, timer,
 #     INTC, RTLNet window, DMA registers, memory path) and axi_mem
 #     (3 slaves: the memory path from axi_periph, DMA MM2S, DMA S2MM; one
@@ -66,6 +71,8 @@
 #   * 11-09-2026: JTAG UART removed (C_USE_UART 0, no MDM AXI slave, 0x4140_0000
 #     unmapped); axi_periph has 6 masters; microblaze_riscv dict one CONFIG per line.
 #   * 11-09-2026: C_PC_WIDTH 32 (the propagated 19 bits confine execution to the LMB).
+#   * 11-10-2026: burst-only DDR3 access: 64-byte cache lines (C_ICACHE_LINE_LEN and C_DCACHE_LINE_LEN 16 words),
+#     32-bit cache buses (C_*CACHE_DATA_WIDTH 0), write-back data cache.
 # Clocks: clk (cpu_clk 90 MHz) for every cell.
 # -----------------------------------------------------------------------------
 
@@ -169,11 +176,11 @@ proc rtlnet_cpu_bd_create {bd_dir} {
     CONFIG.C_ICACHE_HIGHADDR         $::rtlnet_cpu_bd::CACHE_HIGH \
     CONFIG.C_DCACHE_BASEADDR         $::rtlnet_cpu_bd::CACHE_BASE \
     CONFIG.C_DCACHE_HIGHADDR         $::rtlnet_cpu_bd::CACHE_HIGH \
-    CONFIG.C_ICACHE_LINE_LEN         4 \
-    CONFIG.C_DCACHE_LINE_LEN         4 \
-    CONFIG.C_ICACHE_DATA_WIDTH       1 \
-    CONFIG.C_DCACHE_DATA_WIDTH       1 \
-    CONFIG.C_DCACHE_USE_WRITEBACK    0 \
+    CONFIG.C_ICACHE_LINE_LEN         16 \
+    CONFIG.C_DCACHE_LINE_LEN         16 \
+    CONFIG.C_ICACHE_DATA_WIDTH       0 \
+    CONFIG.C_DCACHE_DATA_WIDTH       0 \
+    CONFIG.C_DCACHE_USE_WRITEBACK    1 \
     CONFIG.C_USE_BRANCH_TARGET_CACHE 0 \
     CONFIG.C_DEBUG_ENABLED           1 \
     CONFIG.C_D_AXI                   1 \

@@ -37,6 +37,16 @@ package rtlnet_h264_pkg;
   localparam logic       IDX_KIND_SLICE   = 1'b0;
   localparam logic       IDX_KIND_PICTURE = 1'b1;
 
+  // Index record: 128 bytes (8 beats of 128 bits) per entry so every index write is one 8-beat burst; the first 16 bytes
+  // hold the entry words, the other 112 bytes are reserved and written as zero.
+  localparam int IDX_REC_BYTES = 128;
+  localparam int IDX_REC_BEATS = 8;
+
+  // Rebuilt-picture tile layout (macroblock-tiled reference picture): 256 bytes of luma (16 beats, row-major 16 x 16)
+  // and 128 bytes of chroma (8 beats: Cb 8 x 8 then Cr 8 x 8) per macroblock, at base + 256 * mb and base + 128 * mb.
+  localparam int REC_LUMA_TILE_BYTES   = 256;
+  localparam int REC_CHROMA_TILE_BYTES = 128;
+
   // Slice type code written in the slice header and the index entry (I slice, all slices of the picture).
   localparam logic [7:0] SLICE_TYPE_I_ALL = 8'd7;
 

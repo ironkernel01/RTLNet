@@ -42,14 +42,17 @@
 
 /* DDR3 SDRAM, 512 MiB, behind the M_AXI_DDR master (instruction and data caches, then the
  * rtlnet_axi_arbiter and the MIG controller). Only this window is cached: 8 KiB instruction
- * cache and 8 KiB write-through data cache, 16-byte lines (C_ICACHE_BASEADDR 0x8000_0000,
+ * cache and 8 KiB write-back data cache, 64-byte lines (C_ICACHE_BASEADDR 0x8000_0000,
  * C_*CACHE_HIGHADDR 0x9FFF_FFFF). The LMB, the AXI block RAM and every peripheral are uncached.
- * The DMA engines do not reach the DDR3 window. */
+ * The DMA engines do not reach the DDR3 window. The data cache is write-back: a buffer the CPU writes and
+ * hardware reads needs plat_dcache_flush_range() first, a buffer hardware writes and the CPU reads needs
+ * plat_dcache_invalidate_range() first (64-byte aligned ranges; a partly covered line is written back or
+ * dropped whole). */
 #define RTLNET_CPU_DDR_BASE         0x80000000u
 #define RTLNET_CPU_DDR_SIZE         0x20000000u
 #define RTLNET_CPU_ICACHE_BYTES     8192u
 #define RTLNET_CPU_DCACHE_BYTES     8192u
-#define RTLNET_CPU_CACHE_LINE_BYTES 16u
+#define RTLNET_CPU_CACHE_LINE_BYTES 64u
 
 /* MicroBlaze V reset vector (C_BASE_VECTORS = 0). Exceptions and interrupts
  * enter through mtvec, which the BSP start-up code sets; the firmware

@@ -14,11 +14,16 @@
 //     FIFO when its last lane is written or when a NAL unit ends (a partial word carries byte strobes; the
 //     next bytes continue in the same 16-byte slot with their own strobes, so the stream stays contiguous).
 //   * Bursts: consecutive pushed words form one burst of at most 16 beats that never crosses a 4 KiB
-//     boundary or the ring end and always ends at a NAL unit end. A descriptor (address, beats-1, byte
-//     count) goes to the write master; the data beats come from the word FIFO.
+//     boundary or the ring end and ends at a slice NAL unit end (the point where the slice must be visible in memory).
+//     The access unit delimiter does not end a burst: its bytes stay in the open word and the slice that follows
+//     continues in the same word, so the delimiter never costs a single-beat write. A descriptor (address, beats-1,
+//     byte count) goes to the write master; the data beats come from the word FIFO. The only bursts shorter than 16 beats
+//     are the ring-end and 4 KiB-end remainders and the last burst of a slice.
+//     Beat counts of the last burst of a slice: the beats the slice's remaining bytes fill, which can be one beat.
 //   * wptr (ring_wptr) is the position after the last burst whose write response arrived, so every byte
 //     below it is visible in memory.
-//   * Index ring: idx_base, idx_entries entries of 16 bytes. Entry words, little endian, word 0 first:
+//   * Index ring: idx_base, idx_entries records of 128 bytes (8 beats, one burst; bytes 16..127 are reserved and
+//     written as zero). Entry words (the first 16 bytes of a record), little endian, word 0 first:
 //       word 0  byte offset in the ring of the first byte of the NAL unit (the start code)
 //               (picture entry: of the picture's first NAL unit, the access unit delimiter)
 //       word 1  length in bytes, start code and emulation-prevention bytes included
@@ -33,8 +38,10 @@
 //   * Overflow and underflow of every queue are gated in logic; a simulation check reports an attempt
 //     (an accepted byte with the ring full is one of them).
 // Language: SystemVerilog-2012.
-// Revision: 11-09-2026
+// Revision: 11-10-2026
 //   * 11-09-2026: initial version.
+//   * 11-10-2026: burst-only DDR3 access: 128-byte index records, the access unit delimiter joins the burst of the
+//     slice that follows.
 // Clocks: clk.
 // -----------------------------------------------------------------------------
 module rtlnet_h264_ring_wr #(
@@ -90,7 +97,8 @@ module rtlnet_h264_ring_wr #(
   output logic [15:0]       rg_w_strb,
   input  logic              rg_w_pop,
 
-  // Index entry to the write master, clk domain: one 16-byte beat; ix_ack pulses when it is taken.
+  // Index record to the write master, clk domain: the 16-byte entry (beat 0 of the 128-byte record); ix_ack pulses when it is
+  // taken.
   output logic              ix_valid,
   output logic [ADDR_W-1:0] ix_addr,
   output logic [127:0]      ix_data,
@@ -210,6 +218,7 @@ module rtlnet_h264_ring_wr #(
   logic         eq_space;
   logic [3:0]   lane;
   logic         full_word;
+  logic         i_end;
   logic         push;
   logic [127:0] wdat_m;
   logic [15:0]  wmask_m;
@@ -301,12 +310,15 @@ module rtlnet_h264_ring_wr #(
 
   assign lane      = wpos[3:0];
   assign full_word = (lane == 4'd15);
-  assign push      = accept && (full_word || i_last);
+  // A NAL unit end flushes the open word and ends the burst only for a slice NAL unit (the delimiter's bytes continue
+  // in the slice's first word).
+  assign i_end     = i_last && (i_kind == NAL_SLICE);
+  assign push      = accept && (full_word || i_end);
   assign waddr     = waddr_q;
   assign wpos_inc  = at_end_q ? 32'd0 : (wpos + 32'd1);
   assign beats_n   = b_beats + 5'd1;
   assign start_addr = (b_beats == 5'd0) ? waddr : b_addr;
-  assign close     = push && ((beats_n == 5'(BURST_MAX_BEATS)) || i_last ||
+  assign close     = push && ((beats_n == 5'(BURST_MAX_BEATS)) || i_end ||
                               (full_word && (waddr[11:4] == 8'hFF)) ||
                               (full_word && at_end_q));
   assign slice_last = accept && i_last && (i_kind == NAL_SLICE);
@@ -349,7 +361,7 @@ module rtlnet_h264_ring_wr #(
     end
   end
 
-  assign idx_limit = {idx_entries[27:0], 4'd0};
+  assign idx_limit = {idx_entries[24:0], 7'd0};
   assign comp_diff = comp_total - eq_end[eq_rp];
   assign comp_ok   = !comp_diff[31];
   // The head entry moves into the request register (ix_valid, ix_addr, ix_data) when its slice is in memory and the
@@ -661,7 +673,7 @@ module rtlnet_h264_ring_wr #(
 
       // Index ring write position, fill and visibility.
       if (ix_take) begin
-        idx_wr_off <= ((idx_wr_off + 32'd16) >= idx_limit) ? 32'd0 : (idx_wr_off + 32'd16);
+        idx_wr_off <= ((idx_wr_off + 32'(IDX_REC_BYTES)) >= idx_limit) ? 32'd0 : (idx_wr_off + 32'(IDX_REC_BYTES));
         idx_infl   <= ev_b_idx ? idx_infl : (idx_infl + 4'd1);
       end else if (ev_b_idx && (idx_infl != 4'd0)) begin
         idx_infl <= idx_infl - 4'd1;

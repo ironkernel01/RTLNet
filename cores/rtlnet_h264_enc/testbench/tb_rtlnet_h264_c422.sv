@@ -31,9 +31,14 @@ module tb_rtlnet_h264_c422;
 
   always #5 clk = ~clk;
 
+  // One macroblock index (in_mb 0): the strip interleave of rtlnet_h264_rd_dma is covered by the encoder benches.
+  /* verilator lint_off UNUSEDSIGNAL */
+  logic [1:0] y_mb, c_mb;
+  /* verilator lint_on UNUSEDSIGNAL */
+
   rtlnet_h264_c422to420 dut (
-    .clk(clk), .resetn(resetn), .in_valid(in_valid), .in_odd(in_odd), .in_data(in_data),
-    .y_valid(y_valid), .y_data(y_data), .c_valid(c_valid), .c_data(c_data)
+    .clk(clk), .resetn(resetn), .in_valid(in_valid), .in_odd(in_odd), .in_mb(2'd0), .in_data(in_data),
+    .y_valid(y_valid), .y_mb(y_mb), .y_data(y_data), .c_valid(c_valid), .c_mb(c_mb), .c_data(c_data)
   );
 
   logic [127:0] exp_y[$];

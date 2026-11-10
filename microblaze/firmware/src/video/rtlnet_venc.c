@@ -5,7 +5,7 @@
  *
  * Role: implementation of the contract in rtlnet_venc.h.
  *
- * Revision: 11-09-2026
+ * Revision: 11-10-2026 (macroblock-tiled rebuilt picture, 128-byte index records)
  */
 #include "rtlnet_venc.h"
 
@@ -25,16 +25,19 @@
 uint32_t rtlnet_host_mem_read32(uintptr_t addr);
 #endif
 
-/* DDR3 map (byte offsets in DDR3). */
-#define VENC_RY_BASE      0x11000000u
-#define VENC_RY_STRIDE    2048u
-#define VENC_RU_BASE      0x11300000u
-#define VENC_RV_BASE      0x11380000u
-#define VENC_RC_STRIDE    1024u
+/* DDR3 map (byte offsets in DDR3). The rebuilt (reference) picture is macroblock-tiled: macroblock m has 256 bytes of luma at
+ * the luma base + 256 * m and 128 bytes of chroma (Cb then Cr) at the chroma base + 128 * m. 1080p (120 x 68 = 8160 macroblocks)
+ * needs 2,088,960 bytes of luma and 1,044,480 bytes of chroma (3,133,440 bytes per picture); each area gets 2 MiB. Two
+ * pictures (A, B) are reserved so that the motion-search phase can ping-pong the reference; the intra-only encoder writes A. */
+#define VENC_REC_AREA_BYTES   0x00200000u
+#define VENC_RY_BASE      0x11000000u               /* picture A luma tiles */
+#define VENC_RU_BASE      0x11200000u               /* picture A chroma tiles */
+#define VENC_RY_BASE_B    (VENC_RY_BASE + 2u * VENC_REC_AREA_BYTES)   /* picture B luma tiles (reserved) */
+#define VENC_RU_BASE_B    (VENC_RU_BASE + 2u * VENC_REC_AREA_BYTES)   /* picture B chroma tiles (reserved) */
 #define VENC_RING_BASE    0x12000000u
 #define VENC_RING_SIZE    0x00800000u
 #define VENC_IDX_BASE     0x13000000u
-#define VENC_IDX_ENTRIES  256u
+#define VENC_IDX_ENTRIES  256u             /* 128-byte records: 32 KiB */
 
 #define VENC_PTS_BASE     90000u     /* first PTS: one second */
 #define VENC_PCR_LEAD     9000u      /* PTS minus PCR: 100 ms */
@@ -205,10 +208,7 @@ static int configure_mode(uint32_t mode)
     cfg.in_base = 0u;
     cfg.in_stride = m.width * 2u;
     cfg.ry_base = VENC_RY_BASE;
-    cfg.ry_stride = VENC_RY_STRIDE;
     cfg.ru_base = VENC_RU_BASE;
-    cfg.rv_base = VENC_RV_BASE;
-    cfg.rc_stride = VENC_RC_STRIDE;
     cfg.ring_base = VENC_RING_BASE;
     cfg.ring_size = VENC_RING_SIZE;
     cfg.idx_base = VENC_IDX_BASE;
@@ -275,10 +275,7 @@ static int begin_picture(void)
     cfg.in_base = f.base;
     cfg.in_stride = stride;
     cfg.ry_base = VENC_RY_BASE;
-    cfg.ry_stride = VENC_RY_STRIDE;
     cfg.ru_base = VENC_RU_BASE;
-    cfg.rv_base = VENC_RV_BASE;
-    cfg.rc_stride = VENC_RC_STRIDE;
     cfg.ring_base = VENC_RING_BASE;
     cfg.ring_size = VENC_RING_SIZE;
     cfg.idx_base = VENC_IDX_BASE;
@@ -334,10 +331,10 @@ static int mux_picture(void)
         uint32_t r = g.idx_rptr[e];
         int found = 0;
         while (r != wptr && !found) {
-            uint8_t raw[RTLNET_H264_IDX_ENTRY_BYTES];
+            uint8_t raw[RTLNET_H264_IDX_WORDS * 4u];   /* the entry words at the start of the 128-byte record */
             uint32_t w[4];
             rtlnet_h264_enc_index_entry_t ent;
-            mem_copy(raw, VENC_IDX_BASE + 16u * (e * idx_share + r), sizeof(raw));
+            mem_copy(raw, VENC_IDX_BASE + RTLNET_H264_IDX_ENTRY_BYTES * (e * idx_share + r), sizeof(raw));
             for (uint32_t i = 0u; i < 4u; i++) {
                 w[i] = (uint32_t)raw[4u * i] | ((uint32_t)raw[4u * i + 1u] << 8) | ((uint32_t)raw[4u * i + 2u] << 16) |
                        ((uint32_t)raw[4u * i + 3u] << 24);

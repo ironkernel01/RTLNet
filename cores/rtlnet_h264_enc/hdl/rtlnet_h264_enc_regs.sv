@@ -19,8 +19,10 @@
 //   * Counters (PIC_COUNT, SLICE_COUNT) are 32-bit, wrap and reset to 0; PIC_COUNT[15:0] is the picture number
 //     stamped into the index entries.
 // Language: SystemVerilog-2012.
-// Revision: 11-09-2026
+// Revision: 11-10-2026
 //   * 11-09-2026: initial version.
+//   * 11-10-2026: tiled rebuilt picture: RY_BASE and RU_BASE are the luma and chroma tile bases, the stride registers and
+//     RV_BASE are reserved; index records are 128 bytes.
 // Clocks: clk (all logic).
 // -----------------------------------------------------------------------------
 module rtlnet_h264_enc_regs #(
@@ -51,10 +53,7 @@ module rtlnet_h264_enc_regs #(
   output logic [31:0] cfg_in_base,
   output logic [31:0] cfg_in_stride,
   output logic [31:0] cfg_ry_base,
-  output logic [31:0] cfg_ry_stride,
   output logic [31:0] cfg_ru_base,
-  output logic [31:0] cfg_rv_base,
-  output logic [31:0] cfg_rc_stride,
   output logic [5:0]  cfg_qp,
   output logic        cfg_mb_pcm,
   output logic [15:0] cfg_frame_num,
@@ -117,11 +116,9 @@ module rtlnet_h264_enc_regs #(
   localparam logic [11:0] REG_MB_MODE     = 12'h03C;
   localparam logic [11:0] REG_IN_BASE     = 12'h040;
   localparam logic [11:0] REG_IN_STRIDE   = 12'h044;
-  localparam logic [11:0] REG_RY_BASE     = 12'h048;
-  localparam logic [11:0] REG_RY_STRIDE   = 12'h04C;
-  localparam logic [11:0] REG_RU_BASE     = 12'h050;
-  localparam logic [11:0] REG_RV_BASE     = 12'h054;
-  localparam logic [11:0] REG_RC_STRIDE   = 12'h058;
+  localparam logic [11:0] REG_RY_BASE     = 12'h048;   // rebuilt picture luma tile base (256 B per macroblock)
+  // 0x04C, 0x054 and 0x058 (the former strides and the Cr base) are reserved: they read 0 and ignore writes.
+  localparam logic [11:0] REG_RU_BASE     = 12'h050;   // rebuilt picture chroma tile base (Cb then Cr, 128 B per macroblock)
   localparam logic [11:0] REG_RING_BASE   = 12'h060;
   localparam logic [11:0] REG_RING_SIZE   = 12'h064;
   localparam logic [11:0] REG_RING_WPTR   = 12'h068;
@@ -151,7 +148,7 @@ module rtlnet_h264_enc_regs #(
   localparam int STATUS_STALL_BIT    = 3;
 
   localparam logic [31:0] CORE_ID      = id4("H", "2", "6", "4");
-  localparam logic [31:0] CORE_VERSION = 32'h1109_2026;
+  localparam logic [31:0] CORE_VERSION = 32'h1110_2026;
   // CAPS: [7:0] MAX_MB_W, [15:8] MAX_MB_H, [19:16] NUM_ENGINES.
   localparam logic [31:0] CORE_CAPS    = {12'd0, 4'(NUM_ENGINES), 8'(MAX_MB_H), 8'(MAX_MB_W)};
 
@@ -204,10 +201,7 @@ module rtlnet_h264_enc_regs #(
       cfg_in_base     <= '0;
       cfg_in_stride   <= '0;
       cfg_ry_base     <= '0;
-      cfg_ry_stride   <= '0;
       cfg_ru_base     <= '0;
-      cfg_rv_base     <= '0;
-      cfg_rc_stride   <= '0;
       cfg_ring_base   <= '0;
       cfg_ring_size   <= '0;
       cfg_idx_base    <= '0;
@@ -286,10 +280,7 @@ module rtlnet_h264_enc_regs #(
           REG_IN_BASE:     cfg_in_base     <= reg_wr_data;
           REG_IN_STRIDE:   cfg_in_stride   <= reg_wr_data;
           REG_RY_BASE:     cfg_ry_base     <= reg_wr_data;
-          REG_RY_STRIDE:   cfg_ry_stride   <= reg_wr_data;
           REG_RU_BASE:     cfg_ru_base     <= reg_wr_data;
-          REG_RV_BASE:     cfg_rv_base     <= reg_wr_data;
-          REG_RC_STRIDE:   cfg_rc_stride   <= reg_wr_data;
           REG_RING_BASE:   cfg_ring_base   <= reg_wr_data;
           REG_RING_SIZE:   cfg_ring_size   <= reg_wr_data;
           REG_RING_RPTR: begin
@@ -363,10 +354,7 @@ module rtlnet_h264_enc_regs #(
         REG_IN_BASE:     reg_rd_data <= cfg_in_base;
         REG_IN_STRIDE:   reg_rd_data <= cfg_in_stride;
         REG_RY_BASE:     reg_rd_data <= cfg_ry_base;
-        REG_RY_STRIDE:   reg_rd_data <= cfg_ry_stride;
         REG_RU_BASE:     reg_rd_data <= cfg_ru_base;
-        REG_RV_BASE:     reg_rd_data <= cfg_rv_base;
-        REG_RC_STRIDE:   reg_rd_data <= cfg_rc_stride;
         REG_RING_BASE:   reg_rd_data <= cfg_ring_base;
         REG_RING_SIZE:   reg_rd_data <= cfg_ring_size;
         REG_RING_WPTR:   reg_rd_data <= ring_wptr[31:0];

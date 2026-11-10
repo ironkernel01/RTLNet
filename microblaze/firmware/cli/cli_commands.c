@@ -3161,7 +3161,7 @@ int cli_show_ddr(const MenuCommandContext *ctx)
     fmt_printf("  Calibration     : %s (init_calib_complete)\n", cal ? "done" : "NOT done");
     fmt_printf("  Memory          : %u MiB at 0x%08X, MT41K256M16 16-bit DDR3-800, AXI4 128-bit on ui_clk\n",
                (unsigned)(RTLNET_PLAT_DDR_SIZE / (1024u * 1024u)), (unsigned)RTLNET_PLAT_DDR_BASE);
-    fmt_printf("  Caches          : instruction %u KiB, data %u KiB write-through, %u-byte lines, over the window only\n",
+    fmt_printf("  Caches          : instruction %u KiB, data %u KiB write-back, %u-byte lines, over the window only\n",
                (unsigned)(RTLNET_CPU_ICACHE_BYTES / 1024u), (unsigned)(RTLNET_CPU_DCACHE_BYTES / 1024u),
                (unsigned)RTLNET_PLAT_CACHE_LINE);
     if (rtlnet_axi_arbiter_probe(RTLNET_PLAT_ARB_BASE, &caps) != 0) {

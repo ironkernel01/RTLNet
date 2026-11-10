@@ -5,7 +5,7 @@
  *
  * Role: the memory test behind the CLI command "ddr test". It runs on the DDR3
  * window as the processor sees it, through the 8 KiB instruction and 8 KiB
- * write-through data caches, with explicit cache maintenance around every read
+ * write-back data caches (64-byte lines), with explicit cache maintenance around every write and read
  * that must come from the SDRAM. Three phases:
  *
  *   1. Data bus walking ones and zeros: one 16-byte line (the full 128-bit
@@ -20,7 +20,7 @@
  *      in 64 KiB chunks, then read back after the data cache is invalidated.
  *
  * Write rate and read rate are measured on phase 3 only (processor-driven: 32-bit
- * stores through the write-through cache, 16-byte line fills; the rates are those of this
+ * stores into the write-back cache, written back as 64-byte line bursts, 64-byte line fills; the rates are those of this
  * access path, not the SDRAM peak). A write chunk is timed through the settle callback, so
  * the rate counts completed writes.
  *
@@ -42,7 +42,7 @@
 #include <stddef.h>   /* size_t */
 #include <stdint.h>   /* uint32_t, uint64_t, uintptr_t */
 
-#define DDRTEST_LINE_BYTES    16u        /* one AXI4 beat, one cache line */
+#define DDRTEST_LINE_BYTES    16u        /* one 128-bit AXI4 beat of the SDRAM port (a cache line is RTLNET_PLAT_CACHE_LINE) */
 #define DDRTEST_MIN_BYTES     4096u
 #define DDRTEST_CHUNK_BYTES   65536u     /* timing and progress granularity of phase 3 */
 #define DDRTEST_MAX_ERRORS    64u        /* a phase stops after this many mismatches */

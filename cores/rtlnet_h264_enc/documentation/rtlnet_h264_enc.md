@@ -1,6 +1,6 @@
 # rtlnet_h264_enc: H.264 encoder core, phase 2b-2 (Intra16x16, transform, quantizer, CAVLC, I_PCM fallback)
 
-Revision: 11-09-2026
+Revision: 11-10-2026 (phase 2b-4: burst-only DDR3 access, section 14)
 
 ## 1. Purpose and scope
 
@@ -41,9 +41,9 @@ rtlnet_h264_top                      top: registers, the engine array, completio
   rtlnet_axil_slave                  AXI4-Lite to strobes (rtlnet_common)
   rtlnet_h264_enc_regs               register file (strobe interface), engine windows
   rtlnet_h264_engine  x NUM_ENGINES  one engine, one AXI4 master
-    rtlnet_h264_rd_dma               16 read bursts per macroblock, 2 beats each
-      rtlnet_h264_c422to420          YUYV 4:2:2 rows to 4:2:0 macroblock rows
-    rtlnet_ram_core                  source macroblock buffer (2 banks of 24 words of 16 bytes)
+    rtlnet_h264_rd_dma               16 row bursts per strip of RD_STRIP_MB macroblocks (8 beats at the default 4)
+      rtlnet_h264_c422to420          YUYV 4:2:2 rows to 4:2:0 macroblock rows (row held per macroblock of the strip)
+    rtlnet_ram_core                  strip buffer (2 halves of RD_STRIP_MB banks of 24 words of 16 bytes, 32-word pitch)
     rtlnet_h264_mb_enc               stage A: mode decision, transform, quantizer, rebuild loop, I_PCM copy
       rtlnet_h264_ipred              Intra16x16 / chroma prediction candidates, SAD, mode decision
       rtlnet_h264_fwdq               forward 4x4 transform and AC quantizer (4 lanes, 3 stages)
@@ -56,10 +56,11 @@ rtlnet_h264_top                      top: registers, the engine array, completio
     rtlnet_h264_mb_cavlc             stage B: macroblock layer syntax, nC, two block coders, I_PCM layer
       rtlnet_h264_cavlc_blk  x 2     CAVLC residual block coder (ping-pong), coeff_token / total_zeros / run_before tables
       rtlnet_ram_core                upper-neighbour total_coeff line RAM
-    rtlnet_h264_recon_wr             rebuilt-picture rows, 32 single-beat writes per macroblock
+      rtlnet_ram_core                tile staging buffer (32 x 128 bits)
+    rtlnet_h264_recon_wr             rebuilt-picture tiles: one 16-beat luma burst and one 8-beat chroma burst per macroblock
     rtlnet_h264_bitpack              ue/se, fields, start codes, trailing bits, emulation prevention
     rtlnet_h264_ring_wr              byte gather, word FIFO (rtlnet_ram_core), bursts, index entries, pointers
-    rtlnet_h264_wr_master            ring / index / rebuilt write requests onto AW, W, B
+    rtlnet_h264_wr_master            ring / index record / rebuilt tile burst requests onto AW, W, B
   rtlnet_h264_pkg                    shared constants
 ```
 
@@ -69,10 +70,12 @@ datapath modules above, `hdl/rtlnet_h264_enc.f` (compile order), `driver/rtlnet_
 
 ### 3.1 Macroblock pipeline
 
-The fetch sequencer fills two source banks through the read DMA. Stage A codes one macroblock from a source bank into a
-coefficient bank and a rebuilt bank; the source bank is released when A is done. Stage B turns the coefficient bank of the
+The fetch sequencer fills the two halves of the strip buffer through the read DMA, one strip of up to `RD_STRIP_MB`
+macroblocks (one macroblock row, left to right) per start. Stage A codes one macroblock from its bank of the current strip half into a
+coefficient bank and a rebuilt bank; the strip half is released when A is done with its last macroblock (the last macroblock of the
+strip: `a_x mod RD_STRIP_MB = RD_STRIP_MB - 1` or the last of the row). Stage B turns the coefficient bank of the
 previous macroblock into packer commands meanwhile, and the rebuilt-picture writer drains the rebuilt bank. A starts the next
-macroblock when a source bank is full and a coefficient and a rebuilt bank are free, so the throughput is the larger of the
+macroblock when its strip half is full and a coefficient and a rebuilt bank are free, so the throughput is the larger of the
 two stages. A cannot run further ahead: the neighbours of the next macroblock (left column, bottom row of the row above)
 come from its own rebuild.
 
@@ -174,7 +177,8 @@ on average. The driver therefore writes `max(QP, RTLNET_H264_QP_MIN_REALTIME)` i
 | MAX_MB_W, MAX_MB_H | 120, 68 | widest and tallest picture in macroblocks (1920x1088); range-checks and CAPS |
 | ADDR_W | 32 | only 32 supported (elaboration `$fatal`) |
 | ID_W | 4 | AXI ID width of each engine port |
-| MB_BUF_KB | 1 | source macroblock buffer, KiB (two banks of 24 words use 768 B) |
+| RD_STRIP_MB | 4 | macroblocks per input-read burst strip, 2, 4 or 8: row bursts of 2 x RD_STRIP_MB beats (8 beats = 128 bytes at 4) |
+| MB_BUF_KB | 4 | strip buffer, KiB (two halves of RD_STRIP_MB banks of 32 words of 16 bytes = 2 x RD_STRIP_MB x 512 B; at least RD_STRIP_MB) |
 | REC_BUF_KB | 1 | rebuilt macroblock buffer, KiB (two banks of 96 words of 4 samples) |
 | COEF_BUF_KB | 1 | coefficient buffer per copy, KiB (two banks of 128 words of 48 bits) |
 | LINE_KB | 4 | line RAM of stage A, KiB (two 16-byte words per macroblock column) |
@@ -194,9 +198,13 @@ parameters, so one build codes both video modes.
 | Interrupt | `irq`, level on `enc_clk`: `CTRL.IRQ_EN` and (`STATUS.DONE` or `STATUS.ERR`) |
 
 Every burst is INCR, size 16 bytes (full width), at most 16 beats, and never crosses 4 KiB (`rtlnet_axi_arbiter` rejects
-anything else from a non-narrow master). Read bursts are 2 beats from a 32-byte aligned address. Ring bursts end at 16 beats, at
-4 KiB, at the ring end and at the end of a NAL unit. Index and rebuilt-picture writes are single beats. Simulation
-assertions in `rtlnet_h264_wr_master` and `rtlnet_h264_engine` check the burst rules, and the bench places the real
+anything else from a non-narrow master). The core issues bursts only (section 14): read bursts are `2 x RD_STRIP_MB` beats (8 at the default;
+fewer, but at least 2, for the last strip of a macroblock row whose width is not a multiple of `RD_STRIP_MB`) from an address that is a
+multiple of `32 x RD_STRIP_MB`; the rebuilt picture is written as a 16-beat luma tile burst and an 8-beat chroma tile burst per macroblock; an
+index record is one 8-beat burst; ring bursts are 16 beats and end earlier only at 4 KiB, at the ring end and at the end of a slice NAL
+unit (the one place a short burst, down to a single beat, remains: the last burst of a slice, the ring end remainder and the 4 KiB
+remainder). Simulation assertions in `rtlnet_h264_wr_master` and `rtlnet_h264_engine` check the burst rules, the bench monitor
+`tb_h264_burst_mon` checks the shapes and prints the histogram per master (section 14), and the bench places the real
 `rtlnet_axi_arbiter` between the engines and the memory model.
 
 ## 6. Register map (offsets in the 4 KiB window)
@@ -204,7 +212,7 @@ assertions in `rtlnet_h264_wr_master` and `rtlnet_h264_engine` check the burst r
 | Offset | Name | Access | Meaning |
 |---|---|---|---|
 | 0x000 | ID | RO | "H264" = 0x48323634 |
-| 0x004 | VERSION | RO | 0x11092026 |
+| 0x004 | VERSION | RO | 0x11102026 (11-10-2026: tiled rebuilt picture, 128-byte index records) |
 | 0x008 | CAPS | RO | [7:0] MAX_MB_W, [15:8] MAX_MB_H, [19:16] NUM_ENGINES |
 | 0x00C | CTRL | RW | bit 0 START (self-clearing), bit 1 RING_RESET (self-clearing), bit 8 IRQ_EN |
 | 0x010 | STATUS | RW | bit 0 BUSY, bit 1 DONE (W1C), bit 2 ERR (W1C), bit 3 RING_STALL (live, any engine) |
@@ -217,20 +225,20 @@ assertions in `rtlnet_h264_wr_master` and `rtlnet_h264_engine` check the burst r
 | 0x034 | IDR_PIC_ID | RW | idr_pic_id of an IDR picture |
 | 0x038 | PIC_CFG | RW | [0] IDR picture (reset 1), [12:8] log2_max_frame_num (reset 4, range 4..16) |
 | 0x03C | MB_MODE | RW | [0] 1 = every macroblock is I_PCM (debug, exact rebuilt picture), 0 = Intra16x16 with the per-macroblock I_PCM fallback (reset 0) |
-| 0x040 | IN_BASE | RW | input frame base, multiple of 32 |
-| 0x044 | IN_STRIDE | RW | input line stride in bytes, multiple of 32, at least MB_W x 32 |
-| 0x048 | RY_BASE | RW | rebuilt luma plane base, multiple of 16 |
-| 0x04C | RY_STRIDE | RW | rebuilt luma stride, multiple of 16, at least MB_W x 16 |
-| 0x050 | RU_BASE | RW | rebuilt Cb plane base |
-| 0x054 | RV_BASE | RW | rebuilt Cr plane base |
-| 0x058 | RC_STRIDE | RW | rebuilt chroma stride, multiple of 16, at least MB_W x 8 |
+| 0x040 | IN_BASE | RW | input frame base, multiple of 32 x RD_STRIP_MB (128) |
+| 0x044 | IN_STRIDE | RW | input line stride in bytes, multiple of 128, at least MB_W x 32 |
+| 0x048 | RY_BASE | RW | rebuilt picture luma tile base, multiple of 256 (256 bytes per macroblock) |
+| 0x04C | reserved | RO | reads 0, writes ignored (was RY_STRIDE) |
+| 0x050 | RU_BASE | RW | rebuilt picture chroma tile base (Cb then Cr), multiple of 128 (128 bytes per macroblock) |
+| 0x054 | reserved | RO | reads 0, writes ignored (was RV_BASE) |
+| 0x058 | reserved | RO | reads 0, writes ignored (was RC_STRIDE) |
 | 0x060 | RING_BASE | RW | compressed ring base, multiple of 16 (all engines) |
 | 0x064 | RING_SIZE | RW | compressed ring size in bytes, multiple of 16 x NUM_ENGINES, each share at least 1024 |
 | 0x068 | RING_WPTR | RO | byte offset after the last burst whose write response arrived |
 | 0x06C | RING_RPTR | RW | byte offset firmware consumed up to |
 | 0x070 | RING_FILL | RO | bytes written and not consumed |
-| 0x078 | IDX_BASE | RW | index ring base, multiple of 16 |
-| 0x07C | IDX_ENTRIES | RW | index ring entries (all engines), at least NUM_ENGINES |
+| 0x078 | IDX_BASE | RW | index ring base, multiple of 128 |
+| 0x07C | IDX_ENTRIES | RW | index ring records of 128 bytes (all engines), at least NUM_ENGINES |
 | 0x080 | IDX_WPTR | RO | index of the next entry to be written (visible after its write response) |
 | 0x084 | IDX_RPTR | RW | index firmware consumed up to |
 | 0x088 | IDX_FILL | RO | entries written and not consumed |
@@ -248,7 +256,7 @@ Engine windows: the per-engine registers (0x068 .. 0x088 and 0x098 .. 0x0B0) of 
 window 0 is engine 0. Writes to RING_RPTR and IDX_RPTR in window e go to engine e. The configured ring and index ring are
 split into `NUM_ENGINES` equal shares, engine e using share e: `RING_SIZE / NUM_ENGINES` bytes from
 `RING_BASE + e x RING_SIZE / NUM_ENGINES`, and `IDX_ENTRIES / NUM_ENGINES` entries from
-`IDX_BASE + 16 x e x IDX_ENTRIES / NUM_ENGINES`.
+`IDX_BASE + 128 x e x IDX_ENTRIES / NUM_ENGINES`.
 
 Rules: write the configuration while the core is idle, at least a few clocks before START (the check is registered); write
 RING_RESET once after changing RING_BASE or RING_SIZE and before the first picture. START with an illegal configuration
@@ -263,8 +271,10 @@ One macroblock row is 32 bytes (16 pixels), two 16-byte beats; byte 0 of a beat 
 Conversion to 4:2:0: luma passes through; each chroma sample is `(a + b + 1) >> 1` of the same column in the two vertically
 adjacent rows (rows 2r and 2r+1 of the macroblock), rounding up.
 
-**Source macroblock buffer** (per bank, 16-byte words): words 0..15 the luma rows (pixel i in byte i); words 16..23 chroma rows,
-Cb(0..7) in bytes 0..7 and Cr(0..7) in bytes 8..15.
+**Strip buffer** (two halves of `RD_STRIP_MB` banks, bank pitch 32 words of 16 bytes): in a bank words 0..15 the luma rows (pixel i in
+byte i); words 16..23 chroma rows, Cb(0..7) in bytes 0..7 and Cr(0..7) in bytes 8..15. Macroblock `x` of strip half `h` is bank
+`h x RD_STRIP_MB + (x mod RD_STRIP_MB)`. The read DMA fetches a strip as 16 row bursts: burst `r` is pixel row `r` of the
+strip's macroblocks, two 16-byte beats (one 32-byte pixel row) per macroblock.
 
 **Rebuilt macroblock buffer** (32-bit words of 4 samples, per bank of 128): luma word `4 y + bx`, Cb word `64 + 2 y + bx`, Cr word
 `80 + 2 y + bx`.
@@ -274,11 +284,14 @@ rows; word `4 + 4 tag + row` for the 24 blocks (tag = `4 by + bx` luma, `16 + 2 
 coefficient row `row` of the block in raster order (position (0,0) of AC blocks holds 0); word 100 Cb DC, word 101 Cr DC. For an
 I_PCM macroblock words 0..95 hold the sample words (low 32 bits, first sample in the top byte) in stream order.
 
-**Rebuilt picture**: three planes, 8-bit samples. Luma at `RY_BASE`, line pitch `RY_STRIDE`; Cb at `RU_BASE` and Cr at
-`RV_BASE`, line pitch `RC_STRIDE`, width/2 samples per line. The rebuilt picture is the decoder's output for the stream
-(what JM, OpenH264 and FFmpeg decode, byte for byte). A luma row is one 16-byte write with full strobes; a chroma row is an
-8-byte write into the low or high half of the 16-byte word (address bit 3) with an 8-bit strobe. The same planes later serve
-as the reference buffer.
+**Rebuilt picture**, macroblock-tiled (8-bit samples): macroblock `m` (raster index in the picture, `m = row x MB_W + x`) owns a luma tile of
+256 bytes at `RY_BASE + 256 m` (16 rows of 16 samples, row 0 first: 16 beats of 128 bits) and a chroma tile of 128 bytes at
+`RU_BASE + 128 m` (the Cb 8 x 8 block row by row, then the Cr 8 x 8 block: 8 beats, beat k of the Cb half holds Cb rows 2k and 2k + 1,
+beat 4 + k the Cr rows 2k and 2k + 1). Both tile sizes are powers of two and the bases are multiples of the tile size, so a tile burst never
+crosses 4 KiB. The picture needs `MB_W x MB_H x 384` bytes (3,133,440 bytes at 1080p: 2,088,960 luma and 1,044,480 chroma). The rebuilt
+picture is the decoder's output for the stream (what JM, OpenH264 and FFmpeg decode, byte for byte), in tile order; the bench de-tiles it
+for the comparison. Only this encoder reads it (the motion-search phase will read the tiles); the rebuilt macroblock RAM holds the 96 words of
+a macroblock in exactly this order, so the writer streams it without reordering.
 
 **Compressed ring**: byte stream of NAL units in order, wrapping at the end of the engine's share. Bytes are written as full
 or partial 16-byte words (byte strobes), so the stream is contiguous. The writer stalls, and never overwrites unread
@@ -286,7 +299,8 @@ bytes, when the ring holds fewer than 4 bytes of free space (fill at most `size 
 pointer in steps below the ring size. A read pointer at or beyond the ring size, or a step beyond the data written, is
 ignored and sets ERR code 3.
 
-**Index entry**, 16 bytes, four little-endian 32-bit words, at `IDX_BASE`-share `+ 16 x index`:
+**Index entry**, four little-endian 32-bit words at the start of a 128-byte record (`IDX_BASE`-share `+ 128 x index`; bytes 16..127 of the
+record are reserved and written as zero, so an index write is one 8-beat burst):
 
 | Word | Content |
 |---|---|
@@ -678,4 +692,66 @@ register window is decoder slave 10 (0x44A0_8000) and runs without a crossing to
 
 Out-of-context synthesis of `rtlnet_h264_top` (2 engines) at 11.111 ns: WNS +1.455 ns, 39,489 LUT, 25,377 FF, 18 RAMB36 + 2 RAMB18, 74 DSP (`boards/nexys_video/build/phase2b3_h264_synth90.txt`). In the board build (one 90 MHz clock) the encoder region has +0.459 ns setup slack.
 
-On the board (QP 28, color bars): 720p30 codes every picture at 859 to 880 clocks per macroblock per engine (fits its budget of 1,666) and streams without drops. 1080p30 needs at most 735 clocks per macroblock per engine; the board shows 928 to 929, so 25 % of the pictures are dropped. The busy-cycle counters show the rebuilt-picture write path (`rtlnet_h264_recon_wr`, 32 single-beat writes per macroblock) taking 3.4 to 3.6 million of the 3.8 million clocks of a picture; the simulation (fast memory model) measures about 373 per macroblock. Open.
+On the board (QP 28, color bars): 720p30 codes every picture at 859 to 880 clocks per macroblock per engine (fits its budget of 1,666) and streams without drops. 1080p30 needs at most 735 clocks per macroblock per engine; the board shows 928 to 929, so 25 % of the pictures are dropped. The busy-cycle counters show the rebuilt-picture write path (`rtlnet_h264_recon_wr`, 32 single-beat writes per macroblock) taking 3.4 to 3.6 million of the 3.8 million clocks of a picture; the simulation (fast memory model) measures about 373 per macroblock. Resolved in phase 2b-4 (section 14).
+
+## 14. Burst-only DDR3 access (phase 2b-4, 11-10-2026)
+
+Rule (11-10-2026): every DDR3 access is a burst. No RTLNet master issues an `AWLEN` or `ARLEN` 0 transaction in streaming, bursts are at
+least 8 beats of 128 bits (128 bytes) where the data allows, never cross 4 KiB, and only true tails (ring end, 4 KiB end, end of a slice or frame)
+are shorter. Cause: with 32 single-beat writes per macroblock the encoder measured 928 clocks per macroblock on the board at 1080p30 (budget
+735, 25 % of the pictures dropped) against 373 in simulation.
+
+### 14.1 Burst shapes per master
+
+| Master | Before | After |
+|---|---|---|
+| Encoder input read (AR) | 16 bursts of 2 beats per macroblock (one pixel row of 32 bytes) | 16 row bursts per strip of `RD_STRIP_MB` macroblocks: 8 beats (128 bytes) at the default 4; the last strip of a row with a width that is not a multiple of 4 has `2 x n` beats (2, 4 or 6), never 1 |
+| Rebuilt picture (AW) | 32 single-beat writes per macroblock (16 luma rows, 8 + 8 chroma rows with 8-byte strobes) | 1 burst of 16 beats (luma tile, 256 B) and 1 burst of 8 beats (chroma tile, 128 B) per macroblock |
+| Index record (AW) | 1 beat of 16 bytes | 1 burst of 8 beats (128-byte record) |
+| Compressed ring (AW) | up to 16 beats; every NAL unit end closed a burst (the 6-byte access unit delimiter was a 1-beat burst) | up to 16 beats; only a slice NAL unit end, the ring end and 4 KiB close a burst early (the delimiter joins the burst of the slice that follows); the last burst of a slice can still be short, down to 1 beat |
+| Video write DMA (`rtlnet_vdma_s2mm`) | 16-beat bursts | unchanged: line starts are 256-byte aligned at both strides (2560 and 3840 bytes), so every burst is 16 beats, 720p30 and 1080p30 |
+| CPU caches (arbiter master 0) | write-through: every store one narrow 32-bit beat; line fill one 128-bit beat (4 x 32-bit packed by the SmartConnect) | see `microblaze/documentation/rtlnet_cpu_microblaze.md` section 11: write-back, 64-byte lines; stores leave as 4-beat bursts (measured), reads still reach the memory controller as single beats (open) |
+
+Other DDR3 masters: none. The AXI DMA of the CPU network path uses the AXI BRAM, the frame-buffer reader port is unused, `rtlnet_csi2_rx`
+and `rtlnet_framebuf` have no memory port.
+
+### 14.2 Design
+
+* `rtlnet_h264_recon_wr` reads the 96 words of the rebuilt macroblock RAM in order, builds 24 beats in a 32 x 128-bit staging RAM
+  (`rtlnet_ram_core`, `RAM_STYLE`) and streams the luma tile (16 beats) and the chroma tile (8 beats) as two bursts at one beat per clock.
+  `rtlnet_h264_wr_master` takes a descriptor (`rc_valid`, `rc_addr`, `rc_len`, `rc_pop`) and pulls the beats (`rc_w_valid`, `rc_w_data`,
+  `rc_w_pop`), as the ring does. Outstanding writes are counted per burst. The engine advances its tile pointers by 256 and 128 bytes per
+  macroblock.
+* `rtlnet_h264_rd_dma` fetches a strip of `RD_STRIP_MB` macroblocks with 16 row bursts and writes each macroblock's 24 words into its bank of
+  the strip buffer (two halves of `RD_STRIP_MB` banks, `MB_BUF_KB` 4, one `rtlnet_ram_core`); `rtlnet_h264_c422to420` holds the even-row chroma
+  per macroblock (`NMB` entries), so rows of the strip's macroblocks interleave. Stage A reads its bank as before; a half is released after the
+  last macroblock of the strip. Macroblock order is raster order per band, unchanged. `IN_BASE` and `IN_STRIDE` must be multiples of
+  `32 x RD_STRIP_MB` (128) so that no strip burst crosses 4 KiB (the driver and the core's `cfg_ok` check it).
+* The index record is 128 bytes (8 beats, entry in the first 16 bytes, the rest zero). Chosen over coalescing records because entries are
+  produced a few per picture and must be visible at once; a 128-byte record satisfies the 8-beat rule with one counter in the write master.
+* Registers: `RY_BASE` is the luma tile base, `RU_BASE` the chroma tile base; 0x04C, 0x054, 0x058 are reserved (read 0). `VERSION` 0x11102026.
+
+### 14.3 Verification and results
+
+* Bench monitor `tb_h264_burst_mon` on every engine port: fails the bench on a 1-beat AR, a 1-beat index or rebuilt AW, an index record that is not 8
+  beats, a tile burst that is not 16 or 8 beats, an AR with an odd beat count, and prints the histogram per master. Negative control:
+  `h264_harness.ps1 -InjectBurst` shows the monitor one single-beat rebuilt AW; the bench must fail (`h264_harness_burstneg`: PASS).
+* Histogram (1080p, 2 engines, QP 28, memory model of `rtlnet_ddr_sim`: 20 clocks read latency, no gaps), per engine:
+  AR 16,320 bursts of 8 beats; ring AW 529 bursts, 528 of 16 beats and one tail (14 beats on engine 0, 2 on engine 1); index AW 2 of 8 beats; rebuilt AW
+  8,160 bursts, 4,080 of 8 and 4,080 of 16 beats. No 1-beat transaction. QCIF (11 macroblocks wide): AR 288 of 8 and 144 of 6 beats.
+* Clocks per macroblock (`PIC_CYC / MB_COUNT`), 1080p, both engines sharing the port, memory model latency 20 and gap 0 or 20 %: 379 (limit 735);
+  one engine 379. Before: 373 in the same model but 928 on the board.
+* All decoder-checked configurations decode byte-identical in JM, OpenH264 and FFmpeg against the de-tiled rebuilt picture with the PSNR floors
+  met: see `.sim/logs/p2b4_*.log` (every configuration run before this document was closed passed; `strip_w13_s1`, `strip_w5_e2_s2` and `strip_w18_s3`
+  have widths of 13, 5 and 18 macroblocks).
+* Out-of-context synthesis of `rtlnet_h264_top` (2 engines, 11.111 ns): WNS +1.455 ns, 38,995 LUT (was 39,489), 25,759 FF (was 25,377), 22 RAMB36 + 2 RAMB18
+  (was 18 + 2), 74 DSP, 0 critical warnings (`.sim/synth/h264_top_2b4.log`). The four added RAMB36 are the two tile staging RAMs.
+* Board (11-10-2026, section 14.4 of this document and `rtlnet_nexys_video.md` 6.12): `show encoder` at 1080p30 reports 435 clocks per macroblock per engine
+  (was 928), 720p30 423 to 425 (was 859 to 880).
+
+### 14.4 Board results
+
+`stream_test` at QP 28, 60 s per mode: 720p30 PASS (1805 pictures, 0 dropped, 0 continuity errors, 0 PTS gaps, PSNR minimum 51.14 dB, 1037 kb/s, TS-mux load 3.3 %,
+423 and 425 clocks per macroblock); 1080p30 PASS (1802 pictures, 0 dropped, 0 continuity errors, 0 PTS gaps, PSNR minimum 51.09 dB, 2210 kb/s, TS-mux load 7.0 %,
+435 clocks per macroblock on both engines, last interval 379, busy cycles read 455 k, coder 1,550 k, write 699 k of 1,778 k per picture). The write path that was 3.4 million
+clocks per picture is 0.7 million. `show ddr`: errors 0 on all masters.
