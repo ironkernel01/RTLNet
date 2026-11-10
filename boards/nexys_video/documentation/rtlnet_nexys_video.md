@@ -850,7 +850,10 @@ Wide cache bus (11-10-2026, `rtlnet_cpu_microblaze.md` section 11.1; 512-bit cac
 Board (release image, QP 28): `phase1_gate` PASS 19/19, `cli_test` PASS 55/55, `ddr test 16` PASS and `show ddr` master 0 AR 264,698 bursts / 1,058,792 beats = 4.0 per burst (was 1.0), AW 4.0 beats per burst, errors 0 (`build/phase2b5_ddr_test.txt`).
 `stream_test` 60 s per mode PASS 15/15 (`build/phase2b5_stream_test.txt`): 720p30 1804 pictures, 0 dropped, 0 continuity errors, 0 PTS gaps, PSNR minimum 51.14 dB, 1037 kb/s, TS-mux load 3.2 % (was 3.3 %), 423 and 425 clocks per macroblock;
 1080p30 1802 pictures, 0 dropped, 0 continuity errors, 0 PTS gaps, PSNR minimum 51.08 dB, 3143 kb/s (was 2210), TS-mux load 9.8 % (was 7.0 %), 435 and 436 clocks per macroblock.
-`net_test` and `tcp_test` skipped: the direct PC NIC `Ethernet` is Disconnected.
+Over the LAN (PC on `Wi-Fi`, 192.168.68.84; board DHCP lease 192.168.68.79 from `show ip`): `net_test -Nic Wi-Fi -Speed 1000` PASS 25/25 (`build/net_test_transcript.txt`;
+UDP iperf PC to board 428.0 Mbit/s with 0 lost, board to PC 944.0 Mbit/s with 1 of 401,242 lost), `tcp_test -Board 192.168.68.79` PASS 8/8 (TCP echo 4 connections; TCP iperf PC to board
+58.3 Mbit/s, `-R` 82.8, `-r` 79.8, `-d` 74.4; together 52.8 TCP and 21.0 UDP; the Wi-Fi leg limits these rates). The lease changes between sessions, so `tcp_test` needs `-Board` from `show ip`
+(its default 192.169.1.199 is the old router's lease).
 
 ## 7. Network integration (done 10-22-2026) and what remains
 
