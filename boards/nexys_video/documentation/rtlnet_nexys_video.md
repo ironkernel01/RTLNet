@@ -905,6 +905,121 @@ Bytes per picture (1080p30 and 720p30, QP 28, bars): an IDR picture 8,370 B and 
 Clocks per macroblock per engine, budget 735: I 423/425 (720p30) and 436/436 (1080p30); P 448/451 (720p30) and 490/490 (1080p30). The `show encoder` figure is the last picture of the run.
 Note: `show encoder` prints the register-map date of VERSION 0x11102C02 as `11-10-2c02` (the date formatter, cosmetic); the raw read is 0x11102C02.
 
+### 6.14 Phase 2d board step (11-11-2026)
+
+Change: firmware rate control (`microblaze/documentation/rtlnet_ratectl.md`: `encoder bitrate <kbps>`, `encoder buffer <ms>`, `encoder qprange <min> <max>`, `show encoder history <n>` with the per-second ring), the moving test patterns of `rtlnet_csi2_rx`
+(`camera pattern <bars|scroll|box|noise|all> <speed>`; static bars stay the reset default), and the dropped-picture gap counted once (`acct_frame` in `rtlnet_venc.c`). Encoder VERSION is unchanged (0x11102C02, no encoder RTL change in this step).
+
+Build (`build.ps1 -Network`, git cb094b18 plus the uncommitted Phase 2d firmware, tool 2026.1). **The Phase 2d image is built with `RTLNET_PLACE_DIRECTIVE=ExtraTimingOpt`.** The default placer directive (Explore) no longer closes timing:
+run 1 (Explore, log `build/phase2d_build_run1_timingfail.log.txt`, 2,206 s) failed with WNS -0.238 ns on `u_h264/g_engine[1].u_engine/u_mb_enc/u_invq` `tt_reg` to `hs_reg` (13 logic levels, 9 CARRY4; the same path is the worst in engine 0).
+The pattern generator is not on the failing path. Run 2 (`ExtraTimingOpt`, 1,794 s, logs `build/phase2d_build_run2_pass.txt`, `build/phase2d_build_run2_bitstream.log.txt`, `build/build_info.txt`) passes:
+
+| Gate | Value |
+|---|---|
+| timing | WNS +0.044 ns, WHS +0.016 ns, WPWS +0.131 ns, 0 failing endpoints (Phase 2c: +0.070 / +0.010 / +0.131) |
+| CDC | `fifo 10`, `axil_cdc 5`, `gray 6`, `sync 31`, `reset 8` as expected, `rtlnet_cdc: PASS` |
+| utilization | 83,786 LUT (62.62 %), 79,780 FF (29.81 %), 284.5 RAMB tiles (77.95 %), 82 DSP |
+
+Open item (timing): the `u_invq` path `tt_reg` to `hs_reg` (13 logic levels, 9 CARRY4 in one cycle) is the limiter of both engines (the stage is the inverse quantizer feeding the inverse transform). A pipeline stage on that path removes it (RTL change in `rtlnet_h264_mb_enc`; the clock budget per macroblock has room, 484 of 735 clocks at 1080p30); until then every build of this image needs `ExtraTimingOpt`, and a build with another directive can fail by a few hundred picoseconds.
+
+Board (release image, JTAG, COM3, lease 192.168.68.79 from `show ip`, PC on Wi-Fi 192.168.68.84; logs in `build/`):
+
+| Step | Result | Log |
+|---|---|---|
+| `program.ps1` | PASS | `phase2d_program.txt` |
+| `phase1_gate` | `PHASE1_GATE: PASS 19/19` | `phase2d_phase1_gate.txt` |
+| `cli_test` (Phase 2d steps: bit rate, buffer, QP range, history, patterns) | `CLI_TEST: PASS 79/79` | `phase2d_cli_test.txt` |
+| `net_test`, `tcp_test` | `NET_TEST: PASS 25/25`, `TCP_TEST: PASS 8/8` | `phase2d_net_test.txt`, `phase2d_tcp_test.txt` |
+| firmware host test | demo 448/448, `RATECTL_TEST: PASS (11 gates)` | `microblaze/firmware/build/ratectl_test.log` |
+| `stream_test`, static bars, constant QP 28, GOP 30, 1080p30, 60 s (regression) | `STREAM_TEST: PASS 12/12`, 203 kb/s as in 6.13 | `phase2d_stream_bars_gop30.txt` |
+
+**Capture and test tooling.** The first 60 s rate-control runs failed on "lost" first datagrams. The PC receive path is not the cause: the datagram counts match the board (for example 2,192 received, 2,192 sent), the Windows `Receive Errors` counter does not move, and the receiver
+is a single thread that cannot reorder. There are two separate effects on the way from the board to the PC (Wi-Fi leg):
+
+1. Two adjacent datagrams swap (the video counter at the start of datagrams 3, 4, 5 reads 10, 3, 1 instead of 3, 10, 1; at stream start and at IDR bursts; 9 of the 40 first sweep captures, 9 swaps in the one-hour soak of 2.89 million datagrams). The checker puts them back (below).
+2. The first IDR picture of a stream is lost in part or whole in some runs (the capture then starts inside it or at the first P picture; SPS and PPS absent, FFmpeg "non-existing PPS"): the one-hour soak lost all but 19 packets of it, rc4 about 93 datagrams (board 71,295 sent, PC 71,202),
+   rc8 once. The cause is not proven (no capture on the wire). The first pictures of a rate-controlled stream are far larger than the later ones (start QP from the bits-per-pixel rule, finding 2 below: 100 to 500 kB against 30 to 130 kB), a burst of 100 to 400 datagrams, which the Wi-Fi access point or the PC adapter can drop;
+   an ARP queue of 8 packets in lwIP at the first send was the other suspect, but two pings before the stream (now in the script, they refresh the board's ARP entry) did not stop the loss in the soak and in rc4. The script reports the counts so every repeat shows.
+
+Changes in `stream_test.ps1` and `stream_check.py`:
+
+* The capture is a native receiver thread (C#, `Add-Type`) with a 32 MB socket buffer and a 4 MB file buffer instead of a PowerShell job with one `Receive` and one unbuffered write per datagram. It writes the datagram lengths next to the capture (`.lens`). Two pings of the board precede the capture.
+* `stream_check.py reorder` puts out-of-order datagrams back in order by their continuity counters (look-ahead 8 datagrams; unit test: a synthetic file with two swaps and one move comes back byte-identical). The line "PC receive" prints datagrams received, datagrams the board counted and the Windows receive errors during the capture.
+* `stream_check.py headtrim` (with `-CcTolPct` only) cuts the capture before the PAT of its first IDR picture and the result line reports it ("HEADTRIM cut_packets=... cut_access_units=...").
+* With `-CcTolPct P` (Wi-Fi): a lost access unit within the continuity-error count no longer fails `pts_steps`, `random_access`, `nal_types` or the QP step (PTS gaps that are whole multiples of the picture period are reported as `LOST_AU`, the IDR distance is checked in PTS periods, windows touching a lost datagram are skipped). FFmpeg messages are then reported, not gated, and JM
+  is gated only on captures with 0 continuity errors (JM does not decode across a lost datagram; the result line says so). Without `-CcTolPct` every check is strict as before.
+* `-Saturate low|high` for a target outside the reachable range: the rate windows are reported, and a line checks that at least 90 % of the seconds sit at QP maximum (low) or minimum (high). Seconds at either QP limit are waived from the rate windows.
+* `show ddr` is read again when a late prompt of the previous command cut the first read (a false "arbiter errors" failure in 2 of the first runs).
+
+Heavy case for the capture: GOP 1, 1080p30, pattern `all` 4, target 2000 kb/s (unreachable, QP pinned at 51), 60 s, `-Jm`: 46,688 datagrams received against 46,906 sent by the board (read about 0.3 s after the capture ended), 0 continuity errors, 0 receive errors, 8,014 kb/s, FFmpeg clean, JM identical to FFmpeg, 1,800 of 1,800 frames checked
+(`phase2d_t1.txt`, `phase2d_t1_stream_transcript.txt`; the rate gate fails by design).
+
+**Rate against QP (constant QP, GOP 30, 15 s, every 5th decoded picture compared with the pattern model).** Rate is the elementary-stream bytes per picture times 30 pictures per second; "d" is the number of pictures the board dropped, which makes the rate an upper estimate (a dropped picture forces an IDR picture next);
+"c" marks a capture with continuity errors left after the reorder repair (its PSNR minimum is a damaged picture). Cell: rate, PSNR minimum / mean against the pattern model. Logs `phase2d_stream_sw_<pattern>_q<QP>.txt`, `phase2d_sw_*_ts.txt`, `phase2d_sw_*_psnr.txt`.
+
+| Case | QP 16 | QP 24 | QP 32 | QP 40 | QP 48 |
+|---|---|---|---|---|---|
+| 1080p30 all 4 | 46,623 kb/s, 9.1 / 13.1 dB, d219 | 32,878 kb/s, 19.6 / 48.4 dB, d161 | 23,798 kb/s, 41.3 / 41.5 dB, d110 | 15,978 kb/s, 33.7 / 33.9 dB, d50 | 8,433 kb/s, 25.9 / 26.0 dB |
+| 1080p30 box 24 | 312 kb/s, 76.3 / 77.7 dB | 184 kb/s, 69.2 / 72.0 dB | 165 kb/s, 50.0 / 50.2 dB | 147 kb/s, 43.6 / 43.8 dB | 137 kb/s, 37.8 / 38.3 dB |
+| 1080p30 scroll -7 | 643 kb/s, 63.3 / 67.3 dB | 589 kb/s, 52.9 / 56.8 dB | 541 kb/s, 46.4 / 48.0 dB | 479 kb/s, 36.5 / 40.6 dB | 611 kb/s, 36.0 / 37.9 dB |
+| 1080p30 noise | 46,400 kb/s, 20.0 / 21.1 dB, d222 | 32,502 kb/s, 49.2 / 49.5 dB, d159 | 23,542 kb/s, 41.3 / 41.5 dB, d108 | 15,755 kb/s, 33.8 / 33.9 dB, d47 | 8,210 kb/s, 25.9 / 26.0 dB |
+| 720p30 all 4 | 29,918 kb/s, 63.2 / 69.9 dB, d54 | 21,130 kb/s, 47.6 / 47.9 dB | 15,425 kb/s, 39.8 / 39.9 dB | 10,424 kb/s, 32.1 / 32.2 dB | 5,538 kb/s, 24.1 / 24.3 dB |
+| 720p30 box 24 | 270 kb/s, 72.5 / 74.1 dB | 145 kb/s, 27.0 / 65.8 dB, c | 122 kb/s, 49.6 / 50.1 dB | 104 kb/s, 43.5 / 43.8 dB | 93 kb/s, 37.1 / 38.1 dB |
+| 720p30 scroll -7 | 399 kb/s, 61.4 / 65.8 dB | 370 kb/s, 24.2 / 53.3 dB, c | 332 kb/s, 45.5 / 47.3 dB | 299 kb/s, 35.3 / 39.2 dB | 389 kb/s, 34.1 / 37.0 dB |
+| 720p30 noise | 29,785 kb/s, 14.4 / 66.0 dB, d57, c | 20,993 kb/s, 47.7 / 47.8 dB | 15,305 kb/s, 24.3 / 39.6 dB, c | 10,328 kb/s, 32.1 / 32.2 dB | 5,413 kb/s, 24.2 / 24.3 dB |
+
+Reachable ranges that follow from the sweep:
+
+* The detailed patterns (`all`, `noise`) cost 5.4 to 8.4 Mb/s at QP 48, about 6.3 Mb/s (1080p) and 4.1 Mb/s (720p) at QP 51, and 21 to 47 Mb/s at QP 24 to 16. The board's output path (TS mux, lwIP, UDP) sustains about 15 Mb/s at 1080p30: from QP 40 on, pictures are dropped (50 of 403 at QP 40,
+  110 of 341 at QP 32). At 720p30 only QP 16 (29 Mb/s) drops pictures. So the usable range of 1080p `all` is about 6.3 to 14 Mb/s, of 720p `all` and `noise` about 4.1 to 21 Mb/s; a target near the rate at QP 28 to 36 (20 to 28 Mb/s at 1080p) is above the output path.
+* `box` 24 costs 93 to 312 kb/s (720p) and 137 to 312 kb/s (1080p) over the whole QP range: the P pictures of a moving box are a few dozen bytes, and the IDR picture is most of the bits.
+* `scroll` -7 is not monotonic: the rate falls from QP 16 (400 kb/s at 720p) to a minimum near QP 40 (299 kb/s) and rises again at QP 48 (389 kb/s; 1080p: 479 then 611 kb/s). Above about QP 40 a higher QP makes the stream larger, so the reachable range of this pattern is about 300 to 400 kb/s at 720p and
+  the feedback loop of the controller (raise the QP to lower the rate) has the wrong sign there.
+
+**Rate control, 60 s runs, GOP 30 unless noted, FFmpeg and JM decode, 1 s and 10 s windows from the PC capture (elementary-stream bytes of 30 and 300 pictures; first 2 s skipped, seconds at a QP limit waived) and from the board history.** Targets are from the sweep: not at the rate of QP 28 to 36 where that is above the output path.
+Logs `phase2d_stream_rc<n>_*.txt`, `phase2d_rc<n>_*_ts.txt`, `*_history.txt`; the first set of runs with unreachable targets is in `build/old_rc1/`.
+
+| Run | Target | Mean (PC) | Worst 1 s (PC / board) | Worst 10 s (PC / board) | QP min / avg / max | PSNR min / mean | Result |
+|---|---|---|---|---|---|---|---|
+| rc1 1080p30 `all` 4 | 8,000 kb/s | 7,994 | 4.19 % / 4.21 % | 0.67 % / 0.67 % | 32 / 48.7 / 51 | 19.9 / 20.3 dB | FAIL: 1 picture dropped by the board in the first second (pts gap 6,000), 3 overflows below QP max; rate gates pass; JM differs from FFmpeg after the gap |
+| rc2 1080p30 `box` 24 | 160 kb/s | 162.8 | 16.25 % / 16.11 % | 4.34 % / 3.69 % | 20 / 30.7 / 51 | 33.0 / 55.2 dB | FAIL (1 s window): start-up converges from QP 51 to about 30 in about 5 s (seconds 2 to 4 at -16 %, -7 %); after that every second is within +-9.8 %; 42 overflows, 27 underflows; transport clean, FFmpeg and JM clean |
+| rc3 720p30 `all` 4 | 12,000 kb/s | 11,996 | 2.64 % / 2.64 % | 0.37 % / 0.37 % | 21 / 37.4 / 40 | 32.1 / 34.7 dB | PASS 17/17 |
+| rc4 720p30 `noise` | 12,000 kb/s | 11,998 | 0.91 % / 7.12 % | 0.15 % / 0.72 % | 37 / 37.3 / 40 (PC, after HEADTRIM) | 32.2 / 34.8 dB | PASS 17/17 on the rerun; HEADTRIM cut the first 29 pictures (the first IDR picture was lost at the start of the capture), so the PC windows start at the second IDR picture; the board history (7.12 %) includes the start-up. The first run passed every gate except a false `show ddr` read (log `build/rc4_first/`) |
+| rc5 720p30 `scroll` -7 | 330 kb/s | 328 | 15.76 % / 10.77 % (1,248 of 1,712 windows waived at QP 51) | 0.57 % / 0.57 % | 44 / 50.4 / 51 | 30.5 / 35.0 dB | FAIL: QP pinned at 51 (the non-monotonic rate of `scroll`: the controller starts at QP 51 from the bits-per-pixel rule and the rate at QP 51 is above 330 kb/s); 14 overflows; mean on target |
+| rc6 1080p30 `all` 4, GOP 1 | 10,000 kb/s | 9,995 | 2.77 % / 2.78 % | 0.43 % / 0.43 % | 30 / 47.9 / 51 | 19.9 / 20.2 dB | FAIL: 1 picture dropped in the first second; rate gates pass |
+| rc7 720p30 `scroll` -7 (unreachable low) | 300 kb/s | 291 | 9.59 % (64 windows checked, 1,648 waived at QP 51) / 6.28 % | no window | 46 / 50.8 / 51 | 30.4 / 34.2 dB | PASS 17/17; 340 overflows reported |
+| rc8 1080p30 `box` 24 (unreachable high) | 3,000 kb/s | 493 (board) | reported, not gated | reported | 12 / 12.1 / 40 | 43.7 / 79.5 dB | PASS 18/18: "saturated at QP min", 57 of 57 seconds at QP 12, 1,797 underflows |
+
+Everything else in every run: 0 board-side errors, 0 UDP drops, `show ddr` errors 0, 0 continuity errors in rc1 to rc8 with the capture tooling above, FFmpeg decode clean (0 error lines), JM identical to FFmpeg except after the board-dropped picture of rc1 and rc6, QP step between pictures at most 2 in all eight runs (1,799 to 1,801 slice QPs parsed).
+
+Findings from the rate-control runs (the controller `rtlnet_ratectl.c` is not changed in this step):
+
+1. The mean rate and the 10 s windows meet +-3 % in every run (0.15 to 0.94 %), and the 1 s windows meet +-10 % in rc1, rc3, rc4 and rc6 (0.9 to 4.2 % from the PC capture). The windows that fail are the start-up second of rc2 and the pinned QP of rc5.
+2. Start-up: the first picture's QP comes from the bits-per-pixel rule (`14 - 6 log2(bpp)`). For the detailed patterns it is far too low (QP 32 against 48 needed at 8 Mb/s, 1080p): the first pictures are 100 kB, the buffer reaches 64 % in the first second, the board drops 1 picture (QP 32 at 1080p is above the output path limit of about 15 Mb/s;
+   rc1, rc6) and the controller counts 3 overflows below QP max. The QP then rises by 2 per picture and the rate settles within about 2 s. A start-up QP from the first picture's measured size, or a configured start QP, removes it; a change to `rtlnet_ratectl.c`, not done without the architect.
+3. Content with tiny P pictures (`box`) has little rate control authority: the P picture has a floor of a few dozen bytes, so the IDR picture is most of the bits; rc2 oscillates between QP 20 and 51 with 42 overflows although the mean is 1.8 % high and the 10 s windows are within 4.3 %.
+4. `scroll` has a rate minimum near QP 40 (sweep table); a target below the minimum of the content at the controller's start QP sticks at QP 51 (rc5) and a target at or below 300 kb/s is saturated (rc7, "saturated at QP max"); the reachable target for this pattern is about 300 to 400 kb/s and the controller needs a start QP below 40 there.
+5. PSNR against the pattern model is 20 dB at QP 48 to 51 for the detailed patterns at 1080p, 32 to 35 dB at QP 37 (720p, 12 Mb/s) and above 43 dB for `box`.
+
+**One-hour soak (1080p30, pattern `all` 4, GOP 30, 8,000 kb/s, buffer 500 ms, QP range 12..51, 3,600 s).** `stream_test.ps1 -Seconds 3600 -Gate10 -PsnrStep 10 -CcTolPct 0.01`, then `show stream`, `show encoder`, `show encoder history 3600` (in `phase2d_stream_soak.txt`, `phase2d_soak_1080p30_history.txt`); the capture was checked again offline after the start-of-capture cut
+(`stream_test.ps1 -InputTs ...`, `phase2d_stream_soakhead.txt`, `phase2d_soakhead_offline_*`). The capture files (3.7 GB) are deleted, the logs stay.
+
+| Gate | Result |
+|---|---|
+| Board: pictures, drops, errors | 108,005 pictures sent, **1 dropped** (frame numbers skipped, in the first second: the start-up of finding 2), 0 UDP drops (UDP sent 17,019,491, dropped 0, retries 0), errors 0, frame buffer dropped 0, `show ddr` errors 0. **Gate "0 board-side drops": FAIL by that one picture** |
+| Continuity | 4 continuity errors in 19,851,047 packets (0.00002 %, limit 0.01 %): PASS. Datagrams: 2,889,724 received, 2,889,851 counted by the board (read after the capture), Windows receive errors 0. 9 reordered datagrams were repaired; 1 access unit was lost in the middle of the capture on Wi-Fi (the first run of the checker counted 2, one of them the first picture, cut at the start) |
+| 1 s windows within +-10 % | PC capture (108,000 pictures): worst 3.86 % (4.25 % before the cut of the first picture), 107,849 windows, 62 skipped next to the lost datagram. Board history (3,597 records): worst 4.31 % in the second after the start-up, then at most 0.54 % |
+| 10 s windows within +-3 % | PC capture worst 0.56 % (0.63 % before the cut), 107,039 windows; board history worst 0.67 % (3,588 windows): PASS |
+| Rate | mean 8,000.0 kb/s (PC) and 8,000.03 kb/s (board history), `show stream` 8,003 kb/s over the last 1 s and 8,000 kb/s over the last 10 s; TS 8,293 kb/s; QP 36 (after the cut) to 51, average 48.68; fill 19 to 31 % at the end (min 19.1 %, max 100 % at the start-up), overflow 3 (all in the start-up), underflow 0 |
+| QP step per picture | at most 2 in 108,000 of 108,000 pictures: PASS |
+| Pictures | 3,601 IDR pictures (39,337 B average, 86,295 max) and 104,399 P pictures (33,124 B average, 73,213 max); IDR every 30 pictures in the capture (3,600 gaps of 30) |
+| Decode | FFmpeg: 4 error lines ("out of range intra chroma pred mode"), all in the picture damaged by the lost access unit; no other error (JM is not run on a capture with continuity errors, and was not requested for the soak). Picture 0 cut by HEADTRIM |
+| PSNR against the pattern model (every 10th picture, 10,801 frames) | minimum 11.49 dB (the damaged picture), mean 25.52 dB, 0 resyncs; the steady-state value is 24 to 26 dB at QP 48 to 51 (sweep 25.9 dB at QP 48) |
+| CPU and encoder | TS-mux load 23.4 %, handling plus mux 23.6 %; 508 and 483 clocks per macroblock per engine (P pictures, budget 735) |
+
+Soak verdict: the rate control holds the rate for an hour (every 10 s window within 0.7 %, every 1 s window within 4.3 %), the board counts 0 UDP drops and 0 errors, and the transport on Wi-Fi loses 1 access unit in 108,000. The "0 board-side drops" gate fails by one picture dropped at the start of the stream (finding 2);
+the PSNR minimum is the picture damaged by the lost access unit.
+
 ## 7. Network integration (done 10-22-2026) and what remains
 
 Integrated: `u_mac`, `u_mdio`, `u_protocol` (every leaf, the CPU network path and its classifier), `u_echo` under

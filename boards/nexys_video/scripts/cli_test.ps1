@@ -42,6 +42,8 @@ Revision: 11-10-2026
     mode, rate and source, framebuffer crc).
   * 11-09-2026: DDR3 image (banner "DDR3 image" or the show version Image line): the three ddr test steps are
     skipped, reported as skipped and not counted as passed.
+  * 11-10-2026: Phase 2d: camera pattern (bad name, bad speed, all -7, box 24, bars), encoder bitrate, buffer and qprange (bad values, good values),
+    the rate-control lines of show stream, show encoder history, back to constant QP.
   * 11-10-2026: Phase 2c: encoder VERSION 0x11102C02, encoder gop (bad values, 1, 30) and the GOP lines of show stream and show encoder,
     the cache line of show ddr (32 KiB, 512-bit buses).
 -------------------------------------------------------------------------------
@@ -209,6 +211,13 @@ try {
     Send-Step $sp 'camera source (bad)' "camera source radar`r" @('% Invalid video source \(auto, camera or pattern\) "radar"') 'rtlnet#'
     Send-Step $sp 'camera source pattern' "camera source pattern`r" @('Video source pattern') 'rtlnet#'
     Send-Step $sp 'camera source auto' "camera source auto`r" @('Video source auto') 'rtlnet#'
+    # Moving test patterns (Phase 2d).
+    Send-Step $sp 'camera pattern (bad)' "camera pattern radar`r" @('% Invalid test pattern \(bars, scroll, box, noise or all\) "radar"') 'rtlnet#'
+    Send-Step $sp 'camera pattern (bad speed)' "camera pattern scroll 33`r" @('% Invalid pattern speed \(-32\.\.32\) "33"') 'rtlnet#'
+    Send-Step $sp 'camera pattern all -7' "camera pattern all -7`r" @('Test pattern all, speed -7, effective at the next frame') 'rtlnet#'
+    Send-Step $sp 'show camera (pattern)' "show camera`r" @('Test pattern\s+: all, speed -7 px/frame, frame \d+ since the last restart') 'rtlnet#'
+    Send-Step $sp 'camera pattern box 24' "camera pattern box 24`r" @('Test pattern box, speed 24, effective at the next frame') 'rtlnet#'
+    Send-Step $sp 'camera pattern bars' "camera pattern bars`r" @('Test pattern bars, speed 4, effective at the next frame') 'rtlnet#'
     Send-Step $sp 'framebuffer crc' "framebuffer crc`r" @(
         'Framebuffer CRC-32 : 0x[0-9A-F]{8} \(frame \d+, slot \d, \d+x\d+, (pattern|camera), \d+ bytes\)') 'rtlnet#' 60000
     # H.264 stream (Phase 2b-3): command formats and refusals; the stream itself is checked by stream_test.ps1.
@@ -225,6 +234,21 @@ try {
     Send-Step $sp 'show stream (gop 1)' "show stream`r" @('GOP\s+: 1 \(IDR every 1 pictures\); \d+ IDR pictures') 'rtlnet#'
     Send-Step $sp 'encoder gop 30' "encoder gop 30`r" @('GOP 30 \(an IDR picture every 30 pictures, P pictures between\), effective at the next picture') 'rtlnet#'
     Send-Step $sp 'show encoder (gop 30)' "show encoder`r" @('GOP\s+: 30 \(IDR every 30 pictures') 'rtlnet#'
+    # Rate control (Phase 2d).
+    Send-Step $sp 'encoder bitrate (bad)' "encoder bitrate 100001`r" @('% Invalid bit rate in kb/s \(0\.\.100000, 0 = constant QP\) "100001"') 'rtlnet#'
+    Send-Step $sp 'encoder bitrate 2000' "encoder bitrate 2000`r" @('Constant bit rate 2000 kb/s, effective at the next picture') 'rtlnet#'
+    Send-Step $sp 'encoder buffer (bad)' "encoder buffer 99`r" @('% Invalid buffer in ms \(100\.\.2000\) "99"') 'rtlnet#'
+    Send-Step $sp 'encoder buffer 500' "encoder buffer 500`r" @('Rate control buffer 500 ms of the target rate') 'rtlnet#'
+    Send-Step $sp 'encoder qprange (bad)' "encoder qprange 51 12`r" @('% Invalid QP range "51 12" \(12 <= min <= max <= 51\)') 'rtlnet#'
+    Send-Step $sp 'encoder qprange 12 51' "encoder qprange 12 51`r" @('Rate control QP range 12\.\.51') 'rtlnet#'
+    Send-Step $sp 'show stream (rate control)' "show stream`r" @(
+        'Rate control\s+: constant bit rate, target 2000 kb/s, buffer 500 ms \(1000000 bits\), QP range 12\.\.51',
+        'Measured rate\s+: \d+ kb/s over the last 1 s, \d+ kb/s over the last 10 s', 'Buffer fill\s+: \d+\.\d %', 'Picture QP\s+: last \d+; since clear min \d+, avg \d+\.\d\d, max \d+',
+        'Buffer events\s+: overflow \d+ \(\d+ below QP max\), underflow \d+') 'rtlnet#'
+    Send-Step $sp 'show encoder history 5' "show encoder history 5`r" @('Encoder history: \d+ of \d+ recorded seconds', 'Age \(s\)\s+Bits/s\s+QP avg\s+Fill %\s+Pictures') 'rtlnet#'
+    Send-Step $sp 'show encoder history (bad)' "show encoder history 3601`r" @('% Invalid number of seconds \(1\.\.3600\) "3601"') 'rtlnet#'
+    Send-Step $sp 'encoder bitrate 0' "encoder bitrate 0`r" @('Constant QP \d+ \(rate control off\), effective at the next picture') 'rtlnet#'
+    Send-Step $sp 'show stream (constant QP)' "show stream`r" @('Rate control\s+: constant QP \d+ \(target 0\)', 'Buffer fill\s+: not used in constant QP mode') 'rtlnet#'
     Send-Step $sp 'stream h264 (bad address)' "stream h264 300.1.1.1 5004`r" @('% Invalid IPv4 address "300\.1\.1\.1"') 'rtlnet#'
     Send-Step $sp 'stream h264 (bad port)' "stream h264 192.168.68.1 0`r" @('% Invalid UDP port \(1\.\.65535\) "0"') 'rtlnet#'
     Send-Step $sp 'show stream (stopped)' "show stream`r" @(

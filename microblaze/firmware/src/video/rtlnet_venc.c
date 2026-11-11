@@ -63,6 +63,7 @@ static struct {
     int                        holding;
     int                        have_last;
     uint32_t                   first_frame;
+    uint32_t                   acct_frame;        /* highest frame number accounted for: encoded, or counted as dropped */
     uint32_t                   pts_step;
     uint32_t                   ring_rptr[VENC_MAX_ENGINES];
     uint32_t                   idx_rptr[VENC_MAX_ENGINES];
@@ -174,6 +175,7 @@ int venc_start(uint32_t ip, uint16_t port)
     tsmux_init(&g.mux, sink, NULL);
     g.cfg_mode = 0xFFFFFFFFu;
     g.have_last = 0;
+    g.acct_frame = 0u;
     g.state = ST_IDLE;
     g.pic_seq = 0u;
     g.need_idr = 1u;
@@ -374,9 +376,14 @@ static int begin_picture(void)
     }
     if (!g.have_last) {
         g.first_frame = f.frame;
-    } else if (f.frame > g.st.last_frame + 1u) {
-        g.st.dropped_pictures += f.frame - g.st.last_frame - 1u;
-        g.need_idr = 1u;   /* a dropped picture: restart the GOP with an IDR picture */
+    } else {
+        /* A gap is counted once: acct_frame remembers what was counted, so a configure or start failure below does not count it again. */
+        uint32_t base = (g.acct_frame > g.st.last_frame) ? g.acct_frame : g.st.last_frame;
+        if (f.frame > base + 1u) {
+            g.st.dropped_pictures += f.frame - base - 1u;
+            g.acct_frame = f.frame - 1u;
+            g.need_idr = 1u;   /* a dropped picture: restart the GOP with an IDR picture */
+        }
     }
     /* IDR when forced, when the GOP is complete (gop 1: every picture), or when no reference picture exists; P otherwise. */
     if (g.need_idr || g.gop_pos >= g.st.gop || !g.bufs.has_ref) {

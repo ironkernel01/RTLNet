@@ -2,7 +2,7 @@
 
 Copyright (C) 2026 IronKernel. All rights reserved.
 
-Revision: 11-10-2026
+Revision: 11-11-2026
 
 ## 1. Purpose
 
@@ -160,3 +160,30 @@ Informational lines: a burst or a cut that starts on the IDR picture overflows 6
 The real encoder deviates from `2^(-q/6)` (size falls more slowly at high QP, tiny P pictures have a floor of a few dozen bytes); the feedback on the buffer corrects the
 remainder, and the one-hour soak on the board measures it. The test pattern command depends on the other agent's driver function. Per-row `mb_qp_delta`
 inside a picture is not part of this phase.
+
+## 9. Board results (11-11-2026)
+
+Release image of `rtlnet_nexys_video.md` section 6.14, 60 s runs of `stream_test.ps1` with FFmpeg and JM decode, windows from the PC capture and from `show encoder history`. Targets are chosen from the rate against QP sweep of that section (the usable range
+of 1080p `all` is 6.3 to about 14 Mb/s because the output path drops pictures above about 15 Mb/s; the rate of `scroll` has its minimum near QP 40).
+
+| Run | Target | Mean | Worst 1 s | Worst 10 s | QP min / avg / max | Result |
+|---|---|---|---|---|---|---|
+| 720p30 `all` 4, GOP 30 | 12,000 kb/s | 11,996 | 2.64 % | 0.37 % | 21 / 37.4 / 40 | PASS, 0 overflows |
+| 720p30 `noise`, GOP 30 | 12,000 kb/s | 11,998 | 0.91 % (board history 7.12 % with the start-up) | 0.15 % | 37 / 37.3 / 40 (first 29 pictures cut, first IDR picture lost in the capture) | PASS |
+| 1080p30 `all` 4, GOP 30 | 8,000 kb/s | 7,994 | 4.19 % | 0.67 % | 32 / 48.7 / 51 | rate passes; 1 picture dropped at start-up |
+| 1080p30 `all` 4, GOP 1 | 10,000 kb/s | 9,995 | 2.77 % | 0.43 % | 30 / 47.9 / 51 | rate passes; 1 picture dropped at start-up |
+| 1080p30 `box` 24, GOP 30 | 160 kb/s | 162.8 | 16.25 % (start-up), later 9.8 % | 4.34 % | 20 / 30.7 / 51 | start-up second fails +-10 %; 42 overflows |
+| 720p30 `scroll` -7, GOP 30 | 330 kb/s | 328 | 15.76 % (1,248 windows waived) | 0.57 % | 44 / 50.4 / 51 | QP pinned at 51 |
+| 720p30 `scroll` -7, GOP 30 | 300 kb/s (unreachable low) | 291 | 9.59 % (64 windows) | none | 46 / 50.8 / 51 | saturated at QP max, 340 overflows, PASS |
+| 1080p30 `box` 24, GOP 30 | 3,000 kb/s (unreachable high) | 493 | not gated | not gated | 12 / 12.1 / 40 | saturated at QP min, 57 of 57 seconds at QP 12, PASS |
+
+The QP changes by at most 2 per picture in all eight runs (1,799 to 1,801 pictures parsed). What the host test did not show:
+
+* The first picture's QP (section 2.2, bits per pixel) is far too low for detailed content: at 1080p30 `all` and 8,000 kb/s it starts at QP 32 against about 48 needed, the first pictures are 100 kB, the buffer fills to 64 % and the board drops one picture
+  (the output path limit is about 15 Mb/s); 3 overflows are counted below QP max. The QP reaches the steady state in about 2 s.
+* Content whose P pictures are tiny (`box`) leaves the controller little authority: QP 20 to 51, 42 overflows and 27 underflows at 160 kb/s, with the mean 1.8 % above the target and the 10 s windows within 4.3 %. The start-up converges in about 5 s (seconds 2 to 4 at -16 % and -7 %).
+* The rate of the `scroll` pattern has a minimum near QP 40 (299 kb/s at 720p, 479 kb/s at 1080p) and rises above it, so the loop "higher QP, lower rate" has the wrong sign there; a target below the minimum starts at QP 51 and stays pinned (the 330 kb/s run).
+* Proposed, not done: a start QP from the measured size of the first picture (or a configured start QP) and a limit on the QP excursion when the P pictures are at their floor size.
+
+One-hour soak (1080p30 `all` 4, GOP 30, 8,000 kb/s, 3,600 s, `rtlnet_nexys_video.md` section 6.14): mean 8,000.0 kb/s, every 10 s window within 0.7 % and every 1 s window within 4.3 % (the second after the start-up; later at most 0.54 %), QP 32 to 51 (average 48.68),
+QP step at most 2 in 108,000 pictures, overflow 3 (start-up only), underflow 0, 1 picture dropped at the start-up and 0 UDP drops. The size model is within the feedback's reach for this content over the whole hour: the average QP of minutes 1 to 10 and of the last 10 minutes is 48.65 in both.
