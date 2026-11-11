@@ -481,6 +481,8 @@ set meth_waivers {
            {report_cdc (gated above: no Critical/Warning) shows every crossing synchronized; the asynchronous groups are the MDM BSCAN clocks of the vendor IP}}
   {TIMING-47 {^A False Path timing constraint is set between synchronous clocks rgmii_rxc_v and rgmii_rxc }
            {RGMII same-edge capture: the opposite-edge setup and same-edge hold pairs of the DDR input describe no capture (rtlnet_nexys_video_rgmii.xdc, MAC documentation section 6)}}
+  {ULMTCS-1 {^This design uses \d+ control sets }
+           {control set count above the 7.5 percent guideline (2,690 against 2,524 at 62 percent LUT): an advisory (RECOMMENDED) check, timing closes (WNS +0.070 ns, WHS +0.010 ns); revisit in Phase 2e (fewer control sets in the encoder through shared resets and enables, or the synthesis control_set_opt_threshold) if the count grows or timing suffers}}
   {LUTAR-1 proc:nv_waive_mig_lutar
            {AMD MIG IP u_ddr/g_amd.u_ddr/u_mig: vendor-generated reset logic, LUT u_iodelay_ctrl/rstdiv2_sync_r[11]_i_1 drives the PRE pins of the replicated rstdiv0_sync_r1_reg_rep cells of u_ddr3_infrastructure (reset synchronizer, no user logic)}
            {match}}

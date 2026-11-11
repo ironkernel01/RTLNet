@@ -52,6 +52,7 @@
  *  11-09-2026  MenuBuilder AI / Steve Spano    show version: Image line (LMB or DDR3)
  *  11-09-2026  MenuBuilder AI / Steve Spano    H.264 stream (Phase 2b-3): stream h264, stream stop, show stream, encoder qp, show encoder
  *  11-09-2026  MenuBuilder AI / Steve Spano    Video (Phase 1): show camera, show framebuffer, camera mode|source|rate, framebuffer crc
+ *  11-10-2026  MenuBuilder AI / Steve Spano    H.264 P pictures (Phase 2c): encoder gop, GOP and IDR/P counts in show stream and show encoder; show ddr cache line
  * ===========================================================================
  */
 #include "cli_commands.h"
@@ -3161,9 +3162,9 @@ int cli_show_ddr(const MenuCommandContext *ctx)
     fmt_printf("  Calibration     : %s (init_calib_complete)\n", cal ? "done" : "NOT done");
     fmt_printf("  Memory          : %u MiB at 0x%08X, MT41K256M16 16-bit DDR3-800, AXI4 128-bit on ui_clk\n",
                (unsigned)(RTLNET_PLAT_DDR_SIZE / (1024u * 1024u)), (unsigned)RTLNET_PLAT_DDR_BASE);
-    fmt_printf("  Caches          : instruction %u KiB, data %u KiB write-back, %u-byte lines, over the window only\n",
+    fmt_printf("  Caches          : instruction %u KiB, data %u KiB write-back, %u-byte lines, %u-bit buses, over the window only\n",
                (unsigned)(RTLNET_CPU_ICACHE_BYTES / 1024u), (unsigned)(RTLNET_CPU_DCACHE_BYTES / 1024u),
-               (unsigned)RTLNET_PLAT_CACHE_LINE);
+               (unsigned)RTLNET_PLAT_CACHE_LINE, (unsigned)RTLNET_CPU_CACHE_BUS_BITS);
     if (rtlnet_axi_arbiter_probe(RTLNET_PLAT_ARB_BASE, &caps) != 0) {
         uint32_t id = board_debug_read32(RTLNET_PLAT_ARB_BASE + RTLNET_REG_ID);
         fmt_printf("%% %s not present in this build (ID 0x%08X at 0x%08X, expected 0x%08X)\n", g_core_arb.name,
@@ -3614,6 +3615,26 @@ int cli_encoder_qp(const MenuCommandContext *ctx)
 }
 
 /**
+ * @brief ENCODER GOP [GOP]: set the GOP length (an IDR picture every GOP pictures, P pictures between).
+ * @param ctx argv[0] = GOP 1..255.
+ * @return 0, or -1 for a value outside 1..255.
+ */
+int cli_encoder_gop(const MenuCommandContext *ctx)
+{
+    uint32_t gop;
+    if (cli_parse_u32(ctx->argv[0], &gop) != 0 || venc_set_gop(gop) != VENC_OK) {
+        return cli_bad_value("GOP (1..255)", ctx->argv[0]);
+    }
+    if (gop == 1u) {
+        fmt_printf("GOP 1 (every picture is an IDR picture), effective at the next picture\n");
+    } else {
+        fmt_printf("GOP %u (an IDR picture every %u pictures, P pictures between), effective at the next picture\n", (unsigned)gop,
+                   (unsigned)gop);
+    }
+    return 0;
+}
+
+/**
  * @brief SHOW STREAM: stream state, counts, bit rate, dropped pictures, TS packets and the mux CPU load.
  * @param ctx Unused.
  * @return 0.
@@ -3639,6 +3660,10 @@ int cli_show_stream(const MenuCommandContext *ctx)
                s.mode == RTLNET_H264_MODE_1080P30 ? "1080p30" : "720p30", (unsigned)s.qp, (unsigned)s.qp_used);
     fmt_printf("  Pictures        : %u sent, %u dropped (frame numbers skipped), last frame %u, last %u bytes\n",
                (unsigned)s.pictures, (unsigned)s.dropped_pictures, (unsigned)s.last_frame, (unsigned)s.last_picture_bytes);
+    fmt_printf("  GOP             : %u (IDR every %u pictures); %u IDR pictures (%u bytes each on average), %u P pictures (%u bytes each), last %s\n",
+               (unsigned)s.gop, (unsigned)s.gop, (unsigned)s.idr_pictures,
+               (unsigned)(s.idr_pictures ? s.idr_bytes / s.idr_pictures : 0u), (unsigned)s.p_pictures,
+               (unsigned)(s.p_pictures ? s.p_bytes / s.p_pictures : 0u), s.last_idr ? "IDR" : "P");
     fmt_printf("  Bytes           : %u ES, %u TS, bit rate %u kb/s\n", (unsigned)s.es_bytes, (unsigned)s.ts_bytes,
                (unsigned)(s.bit_rate_bps / 1000u));
     fmt_printf("  TS packets      : %u in %u datagrams, %u refused by UDP (UDP sent %u, dropped %u, retries %u)\n",
@@ -3681,6 +3706,8 @@ int cli_show_encoder(const MenuCommandContext *ctx)
                (unsigned)s.qp, (unsigned)s.qp_used, (unsigned)status, (unsigned)(status & 1u),
                (unsigned)((status >> 1) & 1u), (unsigned)((status >> 2) & 1u), (unsigned)((status >> 3) & 1u),
                (unsigned)board_debug_read32(RTLNET_PLAT_H264_BASE + RTLNET_H264_REG_ERR_CODE));
+    fmt_printf("  GOP             : %u (IDR every %u pictures, P pictures between), last picture %s\n", (unsigned)s.gop,
+               (unsigned)s.gop, s.last_idr ? "IDR" : "P");
     fmt_printf("  Pictures        : %u coded (PIC_COUNT), %u slices\n",
                (unsigned)board_debug_read32(RTLNET_PLAT_H264_BASE + RTLNET_H264_REG_PIC_COUNT),
                (unsigned)board_debug_read32(RTLNET_PLAT_H264_BASE + RTLNET_H264_REG_SLICE_COUNT));

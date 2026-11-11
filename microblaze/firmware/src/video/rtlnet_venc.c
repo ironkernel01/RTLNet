@@ -5,7 +5,7 @@
  *
  * Role: implementation of the contract in rtlnet_venc.h.
  *
- * Revision: 11-10-2026 (macroblock-tiled rebuilt picture, 128-byte index records)
+ * Revision: 11-10-2026 (macroblock-tiled rebuilt picture, 128-byte index records; phase 2c: GOP, P pictures, two rebuilt buffers)
  */
 #include "rtlnet_venc.h"
 
@@ -28,12 +28,12 @@ uint32_t rtlnet_host_mem_read32(uintptr_t addr);
 /* DDR3 map (byte offsets in DDR3). The rebuilt (reference) picture is macroblock-tiled: macroblock m has 256 bytes of luma at
  * the luma base + 256 * m and 128 bytes of chroma (Cb then Cr) at the chroma base + 128 * m. 1080p (120 x 68 = 8160 macroblocks)
  * needs 2,088,960 bytes of luma and 1,044,480 bytes of chroma (3,133,440 bytes per picture); each area gets 2 MiB. Two
- * pictures (A, B) are reserved so that the motion-search phase can ping-pong the reference; the intra-only encoder writes A. */
+ * pictures (A, B) ping-pong: a picture is written to one and a P picture reads the other, the previous picture, as its reference. */
 #define VENC_REC_AREA_BYTES   0x00200000u
 #define VENC_RY_BASE      0x11000000u               /* picture A luma tiles */
 #define VENC_RU_BASE      0x11200000u               /* picture A chroma tiles */
-#define VENC_RY_BASE_B    (VENC_RY_BASE + 2u * VENC_REC_AREA_BYTES)   /* picture B luma tiles (reserved) */
-#define VENC_RU_BASE_B    (VENC_RU_BASE + 2u * VENC_REC_AREA_BYTES)   /* picture B chroma tiles (reserved) */
+#define VENC_RY_BASE_B    (VENC_RY_BASE + 2u * VENC_REC_AREA_BYTES)   /* picture B luma tiles */
+#define VENC_RU_BASE_B    (VENC_RU_BASE + 2u * VENC_REC_AREA_BYTES)   /* picture B chroma tiles */
 #define VENC_RING_BASE    0x12000000u
 #define VENC_RING_SIZE    0x00800000u
 #define VENC_IDX_BASE     0x13000000u
@@ -44,6 +44,7 @@ uint32_t rtlnet_host_mem_read32(uintptr_t addr);
 #define VENC_ENC_TIMEOUT_US  500000u
 #define VENC_LOG2_FN      4u
 #define VENC_CHUNK        1024u      /* bytes per cache invalidate and read */
+#define VENC_PAD_SLOTS    8u         /* frame-buffer slots whose padding lines are tracked */
 
 typedef enum { ST_IDLE = 0, ST_ENCODING } venc_state_t;
 
@@ -64,6 +65,14 @@ static struct {
     uint32_t                   ring_rptr[VENC_MAX_ENGINES];
     uint32_t                   idx_rptr[VENC_MAX_ENGINES];
     uint32_t                   pic_seq;
+    rtlnet_h264_enc_buffers_t  bufs;              /* the two rebuilt buffers: cur is written, the other is the reference */
+    uint32_t                   gop_pos;           /* pictures coded since the last IDR picture (the IDR counts 1) */
+    uint32_t                   need_idr;          /* the next picture must be an IDR picture */
+    uint32_t                   prev_fn;           /* frame_num of the last started picture */
+    uint32_t                   idr_id;            /* idr_pic_id of the next IDR picture (alternates 0, 1) */
+    uint32_t                   pic_type;          /* RTLNET_H264_PIC_IDR or _P of the picture in flight */
+    uint32_t                   padded[VENC_PAD_SLOTS];   /* slot bases whose padding lines (below the display height) are filled */
+    uint32_t                   padded_n;
     uint32_t                   t_start;           /* plat_ticks at picture start */
     /* load accounting: ticks of busy time in the current one-second window */
     uint32_t                   win_start_ms;
@@ -123,7 +132,10 @@ void venc_init(void)
 {
     memset(&g, 0, sizeof(g));
     g.st.qp = VENC_QP_DEFAULT;
+    g.st.gop = VENC_GOP_DEFAULT;
     g.cfg_mode = 0xFFFFFFFFu;
+    g.need_idr = 1u;
+    (void)rtlnet_h264_enc_buffers_init(&g.bufs, VENC_RY_BASE, VENC_RU_BASE, VENC_RY_BASE_B, VENC_RU_BASE_B);
 }
 
 /* release_slot -- release the frame-buffer slot when the firmware holds it. */
@@ -157,6 +169,12 @@ int venc_start(uint32_t ip, uint16_t port)
     g.have_last = 0;
     g.state = ST_IDLE;
     g.pic_seq = 0u;
+    g.need_idr = 1u;
+    g.padded_n = 0u;
+    g.gop_pos = 0u;
+    g.prev_fn = 0u;
+    g.idr_id = 0u;
+    (void)rtlnet_h264_enc_buffers_init(&g.bufs, VENC_RY_BASE, VENC_RU_BASE, VENC_RY_BASE_B, VENC_RU_BASE_B);
     g.st.dst_ip = ip;
     g.st.dst_port = port;
     g.win_start_ms = plat_uptime_ms();
@@ -183,8 +201,52 @@ int venc_set_qp(uint32_t qp)
     if (qp > VENC_QP_MAX) {
         return VENC_ERR_ARG;
     }
+    if (qp != g.st.qp) {
+        g.need_idr = 1u;   /* no P picture across a QP change */
+    }
     g.st.qp = qp;
     return VENC_OK;
+}
+
+int venc_set_gop(uint32_t gop)
+{
+    if (gop < 1u || gop > VENC_GOP_MAX) {
+        return VENC_ERR_ARG;
+    }
+    g.st.gop = gop;
+    return VENC_OK;
+}
+
+/*
+ * pad_slot -- fill the lines of a slot below the picture (the coded height is a multiple of 16: 1088 for 1080 lines).
+ * The video write DMA writes only the picture's lines, so the lines 1080..1087 hold whatever the DDR3 held before (power-up
+ * contents or an earlier frame), and the encoder reads them as the bottom of the last macroblock row. Stale data there changes the
+ * picture size (one slot in three coded about 11 kB more in the 215334f run) and makes every P picture across such a slot
+ * non-skip in that row. The firmware writes the last picture line into each padding line once per slot and mode (the DMA never
+ * touches those lines, and the slot is held by the firmware while this runs).
+ */
+static void pad_slot(uint32_t base, uint32_t stride, uint32_t lines, uint32_t coded_lines)
+{
+#ifndef RTLNET_HOST_TEST
+    uintptr_t src = (uintptr_t)(RTLNET_PLAT_DDR_BASE + base + (lines - 1u) * stride);
+    uintptr_t dst = (uintptr_t)(RTLNET_PLAT_DDR_BASE + base + lines * stride);
+    uint32_t i;
+    for (i = 0u; i < g.padded_n; i++) {
+        if (g.padded[i] == base) {
+            return;
+        }
+    }
+    plat_dcache_invalidate_range(src, stride);
+    for (uint32_t r = 0u; r < coded_lines - lines; r++) {
+        memcpy((void *)(dst + (uintptr_t)r * stride), (const void *)src, stride);
+    }
+    plat_dcache_flush_range(dst, (coded_lines - lines) * stride);
+    if (g.padded_n < VENC_PAD_SLOTS) {
+        g.padded[g.padded_n++] = base;
+    }
+#else
+    (void)base; (void)stride; (void)lines; (void)coded_lines;
+#endif
 }
 
 /*
@@ -222,6 +284,8 @@ static int configure_mode(uint32_t mode)
         g.idx_rptr[e] = 0u;
     }
     g.cfg_mode = mode;
+    g.padded_n = 0u;   /* the padding lines of the slots are filled again for the new geometry */
+    g.need_idr = 1u;   /* a new mode starts a new coded video sequence: the reference of the old mode is unusable */
     g.st.mode = mode;
     g.st.width = m.display_width;
     g.st.height = m.display_height;
@@ -241,6 +305,7 @@ static int begin_picture(void)
     uint32_t mode;
     uint32_t stride;
     uint32_t period;
+    uint32_t pic_type;
     if (rtlnet_framebuf_fw_take(RTLNET_PLAT_FB_BASE, &f) != RTLNET_FB_OK) {
         g.st.errors++;
         return -1;
@@ -265,6 +330,9 @@ static int begin_picture(void)
     stride = rtlnet_reg_read32(RTLNET_PLAT_S2MM_BASE, RTLNET_S2MM_REG_STRIDE);
     if (stride == 0u) {
         stride = m.width * 2u;
+    }
+    if (m.height > f.height && f.height > 0u) {
+        pad_slot(f.base, stride, f.height, m.height);
     }
     memset(&cfg, 0, sizeof(cfg));
     cfg.mb_w = m.mb_w;
@@ -295,12 +363,33 @@ static int begin_picture(void)
         g.first_frame = f.frame;
     } else if (f.frame > g.st.last_frame + 1u) {
         g.st.dropped_pictures += f.frame - g.st.last_frame - 1u;
+        g.need_idr = 1u;   /* a dropped picture: restart the GOP with an IDR picture */
+    }
+    /* IDR when forced, when the GOP is complete (gop 1: every picture), or when no reference picture exists; P otherwise. */
+    if (g.need_idr || g.gop_pos >= g.st.gop || !g.bufs.has_ref) {
+        pic_type = RTLNET_H264_PIC_IDR;
+    } else {
+        pic_type = RTLNET_H264_PIC_P;
     }
     g.pic_seq++;
-    if (rtlnet_h264_enc_start_picture(RTLNET_PLAT_H264_BASE, 0u, g.pic_seq & 0xFFu, 1) != 0) {
+    if (rtlnet_h264_enc_buffers_begin(RTLNET_PLAT_H264_BASE, &g.bufs, pic_type) != 0 ||
+        rtlnet_h264_enc_start_picture_ex(RTLNET_PLAT_H264_BASE,
+                                         pic_type == RTLNET_H264_PIC_IDR ? 0u : rtlnet_h264_enc_next_frame_num(g.prev_fn, VENC_LOG2_FN),
+                                         g.idr_id, pic_type) != 0) {
         g.st.errors++;
+        g.need_idr = 1u;
         release_slot();
         return -1;
+    }
+    g.pic_type = pic_type;
+    if (pic_type == RTLNET_H264_PIC_IDR) {
+        g.prev_fn = 0u;
+        g.idr_id ^= 1u;       /* consecutive IDR pictures differ (clause 7.4.3) */
+        g.need_idr = 0u;
+        g.gop_pos = 1u;
+    } else {
+        g.prev_fn = rtlnet_h264_enc_next_frame_num(g.prev_fn, VENC_LOG2_FN);
+        g.gop_pos++;
     }
     g.t_start = plat_ticks();
     return 0;
@@ -361,9 +450,12 @@ static int mux_picture(void)
     }
     pts = (uint64_t)VENC_PTS_BASE + (uint64_t)(g.frame.frame - g.first_frame) * g.pts_step;
     t0 = plat_ticks();
-    tsmux_au_begin(&g.mux, pts, pts - VENC_PCR_LEAD, 1);
+    /* The random access indicator marks IDR pictures only; the PCR stays on every access unit (13818-1: at most 100 ms apart). */
+    tsmux_au_begin(&g.mux, pts, pts - VENC_PCR_LEAD, g.pic_type == RTLNET_H264_PIC_IDR);
     tsmux_au_data(&g.mux, aud, sizeof(aud));
-    tsmux_au_data(&g.mux, g.sps_pps, (uint32_t)g.sps_len);
+    if (g.pic_type == RTLNET_H264_PIC_IDR) {
+        tsmux_au_data(&g.mux, g.sps_pps, (uint32_t)g.sps_len);   /* SPS and PPS in front of every IDR picture */
+    }
     ring_feed(0u, (off[0] + 6u) % share, len[0] - 6u);
     for (uint32_t e = 1u; e < g.engines; e++) {
         ring_feed(e, off[e], len[e]);
@@ -381,9 +473,19 @@ static int mux_picture(void)
         g.idx_rptr[e] = new_idx[e];
         rtlnet_h264_enc_set_read_pointers(RTLNET_PLAT_H264_BASE + 0x100u * e, g.ring_rptr[e], g.idx_rptr[e]);
     }
+    if (g.pic_type == RTLNET_H264_PIC_IDR) {
+        total += (uint32_t)g.sps_len;
+        g.st.idr_pictures++;
+        g.st.idr_bytes += total;
+        g.st.last_idr = 1u;
+    } else {
+        g.st.p_pictures++;
+        g.st.p_bytes += total;
+        g.st.last_idr = 0u;
+    }
     g.st.pictures++;
-    g.st.es_bytes += total + (uint32_t)g.sps_len;
-    g.st.last_picture_bytes = total + (uint32_t)g.sps_len;
+    g.st.es_bytes += total;
+    g.st.last_picture_bytes = total;
     g.st.last_frame = g.frame.frame;
     g.have_last = 1;
     return 0;
@@ -435,9 +537,11 @@ void venc_poll(void)
             if ((status & RTLNET_H264_STATUS_ERR) != 0u) {
                 g.st.errors++;
                 rtlnet_h264_enc_clear_status(RTLNET_PLAT_H264_BASE);
-                g.cfg_mode = 0xFFFFFFFFu;   /* reconfigure and reset the rings at the next picture */
+                g.cfg_mode = 0xFFFFFFFFu;   /* reconfigure and reset the rings at the next picture (configure_mode forces an IDR) */
+                g.need_idr = 1u;
             } else {
                 rtlnet_h264_enc_clear_status(RTLNET_PLAT_H264_BASE);
+                rtlnet_h264_enc_buffers_end(&g.bufs);   /* the picture just rebuilt is the reference of the next one */
                 if (mux_picture() != 0) {
                     g.st.errors++;
                     g.cfg_mode = 0xFFFFFFFFu;
@@ -449,6 +553,7 @@ void venc_poll(void)
             release_slot();
             g.st.errors++;
             g.cfg_mode = 0xFFFFFFFFu;
+            g.need_idr = 1u;
             g.state = ST_IDLE;
         }
     }
@@ -473,6 +578,10 @@ void venc_clear_counters(void)
     g.st.pictures = 0u;
     g.st.es_bytes = 0u;
     g.st.dropped_pictures = 0u;
+    g.st.idr_pictures = 0u;
+    g.st.p_pictures = 0u;
+    g.st.idr_bytes = 0u;
+    g.st.p_bytes = 0u;
     g.st.errors = 0u;
     g.st.max_mux_us = 0u;
     tsmux_clear_counters(&g.mux);

@@ -25,15 +25,19 @@ Overview:
     are printed for the record.
 Usage:
   powershell -NoProfile -ExecutionPolicy Bypass -File boards/nexys_video/scripts/tcp_test.ps1 `
-    [-Board 192.169.1.199] [-Seconds 10] [-UdpRate 20M] [-Iperf <iperf.exe>]
-Revision: 11-09-2026
+    [-Board <board IPv4>] [-Seconds 10] [-UdpRate 20M] [-Iperf <iperf.exe>] [-Port COM3]
+  Without -Board the script reads the board's address over the USB-UART (CLI `show ip`, the effective IPv4) under the board lock;
+  the DHCP lease changes between sessions.
+Revision: 11-10-2026
   * 10-22-2026: initial version.
   * 10-22-2026: -R, -r and -d are gates with throughput (rtlnet_lwiperf).
   * 11-09-2026: takes the machine-wide board lock (rtlnet_board_lock.ps1) before touching the board.
+  * 11-10-2026: -Board defaults to the lease read from the board over COM3 (show ip), not a fixed address.
 -------------------------------------------------------------------------------
 #>
 param(
-    [string]$Board = '192.169.1.199',
+    [string]$Board = '',
+    [string]$Port = 'COM3',
     [int]$Seconds = 10,
     [string]$UdpRate = '20M',
     [string]$Iperf = ''
@@ -44,6 +48,33 @@ $ErrorActionPreference = 'Continue'
 . (Join-Path $PSScriptRoot '..\..\..\scripts\rtlnet_board_lock.ps1')
 Enter-RtlnetBoardLock -Purpose 'tcp test' -ExpectedMinutes 60
 $Repo   = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..')).Path
+if (-not $Board) {
+    # The board's DHCP lease from the CLI (`show ip`, "Effective IPv4"), over the USB-UART.
+    $sp = New-Object System.IO.Ports.SerialPort $Port, 115200, ([System.IO.Ports.Parity]::None), 8, ([System.IO.Ports.StopBits]::One)
+    $sp.Handshake = [System.IO.Ports.Handshake]::None
+    $sp.ReadTimeout = 200
+    $sp.WriteTimeout = 2000
+    try {
+        $sp.Open()
+        $sp.DiscardInBuffer()
+        $sp.Write([string][char]3)
+        $sp.Write("`r")
+        $buf = ''
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        while ($sw.ElapsedMilliseconds -lt 5000 -and $buf.TrimEnd(' ') -notmatch 'rtlnet(\([a-z-]+\))?[>#]$') { $buf += $sp.ReadExisting(); Start-Sleep -Milliseconds 30 }
+        $sp.Write("show ip`r")
+        $buf = ''
+        $sw.Restart()
+        while ($sw.ElapsedMilliseconds -lt 5000 -and $buf.TrimEnd(' ') -notmatch 'rtlnet(\([a-z-]+\))?[>#]$') { $buf += $sp.ReadExisting(); Start-Sleep -Milliseconds 30 }
+        if ($buf -match 'Effective IPv4\s+: (\d+\.\d+\.\d+\.\d+)') { $Board = $Matches[1] }
+    } catch {
+        Write-Output "TCP_TEST: FAIL cannot read the board address on ${Port}: $($_.Exception.Message)"
+        exit 1
+    } finally {
+        if ($sp.IsOpen) { $sp.Close() }
+    }
+    if (-not $Board -or $Board -eq '0.0.0.0') { Write-Output "TCP_TEST: FAIL the board has no IPv4 address (show ip); pass -Board"; exit 1 }
+}
 . (Join-Path $Repo 'scripts\rtlnet_tools.ps1')
 $Python = Resolve-RtlnetPython
 if (-not $Iperf) { $Iperf = Resolve-RtlnetIperf; if (-not $Iperf) { $Iperf = 'iperf.exe' } }

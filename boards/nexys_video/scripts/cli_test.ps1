@@ -33,7 +33,7 @@ Overview:
     "CLI_TEST: FAIL <failed>/<n>"; exit code 0 only on PASS.
 Usage:
   powershell -NoProfile -ExecutionPolicy Bypass -File boards/nexys_video/scripts/cli_test.ps1 [-Port COM3] [-Baud 115200]
-Revision: 11-09-2026
+Revision: 11-10-2026
   * 10-22-2026: initial version.
   * 10-22-2026: CPU network path steps (BSP-based firmware).
   * 11-09-2026: register map 11-09-2026; DDR3 steps (show ddr, ddr test, bad size).
@@ -42,6 +42,8 @@ Revision: 11-09-2026
     mode, rate and source, framebuffer crc).
   * 11-09-2026: DDR3 image (banner "DDR3 image" or the show version Image line): the three ddr test steps are
     skipped, reported as skipped and not counted as passed.
+  * 11-10-2026: Phase 2c: encoder VERSION 0x11102C02, encoder gop (bad values, 1, 30) and the GOP lines of show stream and show encoder,
+    the cache line of show ddr (32 KiB, 512-bit buses).
 -------------------------------------------------------------------------------
 #>
 param(
@@ -165,7 +167,7 @@ try {
     Send-Step $sp 'show ddr' "show ddr`r" @(
         'Calibration\s+: done', 'Arbiter\s+: ID "ARBT" 0x41524254, version 11-09-2026 at 0x44A04000',
         'Arbiter config\s+: 4 master\(s\), 16-byte beats, ID width 2, 8 outstanding, high-priority mask 0x02, narrow mask 0x01, wrap mask 0x01',
-        'illegal-burst flag clear', 'Master 0 \(CPU caches\): AW bursts \d+',
+        'illegal-burst flag clear', 'Caches\s+: instruction 32 KiB, data 32 KiB write-back, 64-byte lines, 512-bit buses', 'Master 0 \(CPU caches\): AW bursts \d+',
         'Master 1 \(video write DMA\): AW bursts \d+, .* errors 0,', 'Master 2 \(encoder engine 0\): AW bursts \d+, .* errors 0,',
         'Master 3 \(encoder engine 1\): AW bursts \d+, .* errors 0,') 'rtlnet#'
     if ($ddrImage) {
@@ -210,16 +212,23 @@ try {
     Send-Step $sp 'framebuffer crc' "framebuffer crc`r" @(
         'Framebuffer CRC-32 : 0x[0-9A-F]{8} \(frame \d+, slot \d, \d+x\d+, (pattern|camera), \d+ bytes\)') 'rtlnet#' 60000
     # H.264 stream (Phase 2b-3): command formats and refusals; the stream itself is checked by stream_test.ps1.
+    Send-Step $sp 'encoder VERSION' "debug read 0x44a08004`r" @('0x44A08004 = 0x11102C02') 'rtlnet#'
     Send-Step $sp 'show encoder' "show encoder`r" @(
-        'ID "H264" 0x48323634', 'Build\s+: 2 engines, up to 120 x 68 macroblocks', 'QP\s+: \d+ configured, \d+ written; STATUS 0x[0-9A-F]{8}',
+        'ID "H264" 0x48323634', 'GOP\s+: \d+ \(IDR every \d+ pictures, P pictures between\), last picture (IDR|P)', 'Build\s+: 2 engines, up to 120 x 68 macroblocks', 'QP\s+: \d+ configured, \d+ written; STATUS 0x[0-9A-F]{8}',
         'Engine 0\s+: \d+ macroblocks, picture \d+ cycles', 'Engine 1\s+: \d+ macroblocks, picture \d+ cycles') 'rtlnet#'
     Send-Step $sp 'encoder qp (bad)' "encoder qp 52`r" @('% Invalid QP \(0\.\.51\) "52"') 'rtlnet#'
     Send-Step $sp 'encoder qp 8 (floor)' "encoder qp 8`r" @('QP 8 set; the driver writes 12') 'rtlnet#'
     Send-Step $sp 'encoder qp 28' "encoder qp 28`r" @('QP 28, effective at the next picture') 'rtlnet#'
+    Send-Step $sp 'encoder gop (bad 0)' "encoder gop 0`r" @('% Invalid GOP \(1\.\.255\) "0"') 'rtlnet#'
+    Send-Step $sp 'encoder gop (bad 256)' "encoder gop 256`r" @('% Invalid GOP \(1\.\.255\) "256"') 'rtlnet#'
+    Send-Step $sp 'encoder gop 1' "encoder gop 1`r" @('GOP 1 \(every picture is an IDR picture\), effective at the next picture') 'rtlnet#'
+    Send-Step $sp 'show stream (gop 1)' "show stream`r" @('GOP\s+: 1 \(IDR every 1 pictures\); \d+ IDR pictures') 'rtlnet#'
+    Send-Step $sp 'encoder gop 30' "encoder gop 30`r" @('GOP 30 \(an IDR picture every 30 pictures, P pictures between\), effective at the next picture') 'rtlnet#'
+    Send-Step $sp 'show encoder (gop 30)' "show encoder`r" @('GOP\s+: 30 \(IDR every 30 pictures') 'rtlnet#'
     Send-Step $sp 'stream h264 (bad address)' "stream h264 300.1.1.1 5004`r" @('% Invalid IPv4 address "300\.1\.1\.1"') 'rtlnet#'
     Send-Step $sp 'stream h264 (bad port)' "stream h264 192.168.68.1 0`r" @('% Invalid UDP port \(1\.\.65535\) "0"') 'rtlnet#'
     Send-Step $sp 'show stream (stopped)' "show stream`r" @(
-        'State\s+: stopped', 'Pictures\s+: \d+ sent, \d+ dropped', 'TS packets\s+: \d+ in \d+ datagrams',
+        'State\s+: stopped', 'Pictures\s+: \d+ sent, \d+ dropped', 'GOP\s+: 30 \(IDR every 30 pictures\); \d+ IDR pictures \(\d+ bytes each on average\), \d+ P pictures', 'TS packets\s+: \d+ in \d+ datagrams',
         'CPU load\s+: TS mux \d+\.\d %', 'Errors\s+: \d+; frame buffer published \d+, dropped \d+') 'rtlnet#'
     Send-Step $sp 'stream stop (none)' "stream stop`r" @('No stream is running') 'rtlnet#'
     Send-Step $sp 'conf t (tcp)' "configure terminal`r" @() 'rtlnet(config)#'

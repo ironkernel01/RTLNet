@@ -19,6 +19,7 @@ REVISION:10-22-2026:Checksum offload: show offload, offload tx-ip / tx-l4 / rx /
 REVISION:11-09-2026:DDR3: show ddr, ddr test [size in MiB]; clear counters also clears the DDR3 arbiter
 REVISION:11-09-2026:Video (Phase 1): show camera, show framebuffer, camera mode|source|rate, framebuffer crc; clear counters clears the video cores
 REVISION:11-09-2026:H.264 stream (Phase 2b-3): stream h264 <ip> <port>, stream stop, show stream, encoder qp, show encoder
+REVISION:11-10-2026:H.264 P pictures (Phase 2c): encoder gop <1..255>, GOP and IDR/P counts in show stream and show encoder
 
 # ---------------------------------------------------------------------------
 # Modes
@@ -100,7 +101,8 @@ cli_camera_rate:priv:CAMERA RATE [FPS]:Frame rate in frames per second, 1..30 (3
 cli_framebuffer_crc:priv:FRAMEBUFFER CRC:CRC-32 of the latest published frame, read through the cache
 cli_stream_h264:priv:STREAM H264 [IP] [PORT]:Start the H.264 MPEG-TS stream over UDP to a host (VLC: udp://@:PORT)
 cli_stream_stop:priv:STREAM STOP:Stop the H.264 stream
-cli_encoder_qp:priv:ENCODER QP [QP]:H.264 quantizer 0..51, fixed for I pictures (the driver raises values below 12 to 12; default 28)
+cli_encoder_qp:priv:ENCODER QP [QP]:H.264 quantizer 0..51, fixed (the driver raises values below 12 to 12; default 28)
+cli_encoder_gop:priv:ENCODER GOP [GOP]:IDR picture every GOP pictures, P pictures between, 1..255 (1 = all IDR; default 30)
 cli_debug_read:priv:DEBUG READ [ADDR]:Read a 32-bit word (hex 0x... or decimal address)
 cli_debug_write:priv:DEBUG WRITE [ADDR] [VALUE]:Write a 32-bit word
 cli_phy_read:priv:PHY READ [REG]:Read a PHY register (0..31) over MDIO

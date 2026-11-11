@@ -16,14 +16,19 @@
  * of rtlnet_csi2_rx (3000 at 30 fps). The count comes from ui_clk through the frame numbers, so a dropped frame shows as a
  * PTS gap of two steps. The PCR is the PTS minus 9000 ticks (100 ms of receiver buffering).
  *
+ * Phase 2c: IDR every GOP pictures (default 30), P pictures between. The rebuilt picture ping-pongs between two buffers; a P
+ * picture's reference is the previous picture's buffer. The next picture is an IDR picture after a dropped picture, a mode change,
+ * a QP change or an encoder error, so a P picture never references a picture that was not coded.
+ *
  * DDR3 map (byte offsets in DDR3, CPU address = DDR3 window + offset; the frame buffer holds 0x1000_0000 to 0x10C0_0000):
- *   0x1100_0000  rebuilt luma plane (stride 2048), 0x1130_0000 Cb (stride 1024), 0x1138_0000 Cr
+ *   0x1100_0000 / 0x1120_0000  rebuilt picture A, luma tiles / chroma tiles (2 MiB each)
+ *   0x1140_0000 / 0x1160_0000  rebuilt picture B, luma tiles / chroma tiles (2 MiB each)
  *   0x1200_0000  compressed rings, 8 MiB, split by the core into one share per engine
- *   0x1300_0000  index rings, 256 entries of 16 bytes, split per engine
+ *   0x1300_0000  index rings, 256 records of 128 bytes, split per engine
  *
  * This header holds the contract; rtlnet_venc.c holds the per-function commentary.
  *
- * Revision: 11-09-2026
+ * Revision: 11-10-2026 (GOP, P pictures)
  */
 #ifndef RTLNET_VENC_H
 #define RTLNET_VENC_H
@@ -32,6 +37,8 @@
 
 #define VENC_QP_DEFAULT     28u
 #define VENC_QP_MAX         51u
+#define VENC_GOP_DEFAULT    30u    /* IDR every 30 pictures, P pictures in between */
+#define VENC_GOP_MAX        255u   /* 1 = every picture is an IDR picture */
 #define VENC_MAX_ENGINES    4u
 
 #define VENC_OK             0
@@ -46,6 +53,12 @@ typedef struct {
     uint16_t dst_port;
     uint32_t qp;                /* configured QP; the driver raises it to 12 */
     uint32_t qp_used;           /* QP written to the core */
+    uint32_t gop;               /* IDR every gop pictures (1 = all IDR) */
+    uint32_t idr_pictures;      /* IDR pictures sent */
+    uint32_t p_pictures;        /* P pictures sent */
+    uint32_t idr_bytes;         /* elementary stream bytes of the IDR pictures (SPS, PPS and slices) */
+    uint32_t p_bytes;           /* elementary stream bytes of the P pictures */
+    uint32_t last_idr;          /* 1 when the last picture was an IDR picture, 0 for a P picture */
     uint32_t mode;              /* RTLNET_H264_MODE_* of the last picture */
     uint32_t width, height;     /* display size of the last picture */
     uint32_t pictures;          /* pictures sent */
@@ -76,8 +89,13 @@ int venc_start(uint32_t ip, uint16_t port);
 /* Stop the stream and close the socket; a picture in flight is abandoned and its slot released. */
 void venc_stop(void);
 
-/* Set the QP (0..51; the driver raises values below 12 to 12). VENC_ERR_ARG above 51. Effective at the next picture. */
+/* Set the QP (0..51; the driver raises values below 12 to 12). VENC_ERR_ARG above 51. Effective at the next picture; a change of
+ * the QP makes the next picture an IDR picture (a P picture never mixes two QPs in one GOP). */
 int venc_set_qp(uint32_t qp);
+
+/* Set the GOP length: an IDR picture every gop pictures, P pictures in between (1..255; 1 = all IDR). VENC_ERR_ARG outside 1..255.
+ * Effective at the next picture. */
+int venc_set_gop(uint32_t gop);
 
 /* Main-loop service: start the next picture, finish a running one, mux and send. Does nothing when stopped. */
 void venc_poll(void);

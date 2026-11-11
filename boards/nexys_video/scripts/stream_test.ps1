@@ -1,8 +1,9 @@
 <#
 -------------------------------------------------------------------------------
 File: stream_test.ps1
-Purpose: board gate of Phase 2b-3 (documentation/gige.md section 14): the H.264 encoder streams the color bars as
-  MPEG-TS over UDP, and this PC checks the stream with its own TS parser, ffprobe, ffmpeg and VLC.
+Purpose: board gate of Phase 2b-3 and 2c (documentation/gige.md sections 14 and 17): the H.264 encoder streams the color bars as
+  MPEG-TS over UDP (an IDR picture every -Gop pictures, P pictures between), and this PC checks the stream with its own TS parser,
+  ffprobe, ffmpeg and VLC.
 Overview:
   * Takes the machine-wide board lock (rtlnet_board_lock.ps1) unless -NoBoard. Talks to the firmware CLI over the board
     USB-UART (115200 8N1) like phase1_gate.ps1. Tools through scripts/rtlnet_tools.ps1 (Resolve-RtlnetFfmpeg,
@@ -11,25 +12,29 @@ Overview:
     on this PC for -Seconds with a .NET UDP socket (the datagrams are kept as received, so a lost datagram shows as a
     continuity error; ffmpeg's own udp:// reader remuxes and would hide it), "show stream" and "show encoder" from the
     board, "stream stop". Checks per mode, one result line each:
-      ts      stream_check.py ts: 188-byte packets, continuity counters, PAT and PMT CRC-32, PCR, PES, PTS and DTS equal,
-              PTS steps of 3000, about 30 pictures per second, no PTS gaps
+      ts      stream_check.py ts --gop: 188-byte packets, continuity counters, PAT and PMT CRC-32, PCR, PES, PTS and DTS equal,
+              PTS steps of 3000, about 30 pictures per second, no PTS gaps, the random access indicator and the IDR NAL units
+              exactly every -Gop pictures; the bytes per IDR and per P access unit (AU_SIZE lines)
       probe   ffprobe: one video stream, h264 Constrained Baseline, the right width and height, about 30 fps
-      decode  ffmpeg decodes every picture; stream_check.py psnr compares the decoded yuv420p frames with the expected
-              4:2:0 color bars (same eight bars as rtlnet_csi2_rx); PSNR floor -PsnrFloor
-      png     a decoded frame is written to boards/nexys_video/build/phase2b3_decoded_<mode>.png
-      board   show stream: pictures counted, no dropped pictures, no UDP drops, frame buffer drops reported
+      decode  ffmpeg decodes every picture (IDR and P); stream_check.py psnr compares every decoded yuv420p frame with the
+              expected 4:2:0 color bars (same eight bars as rtlnet_csi2_rx); PSNR floor -PsnrFloor
+      png     a decoded frame is written to boards/nexys_video/build/phase2c_gop<N>_decoded_<mode>.png
+      board   show stream: pictures counted, no dropped pictures, no UDP drops, frame buffer drops reported, GOP and the IDR and
+              P counts, clocks per macroblock of each engine (show encoder), TS-mux CPU load
   * VLC step (720p30 unless -SkipVlc): VLC starts on udp://@:<port> with the scene video filter, the board stream runs, and
-    the first snapshot PNG is kept as boards/nexys_video/build/phase2b3_vlc_snapshot.png.
+    the first snapshot PNG is kept as boards/nexys_video/build/phase2c_gop<N>_vlc_snapshot.png.
   * If a capture receives no datagram while the board reports sent datagrams, the script prints the Windows firewall block
     and the command the user runs from an elevated prompt; it never changes the firewall.
   * -InputTs <file>: check an existing capture offline (no board, no capture).
-  * The transcript is boards/nexys_video/build/phase2b3_stream_transcript.txt. The last line is
+  * The transcript is boards/nexys_video/build/phase2c_gop<N>_stream_transcript.txt. The last line is
     "STREAM_TEST: PASS <n>/<n>" or "STREAM_TEST: FAIL <failed>/<n>"; exit code 0 only on PASS.
 Usage:
   powershell -NoProfile -ExecutionPolicy Bypass -File boards/nexys_video/scripts/stream_test.ps1 [-Mode both] [-Seconds 60]
-    [-Port COM3] [-UdpPort 5004] [-HostIp <PC address>] [-Qp 28] [-SkipVlc] [-NoBoard] [-InputTs <file> -Width 1280 -Height 720]
-Revision: 11-09-2026
+    [-Port COM3] [-UdpPort 5004] [-HostIp <PC address>] [-Qp 28] [-Gop 30] [-SkipVlc] [-NoBoard] [-InputTs <file> -Width 1280 -Height 720]
+Revision: 11-10-2026
   * 11-09-2026: initial version.
+  * 11-10-2026: Phase 2c: -Gop (encoder gop), file prefix phase2c_gop<N>, GOP and NAL checks in the TS parser, every decoded frame
+    checked, IDR and P sizes, clocks per macroblock and TS-mux load in the board line.
 -------------------------------------------------------------------------------
 #>
 param(
@@ -40,6 +45,7 @@ param(
     [int]$UdpPort = 5004,
     [string]$HostIp = '',
     [int]$Qp = 28,
+    [ValidateRange(1, 255)][int]$Gop = 30,
     [double]$PsnrFloor = 30.0,
     [int]$VlcSeconds = 14,
     [switch]$SkipVlc,
@@ -58,7 +64,8 @@ New-Item -ItemType Directory -Force -Path $Build | Out-Null
 $ff = Resolve-RtlnetFfmpeg
 $py = Resolve-RtlnetPython
 $Check = Join-Path $PSScriptRoot 'stream_check.py'
-$Transcript = Join-Path $Build 'phase2b3_stream_transcript.txt'
+$Prefix = "phase2c_gop$Gop"
+$Transcript = Join-Path $Build "${Prefix}_stream_transcript.txt"
 $script:log = New-Object System.Text.StringBuilder
 $script:results = @()
 $PromptRe = '(rtlnet(\([a-z-]+\))?[>#])$'
@@ -145,9 +152,9 @@ function Start-Capture([string]$file, [double]$seconds) {
 
 # The checks on one captured transport stream file.
 function Test-Capture([string]$tag, [string]$ts, [int]$w, [int]$h, [double]$fps) {
-    $name = "phase2b3_$tag"
+    $name = "${Prefix}_$tag"
     $o = Join-Path $Build ($name + '_ts.txt')
-    $rc = Invoke-Native $py @('-I', $Check, 'ts', $ts, '--fps', "$fps") $o
+    $rc = Invoke-Native $py @('-I', $Check, 'ts', $ts, '--fps', "$fps", '--gop', "$Gop") $o
     $lines = @(Get-Content -LiteralPath $o)
     foreach ($l in $lines) { [void]$script:log.AppendLine($l) }
     $tsFail = @($lines | Where-Object { $_ -match '^CHECK \S+ FAIL' })
@@ -171,7 +178,7 @@ function Test-Capture([string]$tag, [string]$ts, [int]$w, [int]$h, [double]$fps)
     $dok = $false
     if (Test-Path -LiteralPath $yuv) {
         $o2 = Join-Path $Build ($name + '_psnr.txt')
-        $rc2 = Invoke-Native $py @('-I', $Check, 'psnr', $yuv, "$w", "$h", '--floor', "$PsnrFloor") $o2
+        $rc2 = Invoke-Native $py @('-I', $Check, 'psnr', $yuv, "$w", "$h", '--floor', "$PsnrFloor", '--max-frames', '0') $o2
         $pl = @(Get-Content -LiteralPath $o2)
         foreach ($l in $pl) { [void]$script:log.AppendLine($l) }
         $pc = ($pl | Where-Object { $_ -match '^CHECK psnr' } | Select-Object -Last 1)
@@ -183,7 +190,7 @@ function Test-Capture([string]$tag, [string]$ts, [int]$w, [int]$h, [double]$fps)
     } else { $dmsg = 'ffmpeg produced no output' }
     Add-Result "$tag decode: PSNR against the bars" $dok $dmsg
     # PNG of a decoded frame
-    $png = Join-Path $Build ($name -replace 'phase2b3_', 'phase2b3_decoded_') 
+    $png = Join-Path $Build "${Prefix}_decoded_$tag" 
     $png = $png + '.png'
     Remove-Item -LiteralPath $png -ErrorAction SilentlyContinue
     [void](Invoke-Native $ff.Ffmpeg @('-v', 'error', '-y', '-i', $ts, '-vf', 'select=eq(n\,20)', '-fps_mode', 'passthrough', '-frames:v', '1', $png) (Join-Path $Build ($name + '_png.txt')))
@@ -207,7 +214,7 @@ if ($InputTs) {
 
 if (-not $NoBoard) {
     . (Join-Path $Repo 'scripts\rtlnet_board_lock.ps1')
-    Enter-RtlnetBoardLock -Purpose 'phase2b3 stream test' -ExpectedMinutes 30
+    Enter-RtlnetBoardLock -Purpose 'phase2c stream test' -ExpectedMinutes 30
 }
 $modes = @($Mode); if ($Mode -eq 'both') { $modes = @('720p30', '1080p30') }
 $dims = @{ '720p30' = @(1280, 720); '1080p30' = @(1920, 1080) }
@@ -238,8 +245,10 @@ try {
         if ($cand.Count -gt 0) { $HostIp = $cand[0].IPAddress }
     }
     if (-not $HostIp) { Write-Output "STREAM_TEST: FAIL no PC address on the board's network $boardIp; pass -HostIp"; exit 1 }
-    Say "Board $boardIp, PC $HostIp, UDP port $UdpPort, QP $Qp, $Seconds s per mode"
+    Say "Board $boardIp, PC $HostIp, UDP port $UdpPort, QP $Qp, GOP $Gop, $Seconds s per mode"
     [void](Invoke-Cli $sp "encoder qp $Qp")
+    $g = Invoke-Cli $sp "encoder gop $Gop"
+    Add-Result 'encoder gop set' ($g -match "GOP $Gop ") ($g.Trim() -replace '\s+', ' ')
 
     foreach ($m in $modes) {
         $w = $dims[$m][0]; $h = $dims[$m][1]
@@ -247,7 +256,7 @@ try {
         [void](Invoke-Cli $sp "camera mode $m")
         Start-Sleep -Milliseconds 1500
         [void](Invoke-Cli $sp 'clear counters')
-        $capFile = Join-Path $Build "phase2b3_capture_$m.ts"
+        $capFile = Join-Path $Build "${Prefix}_capture_$m.ts"
         $job = Start-Capture $capFile ($Seconds + 0.0)
         $r = Invoke-Cli $sp "stream h264 $HostIp $UdpPort"
         Add-Result "$m stream start" ($r -match 'Streaming H.264') ($r.Trim() -replace '\s+', ' ')
@@ -278,10 +287,19 @@ try {
         $busy = Get-Field $ss 'handling and mux (\d+\.\d) %'
         $kbps = Get-Field $ss 'bit rate (\d+) kb/s'
         $errs = [int](Get-Field $ss 'Errors\s+: (\d+);')
+        $nIdr = [int](Get-Field $ss 'GOP\s+: \d+ \(IDR every \d+ pictures\); (\d+) IDR pictures')
+        $nP = [int](Get-Field $ss 'IDR pictures \(\d+ bytes each on average\), (\d+) P pictures')
+        $avgIdr = [int](Get-Field $ss '\); \d+ IDR pictures \((\d+) bytes each')
+        $avgP = [int](Get-Field $ss 'P pictures \((\d+) bytes each')
+        $lastType = Get-Field $se 'last picture (IDR|P)'
+        $perMb = @([regex]::Matches($se, 'Engine \d\s+: \d+ macroblocks, picture \d+ cycles \((\d+) per macroblock\)') | ForEach-Object { $_.Groups[1].Value })
         $fbDrop = [int](Get-Field $sf 'dropped (\d+)')
         $fbDropShow = Get-Field $ss 'frame buffer published \d+, dropped (\d+)'
         Add-Result "$m board: pictures, drops, load" ($pics -ge ($Seconds * 25) -and $drop -eq 0 -and $udpDrop -eq 0 -and $errs -eq 0) `
             "pictures $pics, dropped pictures $drop, UDP drops $udpDrop, errors $errs, bit rate $kbps kb/s, TS mux load $mux %, handling+mux $busy %, frame buffer drops $fbDropShow"
+        $gopOk = ($nIdr + $nP -eq $pics) -and ($(if ($Gop -eq 1) { $nP -eq 0 } else { $nP -gt 0 -and $nIdr -ge [Math]::Floor($pics / $Gop) -and $nIdr -le ([Math]::Ceiling($pics / $Gop) + 1) }))
+        Add-Result "$m gop: IDR and P pictures" $gopOk "GOP $Gop, $nIdr IDR pictures ($avgIdr bytes each), $nP P pictures ($avgP bytes each), last picture $lastType"
+        Say ("{0}: clocks per macroblock per engine (last picture {1}): {2} (budget 735)" -f $m, $lastType, ($perMb -join ' and '))
         $armErr = @([regex]::Matches($sd, 'errors (\d+)') | ForEach-Object { [int]$_.Groups[1].Value } | Where-Object { $_ -ne 0 })
         Add-Result "$m show ddr: arbiter errors" ($armErr.Count -eq 0 -and $sd -match 'Master 3') "all masters errors 0"
         if ($capDatagrams -gt 0) {
@@ -299,7 +317,7 @@ try {
             Say '--- VLC'
             [void](Invoke-Cli $sp 'camera mode 720p30')
             Start-Sleep -Milliseconds 1500
-            $snapDir = Join-Path $Build 'phase2b3_vlc'
+            $snapDir = Join-Path $Build "${Prefix}_vlc"
             Remove-Item -LiteralPath $snapDir -Recurse -Force -ErrorAction SilentlyContinue
             New-Item -ItemType Directory -Force -Path $snapDir | Out-Null
             $vargs = @('--no-video-title-show', '--video-filter=scene', '--scene-format=png', '--scene-prefix=vlc_', "--scene-path=$snapDir",
@@ -313,12 +331,13 @@ try {
             $snaps = @(Get-ChildItem -LiteralPath $snapDir -Filter '*.png' -ErrorAction SilentlyContinue | Sort-Object Name)
             if ($snaps.Count -gt 0) {
                 $pick = $snaps[[Math]::Min(2, $snaps.Count - 1)]
-                Copy-Item -LiteralPath $pick.FullName -Destination (Join-Path $Build 'phase2b3_vlc_snapshot.png') -Force
+                Copy-Item -LiteralPath $pick.FullName -Destination (Join-Path $Build "${Prefix}_vlc_snapshot.png") -Force
             }
-            Add-Result 'vlc: plays udp stream, snapshot' ($snaps.Count -gt 0) ("$($snaps.Count) snapshot(s) in $snapDir; kept phase2b3_vlc_snapshot.png")
+            Add-Result 'vlc: plays udp stream, snapshot' ($snaps.Count -gt 0) ("$($snaps.Count) snapshot(s) in $snapDir; kept ${Prefix}_vlc_snapshot.png")
         }
     }
     [void](Invoke-Cli $sp 'camera mode 720p30')
+    [void](Invoke-Cli $sp 'encoder gop 30')
     [void](Invoke-Cli $sp 'disable')
 } finally {
     $sp.Close()

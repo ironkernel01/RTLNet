@@ -4,18 +4,21 @@
 Copyright (C) 2026 IronKernel. All rights reserved.
 
 Role: two independent checks that need no decoder library.
-  ts   <file.ts> [--steps 3000] [--fps 30]
+  ts   <file.ts> [--steps 3000] [--fps 30] [--gop 30]
        Parses the transport stream itself: 188-byte packets with sync bytes, per-PID continuity counters, PAT and PMT
        CRC-32/MPEG-2, PCR monotonic, PES start codes, PTS and DTS of every access unit, PTS steps. Prints one line per
-       check: "CHECK <name> PASS|FAIL <detail>", then "TS_SUMMARY ...".
+       check: "CHECK <name> PASS|FAIL <detail>", then "TS_SUMMARY ...". With --gop N (Phase 2c) the random access indicator must be
+       set on the IDR access units only, the IDR access units are N pictures apart (the first access unit is one), every access unit's
+       NAL units agree with its indicator (an IDR slice, NAL type 5, with SPS and PPS, exactly when the indicator is set), and
+       "AU_SIZE" lines give the number, minimum, average and maximum elementary-stream bytes of the IDR and of the P access units.
   psnr <file.yuv> <width> <height> [--floor 30] [--max-frames 24]
-       Reads decoded yuv420p frames (ffmpeg -pix_fmt yuv420p -f rawvideo), builds the expected 4:2:0 bar frame from the same
+       Reads decoded yuv420p frames one at a time (ffmpeg -pix_fmt yuv420p -f rawvideo; --max-frames 0 checks every frame), builds the expected 4:2:0 bar frame from the same
        eight 75 percent bars as rtlnet_csi2_rx (BT.709 limited range values of gige.md section 5.4; vertical bars of width/8
        pixels, chroma 4:2:0 of flat bars equals the bar chroma), and prints the PSNR of Y, Cb and Cr per sampled frame and the
        minimum. "CHECK psnr PASS|FAIL ...".
 Exit code 0 when every check passes.
 
-Revision: 11-09-2026
+Revision: 11-10-2026 (phase 2c: GOP checks, access-unit sizes, every-frame PSNR without reading the whole file)
 """
 import math
 import sys
@@ -47,7 +50,17 @@ class Checker:
             self.fail += 1
 
 
-def check_ts(path, step, fps):
+def nal_types(buf):
+    """NAL unit types found by start codes in an access unit's elementary stream bytes."""
+    out = []
+    i = buf.find(b"\x00\x00\x01")
+    while i >= 0 and i + 3 < len(buf):
+        out.append(buf[i + 3] & 0x1F)
+        i = buf.find(b"\x00\x00\x01", i + 3)
+    return out
+
+
+def check_ts(path, step, fps, gop=0):
     c = Checker()
     data = open(path, "rb").read()
     # Align on the first sync byte that repeats every 188 bytes three times.
@@ -70,6 +83,10 @@ def check_ts(path, step, fps):
     dts_list = []
     pes_err = 0
     ra_count = 0
+    ra_flags = []        # random access indicator of each access unit
+    au_bytes = []        # elementary stream bytes of each access unit
+    au_nals = []         # NAL unit types of each access unit
+    cur = None           # bytearray of the access unit in progress
     pat_ok = pmt_ok = 0
     video_pid = None
     for n in range(npk):
@@ -111,6 +128,12 @@ def check_ts(path, step, fps):
                 else:
                     psi_err += 1
             continue
+        if (p[1] & 0x40) and (afc & 1) and pid == 0x0100:   # PES start: close the previous access unit
+            if cur is not None:
+                au_bytes.append(len(cur))
+                au_nals.append(nal_types(bytes(cur)))
+            cur = bytearray()
+            ra_flags.append(bool((afc & 2) and p[4] >= 1 and (p[5] & 0x40)))
         if (p[1] & 0x40) and (afc & 1):   # PES start
             if p[off:off + 3] != b"\x00\x00\x01" or p[off + 3] != 0xE0 or (p[off + 7] & 0xC0) != 0xC0:
                 pes_err += 1
@@ -119,6 +142,10 @@ def check_ts(path, step, fps):
             dts = get_ts(p[off + 14: off + 19])
             pts_list.append(pts)
             dts_list.append(dts)
+            cur += p[off + 19:]
+            continue
+        if pid == 0x0100 and (afc & 1) and cur is not None:
+            cur += p[off:]
     c.report("packets", npk > 0 and bad_sync == 0 and tei == 0 and (len(data) - start) % 188 == 0,
              "%d packets, %d bad sync, %d transport errors, %d trailing bytes" % (npk, bad_sync, tei, (len(data) - start) % 188))
     c.report("continuity", cc_err == 0, "%d continuity counter errors, PIDs %s" % (cc_err, {hex(k): v for k, v in sorted(pids.items())}))
@@ -132,7 +159,33 @@ def check_ts(path, step, fps):
     dur = (pts_list[-1] - pts_list[0]) / 90000.0 if len(pts_list) > 1 else 0
     rate = (len(pts_list) - 1) / dur if dur > 0 else 0
     c.report("frame_rate", abs(rate - fps) < 0.6, "%.2f pictures per second over %.2f s of PTS" % (rate, dur))
-    c.report("random_access", ra_count == len(pts_list), "%d of %d access units flag random access" % (ra_count, len(pts_list)))
+    if cur is not None:
+        au_bytes.append(len(cur))
+        au_nals.append(nal_types(bytes(cur)))
+    if gop <= 0:
+        c.report("random_access", ra_count == len(pts_list), "%d of %d access units flag random access" % (ra_count, len(pts_list)))
+    else:
+        idx = [i for i, f in enumerate(ra_flags) if f]
+        gaps = [b - a for a, b in zip(idx, idx[1:])]
+        bad_gaps = [g for g in gaps if g != gop]
+        c.report("random_access", len(ra_flags) > 0 and ra_flags[0] and not bad_gaps,
+                 "%d of %d access units flag random access (IDR), first access unit %s, %d gaps of %d, %d different %s" %
+                 (len(idx), len(ra_flags), "yes" if ra_flags and ra_flags[0] else "no", len(gaps) - len(bad_gaps), gop, len(bad_gaps), sorted(set(bad_gaps))[:6]))
+        mism = 0
+        for f, n in zip(ra_flags, au_nals):
+            idr = 5 in n
+            if idr != f or (idr and not (7 in n and 8 in n)) or (not idr and (7 in n or 8 in n or 1 not in n)):
+                mism += 1
+        c.report("nal_types", len(au_nals) > 0 and mism == 0, "%d access units: IDR (NAL 5 with SPS 7 and PPS 8) exactly where the indicator is set, P (NAL 1) elsewhere; %d mismatches" % (len(au_nals), mism))
+        for label, want in (("idr", True), ("p", False)):
+            sz = [b for b, f in zip(au_bytes, ra_flags) if f == want]
+            if sz:
+                print("AU_SIZE %s n=%d min=%d avg=%d max=%d bytes" % (label, len(sz), min(sz), sum(sz) // len(sz), max(sz)))
+            else:
+                print("AU_SIZE %s n=0" % label)
+        tot = sum(au_bytes)
+        if len(pts_list) > 1:
+            print("AU_SIZE total_es_bytes=%d es_rate_kbps=%.0f ts_rate_kbps=%.0f" % (tot, tot * 8 / ((pts_list[-1] - pts_list[0]) / 90000.0 + 1.0 / fps) / 1000.0, (len(data) - start) * 8 / ((pts_list[-1] - pts_list[0]) / 90000.0 + 1.0 / fps) / 1000.0))
     print("TS_SUMMARY packets=%d access_units=%d cc_errors=%d pts_gaps=%d rate=%.3f bytes=%d" % (npk, len(pts_list), cc_err, len(bad), rate, len(data)))
     return c.fail
 
@@ -162,23 +215,32 @@ def psnr_of(sse, n):
 
 def check_psnr(path, w, h, floor, max_frames):
     c = Checker()
-    data = open(path, "rb").read()
+    import os
     fsize = w * h * 3 // 2
-    nframes = len(data) // fsize
+    nframes = os.path.getsize(path) // fsize
     if nframes == 0:
-        c.report("psnr", False, "no decoded frame of %dx%d in %d bytes" % (w, h, len(data)))
+        c.report("psnr", False, "no decoded frame of %dx%d in %d bytes" % (w, h, os.path.getsize(path)))
         return c.fail
     yrow, crow, vrow = expected_frame(w, h)
-    pick = sorted(set(int(i * (nframes - 1) / max(1, min(max_frames, nframes) - 1)) for i in range(min(max_frames, nframes))))
+    want = nframes if max_frames <= 0 else min(max_frames, nframes)
+    pick = sorted(set(int(i * (nframes - 1) / max(1, want - 1)) for i in range(want)))
     worst = 99.0
-    for f in pick:
-        base = f * fsize
-        py = psnr_of(plane_sse(data, base, h, w, yrow), w * h)
-        pu = psnr_of(plane_sse(data, base + w * h, h // 2, w // 2, crow), w * h // 4)
-        pv = psnr_of(plane_sse(data, base + w * h + w * h // 4, h // 2, w // 2, vrow), w * h // 4)
-        worst = min(worst, py, pu, pv)
-        print("PSNR frame %d Y %.2f Cb %.2f Cr %.2f dB" % (f, py, pu, pv))
-    c.report("psnr", worst >= floor, "%d of %d decoded frames sampled, minimum %.2f dB (floor %.1f)" % (len(pick), nframes, worst, floor))
+    worst_f = -1
+    with open(path, "rb") as fh:
+        for f in pick:
+            fh.seek(f * fsize)
+            data = fh.read(fsize)
+            py = psnr_of(plane_sse(data, 0, h, w, yrow), w * h)
+            pu = psnr_of(plane_sse(data, w * h, h // 2, w // 2, crow), w * h // 4)
+            pv = psnr_of(plane_sse(data, w * h + w * h // 4, h // 2, w // 2, vrow), w * h // 4)
+            m = min(py, pu, pv)
+            if m < worst:
+                worst = m
+                worst_f = f
+            if max_frames > 0 or m < floor or f < 3:
+                print("PSNR frame %d Y %.2f Cb %.2f Cr %.2f dB" % (f, py, pu, pv))
+    print("PSNR worst frame %d at %.2f dB" % (worst_f, worst))
+    c.report("psnr", worst >= floor, "%d of %d decoded frames checked, minimum %.2f dB (floor %.1f)" % (len(pick), nframes, worst, floor))
     c.report("decoded_frames", nframes >= 1, "%d frames decoded" % nframes)
     return c.fail
 
@@ -191,7 +253,8 @@ def main(argv):
             step = int(argv[argv.index("--steps") + 1])
         if "--fps" in argv:
             fps = float(argv[argv.index("--fps") + 1])
-        return 1 if check_ts(argv[1], step, fps) else 0
+        gop = int(argv[argv.index("--gop") + 1]) if "--gop" in argv else 0
+        return 1 if check_ts(argv[1], step, fps, gop) else 0
     if len(argv) >= 4 and argv[0] == "psnr":
         floor = float(argv[argv.index("--floor") + 1]) if "--floor" in argv else 30.0
         mx = int(argv[argv.index("--max-frames") + 1]) if "--max-frames" in argv else 24

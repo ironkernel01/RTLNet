@@ -42,8 +42,8 @@
 #define RTLNET_CPU_AXI_BRAM_SIZE    0x00010000u
 
 /* DDR3 SDRAM, 512 MiB, behind the M_AXI_DDR master (instruction and data caches, then the
- * rtlnet_axi_arbiter and the MIG controller). Only this window is cached: 8 KiB instruction
- * cache and 8 KiB write-back data cache, 64-byte lines (C_ICACHE_BASEADDR 0x8000_0000,
+ * rtlnet_axi_arbiter and the MIG controller). Only this window is cached: 32 KiB instruction
+ * cache and 32 KiB write-back data cache, 64-byte lines, 512-bit cache buses (C_ICACHE_BASEADDR 0x8000_0000,
  * C_*CACHE_HIGHADDR 0x9FFF_FFFF). The LMB, the AXI block RAM and every peripheral are uncached.
  * The DMA engines do not reach the DDR3 window. The data cache is write-back: a buffer the CPU writes and
  * hardware reads needs plat_dcache_flush_range() first, a buffer hardware writes and the CPU reads needs
@@ -51,8 +51,9 @@
  * dropped whole). */
 #define RTLNET_CPU_DDR_BASE         0x80000000u
 #define RTLNET_CPU_DDR_SIZE         0x20000000u
-#define RTLNET_CPU_ICACHE_BYTES     8192u
-#define RTLNET_CPU_DCACHE_BYTES     8192u
+#define RTLNET_CPU_ICACHE_BYTES     32768u
+#define RTLNET_CPU_DCACHE_BYTES     32768u
+#define RTLNET_CPU_CACHE_BUS_BITS   512u
 #define RTLNET_CPU_CACHE_LINE_BYTES 64u
 
 /* MicroBlaze V reset vector (C_BASE_VECTORS = 0). Exceptions and interrupts
