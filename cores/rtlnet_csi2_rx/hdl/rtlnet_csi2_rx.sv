@@ -23,7 +23,8 @@
 //   * Registers on s_axi_aclk behind rtlnet_axil_cdc and rtlnet_axil_slave (4 KiB window); rtlnet_csi2_rx_regs holds the
 //     register file, offsets in driver/rtlnet_csi2_rx.h.
 // Language: SystemVerilog-2012.
-// Revision: 11-09-2026
+// Revision: 11-10-2026
+//   * 11-10-2026: PATTERN and PATTERN_FRAME registers, moving test patterns (rtlnet_csi2_rx_pattern).
 //   * 11-09-2026: initial version (Phase 1: registers, color bars, source switch).
 // Clocks: clk (generator, switch, registers, video stream; the memory-controller user clock); s_axi_aclk (AXI4-Lite slave
 //   side of the register crossing only).
@@ -91,7 +92,6 @@ module rtlnet_csi2_rx #(
   localparam int          PIX_1080_H   = 1080;
   localparam logic [1:0]  MODE_1080P30 = 2'd1;
   localparam logic [1:0]  SRC_CAMERA   = 2'd1;
-  localparam logic [1:0]  SRC_PATTERN  = 2'd2;
 
   // ---------------------------------------------------------------------------
   // Register access
@@ -198,6 +198,10 @@ module rtlnet_csi2_rx #(
   logic [1:0]  source;
   logic [31:0] frame_period;
   logic [31:0] cam_timeout;
+  logic [2:0]  pattern_sel;
+  logic [7:0]  pattern_speed;
+  logic        pat_restart;
+  logic [31:0] pat_frame;
 
   logic        sel_cam;            // selected source: 1 camera, 0 pattern
   logic        want_cam;
@@ -254,11 +258,15 @@ module rtlnet_csi2_rx #(
     .source       (source),
     .frame_period (frame_period),
     .cam_timeout  (cam_timeout),
+    .pattern      (pattern_sel),
+    .pat_speed    (pattern_speed),
+    .pat_restart  (pat_restart),
     .st_pattern   (!sel_cam),
     .st_clk_run   (cam_clk_running),
     .ev_overrun   (ev_overrun),
     .frame_count  (frame_count),
-    .act_mode     (act_mode)
+    .act_mode     (act_mode),
+    .pat_frame    (pat_frame)
   );
 
   // ---------------------------------------------------------------------------
@@ -312,7 +320,11 @@ module rtlnet_csi2_rx #(
     .resetn   (resetn),
     .start    (gen_start),
     .mode     (video_mode),
+    .pattern  (pattern_sel),
+    .speed    (pattern_speed),
+    .restart  (pat_restart),
     .busy     (gen_busy),
+    .pat_frame (pat_frame),
     .m_tdata  (pat_tdata),
     .m_tvalid (pat_tvalid),
     .m_tready (pat_tready),

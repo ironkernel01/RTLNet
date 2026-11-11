@@ -606,7 +606,8 @@ static uint32_t  g_csi_mode;
 static uint32_t  g_csi_src;
 static uint32_t  g_csi_period = HOST_VID_PERIOD_RST;
 static uint32_t  g_csi_timeout = RTLNET_CSI2_CAM_TIMEOUT_RESET;
-static uint32_t  g_csi_err;                /* STATUS bits [5:2] */
+static uint32_t  g_csi_err;                /* STATUS bits [6:2] */
+static uint32_t  g_csi_pattern = 4u << RTLNET_CSI2_PATTERN_SPEED_SHIFT;   /* PATTERN reset: static bars, speed 4 */
 static uint32_t  g_dma_ctrl = RTLNET_S2MM_CTRL_ENABLE;
 static uint32_t  g_dma_stride;
 static int       g_fb_holds;
@@ -637,6 +638,7 @@ void host_model_video_set(int present)
     g_csi_period  = HOST_VID_PERIOD_RST;
     g_csi_timeout = RTLNET_CSI2_CAM_TIMEOUT_RESET;
     g_csi_err     = 0u;
+    g_csi_pattern = 4u << RTLNET_CSI2_PATTERN_SPEED_SHIFT;
     g_dma_ctrl    = RTLNET_S2MM_CTRL_ENABLE;
     g_dma_stride  = 0u;
     g_fb_holds    = 0;
@@ -710,8 +712,8 @@ static uint32_t host_csi2_read(uint32_t off)
 {
     switch (off) {
     case RTLNET_REG_ID:                  return RTLNET_CSI2_ID_VALUE;
-    case RTLNET_REG_VERSION:             return HOST_VID_VERSION;
-    case RTLNET_REG_CAPS:                return RTLNET_CSI2_MODE_COUNT | RTLNET_CSI2_CAPS_PATTERN;
+    case RTLNET_REG_VERSION:             return RTLNET_CSI2_VERSION_VALUE;
+    case RTLNET_REG_CAPS:                return RTLNET_CSI2_MODE_COUNT | RTLNET_CSI2_CAPS_PATTERN | RTLNET_CSI2_CAPS_MOVING;
     case RTLNET_CSI2_REG_VIDEO_MODE:     return g_csi_mode;
     case RTLNET_CSI2_REG_SOURCE:         return g_csi_src;
     case RTLNET_CSI2_REG_FRAME_PERIOD:   return g_csi_period;
@@ -719,6 +721,8 @@ static uint32_t host_csi2_read(uint32_t off)
     case RTLNET_CSI2_REG_STATUS:         return ((g_csi_src != RTLNET_CSI2_SRC_CAMERA) ? RTLNET_CSI2_STATUS_PATTERN : 0u) | g_csi_err;
     case RTLNET_CSI2_REG_FRAME_COUNT:    return g_vid_frames;
     case RTLNET_CSI2_REG_ACTIVE:         return g_csi_mode;
+    case RTLNET_CSI2_REG_PATTERN:        return g_csi_pattern;
+    case RTLNET_CSI2_REG_PATTERN_FRAME:  return 0u;
     default:                             return 0u;
     }
 }
@@ -758,6 +762,15 @@ static void host_csi2_write(uint32_t off, uint32_t value)
     case RTLNET_CSI2_REG_CAM_TIMEOUT:
         g_csi_timeout = value;
         break;
+    case RTLNET_CSI2_REG_PATTERN: {
+        int32_t speed = (int32_t)(int8_t)(uint8_t)(value >> RTLNET_CSI2_PATTERN_SPEED_SHIFT);
+        if ((value & ~0x0000FF07u) != 0u || (value & 7u) >= RTLNET_CSI2_PATTERN_COUNT || speed < -32 || speed > 32) {
+            g_csi_err |= RTLNET_CSI2_STATUS_PATTERN_ERR;
+        } else {
+            g_csi_pattern = value;
+        }
+        break;
+    }
     case RTLNET_CSI2_REG_STATUS:
         g_csi_err &= ~(value & RTLNET_CSI2_STATUS_ERR_MASK);
         break;

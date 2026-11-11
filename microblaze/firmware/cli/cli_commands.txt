@@ -100,7 +100,7 @@ cli_ddr_test:priv:DDR TEST {SIZE}:DDR3 memory test from 0x80000000: data bus, ad
 cli_camera_mode:priv:CAMERA MODE [MODE]:Video mode: 720p30 or 1080p30 (effective at the next frame)
 cli_camera_source:priv:CAMERA SOURCE [SOURCE]:Video source: auto, camera or pattern
 cli_camera_rate:priv:CAMERA RATE [FPS]:Frame rate in frames per second, 1..30 (30 is the reset value)
-cli_camera_pattern:priv:CAMERA PATTERN [PATTERN] {SPEED}:Test pattern: bars, scroll, box, noise or all; speed -32..32 (default 1, 0 = still)
+cli_camera_pattern:priv:CAMERA PATTERN [PATTERN] {SPEED}:Test pattern: bars, scroll, box, noise or all; speed -32..32 (default 4, 0 = still)
 cli_framebuffer_crc:priv:FRAMEBUFFER CRC:CRC-32 of the latest published frame, read through the cache
 cli_stream_h264:priv:STREAM H264 [IP] [PORT]:Start the H.264 MPEG-TS stream over UDP to a host (VLC: udp://@:PORT)
 cli_stream_stop:priv:STREAM STOP:Stop the H.264 stream

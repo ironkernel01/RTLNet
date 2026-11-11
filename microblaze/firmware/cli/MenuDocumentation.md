@@ -253,7 +253,7 @@ token counts; exec commands are also accepted in priv.
 | 30 | cli_camera_mode | priv | `CAMERA MODE [MODE]` | MODE | — | 3 | 3 | — | Video mode: 720p30 or 1080p30 (effective at the next frame) |
 | 31 | cli_camera_source | priv | `CAMERA SOURCE [SOURCE]` | SOURCE | — | 3 | 3 | — | Video source: auto, camera or pattern |
 | 32 | cli_camera_rate | priv | `CAMERA RATE [FPS]` | FPS | — | 3 | 3 | — | Frame rate in frames per second, 1..30 (30 is the reset value) |
-| 33 | cli_camera_pattern | priv | `CAMERA PATTERN [PATTERN] {SPEED}` | PATTERN | SPEED | 3 | 4 | — | Test pattern: bars, scroll, box, noise or all; speed -32..32 (default 1, 0 = still) |
+| 33 | cli_camera_pattern | priv | `CAMERA PATTERN [PATTERN] {SPEED}` | PATTERN | SPEED | 3 | 4 | — | Test pattern: bars, scroll, box, noise or all; speed -32..32 (default 4, 0 = still) |
 | 34 | cli_framebuffer_crc | priv | `FRAMEBUFFER CRC` | — | — | 2 | 2 | — | CRC-32 of the latest published frame, read through the cache |
 | 35 | cli_stream_h264 | priv | `STREAM H264 [IP] [PORT]` | IP, PORT | — | 4 | 4 | — | Start the H.264 MPEG-TS stream over UDP to a host (VLC: udp://@:PORT) |
 | 36 | cli_stream_stop | priv | `STREAM STOP` | — | — | 2 | 2 | — | Stop the H.264 stream |

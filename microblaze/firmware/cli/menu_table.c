@@ -127,7 +127,7 @@ const MenuCommandDef g_menu_commands[] = {
     { "cli_camera_rate", MENU_MODE_PRIV, "CAMERA RATE [FPS]",
       "Frame rate in frames per second, 1..30 (30 is the reset value)", cli_camera_rate, MENU_MODE_NONE },
     { "cli_camera_pattern", MENU_MODE_PRIV, "CAMERA PATTERN [PATTERN] {SPEED}",
-      "Test pattern: bars, scroll, box, noise or all; speed -32..32 (default 1, 0 = still)", cli_camera_pattern, MENU_MODE_NONE },
+      "Test pattern: bars, scroll, box, noise or all; speed -32..32 (default 4, 0 = still)", cli_camera_pattern, MENU_MODE_NONE },
     { "cli_framebuffer_crc", MENU_MODE_PRIV, "FRAMEBUFFER CRC",
       "CRC-32 of the latest published frame, read through the cache", cli_framebuffer_crc, MENU_MODE_NONE },
     { "cli_stream_h264", MENU_MODE_PRIV, "STREAM H264 [IP] [PORT]",

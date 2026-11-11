@@ -794,7 +794,7 @@ static void demo_video(void)
                demo_has("  Buffer fill     : 0.0 % (min 0.0 %, max 0.0 % since clear)") &&
                demo_has("  Picture QP      : last 0; since clear min 0, avg 0.00, max 0 (0 pictures)") &&
                demo_has("  Buffer events   : overflow 0 (0 below QP max), underflow 0") &&
-               demo_has("  Test pattern    : bars, speed 0"), "show stream: rate control lines, constant bit rate");
+               !demo_has("  Test pattern    :"), "show stream: rate control lines, constant bit rate (no pattern line without the core)");
     host_capture_clear();
     demo_type("encoder bitrate 0\r");
     demo_check(demo_has("Constant QP 28 (rate control off)"), "encoder bitrate: 0 returns to constant QP");
@@ -846,6 +846,19 @@ static void demo_video(void)
                demo_has("  Active source   : pattern") && demo_has("  Frame period    : 3000000 ui_clk cycles (30.00 fps)") &&
                demo_has("  Frame count     : 150") && demo_has("  Camera timeout  : 2 frame periods") &&
                demo_has("  Status          : 0x00000001 (pattern-active)"), "show camera: reset state");
+    demo_check(demo_has("  Test pattern    : bars, speed 4 px/frame, frame 0 since the last restart"), "show camera: pattern reset state");
+    host_capture_clear();
+    demo_type("camera pattern box -7\r");
+    demo_check(demo_has("Test pattern box, speed -7, effective at the next frame"), "camera pattern: box -7 accepted");
+    host_capture_clear();
+    demo_type("show camera\r");
+    demo_check(demo_has("  Test pattern    : box, speed -7 px/frame"), "show camera: pattern box -7 read back");
+    host_capture_clear();
+    demo_type("camera pattern all\r");
+    demo_check(demo_has("Test pattern all, speed 4, effective at the next frame"), "camera pattern: default speed 4");
+    host_capture_clear();
+    demo_type("camera pattern bars\r");
+    demo_check(demo_has("Test pattern bars, speed 4"), "camera pattern: back to bars");
     host_capture_clear();
     demo_type("show framebuffer\r");
     demo_check(demo_has("  Slots           : 3 x 4096 KiB from DDR3 offset 0x10000000 (CPU 0x90000000)") &&

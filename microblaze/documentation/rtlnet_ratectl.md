@@ -117,7 +117,7 @@ Defined in `microblaze/firmware/cli/cli_commands.txt` (MenuBuilder hierarchy; `g
 | `encoder bitrate <kbps>` | priv | target 0..100000 kb/s, 0 = constant QP |
 | `encoder buffer <ms>` | priv | virtual buffer 100..2000 ms |
 | `encoder qprange <min> <max>` | priv | QP range |
-| `camera pattern <bars|scroll|box|noise|all> [speed]` | priv | test pattern content, speed -32..32 (default 1, 0 = still); calls `rtlnet_csi2_rx_set_pattern(base, pattern, speed)` with `RTLNET_CSI2_PATTERN_BARS 0`, `_SCROLL 1`, `_BOX 2`, `_NOISE 3`, `_ALL 4` |
+| `camera pattern <bars|scroll|box|noise|all> [speed]` | priv | test pattern content, speed -32..32 (default 4, 0 = still); calls `rtlnet_csi2_rx_set_pattern(base, pattern, speed)` with `RTLNET_CSI2_PATTERN_BARS 0`, `_SCROLL 1`, `_BOX 2`, `_NOISE 3`, `_ALL 4` |
 | `show encoder history [n]` | exec | the last n seconds of the ring (default 20, at most 3600), oldest first: age, bits per second, mean QP, fill, pictures |
 | `show stream`, `show encoder` | exec | the rate-control lines of section 4 |
 

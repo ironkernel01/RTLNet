@@ -11,16 +11,26 @@ Role: two independent checks that need no decoder library.
        set on the IDR access units only, the IDR access units are N pictures apart (the first access unit is one), every access unit's
        NAL units agree with its indicator (an IDR slice, NAL type 5, with SPS and PPS, exactly when the indicator is set), and
        "AU_SIZE" lines give the number, minimum, average and maximum elementary-stream bytes of the IDR and of the P access units.
-  psnr <file.yuv> <width> <height> [--floor 30] [--max-frames 24]
+  psnr <file.yuv> <width> <height> [--floor 30] [--max-frames 24] [--pattern <0..4> --speed <n> [--k-first-max 64]]
        Reads decoded yuv420p frames one at a time (ffmpeg -pix_fmt yuv420p -f rawvideo; --max-frames 0 checks every frame), builds the expected 4:2:0 bar frame from the same
        eight 75 percent bars as rtlnet_csi2_rx (BT.709 limited range values of gige.md section 5.4; vertical bars of width/8
        pixels, chroma 4:2:0 of flat bars equals the bar chroma), and prints the PSNR of Y, Cb and Cr per sampled frame and the
        minimum. "CHECK psnr PASS|FAIL ...".
+       With --pattern N --speed S (Phase 2d) every decoded picture, in order, is compared with the pattern of
+       boards/nexys_video/scripts/pattern_model.py (the rtlnet_csi2_rx pattern N at speed S in 4:2:0, the encoder's chroma rule): the
+       pattern frame counter k of a picture is searched among k_prev + 1 .. k_prev + 4 (the first picture among 0 .. --k-first-max) and the
+       best match (lowest luma error) is kept, so a picture the board dropped resyncs the sequence. Prints "PSNR frame f k K ..." lines,
+       "PSNR_K resyncs=<n> dropped=<d> ..." and "CHECK psnr PASS|FAIL ..." (PSNR floor on the best match; a picture whose best match
+       is not k_prev + 1 counts as a resync). Pattern 0 needs no k. Without --pattern the check is the static-bars one above.
+  selftest <ffmpeg.exe> [--keep <dir>]
+       Host test of the pattern PSNR path: builds streams from pattern_model.py with ffmpeg libx264 (pictures omitted to force resyncs), decodes
+       them again and runs the pattern check; prints "CHECK selftest_<pattern> PASS|FAIL ...".
 Exit code 0 when every check passes.
 
-Revision: 11-10-2026 (phase 2c: GOP checks, access-unit sizes, every-frame PSNR without reading the whole file)
+Revision: 11-10-2026 (phase 2c: GOP checks, access-unit sizes, every-frame PSNR without reading the whole file; phase 2d: --pattern, selftest)
 """
 import math
+import os
 import sys
 
 # (Y, Cb, Cr) of the eight bars, rtlnet_csi2_rx_pattern.sv bar_ycc
@@ -245,6 +255,140 @@ def check_psnr(path, w, h, floor, max_frames):
     return c.fail
 
 
+def _best_k(dec_y, pm, geom, pattern, speed, cands, cache):
+    """k among cands whose expected luma is closest (lowest SSE) to the decoded luma; returns (k, planes of that k)."""
+    import numpy as np
+    best = None
+    for k in cands:
+        if k not in cache:
+            cache[k] = pm.frame_yuv420(geom, pattern, speed, k)
+            if len(cache) > 12:
+                cache.pop(min(cache))
+        d = dec_y.astype(np.int32) - cache[k][0].astype(np.int32)
+        sse = int((d * d).sum())
+        if best is None or sse < best[0]:
+            best = (sse, k)
+    return best[1], cache[best[1]]
+
+
+def _plane_psnr(dec, exp):
+    import numpy as np
+    d = dec.astype(np.int32) - exp.astype(np.int32)
+    sse = int((d * d).sum())
+    return psnr_of(sse, dec.size)
+
+
+def check_psnr_pattern(path, w, h, floor, max_frames, pattern, speed, k_first_max):
+    """PSNR of every decoded picture against the pattern, k tracked per picture (see the module text)."""
+    import numpy as np
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import pattern_model as pm
+    c = Checker()
+    fsize = w * h * 3 // 2
+    nframes = os.path.getsize(path) // fsize
+    if nframes == 0:
+        c.report("psnr", False, "no decoded frame of %dx%d in %d bytes" % (w, h, os.path.getsize(path)))
+        return c.fail
+    want = nframes if max_frames <= 0 else min(max_frames, nframes)
+    geom = (w, h)
+    cache = {}
+    k_prev = -1
+    resyncs = 0
+    dropped = 0
+    unmatched = 0
+    worst = 99.0
+    worst_f = -1
+    ks = []
+    with open(path, "rb") as fh:
+        for f in range(want):
+            data = np.frombuffer(fh.read(fsize), dtype=np.uint8)
+            y = data[: w * h].reshape(h, w)
+            cb = data[w * h: w * h + w * h // 4].reshape(h // 2, w // 2)
+            cr = data[w * h + w * h // 4:].reshape(h // 2, w // 2)
+            if pattern == 0:
+                k = 0
+                planes = pm.frame_yuv420(geom, 0, speed, 0) if 0 not in cache else cache[0]
+                cache[0] = planes
+            else:
+                cands = range(0, k_first_max + 1) if k_prev < 0 else range(k_prev + 1, k_prev + 5)
+                k, planes = _best_k(y, pm, geom, pattern, speed, cands, cache)
+                if k_prev >= 0 and k != k_prev + 1:
+                    resyncs += 1
+                    dropped += k - k_prev - 1
+                k_prev = k
+            py = _plane_psnr(y, planes[0])
+            pu = _plane_psnr(cb, planes[1])
+            pv = _plane_psnr(cr, planes[2])
+            m = min(py, pu, pv)
+            if m < floor:
+                unmatched += 1
+            if m < worst:
+                worst = m
+                worst_f = f
+            ks.append(k)
+            if f < 3 or m < floor:
+                print("PSNR frame %d k %d Y %.2f Cb %.2f Cr %.2f dB" % (f, k, py, pu, pv))
+    print("PSNR worst frame %d at %.2f dB" % (worst_f, worst))
+    print("PSNR_K resyncs=%d dropped=%d first_k=%d last_k=%d pictures=%d" % (resyncs, dropped, ks[0], ks[-1], len(ks)))
+    c.report("psnr", worst >= floor, "%d of %d decoded frames checked against pattern %d speed %d, minimum %.2f dB (floor %.1f), %d resyncs (%d pictures dropped), %d below the floor" %
+             (want, nframes, pattern, speed, worst, floor, resyncs, dropped, unmatched))
+    c.report("decoded_frames", nframes >= 1, "%d frames decoded" % nframes)
+    return c.fail
+
+
+def selftest(ffmpeg, keep):
+    """Streams from the Python model through libx264 (pictures left out to force resyncs), decoded and checked."""
+    import subprocess
+    import tempfile
+    import numpy as np
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import pattern_model as pm
+    c = Checker()
+    w, h = 640, 352
+    cases = [(1, 4, [0, 1, 2, 3, 5, 6, 7, 10, 11, 12, 13, 14]),
+             (2, -7, [0, 1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12]),
+             (3, 4, [0, 1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12]),
+             (4, 24, [0, 1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12]),
+             (0, 4, [0, 1, 2, 3, 4, 5])]
+    with tempfile.TemporaryDirectory() as td:
+        wd = keep or td
+        os.makedirs(wd, exist_ok=True)
+        for pattern, speed, klist in cases:
+            raw = os.path.join(wd, "p%d_in.yuv" % pattern)
+            out = os.path.join(wd, "p%d_out.yuv" % pattern)
+            mp4 = os.path.join(wd, "p%d.mp4" % pattern)
+            with open(raw, "wb") as fh:
+                for k in klist:
+                    yy, cb, cr = pm.frame_yuv420((w, h), pattern, speed, k)
+                    fh.write(yy.tobytes() + cb.tobytes() + cr.tobytes())
+            r1 = subprocess.run([ffmpeg, "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "yuv420p", "-s", "%dx%d" % (w, h), "-r", "30", "-i", raw,
+                                 "-c:v", "libx264", "-profile:v", "baseline", "-preset", "ultrafast", "-crf", "10", "-g", "8", "-bf", "0", mp4],
+                                capture_output=True, text=True)
+            r2 = subprocess.run([ffmpeg, "-y", "-loglevel", "error", "-i", mp4, "-pix_fmt", "yuv420p", "-f", "rawvideo", out], capture_output=True, text=True)
+            if r1.returncode != 0 or r2.returncode != 0:
+                c.report("selftest_p%d" % pattern, False, "ffmpeg failed: %s %s" % (r1.stderr.strip(), r2.stderr.strip()))
+                continue
+            expect_resyncs = sum(1 for a, b in zip(klist, klist[1:]) if b != a + 1) if pattern != 0 else 0
+            expect_dropped = sum(b - a - 1 for a, b in zip(klist, klist[1:])) if pattern != 0 else 0
+            print("selftest pattern %d speed %d: %d pictures, expected %d resyncs, %d dropped" % (pattern, speed, len(klist), expect_resyncs, expect_dropped))
+            import io
+            buf = io.StringIO()
+            old = sys.stdout
+            sys.stdout = buf
+            try:
+                fails = check_psnr_pattern(out, w, h, 30.0, 0, pattern, speed, 8)
+            finally:
+                sys.stdout = old
+            text = buf.getvalue()
+            print(text.strip())
+            line = [ln for ln in text.splitlines() if ln.startswith("PSNR_K")][0]
+            got = dict(tok.split("=") for tok in line.split()[1:])
+            ok = fails == 0 and int(got["resyncs"]) == expect_resyncs and int(got["dropped"]) == expect_dropped and (pattern == 0 or (int(got["first_k"]) == klist[0] and int(got["last_k"]) == klist[-1]))
+            c.report("selftest_p%d" % pattern, ok, "resyncs %s (expected %d), dropped %s (expected %d), k %s..%s" %
+                     (got["resyncs"], expect_resyncs, got["dropped"], expect_dropped, got["first_k"], got["last_k"]))
+    return c.fail
+
+
 def main(argv):
     if len(argv) >= 2 and argv[0] == "ts":
         step = 3000
@@ -257,8 +401,17 @@ def main(argv):
         return 1 if check_ts(argv[1], step, fps, gop) else 0
     if len(argv) >= 4 and argv[0] == "psnr":
         floor = float(argv[argv.index("--floor") + 1]) if "--floor" in argv else 30.0
+        if "--pattern" in argv:
+            pattern = int(argv[argv.index("--pattern") + 1])
+            speed = int(argv[argv.index("--speed") + 1]) if "--speed" in argv else 4
+            kmax = int(argv[argv.index("--k-first-max") + 1]) if "--k-first-max" in argv else 64
+            mx = int(argv[argv.index("--max-frames") + 1]) if "--max-frames" in argv else 0
+            return 1 if check_psnr_pattern(argv[1], int(argv[2]), int(argv[3]), floor, mx, pattern, speed, kmax) else 0
         mx = int(argv[argv.index("--max-frames") + 1]) if "--max-frames" in argv else 24
         return 1 if check_psnr(argv[1], int(argv[2]), int(argv[3]), floor, mx) else 0
+    if len(argv) >= 2 and argv[0] == "selftest":
+        keep = argv[argv.index("--keep") + 1] if "--keep" in argv else None
+        return 1 if selftest(argv[1], keep) else 0
     print(__doc__)
     return 2
 

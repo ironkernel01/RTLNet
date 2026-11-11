@@ -1,7 +1,7 @@
 // -----------------------------------------------------------------------------
 // File: rtlnet_csi2_rx_regs.sv
 // Purpose: register file of rtlnet_csi2_rx (Phase 1): ID/VERSION/CAPS header, VIDEO_MODE, SOURCE, FRAME_PERIOD,
-//   CAM_TIMEOUT, STATUS with the sticky error flags, FRAME_COUNT and ACTIVE.
+//   CAM_TIMEOUT, STATUS with the sticky error flags, FRAME_COUNT, ACTIVE, PATTERN and PATTERN_FRAME.
 // Overview:
 //   * Strobe interface of rtlnet_axil_slave: a write strobe carries a full 32-bit word; a read strobe is answered with a
 //     registered read mux, data valid the clock after reg_rd_en. Undefined offsets read 0; writes to them are ignored.
@@ -10,10 +10,14 @@
 //     and leaves the register unchanged; a FRAME_PERIOD below the minimum of the selected mode sets STATUS.PERIOD_ERR
 //     and leaves the register unchanged; SOURCE 3 (or any value above 3) sets STATUS.SOURCE_ERR. Nothing is clamped.
 //     Because both writes check the other register, FRAME_PERIOD >= the minimum of VIDEO_MODE holds at every time.
+//     PATTERN: [2:0] pattern 0..4, [15:8] signed speed -32..+32, every other bit 0; anything else sets STATUS.PATTERN_ERR and
+//     leaves the register unchanged. An accepted PATTERN write, and an accepted VIDEO_MODE write that changes the mode, give
+//     pat_restart (one clock, registered): the pattern frame counter restarts at 0 (pattern generator).
 //   * STATUS error flags are sticky and clear by writing 1; a new error in the clock of a clear keeps the flag set.
 //   * Offsets are defined in driver/rtlnet_csi2_rx.h and mirrored here.
 // Language: SystemVerilog-2012.
-// Revision: 11-09-2026
+// Revision: 11-10-2026
+//   * 11-10-2026: PATTERN (0x030), PATTERN_FRAME (0x034), STATUS.PATTERN_ERR, CAPS[6] moving patterns, VERSION 0x11102026.
 //   * 11-09-2026: initial version.
 // Clocks: clk (all logic; the memory-controller user clock).
 // -----------------------------------------------------------------------------
@@ -43,13 +47,17 @@ module rtlnet_csi2_rx_regs #(
   output logic [1:0]  source,
   output logic [31:0] frame_period,
   output logic [31:0] cam_timeout,
+  output logic [2:0]  pattern,
+  output logic [7:0]  pat_speed,
+  output logic        pat_restart,
 
   // Status from the datapath.
   input  logic        st_pattern,       // active source: 1 pattern, 0 camera
   input  logic        st_clk_run,       // camera byte clock running
   input  logic        ev_overrun,       // one-clock pulse: a frame tick found the previous frame still running
   input  logic [31:0] frame_count,
-  input  logic [1:0]  act_mode
+  input  logic [1:0]  act_mode,
+  input  logic [31:0] pat_frame
 );
 
   // ---------------------------------------------------------------------------
@@ -65,6 +73,8 @@ module rtlnet_csi2_rx_regs #(
   localparam logic [11:0] REG_STATUS       = 12'h020;
   localparam logic [11:0] REG_FRAME_COUNT  = 12'h024;
   localparam logic [11:0] REG_ACTIVE       = 12'h028;
+  localparam logic [11:0] REG_PATTERN      = 12'h030;
+  localparam logic [11:0] REG_PAT_FRAME    = 12'h034;
 
   localparam int ST_PATTERN_BIT    = 0;
   localparam int ST_CLK_RUN_BIT    = 1;
@@ -72,17 +82,20 @@ module rtlnet_csi2_rx_regs #(
   localparam int ST_PERIOD_ERR_BIT = 3;
   localparam int ST_SOURCE_ERR_BIT = 4;
   localparam int ST_OVERRUN_BIT    = 5;
+  localparam int ST_PATTERN_ERR_BIT = 6;
 
   localparam logic [1:0] MODE_720P30  = 2'd0;
   localparam logic [1:0] MODE_1080P30 = 2'd1;
   localparam logic [1:0] SRC_RESERVED = 2'd3;
+  localparam logic [2:0] PAT_MAX      = 3'd4;
+  localparam logic [31:0] PATTERN_RESET = 32'h0000_0400;   // pattern 0 (static bars), speed 4
 
   import rtlnet_pkg::*;
 
   localparam logic [31:0] CORE_ID      = id4("C", "S", "I", "2");
-  localparam logic [31:0] CORE_VERSION = 32'h1109_2026;
-  // CAPS: [3:0] number of video modes, [4] test-pattern generator, [5] camera front end.
-  localparam logic [31:0] CORE_CAPS    = {26'd0, CAMERA_PRESENT, 1'b1, 4'(NUM_MODES)};
+  localparam logic [31:0] CORE_VERSION = 32'h1110_2026;
+  // CAPS: [3:0] number of video modes, [4] test-pattern generator, [5] camera front end, [6] moving patterns.
+  localparam logic [31:0] CORE_CAPS    = {25'd0, 1'b1, CAMERA_PRESENT, 1'b1, 4'(NUM_MODES)};
 
   // ---------------------------------------------------------------------------
   // State
@@ -90,11 +103,16 @@ module rtlnet_csi2_rx_regs #(
   logic        mode_err;
   logic        period_err;
   logic        source_err;
+  logic        pattern_err;
   logic        overrun;
   logic        wr_video_mode;
   logic        wr_source;
   logic        wr_period;
   logic        wr_status;
+  logic        wr_pattern;
+  logic        pattern_valid;
+  logic        set_pattern_err;
+  logic        mode_change;
   logic [31:0] min_selected;
   logic [31:0] min_requested;
   logic        mode_valid;
@@ -107,6 +125,7 @@ module rtlnet_csi2_rx_regs #(
   assign wr_source     = reg_wr_en && (reg_wr_addr == REG_SOURCE);
   assign wr_period     = reg_wr_en && (reg_wr_addr == REG_FRAME_PERIOD);
   assign wr_status     = reg_wr_en && (reg_wr_addr == REG_STATUS);
+  assign wr_pattern    = reg_wr_en && (reg_wr_addr == REG_PATTERN);
 
   // Minimum FRAME_PERIOD of the selected mode and of the mode a VIDEO_MODE write requests.
   assign min_selected  = (video_mode == MODE_1080P30) ? 32'(PERIOD_MIN_1080) : 32'(PERIOD_MIN_720);
@@ -118,6 +137,12 @@ module rtlnet_csi2_rx_regs #(
                           (wr_period && (reg_wr_data < min_selected));
   assign set_source_err = wr_source && ((reg_wr_data[31:2] != 30'd0) || (reg_wr_data[1:0] == SRC_RESERVED));
 
+  // PATTERN: pattern 0..4 in [2:0], speed in [15:8] from -32 to +32 (0x00..0x20, 0xE0..0xFF), nothing else set.
+  assign pattern_valid   = (reg_wr_data[31:16] == 16'd0) && (reg_wr_data[7:3] == 5'd0) && (reg_wr_data[2:0] <= PAT_MAX) &&
+                           ((reg_wr_data[15:8] <= 8'd32) || (reg_wr_data[15:8] >= 8'hE0));
+  assign set_pattern_err = wr_pattern && !pattern_valid;
+  assign mode_change     = wr_video_mode && mode_valid && (frame_period >= min_requested) && (reg_wr_data[1:0] != video_mode);
+
   // Configuration registers.
   always_ff @(posedge clk) begin
     if (!resetn) begin
@@ -125,7 +150,15 @@ module rtlnet_csi2_rx_regs #(
       source       <= 2'd0;
       frame_period <= 32'(PERIOD_RESET);
       cam_timeout  <= 32'(CAM_TIMEOUT_RST);
+      pattern      <= PATTERN_RESET[2:0];
+      pat_speed    <= PATTERN_RESET[15:8];
+      pat_restart  <= 1'b0;
     end else begin
+      pat_restart <= (wr_pattern && pattern_valid) || mode_change;
+      if (wr_pattern && pattern_valid) begin
+        pattern   <= reg_wr_data[2:0];
+        pat_speed <= reg_wr_data[15:8];
+      end
       if (wr_video_mode && mode_valid && (frame_period >= min_requested)) video_mode <= reg_wr_data[1:0];
       if (wr_source && !set_source_err)                                  source     <= reg_wr_data[1:0];
       if (wr_period && (reg_wr_data >= min_selected))                    frame_period <= reg_wr_data;
@@ -140,7 +173,10 @@ module rtlnet_csi2_rx_regs #(
       period_err <= 1'b0;
       source_err <= 1'b0;
       overrun    <= 1'b0;
+      pattern_err <= 1'b0;
     end else begin
+      if (set_pattern_err)                                           pattern_err <= 1'b1;
+      else if (wr_status && reg_wr_data[ST_PATTERN_ERR_BIT])         pattern_err <= 1'b0;
       if (set_mode_err)                                              mode_err   <= 1'b1;
       else if (wr_status && reg_wr_data[ST_MODE_ERR_BIT])            mode_err   <= 1'b0;
       if (set_period_err)                                            period_err <= 1'b1;
@@ -160,6 +196,7 @@ module rtlnet_csi2_rx_regs #(
     status_word[ST_PERIOD_ERR_BIT] = period_err;
     status_word[ST_SOURCE_ERR_BIT] = source_err;
     status_word[ST_OVERRUN_BIT]    = overrun;
+    status_word[ST_PATTERN_ERR_BIT] = pattern_err;
   end
 
   // Registered read mux: data the clock after reg_rd_en.
@@ -178,6 +215,8 @@ module rtlnet_csi2_rx_regs #(
         REG_STATUS:       reg_rd_data <= status_word;
         REG_FRAME_COUNT:  reg_rd_data <= frame_count;
         REG_ACTIVE:       reg_rd_data <= {30'd0, act_mode};
+        REG_PATTERN:      reg_rd_data <= {16'd0, pat_speed, 5'd0, pattern};
+        REG_PAT_FRAME:    reg_rd_data <= pat_frame;
         default:          reg_rd_data <= '0;
       endcase
     end

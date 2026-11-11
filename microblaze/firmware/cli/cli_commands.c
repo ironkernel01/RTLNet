@@ -3267,34 +3267,21 @@ int cli_ddr_test(const MenuCommandContext *ctx)
 static const char *const g_mode_name[RTLNET_CSI2_MODE_COUNT] = { "720p30", "1080p30" };
 static const char *const g_source_name[]                     = { "auto", "camera", "pattern" };
 
-/* Moving test patterns (Phase 2d): int rtlnet_csi2_rx_set_pattern(uintptr_t base, uint32_t pattern, int32_t speed) of the CSI-2 core
- * driver. While the driver header lacks it, a stub with the same signature refuses, so this file builds and the command says so. */
-#ifndef RTLNET_CSI2_PATTERN_ALL
-#define RTLNET_CSI2_PATTERN_BARS    0u
-#define RTLNET_CSI2_PATTERN_SCROLL  1u
-#define RTLNET_CSI2_PATTERN_BOX     2u
-#define RTLNET_CSI2_PATTERN_NOISE   3u
-#define RTLNET_CSI2_PATTERN_ALL     4u
-#define CLI_PATTERN_STUB            1
-/**
- * @brief Stand-in for the driver call until cores/rtlnet_csi2_rx provides it.
- * @param base    Unused.
- * @param pattern Unused.
- * @param speed   Unused.
- * @return -1 always.
- */
-static int rtlnet_csi2_rx_set_pattern(uintptr_t base, uint32_t pattern, int32_t speed)
-{
-    (void)base;
-    (void)pattern;
-    (void)speed;
-    return -1;
-}
-#endif
 #define CLI_PATTERN_SPEED_MAX       32
 static const char *const g_pattern_name[] = { "bars", "scroll", "box", "noise", "all" };
-static uint32_t          g_pattern_now    = RTLNET_CSI2_PATTERN_BARS;   /* last pattern set (the reset state is the static bars) */
-static int32_t           g_pattern_speed  = 0;
+#define CLI_PATTERN_SPEED_DEF       4    /* the PATTERN reset speed */
+
+/**
+ * @brief Print the test-pattern line from the CSI-2 core's PATTERN and PATTERN_FRAME registers.
+ * @param st State read by rtlnet_csi2_rx_read_state.
+ * @return None.
+ */
+static void cli_print_pattern(const rtlnet_csi2_rx_state_t *st)
+{
+    fmt_printf("  Test pattern    : %s, speed %d px/frame, frame %u since the last restart\n",
+               (st->pattern < RTLNET_CSI2_PATTERN_COUNT) ? g_pattern_name[st->pattern] : "unknown", (int)st->pattern_speed,
+               (unsigned)st->pattern_frame);
+}
 
 /**
  * @brief Print a core identity line: name, ID text, ID value, version and window address.
@@ -3363,6 +3350,9 @@ int cli_show_camera(const MenuCommandContext *ctx)
     cli_print_core_line(&g_core_csi2, board_debug_read32(RTLNET_PLAT_CSI2_BASE + RTLNET_REG_VERSION));
     fmt_printf("  Capabilities    : %u video modes, test pattern %s, camera front end %s\n", (unsigned)caps.modes,
                caps.pattern ? "yes" : "no", caps.camera ? "yes" : "no");
+    if (caps.moving) {
+        cli_print_pattern(&st);
+    }
     if (st.video_mode < RTLNET_CSI2_MODE_COUNT) {
         fmt_printf("  Video mode      : %s (%ux%u)\n", g_mode_name[st.video_mode],
                    (unsigned)rtlnet_csi2_rx_mode_width(st.video_mode), (unsigned)rtlnet_csi2_rx_mode_height(st.video_mode));
@@ -3524,13 +3514,13 @@ int cli_camera_rate(const MenuCommandContext *ctx)
 
 /**
  * @brief CAMERA PATTERN [PATTERN] {SPEED}: test pattern content (bars, scroll, box, noise, all) and its speed.
- * @param ctx argv[0] = pattern, argv[1] = speed -32..32 (default 1; 0 = still; bars ignore it).
+ * @param ctx argv[0] = pattern, argv[1] = speed -32..32 (default 4, the reset speed; 0 = still; bars ignore it).
  * @return 0, or -1 for a bad name or speed, an absent core or a value the driver rejects.
  */
 int cli_camera_pattern(const MenuCommandContext *ctx)
 {
     uint32_t pat = RTLNET_CSI2_PATTERN_ALL + 1u;
-    int32_t speed = 1;
+    int32_t speed = CLI_PATTERN_SPEED_DEF;
     int rc;
     for (uint32_t i = 0; i <= RTLNET_CSI2_PATTERN_ALL; i++) {
         if (cli_word_is(ctx->argv[0], g_pattern_name[i])) {
@@ -3554,15 +3544,9 @@ int cli_camera_pattern(const MenuCommandContext *ctx)
     }
     rc = rtlnet_csi2_rx_set_pattern(RTLNET_PLAT_CSI2_BASE, pat, speed);
     if (rc != 0) {
-#ifdef CLI_PATTERN_STUB
-        fmt_printf("%% The CSI-2 driver has no moving test patterns in this build\n");
-#else
         fmt_printf("%% Test pattern %s speed %d rejected by the core\n", g_pattern_name[pat], (int)speed);
-#endif
         return -1;
     }
-    g_pattern_now = pat;
-    g_pattern_speed = speed;
     fmt_printf("Test pattern %s, speed %d, effective at the next frame (camera source pattern)\n", g_pattern_name[pat], (int)speed);
     return 0;
 }
@@ -3803,7 +3787,13 @@ static void cli_print_ratectl(void)
                (unsigned)r.pictures);
     fmt_printf("  Buffer events   : overflow %u (%u below QP max), underflow %u\n", (unsigned)r.overflow,
                (unsigned)r.overflow_below_max, (unsigned)r.underflow);
-    fmt_printf("  Test pattern    : %s, speed %d\n", g_pattern_name[g_pattern_now], (int)g_pattern_speed);
+    {
+        rtlnet_csi2_rx_state_t cst;
+        board_probe_t pp;
+        if (board_probe(g_core_csi2.base, g_core_csi2.id, &pp) && rtlnet_csi2_rx_read_state(RTLNET_PLAT_CSI2_BASE, &cst) == 0) {
+            cli_print_pattern(&cst);
+        }
+    }
 }
 
 /**

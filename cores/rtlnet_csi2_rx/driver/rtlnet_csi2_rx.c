@@ -1,5 +1,5 @@
 /*
- * rtlnet_csi2_rx.c -- RTLNet CSI-2 capture core driver (Phase 1)
+ * rtlnet_csi2_rx.c -- RTLNet CSI-2 capture core driver (Phase 1, test patterns)
  *
  * Copyright (C) 2026 IronKernel. All rights reserved.
  *
@@ -33,6 +33,7 @@ int rtlnet_csi2_rx_probe(uintptr_t base, rtlnet_csi2_rx_caps_t *caps)
         caps->modes   = c & RTLNET_CSI2_CAPS_MODES_MASK;
         caps->pattern = ((c & RTLNET_CSI2_CAPS_PATTERN) != 0u) ? 1 : 0;
         caps->camera  = ((c & RTLNET_CSI2_CAPS_CAMERA) != 0u) ? 1 : 0;
+        caps->moving  = ((c & RTLNET_CSI2_CAPS_MOVING) != 0u) ? 1 : 0;
     }
     return RTLNET_CSI2_OK;
 }
@@ -46,6 +47,8 @@ int rtlnet_csi2_rx_probe(uintptr_t base, rtlnet_csi2_rx_caps_t *caps)
  */
 int rtlnet_csi2_rx_read_state(uintptr_t base, rtlnet_csi2_rx_state_t *st)
 {
+    uint32_t pat;
+
     if (st == NULL) {
         return RTLNET_CSI2_ERR_ARG;
     }
@@ -56,6 +59,10 @@ int rtlnet_csi2_rx_read_state(uintptr_t base, rtlnet_csi2_rx_state_t *st)
     st->status       = rtlnet_reg_read32(base, RTLNET_CSI2_REG_STATUS);
     st->frame_count  = rtlnet_reg_read32(base, RTLNET_CSI2_REG_FRAME_COUNT);
     st->active_mode  = rtlnet_reg_read32(base, RTLNET_CSI2_REG_ACTIVE) & 0x3u;
+    pat = rtlnet_reg_read32(base, RTLNET_CSI2_REG_PATTERN);
+    st->pattern       = pat & 0x7u;
+    st->pattern_speed = (int32_t)(int8_t)((pat >> RTLNET_CSI2_PATTERN_SPEED_SHIFT) & 0xFFu);
+    st->pattern_frame = rtlnet_reg_read32(base, RTLNET_CSI2_REG_PATTERN_FRAME);
     return RTLNET_CSI2_OK;
 }
 
@@ -111,6 +118,22 @@ int rtlnet_csi2_rx_set_source(uintptr_t base, uint32_t source)
 int rtlnet_csi2_rx_set_frame_period(uintptr_t base, uint32_t period)
 {
     return write_checked(base, RTLNET_CSI2_REG_FRAME_PERIOD, period, RTLNET_CSI2_STATUS_PERIOD_ERR);
+}
+
+/*
+ * rtlnet_csi2_rx_set_pattern -- select the test pattern and its speed (effective at the next frame start)
+ * Steps:
+ *   1. Refuse values that do not fit the register fields (pattern above 255, speed outside -128..127): nothing is written.
+ *   2. Write pattern | speed << 8; the core accepts patterns 0..4 and speeds -32..+32 and rejects the rest (PATTERN_ERR).
+ * Returns: RTLNET_CSI2_OK, ERR_ARG (not encodable), or ERR_REJECTED (the core rejected the value; the register is unchanged).
+ */
+int rtlnet_csi2_rx_set_pattern(uintptr_t base, uint32_t pattern, int32_t speed)
+{
+    if (pattern > 0xFFu || speed < -128 || speed > 127) {
+        return RTLNET_CSI2_ERR_ARG;
+    }
+    return write_checked(base, RTLNET_CSI2_REG_PATTERN,
+                         pattern | (((uint32_t)speed & 0xFFu) << RTLNET_CSI2_PATTERN_SPEED_SHIFT), RTLNET_CSI2_STATUS_PATTERN_ERR);
 }
 
 /*
