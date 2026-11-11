@@ -1,6 +1,6 @@
-# rtlnet_h264_enc: H.264 encoder core, phases 2b-2 to 2c-1 (Intra16x16, I_PCM fallback, P pictures at motion vector (0,0))
+# rtlnet_h264_enc: H.264 encoder core, phases 2b-2 to 2c-2 (Intra16x16, I_PCM fallback, P pictures with integer-pel motion search)
 
-Revision: 11-10-2026 (phase 2c-1: P pictures without motion search, section 15; phase 2b-4: burst-only DDR3 access, section 14)
+Revision: 11-10-2026 (phase 2c-2: integer-pel motion search, section 16; phase 2c-1: P pictures without motion search, section 15; phase 2b-4: burst-only DDR3 access, section 14)
 
 ## 1. Purpose and scope
 
@@ -13,7 +13,8 @@ shows. Every I slice macroblock is Intra16x16 unless it falls back to I_PCM (sec
 conversion, the bit packer with emulation prevention, the NAL and slice syntax, the write DMA into a compressed ring, the
 index ring and the rebuilt-picture write are unchanged from phase 2b-1. Phase 2c-1 adds P pictures (slice_type 5): every
 macroblock is P_Skip, P_L0_16x16 at the motion vector (0,0) with its residual, Intra16x16 or I_PCM, predicted from the co-located
-macroblock of the previous picture's rebuilt tiles; there is no motion search (section 15). A register bit selects the picture type.
+macroblock of the previous picture's rebuilt tiles; there is no motion search (section 15). Phase 2c-2 replaces the co-located reference by an integer-pel
+motion search of the 16 x 16 partition (range +-16, section 16). A register bit selects the picture type.
 
 Two video modes run on one build, selected by registers (VIDEO_MODE of the camera design):
 
@@ -46,8 +47,13 @@ rtlnet_h264_top                      top: registers, the engine array, completio
     rtlnet_h264_rd_dma               16 row bursts per strip of RD_STRIP_MB macroblocks (8 beats at the default 4)
       rtlnet_h264_c422to420          YUYV 4:2:2 rows to 4:2:0 macroblock rows (row held per macroblock of the strip)
     rtlnet_ram_core                  strip buffer (2 halves of RD_STRIP_MB banks of 24 words of 16 bytes, 32-word pitch)
-    rtlnet_h264_ref_dma              P pictures: the co-located reference macroblock, a 16-beat luma and an 8-beat chroma burst
-    rtlnet_ram_core                  reference macroblock buffer (2 banks of 24 of 32 words of 16 bytes), REF_BUF_KB
+    rtlnet_h264_search               P pictures (2c-2): window loader, motion search, prediction generator, one macroblock ahead of stage A
+      rtlnet_ram_core  x 2           search window (even and odd slots, 128 bit), WIN_KB each
+      rtlnet_ram_core                source rows buffer of the search (8 words, distributed)
+      rtlnet_h264_mvctx              the search's own vector context (approximate predictor and neighbour candidates), MV_LINE_KB
+      rtlnet_h264_sad16              16 samples per clock sum of absolute differences
+      rtlnet_h264_cinterp            chroma bilinear interpolation, clause 8.4.2.2.2
+    rtlnet_ram_core                  prediction buffer (2 banks of 24 of 32 words of 16 bytes), REF_BUF_KB
     rtlnet_h264_mb_enc               stage A: mode decision, transform, quantizer, rebuild loop, I_PCM copy
       rtlnet_h264_ipred              Intra16x16 / chroma prediction candidates, SAD, mode decision, inter SAD
       rtlnet_h264_mvctx              P pictures: motion vector context (neighbours' vectors), mvp and the skip vector
@@ -72,7 +78,8 @@ rtlnet_h264_top                      top: registers, the engine array, completio
 ```
 
 Files: `hdl/rtlnet_h264_top.sv` (top), `hdl/rtlnet_h264_enc_regs.sv`, `hdl/rtlnet_h264_engine.sv` (one engine), the
-datapath modules above (phase 2c-1 adds `rtlnet_h264_ref_dma.sv`, `rtlnet_h264_mvctx.sv` and `rtlnet_h264_mvpred.sv`),
+datapath modules above (phase 2c-1 adds `rtlnet_h264_mvctx.sv` and `rtlnet_h264_mvpred.sv`; phase 2c-2 adds `rtlnet_h264_search.sv`, `rtlnet_h264_sad16.sv`
+and `rtlnet_h264_cinterp.sv` and removes `rtlnet_h264_ref_dma.sv`),
 `hdl/rtlnet_h264_enc.f` (compile order), `driver/rtlnet_h264_enc.{h,c}`, `testbench/`.
 `rtlnet_h264_mb_pcm` of phase 2b-1 is gone: the I_PCM macroblock layer is written by stage B like any other.
 
@@ -187,8 +194,10 @@ on average. The driver therefore writes `max(QP, RTLNET_H264_QP_MIN_REALTIME)` i
 | ADDR_W | 32 | only 32 supported (elaboration `$fatal`) |
 | ID_W | 4 | AXI ID width of each engine port |
 | RD_STRIP_MB | 4 | macroblocks per input-read burst strip, 2, 4 or 8: row bursts of 2 x RD_STRIP_MB beats (8 beats = 128 bytes at 4) |
-| REF_BUF_KB | 1 | reference macroblock buffer per engine, KiB (two banks of 32 words of 16 bytes, 24 used per bank; at least 1) |
-| MV_LINE_KB | 1 | motion vector line RAM per engine, KiB (one 32-bit word per macroblock column and one more; at least MAX_MB_W + 1 words) |
+| REF_BUF_KB | 1 | prediction buffer per engine, KiB (two banks of 32 words of 16 bytes, 24 used per bank; at least 1; written by the search since 2c-2) |
+| MV_LINE_KB | 1 | motion vector line RAM per engine and per user (stage A's context and the search's), KiB (one 32-bit word per macroblock column and one more; at least MAX_MB_W + 1 words) |
+| WIN_KB | 4 | each of the two search window RAMs per engine, KiB (144 words of 16 bytes are used; at least 4) |
+| SR | 16 | motion search range, whole samples, 0 to 16 (0: only the vector (0,0), the 2c-1 behaviour) |
 | MB_BUF_KB | 4 | strip buffer, KiB (two halves of RD_STRIP_MB banks of 32 words of 16 bytes = 2 x RD_STRIP_MB x 512 B; at least RD_STRIP_MB) |
 | REC_BUF_KB | 1 | rebuilt macroblock buffer, KiB (two banks of 96 words of 4 samples) |
 | COEF_BUF_KB | 1 | coefficient buffer per copy, KiB (two banks of 128 words of 48 bits) |
@@ -208,8 +217,8 @@ parameters, so one build codes both video modes.
 | AXI4 masters, `enc_clk` | `m_axi_aw*`, `w*`, `b*`, `ar*`, `r*` as packed vectors, engine e at `[e*W +: W]`, arbiter style; 128-bit data, ADDR_W 32, ID_W 4 |
 | Interrupt | `irq`, level on `enc_clk`: `CTRL.IRQ_EN` and (`STATUS.DONE` or `STATUS.ERR`) |
 
-In P pictures the AR channel also carries the reference reads (AXI ID 1; the input strips use ID 0): a 16-beat luma tile burst and an 8-beat
-chroma tile burst per macroblock, from addresses that are multiples of 256 and 128 (section 15.1). Every burst is INCR, size 16 bytes (full width), at most 16 beats, and never crosses 4 KiB (`rtlnet_axi_arbiter` rejects
+In P pictures the AR channel also carries the search window reads (AXI ID 1; the input strips use ID 0): per macroblock one column of reference tiles,
+a 16-beat luma tile burst and an 8-beat chroma tile burst for each of the rows r - 1, r, r + 1 that exist, from addresses that are multiples of 256 and 128 (section 16.2). Every burst is INCR, size 16 bytes (full width), at most 16 beats, and never crosses 4 KiB (`rtlnet_axi_arbiter` rejects
 anything else from a non-narrow master). The core issues bursts only (section 14): read bursts are `2 x RD_STRIP_MB` beats (8 at the default;
 fewer, but at least 2, for the last strip of a macroblock row whose width is not a multiple of `RD_STRIP_MB`) from an address that is a
 multiple of `32 x RD_STRIP_MB`; the rebuilt picture is written as a 16-beat luma tile burst and an 8-beat chroma tile burst per macroblock; an
@@ -224,7 +233,7 @@ remainder). Simulation assertions in `rtlnet_h264_wr_master` and `rtlnet_h264_en
 | Offset | Name | Access | Meaning |
 |---|---|---|---|
 | 0x000 | ID | RO | "H264" = 0x48323634 |
-| 0x004 | VERSION | RO | 0x11102C01 (11-10-2026, phase 2c-1: P pictures; 0x11102026 was the tiled rebuilt picture with 128-byte index records) |
+| 0x004 | VERSION | RO | 0x11102C02 (11-10-2026, phase 2c-2: motion search, no register change; 0x11102C01 was phase 2c-1: P pictures; 0x11102026 the tiled rebuilt picture with 128-byte index records) |
 | 0x008 | CAPS | RO | [7:0] MAX_MB_W, [15:8] MAX_MB_H, [19:16] NUM_ENGINES |
 | 0x00C | CTRL | RW | bit 0 START (self-clearing), bit 1 RING_RESET (self-clearing), bit 8 IRQ_EN |
 | 0x010 | STATUS | RW | bit 0 BUSY, bit 1 DONE (W1C), bit 2 ERR (W1C), bit 3 RING_STALL (live, any engine) |
@@ -428,6 +437,8 @@ All H.264 RTL benches run in Verilator 5.050 (MSYS2 UCRT64, g++ 16.2), through `
 * `testbench/h264_mutation.ps1`: 19 mutations (13 of phase 2b-2, 6 of the P path), each restored byte for byte (SHA-256 checked) (section 11.4, 15.5).
 * `testbench/h264_harness_par.ps1` runs the harness configurations in parallel (one process each); the P-picture configurations `p_*` of phase 2c-1
   (GOPs of generated sequences, section 15.5) run only when named with `-Config`.
+* Phase 2c-2: `tb_rtlnet_h264_search` (search stage against a software model), `tb_rtlnet_h264_cinterp` (chroma interpolation, all 64 fractions) and
+  `tb_rtlnet_h264_sad16` (SAD unit), the harness configurations `m_*` and the bits ratio check (section 16.8).
 * Synthesis check `testbench/h264_synth.tcl` through `scripts/rtlnet_vivado.ps1`.
 
 ### Tool builds (no hardcoded paths)
@@ -933,5 +944,148 @@ Phase 2c-1 adds two memories per engine, both `rtlnet_ram_core` instances with `
 
 Total for `NUM_ENGINES` 2: 10 RAMB18, about 5 RAMB36 equivalents, on top of the 22 RAMB36 + 2 RAMB18 of section 14.3 (by capacity only 32 Kibit, under one RAMB36; the width of the reference words
 sets the count). `RAM_STYLE` "distributed" puts the reference buffer in about 130 LUTs per engine. Memory outside the core: the second rebuilt buffer, 3,133,440 bytes at 1080p. The
-added logic is small (the inter decision, the motion vector context, the reference DMA, two comparators); no synthesis has been run for phase 2c-1 (the synthesis slot is the architect's), so the LUT, DSP and timing figures of section 14.3 are
-those of the phase 2b-4 build.
+added logic is small (the inter decision, the motion vector context, the reference DMA, two comparators).
+
+### 15.7 Synthesis of the committed 2c-1 RTL (step 0 of phase 2c-2, 11-10-2026)
+
+`h264_synth.tcl`, 2 engines, 11.111 ns, `xc7a200tsbg484-1` (`.sim/synth/h264_top_2c1.log`): **WNS -2.871 ns** (30 failing endpoints), 41,387 LUT, 27,338 FF, 26 RAMB36 + 4 RAMB18, 74 DSP,
+0 critical warnings. Two path groups failed, both in 2c-1 logic: `u_mvctx/mvp_x` to `cost_in` in `rtlnet_h264_mb_enc` (the MD1 clock computed mvd, the two se(v) lengths, the lambda
+multiply and the add in one clock: 21 logic levels, 14.0 ns) and the compare of the skip vector in `rtlnet_h264_mvctx` (`skip_zero`, -1.3 ns, 15 levels). Fixes (no change of behaviour or clocks):
+the mvd, its code lengths and the rate `lambda x bits` are free-running register stages (the vector, the predictor and the QP are stable far before MD1); `skip_zero` is the compare of the
+registered skip vector. After the fix (`.sim/synth/h264_top_2c1fix.log`): WNS +0.895 ns, 41,546 LUT, 27,374 FF, 26 RAMB36 + 4 RAMB18, 76 DSP (the rate multiplier). The LUT and RAMB36 gates of
+2c-2 are measured against the committed numbers (41,387 LUT, 26 RAMB36).
+
+## 16. Motion search, phase 2c-2 (11-10-2026)
+
+Phase 2c-2 replaces the co-located reference read of 2c-1 by an integer-pel motion search of the 16 x 16 partition with one reference picture
+(`rtlnet_h264_search`, one per engine). The syntax writer, the motion vector context of stage A and the residual path are those of 2c-1.
+
+### 16.1 Pipeline
+
+The search is its own stage, one macroblock ahead of stage A. Per macroblock of the band, in raster order, it (1) waits until the window holds the
+columns it needs, (2) copies the even luma rows (0, 2, ..., 14) of the macroblock from the strip buffer into a small buffer, (3) searches, (4) writes the prediction at
+the best vector into a bank of the prediction buffer (the 2c-1 reference macroblock buffer, same layout: luma word y, Cb words 16 + k, Cr words 20 + k)
+and reports the vector. The engine starts the next search when the other bank is free and the macroblock's strip is in the strip buffer. Stage A starts
+a macroblock when its prediction bank is full, reads the prediction exactly as in 2c-1 (SAD phase, PASS1, PASS3) and takes the vector (`mv_in_x`,
+`mv_in_y`, quarter samples, a multiple of 4). The search reads the strip buffer only in clocks stage A does not use its read port (and never while an
+I_PCM copy runs, `src_lock`). The search stage takes 150 to 250 clocks per macroblock on typical content, so stage A (about 381 clocks) stays the limit.
+
+**Approximation.** Stage A decides each macroblock one macroblock behind the search, so the left neighbour's final vector (it can be P_Skip at the
+skip vector, or intra) is not known when the search runs. The search keeps its own vector context (`rtlnet_h264_mvctx` instance, its own line RAM)
+filled with its own results: the predictor used for the rate term, and the left, above and above-right candidates, are search vectors, not final ones.
+Stage A computes the exact `mvp` for `mvd` and for the skip decision and makes the final choice: P_Skip, P_L0_16x16 at the search vector, Intra16x16
+or I_PCM. The cost of the approximation is only efficiency (a rate term against a slightly different predictor).
+
+### 16.2 Search window
+
+Two window RAMs (`rtlnet_ram_core`, 128 bit, `WIN_KB` 4 KiB, 256 words each, `RAM_STYLE`; 2 RAMB36 each, 4 RAMB36 per engine at `MAX_MB_W` 120) hold
+four columns of reference tiles, slot = global column load index mod 4: the columns c - 1, c, c + 1 of the macroblock being searched and the column
+c + 2 being prefetched. Adjacent columns have adjacent slots, so one RAM holds the even slots and the other the odd ones, and a 16 sample luma row at any
+horizontal offset (the rows of two adjacent tiles, shifted by `vx mod 16` bytes) is read in one clock, one word from each RAM. Per slot pair and RAM:
+3 macroblock rows (r - 1, r, r + 1) x 16 luma words (word `{slot[1], wr, y}`) and 8 chroma words (128 + `{slot[1], wr, beat}`, the tile beats as stored).
+The loader loads one column per macroblock (the tiles of the rows that exist: three 16-beat luma and three 8-beat chroma bursts, AXI ID 1, tile
+aligned, never 4 KiB crossing), so every reference tile is read three times per picture. A column g may load while g < (first column the current
+search needs) + 4, and a search starts when its last column is loaded; at the end of a macroblock row the loader continues with the next row's columns
+while the last macroblocks of the row search. Tiles outside the picture are not fetched. The window needs 4.5 RAMB36 per engine including the search
+vector line RAM; the 8-word source buffer (`SRCBUF_STYLE`, distributed) takes about 16 LUTRAM.
+
+### 16.3 SAD unit
+
+`rtlnet_h264_sad16`: 16 absolute differences per clock (one macroblock row), four register stages (differences, sums of four, row sum, accumulation).
+The metric covers the 8 even rows of the macroblock (a 2:1 vertical subsample of the search metric only; stage A computes the exact SAD of the chosen
+vector), so a candidate takes 8 clocks; candidates follow each other with no gap, a result appears 4 clocks after the last row.
+Sizing: the search budget is the stage A time (381 clocks) minus about 100 clocks for source copy, prediction and overhead; at 8 clocks per candidate
+that is about 35 candidates, and the measured mean is 8 to 12 per macroblock on the test sequences (the evaluation cap `MAX_EVAL` 48 bounds the worst
+case at about 600 clocks; the worst measured P picture is 560 clocks per macroblock on average). 32 samples per clock (two rows) would need four window words per clock, double
+the window RAM width. A full 16-row metric (16 clocks per candidate, built and measured) raised the true-vector share only by a few macroblocks per
+picture and took the 1080p pan to 625 clocks per macroblock, over the 600 gate, so the subsampled metric stays.
+
+### 16.4 Picture-edge rule
+
+Every candidate vector keeps the 16 x 16 luma block inside the picture: `0 <= 16 c + vx` and `16 c + vx + 16 <= 16 MB_W`, the same vertically, and
+`|vx|, |vy| <= SR`. The bounds are 0 in the first and last column / row and +-`SR` elsewhere, so the block never leaves the window. For an integer luma
+vector the chroma vector (clause 8.4.1.4, the luma vector in units of 1/8 chroma sample) is `4 vx` with `xIntC = (4 vx) >> 3 = floor(vx / 2)` and
+`xFracC = (4 vx) & 7 = 4 (vx & 1)` (clause 8.4.2.2.2); the taps `xIntC` and `xIntC + 1` (and rows likewise) stay inside the chroma picture because the
+luma block does: the last tap is at most `8 c + floor(vx / 2) + 8 <= 8 MB_W - 1` for odd `vx` (for even `vx` the weight of the extra tap is 0). So no
+sample coordinate clipping (equations 8-229, 8-230) is needed in this phase. Vectors that point outside the picture (edge padding) are left to Phase 2e.
+P_Skip is allowed only when the exact skip vector (clause 8.4.1.1) equals the search vector (so it is inside the picture and the window) and the
+residual at that vector quantizes to zero (with the isolated-coefficient rule of 15.1); this replaces the 2c-1 restriction "skip only at (0,0)".
+
+### 16.5 Search pattern
+
+Cost = 2 x SAD(8 even rows) + lambda(QP) x (se(v) length of `mvdx` + of `mvdy`) with `mvd = 4 v - mvp` against the approximate predictor (clause 9.1 lengths), plus, for every vector but (0,0),
+`ZERO_BIAS` (128) and 8 more bits of lambda (a static scene keeps the zero vector and codes as P_Skip at every QP: with a smaller bias the rebuilt-picture noise made a few macroblocks of the static
+sequences move). Strictly lower cost wins; earlier candidates win ties.
+Candidates, in this order, deduplicated and filtered by the edge rule: (0,0), the predictor (median of the neighbours, clause 8.4.1.3, all inter),
+the left, above and above-right (above-left when the latter does not exist) vectors, and the vector of the macroblock searched just before (raster
+order, across rows and pictures: a global motion continues; without it a pan with large vectors never found its vector from row 0 on). Then step stages
+around the best candidate: d = 16 (8 points: the four diamond points and the four diagonal ones), 8 (8 points), 4 (8), 2 (4) and 1 (4 points), at most
+3, 3, 2, 2 and 3 repeats while the best point moves; the stages d >= 2 are skipped when the best cost is at most `GOOD_COST` (768) at the start of the
+stage; no new step starts after `MAX_EVAL` (48) evaluations. A typical pan macroblock evaluates the 1 to 3 distinct candidates and one diamond of
+4 points. The software model in `tb_rtlnet_h264_search` implements exactly this order and the unit bench checks every evaluated vector and SAD.
+
+### 16.6 Prediction
+
+Luma: the 16 rows at the integer vector, one row per clock from the window. Chroma: `rtlnet_h264_cinterp`, clause 8.4.2.2.2 equation 8-228
+`((8 - xFrac)(8 - yFrac) A + xFrac (8 - yFrac) B + (8 - xFrac) yFrac C + xFrac yFrac D + 32) >> 6`, implemented for every `xFracC`, `yFracC` of 0 to 7
+as two exact separable steps (horizontal weights per source row, vertical weights per row pair), 8 samples per clock; 9 source rows per plane, 18 clocks;
+only fractions 0 and 4 occur now. The rebuild of stage A uses the same prediction buffer.
+
+### 16.7 Registers and parameters
+
+No register changes (VERSION 0x11102C02). `SR` (0 to 16, default 16) and `WIN_KB` are parameters of `rtlnet_h264_top`; `SR` 0 searches only (0,0) (the
+2c-1 behaviour, used as the baseline of the bits gate).
+
+### 16.8 Verification (Verilator, section 10)
+
+All runs 11-10-2026 with the final RTL; logs in `.sim/logs/` (gitignored work directory).
+
+| Check | Result | Log |
+|---|---|---|
+| Search unit bench `tb_rtlnet_h264_search` (model of the algorithm; candidate order, deduplication, edge legality, SAD of every candidate, best cost, final vector, the 24-word prediction, the window RAM contents of the columns c - 1 .. c + 1 after every macroblock, burst shapes and counts) | 7 configurations pass: 6 x 5 full picture with a true vector (30 macroblocks, 786 candidates, 4,992 window words), band 2..4 of 7 x 6, 2 x 4 (width 2), random picture at QP 51, vectors beyond the range with `SR` 8; the `_neg` control fails as required | `.sim/verilator/tb_rtlnet_h264_search*/run.log` |
+| Chroma interpolation `tb_rtlnet_h264_cinterp` | all 64 fractions x 5 blocks (random, extreme, gaps and back to back): 8,000 checks against equation 8-228 | `.sim/verilator/` |
+| SAD unit `tb_rtlnet_h264_sad16` | 380 checks (126 candidates of 1 to 40 rows, with and without gaps) | `.sim/verilator/` |
+| All 24 H.264 unit bench entries (`rtlnet_regression.ps1 -Match "^tb_rtlnet_h264_"`) | 24 passed, 0 failed | `.sim/verilator/` |
+| Decoder harness, earlier configurations | `h264_harness_par.ps1` over the 74 I-picture configurations: 74 of 74 passed | `g0_par.log` |
+| Decoder harness, 2c-1 P configurations `p_*` | 46 of 46 passed (static scenes all-skip at QP 12, 28, 38, 51) | `g1_par.log` |
+| Decoder harness, 2c-2 configurations `m_*` | 53 of 53 passed: JM, OpenH264 and FFmpeg byte-identical to the de-tiled rebuilt picture of EVERY picture of every GOP, PSNR floors met (QCIF, 720p, 1080p; 1 and 2 engines; 1, 2, 3, 4, 9 slices; QP 12 to 51; pans of 1 to 16 samples per picture horizontally, vertically and diagonally, 24 beyond the range, a bouncing window, moving objects over a static background, moving bars, noise, a cut, widths 208, 80 and 288) | `g1_par.log` |
+| Burst monitor, 1080p 2 engines QP 28 pan of 12 samples (engine 0) | input AR 146,880 x 8 beats; window AR 96,960 x 16 beats and 96,960 x 8 beats (three reads of every reference tile per picture); rebuilt AW and index AW unchanged; no 1-beat transaction | `g1_m_1080p_e2_s2_panh12_q28.log` |
+| Negative controls | `-InjectBurstRef` (4-beat window read): monitor fires on `m_qcif_panh8_q28` and `p_qcif_pan_e2_s2_q28`; `-InjectBurst` and `-Inject` (corrupted stream byte): all fail as required | `n_refneg.log`, `n_burstneg.log`, `n_inject.log` |
+| Lint, driver test | `LINT PASS` (0 warnings); `DRIVER TEST PASS: rtlnet_h264_enc checks=450` | |
+| Mutations (`h264_mutation.ps1 -Only 14 .. 24`) | 11 of 11 caught, each file restored with an identical SHA-256: (16) window chroma tile pointer step wrong, (20) a window column loaded into the wrong slot, (21) the mvd cost of the search without the predictor (only the search bench sees it: it compares the best cost), (22) chroma interpolation weight off by one, (23) the lower edge bound of the search removed, (24) P_Skip without the skip vector equal to the search vector; (14), (15), (17), (18), (19) of 2c-1 unchanged | `n_mut.log` |
+
+**Search quality.** Pans by a known integer vector over the value-noise canvas (`vtex`), QP 12 to 28, the share of the macroblocks whose block at the pan vector lies
+inside the picture that carry exactly that vector (`MVSTAT`, minimum over the 8 P pictures; gate 90 %): panh1 97.8 %, panh2 100 %, panh3 100 %, panh5 98.9 %, panh8 93.3 % (QP 12
+and 28, 3 slices), panh12 98.9 %, panh16 100 %, panv1 96.6 %, panv4 98.9 %, panv9 94.3 %, panv16 100 %, pand2 98.8 %, pand6 90.0 % (QP 28) and 91.2 % (QP 20), pand11 97.5 %,
+pand16 100 %, 720p panh8 100 %, 1080p panh12 99.9 % and pand16 (QP 20) 100 %, strip widths 13 and 18: 96.3 % and 100 %, `SR` 8: 100 %. Configurations that are not gated: the two
+2-engine QCIF pans (`m_qcif_pand6_e2_s2_q28`, `m_strip_w5_e2_pand3_q28`: 32 to 80 macroblocks per picture, the worst picture 87.5 %), QP 38 and 51 (the quantizer leaves too little of the
+texture), and the 2c-1 smooth photo pan (4 samples right, 1 down: 42 to 69 %; even an exhaustive full SAD search finds the vector in only 35 of 80 macroblocks of its first P picture
+because the QP 28 rebuilt photo makes vectors one sample apart practically tied). **Bits:** the P pictures of `m_qcif_panh8_q28` carry 36,096 bits with the search against 306,544 with `SR` 0
+(the 2c-1 behaviour): ratio 0.118; `m_qcif_pand6_q28` 0.226; 1080p panh12 (2 engines) 0.010; the 2c-1 photo pan 0.19 (limit 0.50;
+`h264_check.py bitsratio`).
+
+**Clocks per macroblock** (`PIC_CYC / MB_COUNT` of an engine, `-Lat 20 -Gap 20`; gate for P pictures at 1080p, 2 engines: 600):
+
+| Content | I pictures | P pictures (min / mean / max) |
+|---|---|---|
+| 1080p, pan of 12 samples QP 28, 2 engines (`m_1080p_e2_s2_panh12_q28`) | 379 | 397 / 398 / 399 |
+| 1080p, pan of 16 diagonal QP 20, 1 engine | 379 | 383 / 383 / 384 |
+| 1080p, 2c-1 pan QP 28 and static QP 28 (`p_1080p_e2_s2_*`) | 379 | 381 / 381 / 382 |
+| 1080p, objects QP 51, 4 slices; noise QP 28 (dense, I_PCM fallback) | 379; 525 | 405 / 406 / 409; 520 / 525 / 531 |
+| 720p, pans, objects, bounce (QP 12 to 38) | 379 to 437 | 382 to 419 |
+| QCIF, pans QP 28 | 384 | 396 to 433 |
+| QCIF, pan beyond the range (24), QP 12 / 28 | 443 / 385 | 517 to 547 / 506 to 531 |
+| QCIF, 2 engines, 4 samples wide strips (`m_strip_w5_e2_pand3_q28`, worst case) | 405 to 413 | 491 / 523 / 560 |
+| QCIF, noise QP 28 | 526 | 531 / 533 / 535 |
+
+The search stage (about 150 to 250 clocks per macroblock on typical content: 8 to 12 candidates of 8 clocks, the prediction 40 clocks, the window and source waits) runs in the shadow of stage A
+(381 clocks); the worst measured P macroblock average is 560 (`MAX_EVAL` 48 bounds the worst case at about 600 clocks of search plus waits), inside the 600-clock gate and the 735-clock board budget.
+
+**RAM per engine** (2c-2, `RAM_STYLE` "block", `MAX_MB_W` 120): window 2 RAMs x 4 RAMB18 = 4 RAMB36; the search vector line RAM 1 RAMB18; the 8-word source buffer in LUTRAM; the prediction buffer is the
+2c-1 reference buffer (2 RAMB36, unchanged). 2 engines: +8 RAMB36 and +2 RAMB18 over 2c-1.
+
+### 16.9 Synthesis
+
+`h264_synth.tcl`, 2 engines, `enc_clk` 11.111 ns, `xc7a200tsbg484-1` (`.sim/synth/h264_top_2c2c.log`): PASS, 0 critical warnings, post-synthesis **WNS +0.881 ns** (worst path `u_regs/cfg_mb_h` into
+`me_left`), **47,083 LUT** (+5,696 over the committed 2c-1 RTL's 41,387; +5,537 over the timing-fixed 41,546; gate +12,000), 31,071 FF, **34 RAMB36** (+8 over 26; gate +10) + 6 RAMB18, 76 DSP.
+Per engine the search stage costs about 2,800 LUT (SAD unit, chroma interpolator, shifters, the search sequencer, the window loader and the search's motion vector context).

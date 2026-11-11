@@ -61,3 +61,16 @@ static 12 49.3
 static 28 40.4
 static 38 36.4
 static 51 30.9
+# Phase 2c-2 motion sequences (minimum over the m_* configurations minus 1 dB, then 0.5 dB margin): panx = panh/panv/pand<k>.
+panx 12 46.6
+panx 20 40.4
+panx 28 33.5
+panx 38 28.4
+panx 51 22.1
+bounce 12 47.4
+bounce 28 34.1
+bounce 51 22.6
+objs 12 48.0
+objs 28 36.7
+objs 38 31.5
+objs 51 26.1

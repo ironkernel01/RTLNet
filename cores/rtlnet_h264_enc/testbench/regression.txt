@@ -46,3 +46,18 @@ h264_harness_burstneg  script:cores/rtlnet_h264_enc/testbench/h264_harness.ps1 -
 h264_harness_burstrefneg script:cores/rtlnet_h264_enc/testbench/h264_harness.ps1 -InjectBurstRef -Config p_qcif_pan_q28,p_qcif_pan_e2_s2_q28
 h264_harness_p         script:cores/rtlnet_h264_enc/testbench/h264_harness_par.ps1 -Config p_* -Jobs 4 -Prefix p2c1 -NoPng
 h264_lint               script:cores/rtlnet_h264_enc/testbench/h264_lint.ps1
+# Phase 2c-2 (motion search): tb_rtlnet_h264_search checks the window loader, candidate order, SAD values, edge legality, the result and the prediction against a model
+# (several geometries: full picture, a band inside the picture, narrow pictures, vectors beyond the range, a random picture, SR 8); tb_rtlnet_h264_cinterp the clause 8.4.2.2.2
+# interpolation for all 64 fractions; tb_rtlnet_h264_sad16 the SAD unit. The m_* harness configurations run pans (horizontal, vertical, diagonal, 1 to 16 and 24
+# samples per picture), a bouncing window, moving objects, bars, noise and a cut at QCIF, 720p and 1080p; configurations with an expected vector enforce >= 90 % true vectors.
+tb_rtlnet_h264_search   cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_search.f   sim=verilator
+tb_rtlnet_h264_search   cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_search.f   neg  plusargs=INJECT_FAILURE  expectfail  sim=verilator
+tb_rtlnet_h264_search   cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_search.f   band  defines=TB_W=7,TB_H=6,TB_FIRST=2,TB_ROWS=3,TB_TX=-9,TB_TY=7,TB_SEED=2  sim=verilator
+tb_rtlnet_h264_search   cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_search.f   narrow  defines=TB_W=2,TB_H=4,TB_FIRST=0,TB_ROWS=4,TB_TX=3,TB_TY=3,TB_SEED=3  sim=verilator
+tb_rtlnet_h264_search   cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_search.f   rand  defines=TB_W=5,TB_H=4,TB_FIRST=1,TB_ROWS=3,TB_TX=99,TB_QP=51,TB_SEED=4  sim=verilator
+tb_rtlnet_h264_search   cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_search.f   far  defines=TB_W=6,TB_H=5,TB_FIRST=0,TB_ROWS=5,TB_TX=24,TB_TY=-20,TB_QP=12,TB_SR=8,TB_SEED=5  sim=verilator
+tb_rtlnet_h264_cinterp  cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_cinterp.f  sim=verilator
+tb_rtlnet_h264_cinterp  cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_cinterp.f  neg  plusargs=INJECT_FAILURE  expectfail  sim=verilator
+tb_rtlnet_h264_sad16    cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_sad16.f    sim=verilator
+tb_rtlnet_h264_sad16    cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_sad16.f    neg  plusargs=INJECT_FAILURE  expectfail  sim=verilator
+h264_harness_m          script:cores/rtlnet_h264_enc/testbench/h264_harness_par.ps1 -Config m_* -Jobs 4 -Prefix p2c2 -NoPng

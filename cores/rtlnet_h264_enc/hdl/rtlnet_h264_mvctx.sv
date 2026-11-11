@@ -12,6 +12,8 @@
 //   * upd (one clock, at the end of a macroblock, with upd_inter and the motion vector of the macroblock; an intra or I_PCM
 //     macroblock has upd_inter 0 and mv 0, a P_Skip macroblock upd_inter 1 and the skip motion vector) writes the line RAM
 //     word of the macroblock's column and the left registers.
+//   * The entries of the neighbours (nb_*) are visible for the caller that needs the vectors themselves (the motion search of
+//     phase 2c-2 uses them as search candidates).
 //   * Availability is the caller's: av_top (not the first row of the slice), av_left (not the first column), av_tr (av_top and
 //     a column to the right). The line RAM is not cleared between slices or pictures: entries of unavailable neighbours are
 //     never used.
@@ -19,6 +21,7 @@
 // Language: SystemVerilog-2012.
 // Revision: 11-10-2026
 //   * 11-10-2026: initial version (phase 2c-1).
+//   * 11-10-2026: phase 2c-2: skip_zero from the registered skip vector (timing); neighbour entries exported.
 // Clocks: clk.
 // -----------------------------------------------------------------------------
 module rtlnet_h264_mvctx #(
@@ -40,6 +43,20 @@ module rtlnet_h264_mvctx #(
   output logic signed [13:0]                skip_x,
   output logic signed [13:0]                skip_y,
   output logic                              skip_zero,
+  // The neighbours' entries (valid from ready): left A, above B, above-right C, above-left D. The motion search takes its candidate
+  // vectors from them (phase 2c-2); their availability is the caller's.
+  output logic                              nb_a_inter,
+  output logic signed [13:0]                nb_a_mvx,
+  output logic signed [13:0]                nb_a_mvy,
+  output logic                              nb_b_inter,
+  output logic signed [13:0]                nb_b_mvx,
+  output logic signed [13:0]                nb_b_mvy,
+  output logic                              nb_c_inter,
+  output logic signed [13:0]                nb_c_mvx,
+  output logic signed [13:0]                nb_c_mvy,
+  output logic                              nb_d_inter,
+  output logic signed [13:0]                nb_d_mvx,
+  output logic signed [13:0]                nb_d_mvy,
 
   input  logic                              upd,
   input  logic                              upd_inter,
@@ -72,7 +89,11 @@ module rtlnet_h264_mvctx #(
   logic [31:0]           wr_data;
 
   logic signed [13:0]    p_mvp_x, p_mvp_y, p_skip_x, p_skip_y;
+  // skip_zero of the predictor is not used: skip_zero is the compare of the registered skip vector (timing: the compare behind the
+  // median and skip multiplexers did not fit one clock).
+  /* verilator lint_off UNUSEDSIGNAL */
   logic                  p_skip_zero;
+  /* verilator lint_on UNUSEDSIGNAL */
 
   assign rd_en   = run && (cnt <= 3'd1);
   assign rd_addr = AW'(x_q) + AW'(cnt[0]);
@@ -84,6 +105,12 @@ module rtlnet_h264_mvctx #(
     .wr_clk(clk), .wr_en(wr_en), .wr_addr(wr_addr), .wr_data(wr_data),
     .rd_clk(clk), .rd_resetn(resetn), .rd_en(rd_en), .rd_addr(rd_addr), .rd_data(rd_data)
   );
+
+  assign skip_zero = (skip_x == 14'sd0) && (skip_y == 14'sd0);
+  assign nb_a_inter = l_inter;  assign nb_a_mvx = l_mvx;  assign nb_a_mvy = l_mvy;
+  assign nb_b_inter = b_inter;  assign nb_b_mvx = b_mvx;  assign nb_b_mvy = b_mvy;
+  assign nb_c_inter = c_inter;  assign nb_c_mvx = c_mvx;  assign nb_c_mvy = c_mvy;
+  assign nb_d_inter = d_inter;  assign nb_d_mvx = d_mvx;  assign nb_d_mvy = d_mvy;
 
   rtlnet_h264_mvpred #(.MVW(14)) u_pred (
     .av_a(avl_q),  .inter_a(l_inter), .mvx_a(l_mvx), .mvy_a(l_mvy),
@@ -118,7 +145,6 @@ module rtlnet_h264_mvctx #(
       mvp_y     <= '0;
       skip_x    <= '0;
       skip_y    <= '0;
-      skip_zero <= 1'b1;
     end else begin
       ready <= 1'b0;
       if (upd) begin
@@ -155,7 +181,6 @@ module rtlnet_h264_mvctx #(
           mvp_y     <= p_mvp_y;
           skip_x    <= p_skip_x;
           skip_y    <= p_skip_y;
-          skip_zero <= p_skip_zero;
         end
         if (cnt == 3'd4) begin
           ready <= 1'b1;

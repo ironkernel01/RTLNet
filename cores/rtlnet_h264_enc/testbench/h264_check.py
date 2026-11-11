@@ -28,12 +28,17 @@ Overview:
     --measure prints one candidate line with the minimum PSNR over the pictures. --allskip (static scene) requires every P
     picture to be coded as skipped macroblocks only: at most 6 + 24 x --slices stream bytes (the access unit delimiter, and per
     slice the header, mb_skip_run and the trailing bits), and its rebuilt picture byte-identical to the previous picture's.
+  * Phase 2c-2: the pan sequences panh<k>, panv<k>, pand<k> (any k) share the floor name panx (floor_name); bitsratio compares the P-picture bits
+    of two harness logs (python -I h264_check.py bitsratio --a <log> --b <log> --max 0.5): the encoder with the search against the same sequence
+    with the search range 0 (the phase 2c-1 behaviour); exit code 1 when the ratio exceeds --max.
 Revision: 11-10-2026
   * 11-09-2026: initial version; PSNR report and floors, bits per picture, --pcm switch (intra 16x16 phase).
   * 11-10-2026: sequences, --gop, --allskip.
+  * 11-10-2026: phase 2c-2: floor_name, bitsratio.
 """
 import argparse
 import math
+import re
 import sys
 
 
@@ -137,6 +142,11 @@ def read_floors(path):
     return floors
 
 
+def floor_name(seq):
+    """The name of a sequence in the floors file: every pan<h|v|d><k> sequence is one family (panx)."""
+    return "panx" if re.match(r"^pan[hvd]\d+$", seq) else seq
+
+
 def split_pictures(stream):
     """Byte offsets of the access unit delimiters (00 00 00 01 09) in the stream."""
     marker = bytes([0, 0, 0, 1, 9])
@@ -219,7 +229,7 @@ def cmd_assemble(args):
             else:
                 print("MATCH rebuilt%d equals the generator's 4:2:0 reference (%d bytes), PSNR inf" % (n, len(yuv)))
             continue
-        pats = args.pattern.split(",")
+        pats = [floor_name(x) for x in args.pattern.split(",")]
         key = (pats[min(n, len(pats) - 1)], args.qp)
         if len(pats) == 1 and args.pics > 1:
             # A sequence: one floor for every picture, measured as the minimum over the pictures.
@@ -254,9 +264,42 @@ def cmd_assemble(args):
     return rc
 
 
+def log_p_bits(path):
+    """Sum of the BITS of the P pictures in a harness log (lines `[label] PTYPE picN P` and `[label] BITS picN <bits>`)."""
+    ptype = {}
+    bits = {}
+    with open(path, errors="replace") as f:
+        for line in f:
+            m = re.search(r"PTYPE pic(\d+) ([IP])", line)
+            if m:
+                ptype[int(m.group(1))] = m.group(2)
+            m = re.search(r"\bBITS pic(\d+) (\d+)", line)
+            if m:
+                bits[int(m.group(1))] = int(m.group(2))
+    return sum(b for n, b in bits.items() if ptype.get(n) == "P"), sum(1 for n in bits if ptype.get(n) == "P")
+
+
+def cmd_bitsratio(args):
+    a, na = log_p_bits(args.a)
+    b, nb = log_p_bits(args.b)
+    if na == 0 or nb == 0 or na != nb:
+        print("BITS RATIO FAIL: no P pictures or different counts (%d, %d)" % (na, nb))
+        return 1
+    ratio = a / float(b)
+    ok = ratio <= args.max
+    print("BITS RATIO %s: P-picture bits %d (search) against %d (range 0), %d pictures: ratio %.3f (limit %.2f) %s" % (
+        args.label or args.a, a, b, na, ratio, args.max, "OK" if ok else "FAIL"))
+    return 0 if ok else 1
+
+
 def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
+    r = sub.add_parser("bitsratio")
+    r.add_argument("--a", required=True)
+    r.add_argument("--b", required=True)
+    r.add_argument("--max", type=float, default=0.5)
+    r.add_argument("--label", default="")
     c = sub.add_parser("compare")
     c.add_argument("--a", required=True)
     c.add_argument("--b", required=True)
@@ -279,6 +322,8 @@ def main():
     s.add_argument("--allskip", action="store_true")
     s.add_argument("--slices", type=int, default=1)
     a = ap.parse_args()
+    if a.cmd == "bitsratio":
+        return cmd_bitsratio(a)
     return cmd_compare(a) if a.cmd == "compare" else cmd_assemble(a)
 
 

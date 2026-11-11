@@ -29,12 +29,19 @@ Overview:
     picture; the even horizontal step keeps the 4:2:2 chroma aligned). bars_move: the 75 % colour bars scrolling 8 pixels per
     picture (wrapping). noise_p: independent noise pictures (seed 7 + n). cut: the photo (static) for the first half of the
     pictures and the edges pattern (static) from the middle on, a scene change.
+  * Phase 2c-2 sequences: panh<k>, panv<k>, pand<k> (and pan<k> = panh<k>): the photo canvas with the window moving by (k, 0), (0, k) or
+    (k, k) pixels per picture (k = 1 .. 16 within the search range, 24 beyond it) over a value-noise canvas (pattern vtex); bounce: a window that moves right 3 pictures and
+    left 3 pictures (6 pixels per picture) and down and up (2 pixels), so content enters and leaves at every picture edge; objs: three
+    textured objects with their own vectors ((4, 2), (-6, 1), (0, -4)) over the static photo. --expmv prints the expected motion vector
+    (pixels) of a pan sequence.
 Revision: 11-10-2026
   * 11-09-2026: initial version; textured patterns for the intra 16x16 phase.
   * 11-10-2026: sequences for the P pictures (--seq, --count).
+  * 11-10-2026: phase 2c-2: panh / panv / pand / bounce / objs sequences.
 """
 import argparse
 import math
+import re
 import sys
 
 BARS = [  # 75 % bars, BT.601 limited range (Y, Cb, Cr)
@@ -190,6 +197,39 @@ def pat_photo(w, h, seed):
     return ys, us, vs
 
 
+def pat_vtex(w, h, seed):
+    """Value-noise texture: random lattice (5 samples apart, +-40 luma) smoothly interpolated, a slow gradient and film grain of +-3; chroma
+    from a lattice 3 samples apart (+-30). The picture is correlated over a few samples, so the SAD of a motion search falls towards the true
+    vector, and the texture is strong enough to survive the quantizer at QP 28."""
+    rng = lcg(seed)
+    cw = w // 2
+
+    def lattice(gw, gh, amp):
+        return [[((next(rng) - 128) * amp) // 128 for _ in range(gw)] for _ in range(gh)]
+
+    def interp(lat, sp, x, y):
+        gx, gy = x / sp, y / sp
+        ix, iy = int(gx), int(gy)
+        fx, fy = gx - ix, gy - iy
+        fx = fx * fx * (3 - 2 * fx)
+        fy = fy * fy * (3 - 2 * fy)
+        a = lat[iy][ix] * (1 - fx) + lat[iy][ix + 1] * fx
+        b = lat[iy + 1][ix] * (1 - fx) + lat[iy + 1][ix + 1] * fx
+        return a * (1 - fy) + b * fy
+
+    sp, csp = 5, 3
+    ly = lattice(w // sp + 3, h // sp + 3, 40)
+    lu = lattice(cw // csp + 3, h // csp + 3, 30)
+    lv = lattice(cw // csp + 3, h // csp + 3, 30)
+    ys, us, vs = [], [], []
+    for y in range(h):
+        g = noise_rows(rng, w, 3)
+        ys.append(bytes(clamp8(128 + (x * 30) // w - 15 + interp(ly, sp, x, y) + g[x]) for x in range(w)))
+        us.append(bytes(clamp8(128 + interp(lu, csp, x, y)) for x in range(cw)))
+        vs.append(bytes(clamp8(128 + interp(lv, csp, x, y)) for x in range(cw)))
+    return ys, us, vs
+
+
 def make_planes(pattern, w, h, frame, seed):
     """Return (Y rows, U rows, V rows) with 4:2:2 chroma (w // 2 samples per row)."""
     ys, us, vs = [], [], []
@@ -203,6 +243,8 @@ def make_planes(pattern, w, h, frame, seed):
         return pat_checker(w, h)
     if pattern == "photo":
         return pat_photo(w, h, seed)
+    if pattern == "vtex":
+        return pat_vtex(w, h, seed)
     if pattern == "noise":
         rng = lcg(seed)
         for _ in range(h):
@@ -281,11 +323,92 @@ def write_picture(prefix, w, h, ys, us, vs):
                 f.write(bytes((p + q + 1) >> 1 for p, q in zip(plane[2 * r], plane[2 * r + 1])))
 
 
-SEQUENCES = ("static", "pan", "bars_move", "noise_p", "cut")
+SEQUENCES = ("static", "pan", "bars_move", "noise_p", "cut", "panh<k>", "panv<k>", "pand<k>", "bounce", "objs")
+
+
+def pan_vector(seq):
+    """(dx, dy) of the sequences panh<k> (k right), panv<k> (k down), pand<k> (k right and k down) and pan<k> (= panh<k>); the
+    window moves by the vector per picture, so the previous picture's block at +vector is the current block (motion vector +vector)."""
+    m = re.match(r"^pan([hvd]?)(\d+)$", seq)
+    if not m:
+        return None
+    k = int(m.group(2))
+    kind = m.group(1)
+    if kind == "v":
+        return (0, k)
+    if kind == "d":
+        return (k, k)
+    return (k, 0)
+
+
+def window_path(seq, count):
+    """Window origin (x0, y0) of every picture of a panning sequence and the canvas margin (mx, my)."""
+    pv = pan_vector(seq)
+    if pv:
+        dx, dy = pv
+        return [(dx * n, dy * n) for n in range(count)], dx * (count - 1), dy * (count - 1)
+    if seq == "bounce":
+        # triangle path: 3 steps right (6 px) and 2 down (2 px), then back, so both picture edges see content entering and leaving
+        pts = []
+        x = 0
+        y = 0
+        dxs = 6
+        dys = 2
+        for n in range(count):
+            pts.append((x, y))
+            if (n // 3) % 2 == 0:
+                x += dxs
+            else:
+                x -= dxs
+            if (n // 2) % 2 == 0:
+                y += dys
+            else:
+                y -= dys
+        mnx = min(p[0] for p in pts)
+        mny = min(p[1] for p in pts)
+        pts = [(p[0] - mnx, p[1] - mny) for p in pts]
+        return pts, max(p[0] for p in pts), max(p[1] for p in pts)
+    return None
 
 
 def make_sequence(seq, w, h, count):
     """Yield (Y rows, U rows, V rows) of pictures 0 .. count - 1 of a sequence."""
+    wp = window_path(seq, count) if seq != "pan" else None
+    if seq == "objs":
+        # a static photo background and three moving textured objects (vector per picture: (4, 2), (-6, 1), (0, -4)); positions
+        # are even in x so the 4:2:2 chroma stays aligned
+        bg = make_planes("photo", w, h, 0, 7)
+        ow, oh = 48, 32
+        objs = [make_planes("gradnoise", ow, oh, 0, 11 + i) for i in range(3)]
+        starts = [(w // 8 & ~1, h // 8), (w * 5 // 8 & ~1, h // 2), (w // 2 & ~1, h * 3 // 4 - 8)]
+        vecs = [(4, 2), (-6, 1), (0, -4)]
+        for n in range(count):
+            ys = [bytearray(r) for r in bg[0]]
+            us = [bytearray(r) for r in bg[1]]
+            vs = [bytearray(r) for r in bg[2]]
+            for k in range(3):
+                x0 = starts[k][0] + vecs[k][0] * n
+                y0 = starts[k][1] + vecs[k][1] * n
+                x0 = max(0, min(w - ow, x0)) & ~1
+                y0 = max(0, min(h - oh, y0))
+                for y in range(oh):
+                    ys[y0 + y][x0:x0 + ow] = objs[k][0][y]
+                    us[y0 + y][x0 // 2:x0 // 2 + ow // 2] = objs[k][1][y]
+                    vs[y0 + y][x0 // 2:x0 // 2 + ow // 2] = objs[k][2][y]
+            yield ([bytes(r) for r in ys], [bytes(r) for r in us], [bytes(r) for r in vs])
+        return
+    if wp:
+        pts, mx, my = wp
+        cw_w, cw_h = w + mx, h + my
+        # a textured canvas (value noise, pat_vtex): its content survives the quantizer of QP 28 and is correlated over a few samples, so the
+        # true vector is the SAD minimum and a step search finds it; the smooth photo of the 2c-1 pan sequence leaves vectors that differ by one
+        # sample practically tied (the rebuilt picture's quantization noise decides), and white noise has no SAD slope towards the vector
+        ys, us, vs = make_planes("vtex", cw_w, cw_h, 0, 7)
+        for (x0, y0) in pts:
+            yield ([ys[y0 + y][x0:x0 + w] for y in range(h)],
+                   [us[y0 + y][x0 // 2:x0 // 2 + w // 2] for y in range(h)],
+                   [vs[y0 + y][x0 // 2:x0 // 2 + w // 2] for y in range(h)])
+        return
     if seq == "static":
         planes = make_planes("photo", w, h, 0, 7)
         for _ in range(count):
@@ -324,12 +447,19 @@ def main():
     ap.add_argument("--pattern", default="")
     ap.add_argument("--seq", default="")
     ap.add_argument("--count", type=int, default=1)
-    ap.add_argument("--w", type=int, required=True)
-    ap.add_argument("--h", type=int, required=True)
+    ap.add_argument("--w", type=int, default=0)
+    ap.add_argument("--h", type=int, default=0)
     ap.add_argument("--frame", type=int, default=0)
     ap.add_argument("--seed", type=int, default=1)
-    ap.add_argument("--out", required=True)
+    ap.add_argument("--out", default="")
+    ap.add_argument("--expmv", default="")
     a = ap.parse_args()
+    if a.expmv:
+        pv = pan_vector(a.expmv)
+        print("%d %d" % ((4, 1) if a.expmv == "pan" else (pv if pv else (0, 0))))
+        return 0
+    if not a.out:
+        raise SystemExit("--out is required")
     w, h = a.w, a.h
     if w % 16 or h % 16 or (w * 2) % 32:
         raise SystemExit("w and h must be multiples of 16 (macroblock), line stride a multiple of 32")

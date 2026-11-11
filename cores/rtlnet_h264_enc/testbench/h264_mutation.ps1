@@ -20,7 +20,11 @@ Overview:
     (rtlnet_h264_engine), (17) P_Skip chosen although luma levels are coded (rtlnet_h264_mb_enc), (18) the intra rounding offset used
     for inter blocks (rtlnet_h264_fwdq: a legal encoder choice a decoder cannot see, only the transform bench catches it),
     (19) the single-matching-reference rule ignoring neighbour C (rtlnet_h264_mvpred: mvp is always 0 in stage 2c-1, so only the
-    mvpred bench catches it).
+    mvpred bench catches it). Phase 2c-2: (16) is now the window loader's chroma tile pointer stepping by the luma tile size
+    (rtlnet_h264_search); (20) a window column loaded into the wrong slot (a wrong column on every slide), (21) the mvd cost of the search
+    without the predictor (an encoder choice a decoder cannot see: the search bench catches it), (22) the chroma interpolation weight
+    off by one (rtlnet_h264_cinterp: eighth sample fraction), (23) the lower edge bound of the search range removed (vectors that leave the
+    picture), (24) P_Skip without the skip vector equal to the search vector (rtlnet_h264_mb_enc).
   * A mutation is CAUGHT when every listed check fails (non-zero exit). The file is restored in a finally block.
   * Prints `MUTATION <n> <name>: CAUGHT|SURVIVED ...` and `MUTATION RESULT: <caught> of <total> caught`; exit 0 only when
     all are caught and every file is restored identical.
@@ -28,6 +32,7 @@ Usage: powershell -NoProfile -ExecutionPolicy Bypass -File h264_mutation.ps1 [-O
 Revision: 11-10-2026
   * 11-09-2026: initial version; mutations 10 to 13 (I_PCM fallback, level pair merge).
   * 11-10-2026: mutations 14 to 19 (P path).
+  * 11-10-2026: phase 2c-2: mutation 16 moved to the window loader, mutations 20 to 24 (motion search).
 -------------------------------------------------------------------------------
 #>
 param([string]$Only = '')   # comma separated mutation numbers, e.g. 1,2,5; all when empty
@@ -93,9 +98,10 @@ $Muts = @(
        Old = "C_SR: begin cmd_valid = 1'b1; cmd_op = PK_UE; cmd_val = 32'(run_q); end"; New = "C_SR: begin cmd_valid = 1'b1; cmd_op = PK_UE; cmd_val = 32'(run_q) + 32'd1; end";
        Checks = @(@{ Kind = 'bench'; Bench = 'tb_rtlnet_h264_mbcavlc'; Fl = 'cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_mbcavlc.f' },
                   @{ Kind = 'harness'; Config = 'p_qcif_cut_q28' }) },
-    @{ Name = 'reference chroma pointer step wrong'; File = 'rtlnet_h264_engine.sv';
-       Old = "rfu_ptr   <= rfu_ptr + ADDR_W'(REC_CHROMA_TILE_BYTES);"; New = "rfu_ptr   <= rfu_ptr + ADDR_W'(REC_LUMA_TILE_BYTES);";
-       Checks = @(@{ Kind = 'harness'; Config = 'p_qcif_pan_q28' }) },
+    @{ Name = 'window chroma tile pointer step wrong'; File = 'rtlnet_h264_search.sv';
+       Old = "c_cur    <= c_cur + 32'd128;"; New = "c_cur    <= c_cur + 32'd256;";
+       Checks = @(@{ Kind = 'bench'; Bench = 'tb_rtlnet_h264_search'; Fl = 'cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_search.f' },
+                  @{ Kind = 'harness'; Config = 'm_qcif_panh8_q28' }) },
     @{ Name = 'P_Skip chosen with coded luma levels'; File = 'rtlnet_h264_mb_enc.sv';
        Old = "o_skip       <= inter_q && (nz8_e == 4'd0) && (drop_q"; New = "o_skip       <= inter_q && (drop_q";
        Checks = @(@{ Kind = 'harness'; Config = 'p_qcif_pan_q28' }) },
@@ -104,7 +110,24 @@ $Muts = @(
        Checks = @(@{ Kind = 'bench'; Bench = 'tb_rtlnet_h264_xform'; Fl = 'cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_xform.f' }) },
     @{ Name = 'single matching reference index: neighbour C ignored'; File = 'rtlnet_h264_mvpred.sv';
        Old = "mvp_x = ra ? ax : (rb ? bx : cx);"; New = "mvp_x = ra ? ax : (rb ? bx : ax);";
-       Checks = @(@{ Kind = 'bench'; Bench = 'tb_rtlnet_h264_mvpred'; Fl = 'cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_mvpred.f' }) }
+       Checks = @(@{ Kind = 'bench'; Bench = 'tb_rtlnet_h264_mvpred'; Fl = 'cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_mvpred.f' }) },
+    @{ Name = 'window column loaded into the wrong slot'; File = 'rtlnet_h264_search.sv';
+       Old = "slot_q   <= ld_g[1:0];"; New = "slot_q   <= ld_g[1:0] + 2'd1;";
+       Checks = @(@{ Kind = 'bench'; Bench = 'tb_rtlnet_h264_search'; Fl = 'cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_search.f' },
+                  @{ Kind = 'harness'; Config = 'm_qcif_panh8_q28' }) },
+    @{ Name = 'mvd cost of the search without the predictor'; File = 'rtlnet_h264_search.sv';
+       Old = "r1_dx  <= 16'sd4 * 16'(i0_vx) - 16'(mvp_x);"; New = "r1_dx  <= 16'sd4 * 16'(i0_vx);";
+       Checks = @(@{ Kind = 'bench'; Bench = 'tb_rtlnet_h264_search'; Fl = 'cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_search.f' }) },
+    @{ Name = 'chroma interpolation weight off by one'; File = 'rtlnet_h264_cinterp.sv';
+       Old = "assign wx0 = 4'd8 - wx1;"; New = "assign wx0 = 4'd7 - wx1;";
+       Checks = @(@{ Kind = 'bench'; Bench = 'tb_rtlnet_h264_cinterp'; Fl = 'cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_cinterp.f' },
+                  @{ Kind = 'harness'; Config = 'm_qcif_panh8_q28' }) },
+    @{ Name = 'search lower edge bound removed (vectors leave the picture)'; File = 'rtlnet_h264_search.sv';
+       Old = "vlo_x          <= (pc == 7'd0) ? 8'sd0 : -8'sd1 * 8'(SR);"; New = "vlo_x          <= -8'sd1 * 8'(SR);";
+       Checks = @(@{ Kind = 'bench'; Bench = 'tb_rtlnet_h264_search'; Fl = 'cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_search.f' }) },
+    @{ Name = 'P_Skip without the skip vector equal to the search vector'; File = 'rtlnet_h264_mb_enc.sv';
+       Old = "(skip_x == inter_mv_x) && (skip_y == inter_mv_y);"; New = "1'b1;";
+       Checks = @(@{ Kind = 'harness'; Config = 'm_qcif_panh3_q38' }) }
 )
 
 function Get-Sha([string]$p) { return (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash }

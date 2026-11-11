@@ -40,7 +40,7 @@
 #include <stdint.h>   /* uint32_t, uint8_t, uintptr_t */
 
 #define RTLNET_H264_ID_VALUE             0x48323634u   /* "H264" */
-#define RTLNET_H264_VERSION_VALUE        0x11102C01u
+#define RTLNET_H264_VERSION_VALUE        0x11102C02u
 /* Revision 11-09-2026: initial register map (phase 2b-1); MB_MODE register and cfg->mb_pcm (phase 2b-2);
  * RTLNET_H264_QP_MIN_REALTIME (the QP clamp of rtlnet_h264_enc_configure).
  * Revision 11-10-2026 (VERSION 0x11102026, burst-only DDR3 access): the rebuilt picture is macroblock-tiled (RY_BASE and
@@ -49,7 +49,9 @@
  * Revision 11-10-2026 (VERSION 0x11102C01, phase 2c-1, P pictures): PIC_CFG bit 1 selects a P picture, REF_Y_BASE (0x054) and
  * REF_U_BASE (0x058) hold the reference picture's tile bases, the two-buffer helper rtlnet_h264_enc_buffers_*, the P-aware
  * start rtlnet_h264_enc_start_picture_ex and the frame_num helper. rtlnet_h264_enc_start_picture is unchanged (it starts
- * an I picture, IDR or not, and clears the P bit). */
+ * an I picture, IDR or not, and clears the P bit).
+ * Revision 11-10-2026 (VERSION 0x11102C02, phase 2c-2, motion search): no register or API change; the reference picture is searched
+ * (integer vectors, +-16) instead of read at the co-located macroblock. */
 
 /* Real-time QP floor: rtlnet_h264_enc_configure writes max(cfg->qp, RTLNET_H264_QP_MIN_REALTIME) into the QP register. Below
  * this QP dense macroblocks leave the macroblock coder over its clock budget (documentation section "Throughput"); the

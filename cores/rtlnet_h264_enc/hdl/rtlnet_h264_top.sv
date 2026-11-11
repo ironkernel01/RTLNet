@@ -22,6 +22,7 @@
 // Revision: 11-10-2026
 //   * 11-09-2026: initial version.
 //   * 11-10-2026: phase 2c-1: REF_BUF_KB, MV_LINE_KB; the P picture and reference base registers go to the engines.
+//   * 11-10-2026: phase 2c-2: WIN_KB, SR (motion search window and range); REF_BUF_KB is the prediction buffer.
 // Clocks: enc_clk (engine, memory port, register file); s_axi_aclk (AXI4-Lite slave side of the register
 //   crossing only).
 // -----------------------------------------------------------------------------
@@ -38,7 +39,9 @@ module rtlnet_h264_top #(
   parameter int    COEF_BUF_KB = 1,      // coefficient buffer: two banks of 102 words of 48 bits (needs 1)
   parameter int    LINE_KB     = 4,      // rebuilt bottom-row line buffer: 2 x 16 bytes per macroblock column
   parameter int    FIFO_KB     = 1,      // compressed-ring word FIFO
-  parameter int    REF_BUF_KB  = 1,      // reference macroblock buffer (P pictures): two banks of 32 words of 16 bytes
+  parameter int    REF_BUF_KB  = 1,      // prediction buffer (P pictures): two banks of 32 words of 16 bytes
+  parameter int    WIN_KB      = 4,      // each of the two motion search window RAMs (P pictures), KiB
+  parameter int    SR          = 16,     // motion search range in whole samples, 0 .. 16 (0: only the vector (0, 0), the phase 2c-1 behaviour)
   parameter int    MV_LINE_KB  = 1,      // motion vector line RAM (P pictures): one 32-bit word per macroblock column
   parameter string RAM_STYLE   = "block"  // "block" | "distributed", for every engine memory (RAM instancing rule)
 )(
@@ -299,7 +302,7 @@ module rtlnet_h264_top #(
       rtlnet_h264_engine #(
         .ADDR_W(ADDR_W), .ID_W(ID_W), .MAX_MB_W(MAX_MB_W), .MAX_MB_H(MAX_MB_H), .MB_BUF_KB(MB_BUF_KB), .RD_STRIP_MB(RD_STRIP_MB),
         .REC_BUF_KB(REC_BUF_KB), .COEF_BUF_KB(COEF_BUF_KB), .LINE_KB(LINE_KB), .FIFO_KB(FIFO_KB), .REF_BUF_KB(REF_BUF_KB),
-        .MV_LINE_KB(MV_LINE_KB), .EMIT_AUD(e == 0), .RAM_STYLE(RAM_STYLE)
+        .MV_LINE_KB(MV_LINE_KB), .WIN_KB(WIN_KB), .SR(SR), .EMIT_AUD(e == 0), .RAM_STYLE(RAM_STYLE)
       ) u_engine (
         .clk(enc_clk), .resetn(enc_resetn),
         .start(start), .busy(eng_busy[e]), .done(eng_done[e]), .err_cfg(eng_err_cfg[e]), .err_axi(eng_err_axi[e]),

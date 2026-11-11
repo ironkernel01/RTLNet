@@ -25,6 +25,7 @@
 //     RV_BASE are reserved; index records are 128 bytes.
 //   * 11-10-2026: phase 2c-1 (P pictures): PIC_CFG bit 1 selects a P picture, REF_Y_BASE (0x054) and REF_U_BASE (0x058) hold the
 //     tile bases of the reference picture, VERSION 0x11102C01.
+//   * 11-10-2026: phase 2c-2 (motion search): VERSION 0x11102C02, no register change.
 // Clocks: clk (all logic).
 // -----------------------------------------------------------------------------
 module rtlnet_h264_enc_regs #(
@@ -156,7 +157,7 @@ module rtlnet_h264_enc_regs #(
   localparam int STATUS_STALL_BIT    = 3;
 
   localparam logic [31:0] CORE_ID      = id4("H", "2", "6", "4");
-  localparam logic [31:0] CORE_VERSION = 32'h1110_2C01;   // 11-10, phase 2c-1
+  localparam logic [31:0] CORE_VERSION = 32'h1110_2C02;   // 11-10, phase 2c-2 (motion search; the register map is that of 2c-1)
   // CAPS: [7:0] MAX_MB_W, [15:8] MAX_MB_H, [19:16] NUM_ENGINES.
   localparam logic [31:0] CORE_CAPS    = {12'd0, 4'(NUM_ENGINES), 8'(MAX_MB_H), 8'(MAX_MB_W)};
 

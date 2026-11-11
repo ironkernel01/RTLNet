@@ -42,9 +42,15 @@ Overview:
 Usage: powershell -NoProfile -ExecutionPolicy Bypass -File h264_harness.ps1 [-Config qcif_s1,720p_*] [-Inject] [-InjectBurst] [-InjectBurstRef] [-Pcm] [-Measure] [-Threads N] [-Gap pct] [-Lat clocks]
   -Gap and -Lat set the memory model's ready/valid gap percentage (default 20) and read latency in clocks (default 20; rtlnet_ddr_sim: gap 0, latency 20).
   Without -Config every configuration of the default set runs (several minutes per ten configurations: each one builds the bench).
+  * Motion search (phase 2c-2): configurations named m_* run the panning sequences panh<k> / panv<k> / pand<k> (the window moves k samples per
+    picture), pan<k> beyond the range, bounce and objs; a configuration with ExpMv = (x, y) passes +EXPMV_X / +EXPMV_Y to the bench, which prints
+    `MVSTAT pic<n> interior=<I> true=<T>` per P picture (macroblocks whose block at the expected vector lies inside the picture, and those among
+    them coded as inter with exactly that vector), and the harness requires T >= 90 % of I for every P picture. Sr = n sets the core's search
+    range (TB_SR; Sr 0 is the phase 2c-1 behaviour, the baseline of the bits gate, see h264_check.py bitsratio).
 Revision: 11-10-2026
   * 11-09-2026: initial version; QP/pattern configuration table, PSNR floors, bits per picture, -Pcm and -Measure.
   * 11-10-2026: phase 2c-1: GOP and sequence configurations (p_*), one input buffer reloaded per picture, -InjectBurstRef.
+  * 11-10-2026: phase 2c-2: m_* motion configurations, ExpMv and Sr.
 -------------------------------------------------------------------------------
 #>
 param(
@@ -167,6 +173,56 @@ foreach ($sz in @(@('720p', 1280, 720, 720), @('1080p', 1920, 1088, 1080))) {
 # Throughput configurations: 1080p, two engines, QP 28, a moving picture and a static one, 9 pictures.
 Add-PCfg 'p_1080p_e2_s2_pan_q28'    1920 1088 1080 2 2 $g9 'pan' 28
 Add-PCfg 'p_1080p_e2_s2_static_q28' 1920 1088 1080 2 2 $g9 'static' 28 @{ AllSkip = $true }
+# Motion search configurations (phase 2c-2, m_*): pans by known integer vectors (horizontal, vertical, diagonal; magnitudes 1 to 16), a pan beyond the
+# range (24), a window that bounces (content enters and leaves at every picture edge), moving objects over a static background, moving bars, noise and a
+# cut, at QCIF, 720p and 1080p, on 1 and 2 engines with 1, 2 and 4 slices over QP 12 to 51. A configuration with ExpMv carries the search-quality gate
+# (at least 90 % of the macroblocks whose block at the pan vector lies inside the picture carry that vector, in every P picture); it applies at QP 12 to
+# 28 (above that the quantizer leaves too little of the texture for the vector to be the SAD minimum). The _sr0 configurations run the core with the
+# search range 0 (the vector (0, 0) only, the phase 2c-1 behaviour): the baseline of the bits gate.
+foreach ($pv in @(@('panh', 1, 0), @('panh', 2, 0), @('panh', 3, 0), @('panh', 5, 0), @('panh', 8, 0), @('panh', 12, 0), @('panh', 16, 0),
+                  @('panv', 1, 0), @('panv', 4, 0), @('panv', 9, 0), @('panv', 16, 0), @('pand', 2, 0), @('pand', 6, 0), @('pand', 11, 0), @('pand', 16, 0))) {
+    $k = $pv[1]
+    $ex = switch ($pv[0]) { 'panh' { @($k, 0) } 'panv' { @(0, $k) } default { @($k, $k) } }
+    Add-PCfg ("m_qcif_{0}{1}_q28" -f $pv[0], $k) 176 144 144 1 1 $g9 ("{0}{1}" -f $pv[0], $k) 28 @{ ExpMv = $ex }
+}
+Add-PCfg 'm_qcif_panh8_q12'      176 144 144 1 1 $g9  'panh8'  12 @{ ExpMv = @(8, 0) }
+Add-PCfg 'm_qcif_pand6_q20'      176 144 144 1 1 $g9  'pand6'  20 @{ ExpMv = @(6, 6) }
+Add-PCfg 'm_qcif_panh3_q38'      176 144 144 1 1 $g9  'panh3'  38
+Add-PCfg 'm_qcif_pand11_q51'     176 144 144 1 1 $g9  'pand11' 51
+Add-PCfg 'm_qcif_pan24_q28'      176 144 144 1 1 $g9  'panh24' 28
+Add-PCfg 'm_qcif_pan24_q12'      176 144 144 1 1 $g9  'pand24' 12
+Add-PCfg 'm_qcif_bounce_q28'     176 144 144 1 1 $g10 'bounce' 28
+Add-PCfg 'm_qcif_bounce_q12'     176 144 144 1 1 $g9  'bounce' 12
+Add-PCfg 'm_qcif_bounce_q51'     176 144 144 1 1 $g9  'bounce' 51
+Add-PCfg 'm_qcif_objs_q28'       176 144 144 1 1 $g9  'objs'   28
+Add-PCfg 'm_qcif_objs_q12'       176 144 144 1 1 $g9  'objs'   12
+Add-PCfg 'm_qcif_objs_q51'       176 144 144 1 1 $g9  'objs'   51
+Add-PCfg 'm_qcif_pan_q28'        176 144 144 1 1 $g10 'pan'    28
+Add-PCfg 'm_qcif_bars_q28'       176 144 144 1 1 $g9  'bars_move' 28
+Add-PCfg 'm_qcif_noise_q28'      176 144 144 1 1 $g9  'noise_p' 28
+Add-PCfg 'm_qcif_cut_q28'        176 144 144 1 1 $gc  'cut'    28
+Add-PCfg 'm_qcif_static_q28'     176 144 144 1 1 $g9  'static' 28 @{ AllSkip = $true }
+Add-PCfg 'm_qcif_panh8_s3_q28'   176 144 144 1 3 $g9  'panh8'  28 @{ ExpMv = @(8, 0) }
+Add-PCfg 'm_qcif_pand6_e2_s2_q28' 176 144 144 2 2 $g9 'pand6'  28
+Add-PCfg 'm_qcif_panv4_e2_s4_q20' 176 144 144 2 4 $g9 'panv4'  20 @{ ExpMv = @(0, 4) }
+Add-PCfg 'm_qcif_objs_e2_s2_q38' 176 144 144 2 2 $g9  'objs'   38
+Add-PCfg 'm_qcif_bounce_s9_q28'  176 144 144 1 9 $g9  'bounce' 28
+Add-PCfg 'm_strip_w13_panh8_q28' 208 144 144 1 1 $g9  'panh8'  28 @{ ExpMv = @(8, 0) }
+Add-PCfg 'm_strip_w5_e2_pand3_q28' 80 144 144 2 2 $g9 'pand3'  28
+Add-PCfg 'm_strip_w18_panv7_q28' 288  96  96 1 3 $g9  'panv7'  28 @{ ExpMv = @(0, 7) }
+Add-PCfg 'm_qcif_panh8_q28_sr0'  176 144 144 1 1 $g9  'panh8'  28 @{ Sr = 0 }
+Add-PCfg 'm_qcif_pand6_q28_sr0'  176 144 144 1 1 $g9  'pand6'  28 @{ Sr = 0 }
+Add-PCfg 'm_qcif_pan_q28_sr0'    176 144 144 1 1 $g10 'pan'    28 @{ Sr = 0 }
+Add-PCfg 'm_qcif_panh8_q28_sr8'  176 144 144 1 1 $g9  'panh8'  28 @{ Sr = 8; ExpMv = @(8, 0) }
+Add-PCfg 'm_720p_e1_s1_panh8_q28'  1280  720  720 1 1 $g9 'panh8'  28 @{ ExpMv = @(8, 0) }
+Add-PCfg 'm_720p_e2_s2_pand6_q38'  1280  720  720 2 2 $g9 'pand6'  38
+Add-PCfg 'm_720p_e1_s2_objs_q28'   1280  720  720 1 2 $g9 'objs'   28
+Add-PCfg 'm_720p_e2_s4_bounce_q12' 1280  720  720 2 4 $gc 'bounce' 12
+Add-PCfg 'm_1080p_e2_s2_panh12_q28' 1920 1088 1080 2 2 $g9 'panh12' 28 @{ ExpMv = @(12, 0) }
+Add-PCfg 'm_1080p_e2_s2_panh12_q28_sr0' 1920 1088 1080 2 2 $g9 'panh12' 28 @{ Sr = 0 }
+Add-PCfg 'm_1080p_e1_s1_pand16_q20'  1920 1088 1080 1 1 $g9 'pand16' 20 @{ ExpMv = @(16, 16) }
+Add-PCfg 'm_1080p_e2_s4_objs_q51'    1920 1088 1080 2 4 $g9 'objs'   51
+Add-PCfg 'm_1080p_e2_s2_noise_q28'   1920 1088 1080 2 2 $g9 'noise_p' 28
 $Config = @($Config | ForEach-Object { $_ -split ',' } | Where-Object { $_ -ne '' })
 if ($Config.Count -gt 0) {
     $Configs = @($Configs | Where-Object { $n = $_.Name; @($Config | Where-Object { $n -like $_ }).Count -gt 0 })
@@ -251,11 +307,13 @@ foreach ($c in $Configs) {
               "TB_CONSUMER_DELAY=$($c.Delay)", "TB_MEM_LOG2=$($c.Mem)", "TB_GAP=$Gap", "TB_LAT=$Lat", "TB_QP=$($c.Qp)")
     if ($Pcm -and $HasMbMode) { $defs += 'TB_PCM=1' }
     if ($c.ContainsKey('Stall')) { $defs += 'TB_EXPECT_STALL=1' }
+    if ($c.ContainsKey('Sr')) { $defs += "TB_SR=$($c.Sr)" }
     $fdir = $dir.Replace([string][char]92, '/')
     $pa = @("INPFX=$fdir/in", "OUT=$fdir/o", "GOP=$($c.Gop)")
     if ($Inject) { $pa += 'INJECT' }
     if ($InjectBurst) { $pa += 'INJECT_BURST' }
     if ($InjectBurstRef) { $pa += 'INJECT_BURST_REF' }
+    if ($c.ContainsKey('ExpMv')) { $pa += "EXPMV_X=$($c.ExpMv[0])"; $pa += "EXPMV_Y=$($c.ExpMv[1])" }
     $simOut = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$Repo/scripts/rtlnet_run_verilator.ps1" -Bench tb_rtlnet_h264_top `
         -Filelist cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_top.f -Tag $label -Defines ($defs -join ',') -PlusArgs ($pa -join ',') -Threads $Threads -Extra $VlExtra
     $simLine = ($simOut | Select-Object -Last 1)
@@ -280,6 +338,15 @@ foreach ($c in $Configs) {
     }
     if ($LASTEXITCODE -ne 0) { $fails += 'bench'; $allOk = $false; Write-Output "TEST FAIL: rtlnet_h264_top_$label (bench)"; continue }
     foreach ($m in [regex]::Matches($runLog, '(?m)^(STAT|HIST|SUMMARY) [^\r\n]*')) { Write-Output "[$label] $($m.Value)" }
+    # Search quality (phase 2c-2): the macroblocks of every P picture whose block at the expected vector lies inside the picture must carry it.
+    if ($c.ContainsKey('ExpMv')) {
+        foreach ($m in [regex]::Matches($runLog, '(?m)^MVSTAT pic(\d+) interior=(\d+) true=(\d+)')) {
+            $mi = [int]$m.Groups[2].Value; $mt = [int]$m.Groups[3].Value
+            $pct = if ($mi -gt 0) { 100.0 * $mt / $mi } else { 100.0 }
+            Write-Output ("[{0}] MVSTAT pic{1} interior={2} true={3} ({4:N1} %)" -f $label, $m.Groups[1].Value, $mi, $mt, $pct)
+            if (($mi -gt 0) -and ($mt * 10 -lt $mi * 9)) { $fails += "search quality pic$($m.Groups[1].Value)" }
+        }
+    }
     # Clocks per macroblock (PIC_CYC / MB_COUNT of an engine) over the I and the P pictures of the run: min, mean, max per picture type.
     $cpm = @{ I = @(); P = @() }
     foreach ($m in [regex]::Matches($runLog, '(?m)^STAT pic(\d+) eng(\d+) PIC_CYC=(\d+) type=([IP])\s*\r?\n^STAT pic\d+ eng\d+ MB_COUNT=(\d+)')) {

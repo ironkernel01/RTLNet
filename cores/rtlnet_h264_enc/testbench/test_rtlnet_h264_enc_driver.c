@@ -355,7 +355,7 @@ int main(void)
     {
         rtlnet_h264_enc_buffers_t bufs;
 
-        check(RTLNET_H264_VERSION_VALUE == 0x11102C01u, "VERSION of phase 2c-1");
+        check(RTLNET_H264_VERSION_VALUE == 0x11102C02u, "VERSION of phase 2c-2");
         check((RTLNET_H264_REG_REFY_BASE == 0x054u) && (RTLNET_H264_REG_REFU_BASE == 0x058u), "reference register offsets");
         g_reg[RTLNET_H264_REG_STATUS / 4u] = 0u;
         g_reg[RTLNET_H264_REG_PIC_CFG / 4u] = (4u << RTLNET_H264_PIC_CFG_LOG2FN_SHIFT) | RTLNET_H264_PIC_CFG_IDR;

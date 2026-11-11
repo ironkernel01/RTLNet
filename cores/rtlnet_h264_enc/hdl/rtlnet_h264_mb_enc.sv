@@ -38,6 +38,8 @@
 //     P macroblock also o_inter, o_skip, o_cbp4 (the luma 8x8 coded block pattern) and o_mvd_x / o_mvd_y.
 //   * P pictures (phase 2c-1, p_pic): the candidates are P_Skip, P_L0_16x16 at the motion vector (0, 0) (the co-located macroblock
 //     of the reference picture, read from the reference macroblock buffer through the ref_rd port), Intra16x16 and I_PCM.
+//       Phase 2c-2: the vector is an integer vector chosen by the motion search (rtlnet_h264_search), the prediction buffer holds its
+//              prediction; P_Skip needs the skip vector (exact, rtlnet_h264_mvctx) to equal that vector.
 //       MD1/MD2 (3 clocks after the intra decision) compare the inter cost, SAD(source, reference) over luma and chroma (the
 //              accumulators of rtlnet_h264_ipred, filled in the SAD phase next to the intra candidates) plus lambda(QP) times
 //              the bits of mvd = mv - mvp, with the intra cost, the SAD plus mode cost of the best intra modes plus lambda times
@@ -64,6 +66,7 @@
 // Revision: 11-10-2026
 //   * 11-09-2026: initial version; per-macroblock I_PCM fallback.
 //   * 11-10-2026: phase 2c-1: P pictures (inter candidate, skip, inter residual and rebuild, motion vector context).
+//   * 11-10-2026: phase 2c-2: the inter vector comes from the motion search (mv_in_x / mv_in_y); P_Skip at the exact skip vector.
 // Clocks: clk.
 // -----------------------------------------------------------------------------
 module rtlnet_h264_mb_enc #(
@@ -93,6 +96,12 @@ module rtlnet_h264_mb_enc #(
   input  logic [REC_AW-1:0]   reb_base,
   input  logic [CRAM_AW-1:0]  coef_base,
   input  logic [REF_AW-1:0]   ref_base,
+  // The motion vector of the inter candidate (phase 2c-2): quarter samples, a multiple of 4 (integer vector); the prediction buffer
+  // bank at ref_base holds the prediction at that vector. Valid from start until done.
+  input  logic signed [13:0]  mv_in_x,
+  input  logic signed [13:0]  mv_in_y,
+  // High while the I_PCM copy needs the source read port's data to stay (the search stage must not read then).
+  output logic                src_lock,
   output logic                busy,
   output logic                done,
 
@@ -108,7 +117,7 @@ module rtlnet_h264_mb_enc #(
   output logic signed [15:0]  o_mvd_x,
   output logic signed [15:0]  o_mvd_y,
 
-  // Reference macroblock buffer read port: ref_rd_data is valid the clock after ref_rd_en.
+  // Prediction buffer read port (the motion search's prediction of this macroblock): ref_rd_data is valid the clock after ref_rd_en.
   output logic                ref_rd_en,
   output logic [REF_AW-1:0]   ref_rd_addr,
   input  logic [127:0]        ref_rd_data,
@@ -249,11 +258,18 @@ module rtlnet_h264_mb_enc #(
   logic               mv_ready;
   logic               mv_ready_seen;
   logic signed [13:0] mvp_x, mvp_y, skip_x, skip_y;
+  // skip_zero of rtlnet_h264_mvctx is not used since 2c-2: the skip vector is compared with the search vector.
+  /* verilator lint_off UNUSEDSIGNAL */
   logic               skip_zero;
+  logic [3:0]         nb_unused;
+  logic signed [13:0] nb_unused_v [8];
+  /* verilator lint_on UNUSEDSIGNAL */
   logic signed [13:0] inter_mv_x, inter_mv_y;
   logic [17:0]        inter_sad;
-  logic signed [15:0] mvd_x_w, mvd_y_w;
-  logic [7:0]         lam;
+  logic signed [15:0] mvd_x_w, mvd_y_w;     // registered mv - mvp (free running; both inputs are stable long before MD1)
+  logic [6:0]         mvd_len_q;            // bits of the two se(v) codes of mvd
+  logic [14:0]        rate_q;               // lambda x mvd bits
+  logic [7:0]         lam;                  // registered lambda of the slice QP
   logic [31:0]        ref_s1;
   logic [31:0]        d1_ref, d2_ref, e2_ref;
   logic               fq_in_inter, fq_in_full;
@@ -571,14 +587,28 @@ module rtlnet_h264_mb_enc #(
   // ---------------------------------------------------------------------------
   // Motion vector context and the inter candidate (P pictures)
   // ---------------------------------------------------------------------------
-  // Stage 2c-1: the only vector is (0, 0) and the cost is the SAD of the co-located reference macroblock; stage 2c-2 drives
-  // inter_mv_x / inter_mv_y and inter_sad from the search.
-  assign inter_mv_x = 14'sd0;
-  assign inter_mv_y = 14'sd0;
+  // Stage 2c-2: the vector comes from the motion search (the prediction buffer holds the prediction at it); the cost is the SAD of that
+  // prediction (luma and chroma, exact) plus lambda x the bits of mvd = mv - mvp with the exact predictor mvp of rtlnet_h264_mvctx.
+  assign inter_mv_x = mv_in_x;
+  assign inter_mv_y = mv_in_y;
   assign inter_sad  = ip_sad_iy + ip_sad_ic;
-  assign mvd_x_w    = 16'(inter_mv_x) - 16'(mvp_x);
-  assign mvd_y_w    = 16'(inter_mv_y) - 16'(mvp_y);
-  assign lam        = h264_lambda(qp_q);
+  // Rate pipeline (free running): mvd, its code lengths, lambda x bits. Phase 2c-1 computed it in MD1 in one clock (post-synthesis
+  // WNS -2.9 ns); the inputs (mvp 5 clocks after start, the vector, QP) are stable far ahead of MD1, so the stages cost no clocks.
+  always_ff @(posedge clk) begin
+    if (!resetn) begin
+      mvd_x_w   <= 16'sd0;
+      mvd_y_w   <= 16'sd0;
+      mvd_len_q <= 7'd0;
+      rate_q    <= 15'd0;
+      lam       <= 8'd1;
+    end else begin
+      mvd_x_w   <= 16'(inter_mv_x) - 16'(mvp_x);
+      mvd_y_w   <= 16'(inter_mv_y) - 16'(mvp_y);
+      mvd_len_q <= 7'(h264_se_len(mvd_x_w)) + 7'(h264_se_len(mvd_y_w));
+      lam       <= h264_lambda(qp_q);
+      rate_q    <= 15'(lam) * 15'(mvd_len_q);
+    end
+  end
   assign mv_upd_x   = o_skip ? skip_x : inter_mv_x;
   assign mv_upd_y   = o_skip ? skip_y : inter_mv_y;
   assign mv_upd     = (st == S_DONE) && p_pic;
@@ -587,6 +617,9 @@ module rtlnet_h264_mb_enc #(
     .clk(clk), .resetn(resetn),
     .start(start && (st == S_IDLE) && p_pic), .mb_x(mb_x[6:0]), .av_top(av_top), .av_left(av_left), .av_tr(av_tr),
     .ready(mv_ready), .mvp_x(mvp_x), .mvp_y(mvp_y), .skip_x(skip_x), .skip_y(skip_y), .skip_zero(skip_zero),
+    .nb_a_inter(nb_unused[0]), .nb_a_mvx(nb_unused_v[0]), .nb_a_mvy(nb_unused_v[1]), .nb_b_inter(nb_unused[1]), .nb_b_mvx(nb_unused_v[2]),
+    .nb_b_mvy(nb_unused_v[3]), .nb_c_inter(nb_unused[2]), .nb_c_mvx(nb_unused_v[4]), .nb_c_mvy(nb_unused_v[5]), .nb_d_inter(nb_unused[3]),
+    .nb_d_mvx(nb_unused_v[6]), .nb_d_mvy(nb_unused_v[7]),
     .upd(mv_upd), .upd_inter(o_inter), .upd_mvx(mv_upd_x), .upd_mvy(mv_upd_y)
   );
 
@@ -691,6 +724,7 @@ module rtlnet_h264_mb_enc #(
   // Sequencing
   // ---------------------------------------------------------------------------
   assign busy = (st != S_IDLE);
+  assign src_lock = (st == S_PCM);
 
   always_ff @(posedge clk) begin
     if (!resetn) begin
@@ -1050,7 +1084,7 @@ module rtlnet_h264_mb_enc #(
 
         // Inter decision: cost of the reference at the vector against the best intra modes (3 clocks).
         S_MD1: begin
-          cost_in <= 20'(inter_sad) + 20'(lam) * (20'(h264_se_len(mvd_x_w)) + 20'(h264_se_len(mvd_y_w)));
+          cost_in <= 20'(inter_sad) + 20'(rate_q);
           cost_ia <= ip_cost_y + ip_cost_c + (20'(lam) << $clog2(INTRA_BIAS_BITS));
           st      <= S_MD2;
         end
@@ -1145,9 +1179,11 @@ module rtlnet_h264_mb_enc #(
             o_cbp_luma   <= ac_nz_y;
             o_cbp4       <= nz8_e;
             o_cbp_chroma <= drop_q ? 2'd0 : (ac_nz_c ? 2'd2 : ((dqcb_nz || dqcr_nz) ? 2'd1 : 2'd0));
-            // P_Skip: the inter candidate with nothing to code, and the skip vector equal to the vector of the prediction.
-            o_skip       <= inter_q && (nz8_e == 4'd0) && (drop_q || (!ac_nz_c && !dqcb_nz && !dqcr_nz)) && skip_zero &&
-                            (inter_mv_x == 14'sd0) && (inter_mv_y == 14'sd0);
+            // P_Skip (clause 8.4.1.1): the inter candidate with nothing to code, and the skip vector equal to the vector of the prediction
+            // (a decoder predicts a skipped macroblock at the skip vector; the search vector is inside the picture and the window, so the
+            // skip vector is too when they are equal).
+            o_skip       <= inter_q && (nz8_e == 4'd0) && (drop_q || (!ac_nz_c && !dqcb_nz && !dqcr_nz)) &&
+                            (skip_x == inter_mv_x) && (skip_y == inter_mv_y);
             p3_n         <= '0;
             p3_run       <= 1'b1;
             sel_p3       <= 1'b1;

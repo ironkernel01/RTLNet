@@ -39,12 +39,18 @@
 //     checks of the memory model, and the RTL assertions.
 //   * TB_DEBUG_MB (define): prints one DBGMB line per macroblock of engine 0 (mode, skip, coded block pattern, size estimate), for
 //     the investigation of the mode decision; it reads internal signals of the engine and is off by default.
+//   * Motion statistics (phase 2c-2): +EXPMV_X=<n> +EXPMV_Y=<n> (whole samples) name the expected motion vector of a panning sequence; at
+//     the end of every P picture the bench prints `MVSTAT pic<n> interior=<I> true=<T>`: I the macroblocks (all engines) whose
+//     block at that vector lies inside the picture, T those among them that the encoder coded as inter with exactly that vector (a
+//     P_Skip counts with its skip vector). The harness requires T >= 90 % of I for every P picture. TB_SR (define, default 16) sets the
+//     search range of the core (0: only the vector (0, 0), the phase 2c-1 behaviour: the baseline of the bits gate).
 //   * Race-free: every bench output changes at the falling clock edge and every input is sampled there.
 // Language: SystemVerilog-2012 (simulation only; Verilator 5 --timing and Active-HDL).
 // Revision: 11-10-2026
 //   * 11-09-2026: initial version.
 //   * 11-10-2026: tiled rebuilt picture, 128-byte index records, padded input stride, burst monitor.
 //   * 11-10-2026: phase 2c-1: GOPs of I and P pictures, two rebuilt buffers, one input buffer reloaded per picture.
+//   * 11-10-2026: phase 2c-2: motion statistics (MVSTAT), TB_SR.
 // Clocks: enc_clk 150 MHz, s_axi_aclk 100 MHz.
 // -----------------------------------------------------------------------------
 `timescale 1ns / 1ps
@@ -82,6 +88,9 @@
 `ifndef TB_MEM_LOG2
   `define TB_MEM_LOG2 20
 `endif
+`ifndef TB_SR
+  `define TB_SR 16
+`endif
 
 module tb_rtlnet_h264_top;
 
@@ -99,7 +108,10 @@ module tb_rtlnet_h264_top;
   localparam int IDX_ENTRIES = 64;
   localparam int IDX_REC     = 128;      // bytes per index record
   localparam int STRIP_BYTES = 128;      // input line padding (RD_STRIP_MB * 32)
-  localparam int MAX_CLK  = 400_000_000;
+`ifndef TB_MAX_CLK
+  `define TB_MAX_CLK 150_000_000
+`endif
+  localparam int MAX_CLK  = `TB_MAX_CLK;
 
   // Register offsets (mirror driver/rtlnet_h264_enc.h).
   localparam logic [11:0] R_ID = 12'h000, R_VERSION = 12'h004, R_CAPS = 12'h008, R_CTRL = 12'h00C,
@@ -159,7 +171,7 @@ module tb_rtlnet_h264_top;
   logic [15:0]       wstrb_m;
   logic              irq;
 
-  rtlnet_h264_top #(.NUM_ENGINES(NE)) dut (
+  rtlnet_h264_top #(.NUM_ENGINES(NE), .SR(`TB_SR)) dut (
     .enc_clk(enc_clk), .enc_resetn(resetn), .s_axi_aclk(s_clk), .s_axi_aresetn(resetn),
     .s_axi_awaddr(awaddr), .s_axi_awvalid(awvalid_l), .s_axi_awready(awready_l),
     .s_axi_wdata(wdata_l), .s_axi_wstrb(4'hF), .s_axi_wvalid(wvalid_l), .s_axi_wready(wready_l),
@@ -360,6 +372,12 @@ module tb_rtlnet_h264_top;
   int    idr_count;
   int    since_idr;
   int    eng_pic_bytes [4];
+  // Motion statistics (+EXPMV_X, +EXPMV_Y).
+  int    exp_x, exp_y;
+  bit    have_exp;
+  int    mv_idx [4];
+  int    mv_int [4];
+  int    mv_true [4];
 
   function automatic logic [127:0] mem_word(input int unsigned byte_addr);
     return u_mem.mem[byte_addr >> 4];
@@ -561,6 +579,11 @@ module tb_rtlnet_h264_top;
     int total_entries [4];
     bit all_entries;
     cur_pic = p;
+    for (int e = 0; e < 4; e++) begin
+      mv_idx[e] = 0;
+      mv_int[e] = 0;
+      mv_true[e] = 0;
+    end
     pic_is_p = (gop.len() > p) && (gop.getc(p) == "P");
     pic_stream_start = stream.size();
     for (int e = 0; e < NE; e++) begin
@@ -617,6 +640,16 @@ module tb_rtlnet_h264_top;
     dump_rec(p);
     reg_read(R_PIC_COUNT, c);
     tb_check(int'(c) == (p + 1), $sformatf("PIC_COUNT %0d", c));
+    if (have_exp && pic_is_p) begin
+      int ti, tt;
+      ti = 0;
+      tt = 0;
+      for (int e = 0; e < NE; e++) begin
+        ti += mv_int[e];
+        tt += mv_true[e];
+      end
+      $display("MVSTAT pic%0d interior=%0d true=%0d", p, ti, tt);
+    end
     for (int e = 0; e < NE; e++) begin
       reg_read(ereg(e, R_PIC_CYC), c);  $display("STAT pic%0d eng%0d PIC_CYC=%0d type=%s", p, e, c, pic_is_p ? "P" : "I");
       reg_read(ereg(e, R_MB_COUNT), c); $display("STAT pic%0d eng%0d MB_COUNT=%0d", p, e, c);
@@ -635,6 +668,13 @@ module tb_rtlnet_h264_top;
     have_in0 = $value$plusargs("INPFX=%s", inpfx);
     have_in1 = 1'b0;
     have_out = $value$plusargs("OUT=%s", out_prefix);
+    have_exp = $test$plusargs("EXPMV_X");
+    exp_x = 0;
+    exp_y = 0;
+    if (have_exp) begin
+      if (!$value$plusargs("EXPMV_X=%d", exp_x)) exp_x = 0;
+      if (!$value$plusargs("EXPMV_Y=%d", exp_y)) exp_y = 0;
+    end
     if (!$value$plusargs("GOP=%s", gop)) gop = "";
     idr_count = 0;
     since_idr = 0;
@@ -740,12 +780,41 @@ module tb_rtlnet_h264_top;
   );
 
 `ifdef TB_DEBUG_MB
+  always @(posedge enc_clk) if (resetn && (cur_pic == 1) && (dut.g_engine[0].u_engine.me_start || dut.g_engine[0].u_engine.me_done || dut.g_engine[0].u_engine.a_go || dut.g_engine[0].u_engine.a_done))
+    $display("DBGEV t=%0d me_start %0d me_done %0d a_go %0d a_done %0d xh %0d xc %0d xfull %b me_x %0d a_x %0d sfull %b ch %0d me_ch %0d", clocks,
+             dut.g_engine[0].u_engine.me_start, dut.g_engine[0].u_engine.me_done, dut.g_engine[0].u_engine.a_go, dut.g_engine[0].u_engine.a_done,
+             dut.g_engine[0].u_engine.xh, dut.g_engine[0].u_engine.xc, dut.g_engine[0].u_engine.xfull, dut.g_engine[0].u_engine.me_x,
+             dut.g_engine[0].u_engine.a_x, dut.g_engine[0].u_engine.sfull, dut.g_engine[0].u_engine.ch, dut.g_engine[0].u_engine.me_ch);
+  always @(posedge enc_clk) if (resetn && dut.g_engine[0].u_engine.u_search.mb_done)
+    $display("DBGME pic%0d t=%0d vector (%0d,%0d) pc %0d ev %0d", cur_pic, clocks, dut.g_engine[0].u_engine.u_search.mb_vx,
+             dut.g_engine[0].u_engine.u_search.mb_vy, dut.g_engine[0].u_engine.u_search.pc, dut.g_engine[0].u_engine.u_search.ev_cnt);
   always @(posedge enc_clk) if (resetn && dut.g_engine[0].u_engine.a_done)
     $display("DBGMB pic%0d x%0d inter %0d skip %0d pcm %0d cbp4 %0d cbpc %0d est %0d nb %0d nbdc %0d mvd %0d,%0d", cur_pic,
       dut.g_engine[0].u_engine.a_x, dut.g_engine[0].u_engine.a_inter, dut.g_engine[0].u_engine.a_skip, dut.g_engine[0].u_engine.a_pcm,
       dut.g_engine[0].u_engine.a_cbp4, dut.g_engine[0].u_engine.a_cbpc, dut.g_engine[0].u_engine.u_mb_enc.est_tot,
       dut.g_engine[0].u_engine.u_mb_enc.nb_q, dut.g_engine[0].u_engine.u_mb_enc.nb_dc, dut.g_engine[0].u_engine.a_mvdx, dut.g_engine[0].u_engine.a_mvdy);
 `endif
+
+  // Motion statistics: the final vector of every macroblock of every engine, in band raster order.
+  genvar ge;
+  generate
+    for (ge = 0; ge < NE; ge++) begin : g_mvmon
+      always @(posedge enc_clk) begin
+        if (resetn && have_exp && dut.g_engine[ge].u_engine.a_done && pic_is_p) begin
+          int mcol, mrow;
+          mcol = mv_idx[ge] % MBW;
+          mrow = band_first_row(ge) + (mv_idx[ge] / MBW);
+          mv_idx[ge] = mv_idx[ge] + 1;
+          if (((16 * mcol + exp_x) >= 0) && ((16 * mcol + exp_x + 16) <= 16 * MBW) &&
+              ((16 * mrow + exp_y) >= 0) && ((16 * mrow + exp_y + 16) <= 16 * MBH)) begin
+            mv_int[ge] = mv_int[ge] + 1;
+            if (dut.g_engine[ge].u_engine.a_inter && (int'(dut.g_engine[ge].u_engine.u_mb_enc.mv_upd_x) == 4 * exp_x) &&
+                (int'(dut.g_engine[ge].u_engine.u_mb_enc.mv_upd_y) == 4 * exp_y)) mv_true[ge] = mv_true[ge] + 1;
+          end
+        end
+      end
+    end
+  endgenerate
 
   // Ring-full stall observation (the full guard).
   int unsigned stall_cycles = 0;
@@ -758,6 +827,11 @@ module tb_rtlnet_h264_top;
       @(posedge enc_clk);
       clocks++;
       if (clocks > MAX_CLK) begin
+        $display("WATCHDOG engine0: st %0d ft %0d sfull %b xfull %b cfull %b rfull %b search st %0d ld_g %0d tot %0d win_busy %0d me_left %0d me_active %0d a_busy %0d b_busy %0d",
+                 dut.g_engine[0].u_engine.st, dut.g_engine[0].u_engine.ft, dut.g_engine[0].u_engine.sfull, dut.g_engine[0].u_engine.xfull,
+                 dut.g_engine[0].u_engine.cfull, dut.g_engine[0].u_engine.rfull, dut.g_engine[0].u_engine.u_search.st,
+                 dut.g_engine[0].u_engine.u_search.ld_g, dut.g_engine[0].u_engine.u_search.tot_cols, dut.g_engine[0].u_engine.u_search.win_busy,
+                 dut.g_engine[0].u_engine.me_left, dut.g_engine[0].u_engine.me_active, dut.g_engine[0].u_engine.a_busy, dut.g_engine[0].u_engine.b_busy);
         tb_error("watchdog: simulation limit reached");
         tb_verdict("tb_rtlnet_h264_top");
       end
