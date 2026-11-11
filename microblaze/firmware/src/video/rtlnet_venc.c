@@ -284,6 +284,19 @@ static void pad_slot(uint32_t base, uint32_t stride, uint32_t lines, uint32_t co
 }
 
 /*
+ * profile_in_force -- 1 when pictures are coded in the High profile (CABAC): the module is present and licensed, enabled in HP_CTRL and offers
+ * CABAC. The parameter sets are written in the form of this profile. Builds without the seam, with the stub or with hp_caps 0 return 0.
+ */
+static int profile_in_force(void)
+{
+    rtlnet_h264_enc_hp_t hp;
+    if (rtlnet_h264_enc_hp_status(RTLNET_PLAT_H264_BASE, &hp) != 0) {
+        return 0;
+    }
+    return ((hp.present != 0u) && (hp.licensed != 0u) && (hp.enabled != 0u) && ((hp.caps & RTLNET_H264_HP_CAP_CABAC) != 0u)) ? 1 : 0;
+}
+
+/*
  * configure_mode -- program the core for a video mode: frame size and SPS/PPS bytes from the driver, ring and index ring
  * pointers cleared, firmware read pointers restarted. Called when the mode changes (and for the first picture).
  */
@@ -292,7 +305,7 @@ static int configure_mode(uint32_t mode)
     rtlnet_h264_enc_cfg_t cfg;
     rtlnet_h264_enc_mode_t m;
     if (rtlnet_h264_enc_get_mode(mode, &m) != 0 || rtlnet_h264_enc_set_mode(RTLNET_PLAT_H264_BASE, mode, &g.sps_cfg) != 0 ||
-        rtlnet_h264_enc_write_sps_pps(g.sps_pps, sizeof(g.sps_pps), &g.sps_cfg, &g.sps_len) != 0) {
+        rtlnet_h264_enc_write_sps_pps_profile(g.sps_pps, sizeof(g.sps_pps), &g.sps_cfg, profile_in_force(), &g.sps_len) != 0) {
         return -1;
     }
     memset(&cfg, 0, sizeof(cfg));
@@ -457,9 +470,10 @@ static void hp_after_picture(void)
         g.need_idr = 0u;
         g.idr_id ^= 1u;       /* the next IDR picture differs from the forced one (clause 7.4.3) */
     }
-    /* Stage 1 of the High profile module codes Constrained Baseline on both sides of a change: the parameter sets are rewritten from
-     * the unchanged configuration. A later stage sets the profile fields of g.sps_cfg here. */
-    (void)rtlnet_h264_enc_write_sps_pps(g.sps_pps, sizeof(g.sps_pps), &g.sps_cfg, &g.sps_len);
+    /* The parameter sets are rewritten for the profile now in force: High (profile_idc 100, entropy_coding_mode_flag 1) while the module
+     * codes CABAC pictures, Constrained Baseline after the license ended or the enable was cleared. The mux sends them in front of this
+     * forced IDR picture. */
+    (void)rtlnet_h264_enc_write_sps_pps_profile(g.sps_pps, sizeof(g.sps_pps), &g.sps_cfg, profile_in_force(), &g.sps_len);
 }
 
 /*

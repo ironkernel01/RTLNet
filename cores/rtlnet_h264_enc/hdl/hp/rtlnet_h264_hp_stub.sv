@@ -32,9 +32,10 @@ module rtlnet_h264_hp #(
   output logic [3:0]        hp_caps,
   output logic              hp_active,
 
-  // Picture and slice events from the engine, clk domain, one-clock pulses: pic_start when the engine accepts a start
-  // (hp_enable and hp_licensed are sampled then), pic_done at the picture's done, slice_start at the first slice command,
-  // slice_end when the slice's trailing bits are due.
+  // Picture and slice events from the engine, clk domain: pic_start and pic_done are one-clock pulses (the engine accepts a start,
+  // hp_enable and hp_licensed are sampled then; the picture is done). slice_start is high while the engine writes the slice header's
+  // first command (the module uses its rising edge), slice_end is high while the engine waits in its slice-end state: the module writes
+  // the end of its slice data and holds mb_busy until the last command has been accepted; the engine writes the rbsp trailing bits then.
   input  logic              pic_start,
   input  logic              pic_done,
   input  logic              slice_start,
@@ -71,7 +72,7 @@ module rtlnet_h264_hp #(
   input  logic [47:0]       cram_rd_data,
 
   // Bit output to the packer, clk domain: the command interface of rtlnet_h264_bitpack (op 0 FIELD, 1 UE, 2 SE, 3 ALIGN, 4 START,
-  // 5 END; val and len as there). Valid is held until ready.
+  // 5 END, 6 ALIGN1: pad with one bits to a byte boundary; val and len as there). Valid is held until ready.
   output logic              cmd_valid,
   input  logic              cmd_ready,
   output logic [2:0]        cmd_op,
@@ -82,7 +83,7 @@ module rtlnet_h264_hp #(
   // tf_res: residual of an 8x8 block from the engine, one row of 8 signed 9-bit samples per beat (sample 0 in bits [8:0]), 8 beats
   // per block, tf_res_last on the 8th. tf_rec: the rebuilt residual (after quantization, dequantization and the inverse transform) of
   // the block, same layout, to the engine's rebuild loop. tf_lvl: the quantized levels of the block, one row of 8 signed 16-bit
-  // levels per beat (level 0 in bits [15:0]) in raster order, tf_lvl_last on the 8th beat. Tied off in stage 1.
+  // levels per beat (level 0 in bits [15:0]) in raster order, tf_lvl_last on the 8th beat. Tied off in stages 1 and 2.
   output logic              tf_req,
   input  logic              tf_res_valid,
   output logic              tf_res_ready,

@@ -131,25 +131,37 @@ static uint32_t unwrap_nal(const uint8_t *buf, uint32_t start, uint32_t end, rd_
     return header;
 }
 
-static void check_sps_pps(const rtlnet_h264_enc_sps_cfg_t *cfg, uint32_t exp_level, uint32_t exp_crop_b, const char *name)
+/* high 0: Constrained Baseline form (rtlnet_h264_enc_write_sps_pps); high 1: the High profile form (rtlnet_h264_enc_write_sps_pps_profile). */
+static void check_sps_pps_profile(const rtlnet_h264_enc_sps_cfg_t *cfg, uint32_t exp_level, uint32_t exp_crop_b, int high, const char *name)
 {
     uint8_t  buf[RTLNET_H264_SPS_PPS_MAX_BYTES];
     size_t   len = 0u;
     rd_t     r;
     uint32_t next, hdr, v;
 
-    check(rtlnet_h264_enc_write_sps_pps(buf, sizeof(buf), cfg, &len) == 0, name);
+    if (high != 0) {
+        check(rtlnet_h264_enc_write_sps_pps_profile(buf, sizeof(buf), cfg, 1, &len) == 0, name);
+    } else {
+        check(rtlnet_h264_enc_write_sps_pps(buf, sizeof(buf), cfg, &len) == 0, name);
+    }
     check(len > 0u, "length");
     hdr = unwrap_nal(buf, 0u, (uint32_t)len, &r, &next);
     check(hdr == 0x67u, "SPS NAL header 0x67");
-    check(rd_bits(&r, 8u) == 66u, "profile_idc 66");
+    check(rd_bits(&r, 8u) == ((high != 0) ? 100u : 66u), "profile_idc 66 (Constrained Baseline) or 100 (High)");
     check(rd_bits(&r, 1u) == 0u, "constraint_set0_flag");
-    check(rd_bits(&r, 1u) == 1u, "constraint_set1_flag");
+    check(rd_bits(&r, 1u) == ((high != 0) ? 0u : 1u), "constraint_set1_flag (1 for Constrained Baseline)");
     check(rd_bits(&r, 2u) == 0u, "constraint_set2/3_flag");
     check(rd_bits(&r, 4u) == 0u, "reserved_zero_4bits");
     v = rd_bits(&r, 8u);
     check(v == exp_level, "level_idc");
     check(rd_ue(&r) == 0u, "seq_parameter_set_id");
+    if (high != 0) {
+        check(rd_ue(&r) == 1u, "chroma_format_idc 1 (4:2:0)");
+        check(rd_ue(&r) == 0u, "bit_depth_luma_minus8");
+        check(rd_ue(&r) == 0u, "bit_depth_chroma_minus8");
+        check(rd_bits(&r, 1u) == 0u, "qpprime_y_zero_transform_bypass_flag");
+        check(rd_bits(&r, 1u) == 0u, "seq_scaling_matrix_present_flag");
+    }
     check(rd_ue(&r) == (cfg->log2_max_frame_num - 4u), "log2_max_frame_num_minus4");
     check(rd_ue(&r) == 2u, "pic_order_cnt_type 2");
     check(rd_ue(&r) == 1u, "max_num_ref_frames 1");
@@ -174,7 +186,7 @@ static void check_sps_pps(const rtlnet_h264_enc_sps_cfg_t *cfg, uint32_t exp_lev
     check(hdr == 0x68u, "PPS NAL header 0x68");
     check(rd_ue(&r) == 0u, "pic_parameter_set_id");
     check(rd_ue(&r) == 0u, "PPS seq_parameter_set_id");
-    check(rd_bits(&r, 1u) == 0u, "entropy_coding_mode_flag 0 (CAVLC)");
+    check(rd_bits(&r, 1u) == ((high != 0) ? 1u : 0u), "entropy_coding_mode_flag: 0 (CAVLC), 1 (CABAC) for High");
     check(rd_bits(&r, 1u) == 0u, "bottom_field_pic_order_in_frame_present_flag");
     check(rd_ue(&r) == 0u, "num_slice_groups_minus1");
     check(rd_ue(&r) == 0u, "num_ref_idx_l0_default_active_minus1");
@@ -189,6 +201,11 @@ static void check_sps_pps(const rtlnet_h264_enc_sps_cfg_t *cfg, uint32_t exp_lev
     check(rd_bits(&r, 1u) == 0u, "redundant_pic_cnt_present_flag");
     check(rd_bits(&r, 1u) == 1u, "PPS stop bit");
     check(next == (uint32_t)len, "PPS ends the output");
+}
+
+static void check_sps_pps(const rtlnet_h264_enc_sps_cfg_t *cfg, uint32_t exp_level, uint32_t exp_crop_b, const char *name)
+{
+    check_sps_pps_profile(cfg, exp_level, exp_crop_b, 0, name);
 }
 
 int main(void)
@@ -207,11 +224,14 @@ int main(void)
     sps.width = 176u; sps.height = 144u; sps.display_width = 176u; sps.display_height = 144u;
     sps.fps = 30u; sps.log2_max_frame_num = 4u;
     check_sps_pps(&sps, 11u, 0u, "QCIF");
+    check_sps_pps_profile(&sps, 11u, 0u, 1, "QCIF High");
     sps.width = 1280u; sps.height = 720u; sps.display_width = 1280u; sps.display_height = 720u;
     check_sps_pps(&sps, 31u, 0u, "720p30");
+    check_sps_pps_profile(&sps, 31u, 0u, 1, "720p30 High");
     sps.width = 1920u; sps.height = 1088u; sps.display_width = 1920u; sps.display_height = 1080u;
     sps.log2_max_frame_num = 8u;
     check_sps_pps(&sps, 40u, 4u, "1080p30");
+    check_sps_pps_profile(&sps, 40u, 4u, 1, "1080p30 High");
     sps.fps = 60u;
     check_sps_pps(&sps, 42u, 4u, "1080p60");
     sps.width = 3840u; sps.height = 2160u; sps.display_width = 3840u; sps.display_height = 2160u; sps.fps = 30u;
@@ -226,6 +246,7 @@ int main(void)
     check(rtlnet_h264_enc_write_sps_pps(small, sizeof(small), &sps, &len) != 0, "log2_max_frame_num 17 rejected");
     sps.log2_max_frame_num = 8u;
     check(rtlnet_h264_enc_write_sps_pps(small, sizeof(small), &sps, &len) != 0, "buffer too small rejected");
+    check(rtlnet_h264_enc_write_sps_pps_profile(small, sizeof(small), &sps, 1, &len) != 0, "High form: buffer too small rejected");
     sps.display_height = 1090u;
     check(rtlnet_h264_enc_write_sps_pps(small, 64u, &sps, &len) != 0, "crop beyond the picture rejected");
     sps.display_height = 1080u;

@@ -54,11 +54,14 @@
 //     by hp_active, which the module sets for a picture at the engine's start and clears at its done; hp_active is 0 for a whole picture
 //     or 1 for a whole picture. The engine applies a change of hp_licensed or hp_enable only at a picture start: a change forces that
 //     picture to be an IDR picture (frame_num 0, an idr_pic_id different from the previous IDR picture, intra only) and pulses hp_chg;
-//     firmware writes new parameter sets after it sees the pulse in the status register. With HIGH_PROFILE = 0 the module is not
+//     firmware writes new parameter sets after it sees the pulse in the status register. With hp_active the slice header of a P slice
+//     carries cabac_init_idc 0 and the slice-end state holds the rbsp trailing bits (PK_END) until the module's mb_busy has risen and
+//     fallen (its end_of_slice_flag and flush); the packer's ALIGN_ONES parameter (= HIGH_PROFILE) adds the PK_ALIGN1 command. With HIGH_PROFILE = 0 the module is not
 //     instantiated, e_idr / e_p / e_frame_num / e_idr_pic_id are the register values, and the generated logic is that of the
 //     Constrained Baseline encoder.
 // Revision: 11-11-2026
 //   * 11-11-2026: High profile seam (parameter HIGH_PROFILE, ports hp_*), forced IDR picture on a license or profile change.
+//   * 11-11-2026: High profile CABAC: cabac_init_idc in the slice header of a P slice, the slice-end command waits for the module's flush.
 //   * 11-09-2026: initial version (I_PCM); phase 2b-2: stage A / stage B macroblock coder, rebuilt and coefficient RAMs,
 //     per-macroblock I_PCM fallback (rtlnet_h264_mb_pcm removed).
 //   * 11-10-2026: burst-only DDR3 access: strip read DMA, tiled rebuilt picture, 128-byte index records.
@@ -398,6 +401,8 @@ module rtlnet_h264_engine #(
   logic              c_rd_en;
   logic [CRAM_AW-1:0] c_raddr;
   logic              hp_act;
+  logic              hp_hold;           // High profile: the slice-end command waits for the module's end-of-slice flush
+  logic              hp_cab_p;          // High profile: cabac_init_idc follows the reference marking (P slice, CABAC)
   logic              e_p;
   logic              e_idr;
   logic [15:0]       e_frame_num;
@@ -600,6 +605,16 @@ module rtlnet_h264_engine #(
       /* verilator lint_on UNUSEDSIGNAL */
 
       assign hp_pic_start = (st == E_IDLE) && start && cfg_ok_q;
+
+      // The slice's end_of_slice_flag and flush are written by the module while the sequencer sits in its slice-end state (slice_end is
+      // st == E_SLEND): the rbsp trailing bits (PK_END) wait until the module's busy rose and fell again.
+      logic hp_seen_busy;
+      always_ff @(posedge clk) begin
+        if (!resetn || (st != E_SLEND)) hp_seen_busy <= 1'b0;
+        else if (h_busy)                hp_seen_busy <= 1'b1;
+      end
+      assign hp_hold  = hp_act && (st == E_SLEND) && !(hp_seen_busy && !h_busy);
+      assign hp_cab_p = hp_act && e_p;
       assign hp_changed = (hp_licensed != hp_lic_q) || (hp_enable != hp_en_q);
 
       // Applied state of the license and the enable bit, the picture's values (the registers', or those of a forced IDR picture:
@@ -660,7 +675,7 @@ module rtlnet_h264_engine #(
       assign cofb_raddr   = hp_act ? CRAM_AW'(h_raddr) : c_raddr;
       // Packer command mux: the coder's command (stage B's or the module's, by hp_act) over the sequencer's; written per source so that
       // each bit is one LUT6 (hp_act, the two valids and the three data bits) and the entropy path keeps its depth.
-      assign mx_valid = seq_valid || (hp_act ? h_valid : cav_valid);
+      assign mx_valid = (seq_valid && !hp_hold) || (hp_act ? h_valid : cav_valid);
       assign mx_op    = hp_act ? (h_valid ? h_op  : seq_op)  : (cav_valid ? cav_op  : seq_op);
       assign mx_val   = hp_act ? (h_valid ? h_val : seq_val) : (cav_valid ? cav_val : seq_val);
       assign mx_len   = hp_act ? (h_valid ? h_len : seq_len) : (cav_valid ? cav_len : seq_len);
@@ -671,6 +686,8 @@ module rtlnet_h264_engine #(
       assign hp_caps         = 4'd0;
       assign hp_act          = 1'b0;
       assign hp_chg          = 1'b0;
+      assign hp_hold         = 1'b0;
+      assign hp_cab_p        = 1'b0;
       assign e_idr           = cfg_idr;
       assign e_p             = cfg_p;
       assign e_frame_num     = cfg_frame_num;
@@ -720,7 +737,8 @@ module rtlnet_h264_engine #(
       E_H6: begin seq_op = PK_UE; seq_val = {16'd0, e_idr_pic_id}; end
       // IDR: no_output_of_prior_pics_flag, long_term_reference_flag. P: num_ref_idx_active_override_flag,
       // ref_pic_list_modification_flag_l0, adaptive_ref_pic_marking_mode_flag. Non-IDR I: adaptive_ref_pic_marking_mode_flag.
-      E_H7: begin seq_op = PK_FIELD; seq_val = 32'd0; seq_len = e_idr ? 6'd2 : (e_p ? 6'd3 : 6'd1); end
+      // High profile P slice: cabac_init_idc 0 = ue(0) = one bit '1' behind the three marking bits.
+      E_H7: begin seq_op = PK_FIELD; seq_val = hp_cab_p ? 32'd1 : 32'd0; seq_len = hp_cab_p ? 6'd4 : (e_idr ? 6'd2 : (e_p ? 6'd3 : 6'd1)); end
       E_H8: begin seq_op = PK_SE; seq_val = 32'(signed'({1'b0, cfg_qp}) - 7'sd26); end
       E_H9: begin seq_op = PK_UE; seq_val = 32'd1; end
       E_SKR:  begin seq_op = PK_UE; seq_val = 32'(b_skip_run); end
@@ -905,7 +923,7 @@ module rtlnet_h264_engine #(
           end
         end
         E_AUD0, E_AUD1, E_AUD2, E_AUD3, E_H0, E_H1, E_H2, E_H3, E_H4, E_H5, E_H7, E_H8, E_H9, E_SKR, E_SLEND: begin
-          if (pk_in_ready) begin
+          if (pk_in_ready && !hp_hold) begin
             case (st)
               E_AUD0:  st <= E_AUD1;
               E_AUD1:  st <= E_AUD2;
@@ -1198,7 +1216,7 @@ module rtlnet_h264_engine #(
     .rc_w_valid(rc_w_valid), .rc_w_data(rc_w_data), .rc_w_pop(rc_w_pop)
   );
 
-  rtlnet_h264_bitpack u_pack (
+  rtlnet_h264_bitpack #(.ALIGN_ONES(HIGH_PROFILE)) u_pack (
     .clk(clk), .resetn(resetn),
     .cmd_valid(pk_cmd_valid), .cmd_ready(pk_cmd_ready), .cmd_op(pk_cmd_op), .cmd_val(pk_cmd_val),
     .cmd_len(pk_cmd_len), .cmd_kind(pk_cmd_kind),

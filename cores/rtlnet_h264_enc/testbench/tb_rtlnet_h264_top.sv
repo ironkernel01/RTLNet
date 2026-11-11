@@ -88,6 +88,9 @@
 `ifndef TB_MEM_LOG2
   `define TB_MEM_LOG2 20
 `endif
+`ifndef TB_HIGH_PROFILE
+  `define TB_HIGH_PROFILE 1'b0
+`endif
 `ifndef TB_SR
   `define TB_SR 16
 `endif
@@ -171,7 +174,7 @@ module tb_rtlnet_h264_top;
   logic [15:0]       wstrb_m;
   logic              irq;
 
-  rtlnet_h264_top #(.NUM_ENGINES(NE), .SR(`TB_SR)) dut (
+  rtlnet_h264_top #(.NUM_ENGINES(NE), .SR(`TB_SR), .HIGH_PROFILE(`TB_HIGH_PROFILE)) dut (
     .enc_clk(enc_clk), .enc_resetn(resetn), .s_axi_aclk(s_clk), .s_axi_aresetn(resetn),
     .s_axi_awaddr(awaddr), .s_axi_awvalid(awvalid_l), .s_axi_awready(awready_l),
     .s_axi_wdata(wdata_l), .s_axi_wstrb(4'hF), .s_axi_wvalid(wvalid_l), .s_axi_wready(wready_l),
@@ -701,6 +704,9 @@ module tb_rtlnet_h264_top;
     reg_write(R_MB_H, MBH);
     reg_write(R_SLICES, SLICES);
     reg_write(R_QP, QP);
+`ifdef TB_HP_ENABLE
+    reg_write(12'h0C0, 32'h1);     // HP_CTRL.hp_enable: the High profile module codes the pictures
+`endif
 `ifdef TB_PCM
     reg_write(R_MB_MODE, 32'h1);
 `endif
@@ -793,6 +799,56 @@ module tb_rtlnet_h264_top;
       dut.g_engine[0].u_engine.a_x, dut.g_engine[0].u_engine.a_inter, dut.g_engine[0].u_engine.a_skip, dut.g_engine[0].u_engine.a_pcm,
       dut.g_engine[0].u_engine.a_cbp4, dut.g_engine[0].u_engine.a_cbpc, dut.g_engine[0].u_engine.u_mb_enc.est_tot,
       dut.g_engine[0].u_engine.u_mb_enc.nb_q, dut.g_engine[0].u_engine.u_mb_enc.nb_dc, dut.g_engine[0].u_engine.a_mvdx, dut.g_engine[0].u_engine.a_mvdy);
+`endif
+
+`ifdef TB_DUMP_MB
+  // Macroblock dump of stage B's input (the descriptor, the coefficient RAM words it reads and the slice events), one text
+  // line per item, for the reference models of entropy coders (+DUMP=<file>): S (slice start), M (macroblock), W (coefficient
+  // RAM word read by the entropy coder), D (clocks the entropy coder took for the macroblock: stage B's start to its done), E (slice
+  // end). W lines follow their M line; idx is the word index inside the bank.
+  integer dmp_f;
+  initial begin
+    string dmp_name;
+    dmp_f = 0;
+    if ($value$plusargs("DUMP=%s", dmp_name)) dmp_f = $fopen(dmp_name, "w");
+  end
+  genvar gd;
+  generate
+    for (gd = 0; gd < NE; gd++) begin : g_dump
+      logic [4:0] dst_q;
+      int         t_go;
+      logic       drd_q;
+      logic [9:0] dra_q;
+      always @(posedge enc_clk) begin
+        if (resetn && (dmp_f != 0)) begin
+          dst_q <= dut.g_engine[gd].u_engine.st;
+          if ((dut.g_engine[gd].u_engine.st == 5'd7) && (dst_q != 5'd7))
+            $fdisplay(dmp_f, "S %0d %0d %0d %0d %0d %0d %0d", gd, dut.g_engine[gd].u_engine.mbn, dut.g_engine[gd].u_engine.cfg_qp,
+                      dut.g_engine[gd].u_engine.e_p, dut.g_engine[gd].u_engine.e_idr, dut.g_engine[gd].u_engine.e_frame_num,
+                      dut.g_engine[gd].u_engine.e_idr_pic_id);
+          if ((dut.g_engine[gd].u_engine.st == 5'd18) && (dst_q != 5'd18)) $fdisplay(dmp_f, "E %0d", gd);
+          if (dut.g_engine[gd].u_engine.b_go) begin
+            logic bbk;
+            bbk = dut.g_engine[gd].u_engine.bb;
+            $fdisplay(dmp_f, "M %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d", gd,
+                      dut.g_engine[gd].u_engine.bi_x[bbk], dut.g_engine[gd].u_engine.bi_avt[bbk], dut.g_engine[gd].u_engine.bi_avl[bbk],
+                      dut.g_engine[gd].u_engine.bi_pcm[bbk], dut.g_engine[gd].u_engine.bi_mode[bbk], dut.g_engine[gd].u_engine.bi_cbpc[bbk],
+                      dut.g_engine[gd].u_engine.bi_cbpl[bbk], dut.g_engine[gd].u_engine.bi_cm[bbk], dut.g_engine[gd].u_engine.bi_inter[bbk],
+                      dut.g_engine[gd].u_engine.bi_skip[bbk], dut.g_engine[gd].u_engine.bi_cbp4[bbk],
+                      $signed(dut.g_engine[gd].u_engine.bi_mvdx[bbk]), $signed(dut.g_engine[gd].u_engine.bi_mvdy[bbk]), dut.g_engine[gd].u_engine.cof_base_b);
+          end
+          if (dut.g_engine[gd].u_engine.b_go) t_go <= clocks;
+          if (dut.g_engine[gd].u_engine.b_done) $fdisplay(dmp_f, "D %0d %0d", gd, clocks - t_go);
+          drd_q <= dut.g_engine[gd].u_engine.cofb_rd_en;
+          dra_q <= 10'(dut.g_engine[gd].u_engine.cofb_raddr) - 10'(dut.g_engine[gd].u_engine.cof_base_b);
+          if (drd_q) $fdisplay(dmp_f, "W %0d %0d %012x", gd, dra_q, dut.g_engine[gd].u_engine.cofb_rdata);
+        end
+      end
+    end
+  endgenerate
+  final begin
+    if (dmp_f != 0) $fclose(dmp_f);
+  end
 `endif
 
   // Motion statistics: the final vector of every macroblock of every engine, in band raster order.
