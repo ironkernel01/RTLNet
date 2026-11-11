@@ -18,7 +18,11 @@
  *
  * Phase 2c: IDR every GOP pictures (default 30), P pictures between. The rebuilt picture ping-pongs between two buffers; a P
  * picture's reference is the previous picture's buffer. The next picture is an IDR picture after a dropped picture, a mode change,
- * a QP change or an encoder error, so a P picture never references a picture that was not coded.
+ * an encoder error, a timeout or a mux failure, so a P picture never references a picture that was not coded. A QP change does not
+ * force an IDR picture: the slice QP of an H.264 P picture is free, so rate control (Phase 2d) changes it at every picture.
+ *
+ * Phase 2d: rate control (rtlnet_ratectl.c). Target 0 is constant QP (the QP of venc_set_qp for every picture); a target in kb/s
+ * picks the QP of each picture from the coded sizes of the pictures before it (the entry lengths of every engine's index record).
  *
  * DDR3 map (byte offsets in DDR3, CPU address = DDR3 window + offset; the frame buffer holds 0x1000_0000 to 0x10C0_0000):
  *   0x1100_0000 / 0x1120_0000  rebuilt picture A, luma tiles / chroma tiles (2 MiB each)
@@ -28,12 +32,14 @@
  *
  * This header holds the contract; rtlnet_venc.c holds the per-function commentary.
  *
- * Revision: 11-10-2026 (GOP, P pictures)
+ * Revision: 11-10-2026 (GOP, P pictures; rate control)
  */
 #ifndef RTLNET_VENC_H
 #define RTLNET_VENC_H
 
 #include <stdint.h>   /* uint32_t, uint16_t */
+
+#include "rtlnet_ratectl.h"
 
 #define VENC_QP_DEFAULT     28u
 #define VENC_QP_MAX         51u
@@ -89,13 +95,23 @@ int venc_start(uint32_t ip, uint16_t port);
 /* Stop the stream and close the socket; a picture in flight is abandoned and its slot released. */
 void venc_stop(void);
 
-/* Set the QP (0..51; the driver raises values below 12 to 12). VENC_ERR_ARG above 51. Effective at the next picture; a change of
- * the QP makes the next picture an IDR picture (a P picture never mixes two QPs in one GOP). */
+/* Set the QP of constant QP mode (0..51; the driver raises values below 12 to 12). VENC_ERR_ARG above 51. Effective at the next
+ * picture; it does not force an IDR picture. */
 int venc_set_qp(uint32_t qp);
 
 /* Set the GOP length: an IDR picture every gop pictures, P pictures in between (1..255; 1 = all IDR). VENC_ERR_ARG outside 1..255.
  * Effective at the next picture. */
 int venc_set_gop(uint32_t gop);
+
+/* Rate control. Bit rate target in kb/s (0 = constant QP, up to 100000), virtual buffer in ms (100..2000), QP range (12 <= min <=
+ * max <= 51). VENC_ERR_ARG on a value out of range. Effective at the next picture. */
+int venc_set_bitrate(uint32_t kbps);
+int venc_set_buffer_ms(uint32_t ms);
+int venc_set_qp_range(uint32_t qp_min, uint32_t qp_max);
+
+/* Rate control statistics, and the record of the completed second `age` seconds ago (0 = the newest; -1 beyond the ring). */
+void venc_get_ratectl(ratectl_stats_t *out);
+int venc_history(uint32_t age, ratectl_sec_t *out);
 
 /* Main-loop service: start the next picture, finish a running one, mux and send. Does nothing when stopped. */
 void venc_poll(void);

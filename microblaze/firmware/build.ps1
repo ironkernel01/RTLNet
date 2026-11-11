@@ -44,6 +44,8 @@ Overview:
     test of the DMA netif (test/netif_host: rtlnet_lwip_netif.c, rtlnet_offload.c and the core
     drivers on lwIP from the install, a mock of the AXI DMA driver and a register model of the
     protocol wrapper and the checksum offload core); each run ends with NETIF_HOST: PASS / FAIL.
+    -RatectlTest: build and run the host unit test of the rate controller (test_ratectl.c, the synthetic encoder model;
+    log build/ratectl_test.log); -Demo runs it as well; the exit code follows the anchored RATECTL_TEST: PASS / FAIL line.
     -NoFirmware: harness only. -Bsp: regenerate
     the BSP even when it is up to date. -Xsa: another hardware export. -Define:
     extra -D macros for the firmware and lwIP compilation (the zero-copy options of
@@ -64,8 +66,8 @@ Overview:
     RTLNET_FW: PASS <elf>.
 Usage:
   powershell -NoProfile -ExecutionPolicy Bypass -File microblaze/firmware/build.ps1 `
-    [-Xsa <xsa>] [-Bsp] [-Ddr] [-HostHarness] [-Demo] [-LwipTest] [-NetifTest] [-NoFirmware] [-Define NAME=VALUE,...]
-Revision: 11-09-2026
+    [-Xsa <xsa>] [-Bsp] [-Ddr] [-HostHarness] [-Demo] [-RatectlTest] [-LwipTest] [-NetifTest] [-NoFirmware] [-Define NAME=VALUE,...]
+Revision: 11-10-2026
   * 10-22-2026: initial version.
   * 10-22-2026: generated standalone BSP, lwIP, BSP linker conventions;
     hand-written start-up, UART, timer and string files removed.
@@ -76,6 +78,7 @@ Revision: 11-09-2026
   * 11-09-2026: DDR3: the rtlnet_axi_arbiter driver and src/rtlnet_ddrtest.c in the firmware and the harness; the
     linker script is unchanged (the DDR3 window is not linked: the firmware uses it only through the memory test).
   * 11-09-2026: video cores (Phase 1): the rtlnet_csi2_rx, rtlnet_vdma_s2mm and rtlnet_framebuf drivers and src/rtlnet_fbcrc.c.
+  * 11-10-2026: rate control (Phase 2d): src/video/rtlnet_ratectl.c in the firmware and the harness; -RatectlTest and the unit test in -Demo.
   * 11-09-2026: -Ddr: development image linked into DDR3 (build/firmware_ddr.elf); boot banner names the image.
 -------------------------------------------------------------------------------
 #>
@@ -87,6 +90,7 @@ param(
     [switch]$Demo,
     [switch]$LwipTest,
     [switch]$NetifTest,
+    [switch]$RatectlTest,
     [switch]$NoFirmware,
     [string[]]$Define = @()
 )
@@ -250,13 +254,13 @@ MEMORY
     $sysInc  = @('-isystem', $bspInc, "-specs=$bspSpec")
     # -O2 on the frame path (netif, lwIP glue, TCP echo, lwIP), -Os elsewhere (CLI, drivers).
     $cflags  = $common + @('-g', '-ffunction-sections', '-fdata-sections')
-    $fastSrc = @('rtlnet_lwip_netif', 'rtlnet_lwip', 'rtlnet_tcp_echo', 'rtlnet_tcp_iperf', 'rtlnet_lwiperf', 'rtlnet_offload', 'rtlnet_ddrtest', 'rtlnet_tsmux', 'rtlnet_venc', 'rtlnet_video_udp')
+    $fastSrc = @('rtlnet_lwip_netif', 'rtlnet_lwip', 'rtlnet_tcp_echo', 'rtlnet_tcp_iperf', 'rtlnet_lwiperf', 'rtlnet_offload', 'rtlnet_ddrtest', 'rtlnet_tsmux', 'rtlnet_venc', 'rtlnet_ratectl', 'rtlnet_video_udp')
     $objs = @()
     $fwSrcs = @(
         'src/main.c', 'src/rtlnet_platform.c', 'src/rtlnet_board.c', 'src/rtlnet_fmt.c', 'src/rtlnet_netmgr.c',
         'src/rtlnet_cpupath.c', 'src/rtlnet_offload.c', 'src/rtlnet_ddrtest.c', 'src/rtlnet_fbcrc.c', 'src/lwip/rtlnet_lwip.c', 'src/lwip/rtlnet_lwip_netif.c', 'src/lwip/rtlnet_tcp_echo.c',
         'src/lwip/rtlnet_tcp_iperf.c', 'src/lwip/rtlnet_lwiperf.c', 'src/lwip/rtlnet_video_udp.c',
-        'src/video/rtlnet_tsmux.c', 'src/video/rtlnet_venc.c',
+        'src/video/rtlnet_tsmux.c', 'src/video/rtlnet_venc.c', 'src/video/rtlnet_ratectl.c',
         'cli/menu.c', 'cli/menu_table.c', 'cli/cli_commands.c'
     ) | ForEach-Object { "$Fw/$_" }
     foreach ($s in ($fwSrcs + ($drvSrcs | ForEach-Object { "$Repo/$_" }))) {
@@ -287,7 +291,7 @@ MEMORY
 # board layer against a register model; lwIP replaced by host/host_lwip_stub.c.
 if ($HostHarness -or $Demo) {
     $hsrcs = @('host/main.c', 'host/host_platform.c', 'host/host_lwip_stub.c', 'src/rtlnet_board.c', 'src/rtlnet_fmt.c',
-               'src/rtlnet_netmgr.c', 'src/rtlnet_cpupath.c', 'src/rtlnet_offload.c', 'src/rtlnet_ddrtest.c', 'src/rtlnet_fbcrc.c', 'src/video/rtlnet_tsmux.c', 'src/video/rtlnet_venc.c', 'cli/menu.c', 'cli/menu_table.c',
+               'src/rtlnet_netmgr.c', 'src/rtlnet_cpupath.c', 'src/rtlnet_offload.c', 'src/rtlnet_ddrtest.c', 'src/rtlnet_fbcrc.c', 'src/video/rtlnet_tsmux.c', 'src/video/rtlnet_venc.c', 'src/video/rtlnet_ratectl.c', 'cli/menu.c', 'cli/menu_table.c',
                'cli/cli_commands.c') |
              ForEach-Object { "$Fw/$_" }
     $exe = Join-Path $Out 'menu.exe'
@@ -309,6 +313,21 @@ if ($HostHarness -or $Demo) {
         if ($rc -ne 0 -or -not $verdict -or $verdict -notmatch '^TEST PASS: ') {
             throw "host demo did not pass"
         }
+    }
+}
+
+# Host unit test of the rate controller (host/test_ratectl.c against src/video/rtlnet_ratectl.c); part of -Demo.
+if ($RatectlTest -or $Demo) {
+    $rcExe = Join-Path $Out 'test_ratectl.exe'
+    $rcLogFile = Join-Path $Out 'ratectl_test.log'
+    Invoke-Step $HostCc ($common + @('-O2', "-I$Fw/src/video", "$Fw/host/test_ratectl.c", "$Fw/src/video/rtlnet_ratectl.c", '-lm', '-o', $rcExe))
+    $rcLog = & $rcExe
+    $rcRc = $LASTEXITCODE
+    $rcLog | Set-Content -LiteralPath $rcLogFile -Encoding ascii
+    $rcLog | ForEach-Object { Write-Output $_ }
+    $rcVerdict = $rcLog | Where-Object { $_ -match '^RATECTL_TEST: (PASS|FAIL)' } | Select-Object -Last 1
+    if ($rcRc -ne 0 -or -not $rcVerdict -or $rcVerdict -notmatch '^RATECTL_TEST: PASS') {
+        throw "rate control unit test did not pass (log $rcLogFile)"
     }
 }
 

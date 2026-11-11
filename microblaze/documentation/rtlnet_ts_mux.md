@@ -87,8 +87,10 @@ index ring are 64-byte aligned (offsets 0x1200_0000 and 0x1300_0000, records of 
 The picture type follows `encoder gop <n>` (1..255, default 30): the first picture after a start, and every n-th picture after it, is an IDR
 picture; the others are P pictures that reference the previous picture's rebuilt buffer (one reference frame, `max_num_ref_frames` 1). GOP 1 makes every
 picture an IDR picture. The next picture is an IDR picture, whatever the GOP position, after: a stream start, a dropped picture (a jump in the frame
-numbers), a mode change, a QP change (`encoder qp` with another value), an encoder error, a timeout and a failed mux. So a P picture never references a picture
-that was not coded or that was coded under another mode or QP. The index entry of a P picture is a picture entry like an IDR picture's; the firmware
+numbers), a mode change, an encoder error, a timeout and a failed mux. So a P picture never references a picture
+that was not coded or that was coded under another mode. A QP change does not force an IDR picture: the slice QP of an H.264 P picture is free (the
+slice header carries `slice_qp_delta`), so `encoder qp` and the per-picture QP of the rate controller (`rtlnet_ratectl.md`) change it at any picture.
+The index entry of a P picture is a picture entry like an IDR picture's; the firmware
 knows the type it started and does not read it back. The counters of `show stream` (`GOP` line) split the pictures into IDR and P with the
 average elementary-stream bytes of each.
 
@@ -107,10 +109,14 @@ reader: while a picture is encoded the take fails with the "already holds a slot
 |---|---|---|
 | `stream h264 <ip> <port>` | priv | start the stream (UDP socket to the host; VLC: `udp://@:<port>`) |
 | `stream stop` | priv | stop it, release the slot, close the socket |
-| `encoder qp <n>` | priv | fixed QP 0..51 for the next picture (default 28; the driver writes at least 12); another value makes the next picture an IDR picture |
+| `encoder qp <n>` | priv | QP of constant QP mode, 0..51 for the next picture (default 28; the driver writes at least 12); it does not force an IDR picture |
+| `encoder bitrate <kbps>` | priv | constant bit rate target 0..100000 kb/s; 0 = constant QP (default); see `rtlnet_ratectl.md` |
+| `encoder buffer <ms>` | priv | rate control virtual buffer 100..2000 ms of the target rate (default 500) |
+| `encoder qprange <min> <max>` | priv | rate control QP range, 12 <= min <= max <= 51 (default 12 51) |
 | `encoder gop <n>` | priv | GOP length 1..255 (default 30): an IDR picture every n pictures, P pictures between; 1 = all IDR |
-| `show stream` | exec | GOP, IDR and P picture counts with their average bytes, pictures sent, dropped pictures (skipped frame numbers), ES and TS bytes, bit rate, TS packets, datagrams, UDP counters, mux and handling CPU load, frame-buffer drops |
-| `show encoder` | exec | identity, build, QP, GOP and the type of the last picture, STATUS, ERR_CODE, per-engine cycle statistics (`PIC_CYC`, `CYC_LAST`, `CYC_MAX`, `RD_CYC`, `PK_CYC`, `WR_CYC`) |
+| `show encoder history [n]` | exec | the per-second record: bits, mean QP, buffer fill and pictures of the last n seconds (default 20, at most 3600), oldest first |
+| `show stream` | exec | rate-control lines (mode and target, measured rate over 1 s and 10 s, buffer fill, QP, overflow and underflow counts, test pattern), GOP, IDR and P picture counts with their average bytes, pictures sent, dropped pictures (skipped frame numbers), ES and TS bytes, bit rate, TS packets, datagrams, UDP counters, mux and handling CPU load, frame-buffer drops |
+| `show encoder` | exec | identity, build, QP, GOP and the type of the last picture, the rate-control lines of `show stream`, STATUS, ERR_CODE, per-engine cycle statistics (`PIC_CYC`, `CYC_LAST`, `CYC_MAX`, `RD_CYC`, `PK_CYC`, `WR_CYC`) |
 
 `clear counters` also clears the stream counters.
 

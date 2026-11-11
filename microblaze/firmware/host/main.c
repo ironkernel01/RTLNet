@@ -759,6 +759,74 @@ static void demo_video(void)
     host_capture_clear();
     demo_type("encoder gop 30\r");
     demo_check(demo_has("GOP 30 (an IDR picture every 30 pictures"), "encoder gop: 30 accepted");
+    /* Rate control (Phase 2d): argument checks, the status lines, the history listing, the test pattern command. */
+    host_capture_clear();
+    demo_type("encoder bitrate 100001\r");
+    demo_check(demo_has("bit rate in kb/s (0..100000"), "encoder bitrate: 100001 rejected");
+    host_capture_clear();
+    demo_type("encoder buffer 99\r");
+    demo_check(demo_has("buffer in ms (100..2000)"), "encoder buffer: 99 rejected");
+    host_capture_clear();
+    demo_type("encoder buffer 2001\r");
+    demo_check(demo_has("buffer in ms (100..2000)"), "encoder buffer: 2001 rejected");
+    host_capture_clear();
+    demo_type("encoder qprange 11 40\r");
+    demo_check(demo_has("Invalid QP range"), "encoder qprange: min 11 rejected");
+    host_capture_clear();
+    demo_type("encoder qprange 40 20\r");
+    demo_check(demo_has("Invalid QP range"), "encoder qprange: min above max rejected");
+    host_capture_clear();
+    demo_type("encoder qprange 20 52\r");
+    demo_check(demo_has("Invalid QP range"), "encoder qprange: max 52 rejected");
+    host_capture_clear();
+    demo_type("encoder bitrate 1000\r");
+    demo_check(demo_has("Constant bit rate 1000 kb/s, effective at the next picture (no IDR picture is forced)"), "encoder bitrate: 1000 accepted");
+    host_capture_clear();
+    demo_type("encoder buffer 250\r");
+    demo_check(demo_has("Rate control buffer 250 ms"), "encoder buffer: 250 accepted");
+    host_capture_clear();
+    demo_type("encoder qprange 20 40\r");
+    demo_check(demo_has("Rate control QP range 20..40"), "encoder qprange: 20..40 accepted");
+    host_capture_clear();
+    demo_type("show stream\r");
+    demo_check(demo_has("  Rate control    : constant bit rate, target 1000 kb/s, buffer 250 ms (250000 bits), QP range 20..40") &&
+               demo_has("  Measured rate   : 0 kb/s over the last 1 s, 0 kb/s over the last 10 s") &&
+               demo_has("  Buffer fill     : 0.0 % (min 0.0 %, max 0.0 % since clear)") &&
+               demo_has("  Picture QP      : last 0; since clear min 0, avg 0.00, max 0 (0 pictures)") &&
+               demo_has("  Buffer events   : overflow 0 (0 below QP max), underflow 0") &&
+               demo_has("  Test pattern    : bars, speed 0"), "show stream: rate control lines, constant bit rate");
+    host_capture_clear();
+    demo_type("encoder bitrate 0\r");
+    demo_check(demo_has("Constant QP 28 (rate control off)"), "encoder bitrate: 0 returns to constant QP");
+    demo_type("encoder qprange 12 51\r");
+    demo_type("encoder buffer 500\r");
+    host_capture_clear();
+    demo_type("show stream\r");
+    demo_check(demo_has("  Rate control    : constant QP 28 (target 0)") && demo_has("  Buffer fill     : not used in constant QP mode"),
+               "show stream: constant QP lines");
+    host_capture_clear();
+    demo_type("show encoder history\r");
+    demo_check(demo_has("Encoder history: 0 of 0 recorded seconds") && demo_has("Age (s)       Bits/s  QP avg  Fill %  Pictures"),
+               "show encoder history: empty");
+    host_capture_clear();
+    demo_type("show encoder history 0\r");
+    demo_check(demo_has("number of seconds (1..3600)"), "show encoder history: 0 rejected");
+    host_capture_clear();
+    demo_type("show encoder history 3601\r");
+    demo_check(demo_has("number of seconds (1..3600)"), "show encoder history: 3601 rejected");
+    host_capture_clear();
+    demo_type("camera pattern stripes\r");
+    demo_check(demo_has("test pattern (bars, scroll, box, noise or all)"), "camera pattern: bad name rejected");
+    host_capture_clear();
+    demo_type("camera pattern scroll 33\r");
+    demo_check(demo_has("pattern speed (-32..32)"), "camera pattern: speed 33 rejected");
+    host_capture_clear();
+    demo_type("camera pattern scroll -33\r");
+    demo_check(demo_has("pattern speed (-32..32)"), "camera pattern: speed -33 rejected");
+    host_capture_clear();
+    demo_type("camera pattern scroll 4\r");
+    demo_check(demo_has("% rtlnet_csi2_rx not present in this build"), "camera pattern: core absent");
+
     host_capture_clear();
     demo_type("show stream\r");
     demo_check(demo_has("State           : stopped") && demo_has("QP 28") && demo_has("GOP             : 30 (IDR every 30 pictures)") && demo_has("CPU load        : TS mux 0.0 %"), "show stream: stopped, QP 28, GOP 30");

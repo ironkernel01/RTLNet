@@ -82,6 +82,7 @@
 #include "rtlnet_offload.h"
 #include "rtlnet_phy_rtl8211e.h"
 #include "rtlnet_platform.h"
+#include "rtlnet_ratectl.h"
 #include "rtlnet_tcp_echo.h"
 #include "rtlnet_tcp_iperf.h"
 #include "rtlnet_udp_echo.h"
@@ -3266,6 +3267,35 @@ int cli_ddr_test(const MenuCommandContext *ctx)
 static const char *const g_mode_name[RTLNET_CSI2_MODE_COUNT] = { "720p30", "1080p30" };
 static const char *const g_source_name[]                     = { "auto", "camera", "pattern" };
 
+/* Moving test patterns (Phase 2d): int rtlnet_csi2_rx_set_pattern(uintptr_t base, uint32_t pattern, int32_t speed) of the CSI-2 core
+ * driver. While the driver header lacks it, a stub with the same signature refuses, so this file builds and the command says so. */
+#ifndef RTLNET_CSI2_PATTERN_ALL
+#define RTLNET_CSI2_PATTERN_BARS    0u
+#define RTLNET_CSI2_PATTERN_SCROLL  1u
+#define RTLNET_CSI2_PATTERN_BOX     2u
+#define RTLNET_CSI2_PATTERN_NOISE   3u
+#define RTLNET_CSI2_PATTERN_ALL     4u
+#define CLI_PATTERN_STUB            1
+/**
+ * @brief Stand-in for the driver call until cores/rtlnet_csi2_rx provides it.
+ * @param base    Unused.
+ * @param pattern Unused.
+ * @param speed   Unused.
+ * @return -1 always.
+ */
+static int rtlnet_csi2_rx_set_pattern(uintptr_t base, uint32_t pattern, int32_t speed)
+{
+    (void)base;
+    (void)pattern;
+    (void)speed;
+    return -1;
+}
+#endif
+#define CLI_PATTERN_SPEED_MAX       32
+static const char *const g_pattern_name[] = { "bars", "scroll", "box", "noise", "all" };
+static uint32_t          g_pattern_now    = RTLNET_CSI2_PATTERN_BARS;   /* last pattern set (the reset state is the static bars) */
+static int32_t           g_pattern_speed  = 0;
+
 /**
  * @brief Print a core identity line: name, ID text, ID value, version and window address.
  * @param core    Core descriptor.
@@ -3493,6 +3523,51 @@ int cli_camera_rate(const MenuCommandContext *ctx)
 }
 
 /**
+ * @brief CAMERA PATTERN [PATTERN] {SPEED}: test pattern content (bars, scroll, box, noise, all) and its speed.
+ * @param ctx argv[0] = pattern, argv[1] = speed -32..32 (default 1; 0 = still; bars ignore it).
+ * @return 0, or -1 for a bad name or speed, an absent core or a value the driver rejects.
+ */
+int cli_camera_pattern(const MenuCommandContext *ctx)
+{
+    uint32_t pat = RTLNET_CSI2_PATTERN_ALL + 1u;
+    int32_t speed = 1;
+    int rc;
+    for (uint32_t i = 0; i <= RTLNET_CSI2_PATTERN_ALL; i++) {
+        if (cli_word_is(ctx->argv[0], g_pattern_name[i])) {
+            pat = i;
+        }
+    }
+    if (pat > RTLNET_CSI2_PATTERN_ALL) {
+        return cli_bad_value("test pattern (bars, scroll, box, noise or all)", ctx->argv[0]);
+    }
+    if (ctx->argc > 1) {
+        const char *t = ctx->argv[1];
+        uint32_t mag;
+        int neg = (t != NULL && t[0] == '-');
+        if (cli_parse_u32(neg ? t + 1 : t, &mag) != 0 || mag > (uint32_t)CLI_PATTERN_SPEED_MAX) {
+            return cli_bad_value("pattern speed (-32..32)", ctx->argv[1]);
+        }
+        speed = neg ? -(int32_t)mag : (int32_t)mag;
+    }
+    if (!cli_core_check(&g_core_csi2)) {
+        return -1;
+    }
+    rc = rtlnet_csi2_rx_set_pattern(RTLNET_PLAT_CSI2_BASE, pat, speed);
+    if (rc != 0) {
+#ifdef CLI_PATTERN_STUB
+        fmt_printf("%% The CSI-2 driver has no moving test patterns in this build\n");
+#else
+        fmt_printf("%% Test pattern %s speed %d rejected by the core\n", g_pattern_name[pat], (int)speed);
+#endif
+        return -1;
+    }
+    g_pattern_now = pat;
+    g_pattern_speed = speed;
+    fmt_printf("Test pattern %s, speed %d, effective at the next frame (camera source pattern)\n", g_pattern_name[pat], (int)speed);
+    return 0;
+}
+
+/**
  * @brief FRAMEBUFFER CRC: CRC-32 of the latest published frame, read through the data cache.
  * @param ctx Unused.
  * @return 0 when the CRC was computed, -1 for an absent core, no published frame or an unusable frame.
@@ -3635,6 +3710,133 @@ int cli_encoder_gop(const MenuCommandContext *ctx)
 }
 
 /**
+ * @brief ENCODER BITRATE [KBPS]: bit rate target of the rate controller.
+ * @param ctx argv[0] = kb/s 0..100000 (0 = constant QP).
+ * @return 0, or -1 for a value out of range.
+ */
+int cli_encoder_bitrate(const MenuCommandContext *ctx)
+{
+    uint32_t kbps;
+    if (cli_parse_u32(ctx->argv[0], &kbps) != 0 || venc_set_bitrate(kbps) != VENC_OK) {
+        return cli_bad_value("bit rate in kb/s (0..100000, 0 = constant QP)", ctx->argv[0]);
+    }
+    if (kbps == 0u) {
+        fmt_printf("Constant QP %u (rate control off), effective at the next picture\n", (unsigned)qp_now());
+    } else {
+        fmt_printf("Constant bit rate %u kb/s, effective at the next picture (no IDR picture is forced)\n", (unsigned)kbps);
+    }
+    return 0;
+}
+
+/**
+ * @brief ENCODER BUFFER [MS]: size of the rate controller's virtual buffer in milliseconds of the target rate.
+ * @param ctx argv[0] = 100..2000.
+ * @return 0, or -1 for a value out of range.
+ */
+int cli_encoder_buffer(const MenuCommandContext *ctx)
+{
+    uint32_t ms;
+    if (cli_parse_u32(ctx->argv[0], &ms) != 0 || venc_set_buffer_ms(ms) != VENC_OK) {
+        return cli_bad_value("buffer in ms (100..2000)", ctx->argv[0]);
+    }
+    fmt_printf("Rate control buffer %u ms of the target rate\n", (unsigned)ms);
+    return 0;
+}
+
+/**
+ * @brief ENCODER QPRANGE [MIN] [MAX]: QP range of the rate controller.
+ * @param ctx argv[0] = minimum, argv[1] = maximum (12 <= min <= max <= 51).
+ * @return 0, or -1 for a value out of range.
+ */
+int cli_encoder_qprange(const MenuCommandContext *ctx)
+{
+    uint32_t lo;
+    uint32_t hi;
+    if (cli_parse_u32(ctx->argv[0], &lo) != 0 || cli_parse_u32(ctx->argv[1], &hi) != 0 || venc_set_qp_range(lo, hi) != VENC_OK) {
+        fmt_printf("%% Invalid QP range \"%s %s\" (12 <= min <= max <= 51)\n", ctx->argv[0], ctx->argv[1]);
+        return -1;
+    }
+    fmt_printf("Rate control QP range %u..%u\n", (unsigned)lo, (unsigned)hi);
+    return 0;
+}
+
+/**
+ * @brief Print a permille figure as "12.3 %".
+ * @param pm Value in permille.
+ * @return None.
+ */
+static void cli_print_permille(uint32_t pm)
+{
+    fmt_printf("%u.%u %%", (unsigned)(pm / 10u), (unsigned)(pm % 10u));
+}
+
+/**
+ * @brief The rate-control lines shared by SHOW STREAM and SHOW ENCODER: mode and target, measured bit rate, buffer, QP, events, pattern.
+ * @return None.
+ */
+static void cli_print_ratectl(void)
+{
+    ratectl_stats_t r;
+    venc_get_ratectl(&r);
+    if (r.target_kbps == 0u) {
+        fmt_printf("  Rate control    : constant QP %u (target 0)\n", (unsigned)r.cqp);
+    } else {
+        fmt_printf("  Rate control    : constant bit rate, target %u kb/s, buffer %u ms (%u bits), QP range %u..%u\n",
+                   (unsigned)r.target_kbps, (unsigned)r.buffer_ms, (unsigned)(r.target_kbps * r.buffer_ms), (unsigned)r.qp_min,
+                   (unsigned)r.qp_max);
+    }
+    fmt_printf("  Measured rate   : %u kb/s over the last 1 s, %u kb/s over the last 10 s (coded picture bits, %u s recorded)\n",
+               (unsigned)(r.bits_1s / 1000u), (unsigned)(r.bits_10s / 1000u), (unsigned)r.seconds);
+    if (r.target_kbps == 0u) {
+        fmt_printf("  Buffer fill     : not used in constant QP mode\n");
+    } else {
+        fmt_printf("  Buffer fill     : ");
+        cli_print_permille(r.fill_permille);
+        fmt_printf(" (min ");
+        cli_print_permille(r.fill_lo_permille);
+        fmt_printf(", max ");
+        cli_print_permille(r.fill_hi_permille);
+        fmt_printf(" since clear)\n");
+    }
+    fmt_printf("  Picture QP      : last %u; since clear min %u, avg %u.%02u, max %u (%u pictures)\n", (unsigned)r.qp_last,
+               (unsigned)r.qp_lo, (unsigned)(r.qp_avg_x100 / 100u), (unsigned)(r.qp_avg_x100 % 100u), (unsigned)r.qp_hi,
+               (unsigned)r.pictures);
+    fmt_printf("  Buffer events   : overflow %u (%u below QP max), underflow %u\n", (unsigned)r.overflow,
+               (unsigned)r.overflow_below_max, (unsigned)r.underflow);
+    fmt_printf("  Test pattern    : %s, speed %d\n", g_pattern_name[g_pattern_now], (int)g_pattern_speed);
+}
+
+/**
+ * @brief SHOW ENCODER HISTORY {COUNT}: the per-second record (bits, mean QP, buffer fill), oldest first.
+ * @param ctx argv[0] = number of seconds to list (default 20, at most the 3600 kept).
+ * @return 0, or -1 for a bad count.
+ */
+int cli_show_encoder_history(const MenuCommandContext *ctx)
+{
+    ratectl_stats_t r;
+    uint32_t n = 20u;
+    if (ctx->argc > 0 && (cli_parse_u32(ctx->argv[0], &n) != 0 || n < 1u || n > RATECTL_HISTORY_SECONDS)) {
+        return cli_bad_value("number of seconds (1..3600)", ctx->argv[0]);
+    }
+    venc_get_ratectl(&r);
+    if (n > r.seconds) {
+        n = r.seconds;
+    }
+    fmt_printf("Encoder history: %u of %u recorded seconds (stream time), oldest first; bits per second = bit rate\n", (unsigned)n,
+               (unsigned)r.seconds);
+    fmt_printf("  Age (s)       Bits/s  QP avg  Fill %%  Pictures\n");
+    for (uint32_t i = n; i-- > 0u;) {
+        ratectl_sec_t s;
+        if (venc_history(i, &s) != 0) {
+            continue;
+        }
+        fmt_printf("  %7u  %11u  %2u.%02u  %6u  %8u\n", (unsigned)(i + 1u), (unsigned)s.bits, (unsigned)(s.qp_q4 / 16u),
+                   (unsigned)((s.qp_q4 % 16u) * 100u / 16u), (unsigned)s.fill_pct, (unsigned)s.pics);
+    }
+    return 0;
+}
+
+/**
  * @brief SHOW STREAM: stream state, counts, bit rate, dropped pictures, TS packets and the mux CPU load.
  * @param ctx Unused.
  * @return 0.
@@ -3666,6 +3868,7 @@ int cli_show_stream(const MenuCommandContext *ctx)
                (unsigned)(s.p_pictures ? s.p_bytes / s.p_pictures : 0u), s.last_idr ? "IDR" : "P");
     fmt_printf("  Bytes           : %u ES, %u TS, bit rate %u kb/s\n", (unsigned)s.es_bytes, (unsigned)s.ts_bytes,
                (unsigned)(s.bit_rate_bps / 1000u));
+    cli_print_ratectl();
     fmt_printf("  TS packets      : %u in %u datagrams, %u refused by UDP (UDP sent %u, dropped %u, retries %u)\n",
                (unsigned)s.ts_packets, (unsigned)s.datagrams, (unsigned)s.sink_errors, (unsigned)sent, (unsigned)dropped,
                (unsigned)retries);
@@ -3708,6 +3911,7 @@ int cli_show_encoder(const MenuCommandContext *ctx)
                (unsigned)board_debug_read32(RTLNET_PLAT_H264_BASE + RTLNET_H264_REG_ERR_CODE));
     fmt_printf("  GOP             : %u (IDR every %u pictures, P pictures between), last picture %s\n", (unsigned)s.gop,
                (unsigned)s.gop, s.last_idr ? "IDR" : "P");
+    cli_print_ratectl();
     fmt_printf("  Pictures        : %u coded (PIC_COUNT), %u slices\n",
                (unsigned)board_debug_read32(RTLNET_PLAT_H264_BASE + RTLNET_H264_REG_PIC_COUNT),
                (unsigned)board_debug_read32(RTLNET_PLAT_H264_BASE + RTLNET_H264_REG_SLICE_COUNT));

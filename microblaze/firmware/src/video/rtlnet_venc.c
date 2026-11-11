@@ -5,7 +5,8 @@
  *
  * Role: implementation of the contract in rtlnet_venc.h.
  *
- * Revision: 11-10-2026 (macroblock-tiled rebuilt picture, 128-byte index records; phase 2c: GOP, P pictures, two rebuilt buffers)
+ * Revision: 11-10-2026 (macroblock-tiled rebuilt picture, 128-byte index records; phase 2c: GOP, P pictures, two rebuilt buffers;
+ *   phase 2d: rate control per picture, no IDR picture on a QP change)
  */
 #include "rtlnet_venc.h"
 
@@ -17,6 +18,7 @@
 #include "rtlnet_h264_enc.h"
 #include "rtlnet_mmio.h"
 #include "rtlnet_platform.h"
+#include "rtlnet_ratectl.h"
 #include "rtlnet_tsmux.h"
 #include "rtlnet_vdma_s2mm.h"
 #include "rtlnet_video_udp.h"
@@ -81,6 +83,9 @@ static struct {
     uint32_t                   win_busy_ticks;
 } g;
 
+/* The rate controller and its seconds ring (28,800 bytes of .bss in the LMB, see rtlnet_ratectl.h). */
+static ratectl_t g_rc;
+
 /* mem_copy -- n bytes of DDR3 (byte offset off) into dst, through the data cache with the lines invalidated first. */
 static void mem_copy(uint8_t *dst, uint32_t off, uint32_t n)
 {
@@ -136,6 +141,8 @@ void venc_init(void)
     g.cfg_mode = 0xFFFFFFFFu;
     g.need_idr = 1u;
     (void)rtlnet_h264_enc_buffers_init(&g.bufs, VENC_RY_BASE, VENC_RU_BASE, VENC_RY_BASE_B, VENC_RU_BASE_B);
+    ratectl_init(&g_rc);
+    ratectl_set_cqp(&g_rc, VENC_QP_DEFAULT);
 }
 
 /* release_slot -- release the frame-buffer slot when the firmware holds it. */
@@ -175,6 +182,7 @@ int venc_start(uint32_t ip, uint16_t port)
     g.prev_fn = 0u;
     g.idr_id = 0u;
     (void)rtlnet_h264_enc_buffers_init(&g.bufs, VENC_RY_BASE, VENC_RU_BASE, VENC_RY_BASE_B, VENC_RU_BASE_B);
+    ratectl_restart(&g_rc);   /* a new stream: the model and the buffer start again (the statistics keep running) */
     g.st.dst_ip = ip;
     g.st.dst_port = port;
     g.win_start_ms = plat_uptime_ms();
@@ -201,11 +209,35 @@ int venc_set_qp(uint32_t qp)
     if (qp > VENC_QP_MAX) {
         return VENC_ERR_ARG;
     }
-    if (qp != g.st.qp) {
-        g.need_idr = 1u;   /* no P picture across a QP change */
-    }
+    /* H.264 slice QP is per slice: a P picture may use any QP, so a QP change does not force an IDR picture. */
     g.st.qp = qp;
+    ratectl_set_cqp(&g_rc, qp);
     return VENC_OK;
+}
+
+int venc_set_bitrate(uint32_t kbps)
+{
+    return (ratectl_set_target(&g_rc, kbps) == 0) ? VENC_OK : VENC_ERR_ARG;
+}
+
+int venc_set_buffer_ms(uint32_t ms)
+{
+    return (ratectl_set_buffer_ms(&g_rc, ms) == 0) ? VENC_OK : VENC_ERR_ARG;
+}
+
+int venc_set_qp_range(uint32_t qp_min, uint32_t qp_max)
+{
+    return (ratectl_set_qp_range(&g_rc, qp_min, qp_max) == 0) ? VENC_OK : VENC_ERR_ARG;
+}
+
+void venc_get_ratectl(ratectl_stats_t *out)
+{
+    ratectl_get_stats(&g_rc, out);
+}
+
+int venc_history(uint32_t age, ratectl_sec_t *out)
+{
+    return ratectl_history(&g_rc, age, out);
 }
 
 int venc_set_gop(uint32_t gop)
@@ -306,6 +338,7 @@ static int begin_picture(void)
     uint32_t stride;
     uint32_t period;
     uint32_t pic_type;
+    uint32_t qp;
     if (rtlnet_framebuf_fw_take(RTLNET_PLAT_FB_BASE, &f) != RTLNET_FB_OK) {
         g.st.errors++;
         return -1;
@@ -334,26 +367,6 @@ static int begin_picture(void)
     if (m.height > f.height && f.height > 0u) {
         pad_slot(f.base, stride, f.height, m.height);
     }
-    memset(&cfg, 0, sizeof(cfg));
-    cfg.mb_w = m.mb_w;
-    cfg.mb_h = m.mb_h;
-    cfg.slices = g.engines;
-    cfg.qp = g.st.qp;
-    cfg.log2_max_frame_num = VENC_LOG2_FN;
-    cfg.in_base = f.base;
-    cfg.in_stride = stride;
-    cfg.ry_base = VENC_RY_BASE;
-    cfg.ru_base = VENC_RU_BASE;
-    cfg.ring_base = VENC_RING_BASE;
-    cfg.ring_size = VENC_RING_SIZE;
-    cfg.idx_base = VENC_IDX_BASE;
-    cfg.idx_entries = VENC_IDX_ENTRIES;
-    if (rtlnet_h264_enc_configure(RTLNET_PLAT_H264_BASE, &cfg) != 0) {
-        g.st.errors++;
-        release_slot();
-        return -1;
-    }
-    g.st.qp_used = rtlnet_reg_read32(RTLNET_PLAT_H264_BASE, RTLNET_H264_REG_QP);
     period = rtlnet_reg_read32(RTLNET_PLAT_CSI2_BASE, RTLNET_CSI2_REG_FRAME_PERIOD);
     g.pts_step = (uint32_t)(((uint64_t)period * 90000u + (RTLNET_PLAT_CPU_CLK_HZ / 2u)) / RTLNET_PLAT_CPU_CLK_HZ);
     if (g.pts_step == 0u) {
@@ -371,6 +384,28 @@ static int begin_picture(void)
     } else {
         pic_type = RTLNET_H264_PIC_P;
     }
+    ratectl_set_stream(&g_rc, m.width * m.height, g.pts_step);
+    qp = ratectl_pick(&g_rc, pic_type == RTLNET_H264_PIC_IDR, g.st.gop);   /* constant QP mode returns the configured QP */
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.mb_w = m.mb_w;
+    cfg.mb_h = m.mb_h;
+    cfg.slices = g.engines;
+    cfg.qp = qp;
+    cfg.log2_max_frame_num = VENC_LOG2_FN;
+    cfg.in_base = f.base;
+    cfg.in_stride = stride;
+    cfg.ry_base = VENC_RY_BASE;
+    cfg.ru_base = VENC_RU_BASE;
+    cfg.ring_base = VENC_RING_BASE;
+    cfg.ring_size = VENC_RING_SIZE;
+    cfg.idx_base = VENC_IDX_BASE;
+    cfg.idx_entries = VENC_IDX_ENTRIES;
+    if (rtlnet_h264_enc_configure(RTLNET_PLAT_H264_BASE, &cfg) != 0) {
+        g.st.errors++;
+        release_slot();
+        return -1;
+    }
+    g.st.qp_used = rtlnet_reg_read32(RTLNET_PLAT_H264_BASE, RTLNET_H264_REG_QP);
     g.pic_seq++;
     if (rtlnet_h264_enc_buffers_begin(RTLNET_PLAT_H264_BASE, &g.bufs, pic_type) != 0 ||
         rtlnet_h264_enc_start_picture_ex(RTLNET_PLAT_H264_BASE,
@@ -486,6 +521,10 @@ static int mux_picture(void)
     g.st.pictures++;
     g.st.es_bytes += total;
     g.st.last_picture_bytes = total;
+    /* Rate control: the coded size (the entry lengths of every engine, plus the SPS and PPS of an IDR picture), the QP written and
+     * the stream time since the previous picture (more than one period after a dropped picture). */
+    ratectl_picture_done(&g_rc, g.pic_type == RTLNET_H264_PIC_IDR, g.st.qp_used, total * 8u,
+                         g.have_last ? (g.frame.frame - g.st.last_frame) * g.pts_step : g.pts_step);
     g.st.last_frame = g.frame.frame;
     g.have_last = 1;
     return 0;
@@ -586,4 +625,5 @@ void venc_clear_counters(void)
     g.st.max_mux_us = 0u;
     tsmux_clear_counters(&g.mux);
     g.win_ts_bytes = 0u;
+    ratectl_clear_stats(&g_rc);
 }

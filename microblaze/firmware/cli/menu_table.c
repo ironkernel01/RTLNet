@@ -43,6 +43,7 @@
  *  11-09-2026  MenuBuilder AI / Steve Spano    Video (Phase 1): show camera, show framebuffer, camera mode|source|rate, framebuffer crc; clear counters clears the video cores
  *  11-09-2026  MenuBuilder AI / Steve Spano    H.264 stream (Phase 2b-3): stream h264 <ip> <port>, stream stop, show stream, encoder qp, show encoder
  *  11-10-2026  MenuBuilder AI / Steve Spano    H.264 P pictures (Phase 2c): encoder gop <1..255>, GOP and IDR/P counts in show stream and show encoder
+ *  11-10-2026  MenuBuilder AI / Steve Spano    Rate control (Phase 2d): encoder bitrate|buffer|qprange, show encoder history, camera pattern, rate-control lines in show stream and show encoder
  * ===========================================================================
  */
 #include "menu.h"
@@ -108,9 +109,11 @@ const MenuCommandDef g_menu_commands[] = {
     { "cli_show_framebuffer", MENU_MODE_EXEC, "SHOW FRAMEBUFFER",
       "Video frame buffer: slots, latest published frame, reference counts, write DMA", cli_show_framebuffer, MENU_MODE_NONE },
     { "cli_show_stream", MENU_MODE_EXEC, "SHOW STREAM",
-      "H.264 stream: pictures, bytes, bit rate, dropped pictures, TS packets and mux CPU load", cli_show_stream, MENU_MODE_NONE },
+      "H.264 stream: pictures, bytes, bit rate, rate control, dropped pictures, TS packets and mux CPU load", cli_show_stream, MENU_MODE_NONE },
     { "cli_show_encoder", MENU_MODE_EXEC, "SHOW ENCODER",
-      "H.264 encoder: QP, mode, status and per-engine cycle statistics", cli_show_encoder, MENU_MODE_NONE },
+      "H.264 encoder: QP, mode, status, rate control and per-engine cycle statistics", cli_show_encoder, MENU_MODE_NONE },
+    { "cli_show_encoder_history", MENU_MODE_EXEC, "SHOW ENCODER HISTORY {COUNT}",
+      "Per-second record of the last COUNT seconds (1..3600, default 20): bits, mean QP, buffer fill", cli_show_encoder_history, MENU_MODE_NONE },
     { "cli_show_running", MENU_MODE_PRIV, "SHOW RUNNING-CONFIG",
       "Current configuration", cli_show_running, MENU_MODE_NONE },
     { "cli_disable", MENU_MODE_PRIV, "DISABLE",
@@ -123,6 +126,8 @@ const MenuCommandDef g_menu_commands[] = {
       "Video source: auto, camera or pattern", cli_camera_source, MENU_MODE_NONE },
     { "cli_camera_rate", MENU_MODE_PRIV, "CAMERA RATE [FPS]",
       "Frame rate in frames per second, 1..30 (30 is the reset value)", cli_camera_rate, MENU_MODE_NONE },
+    { "cli_camera_pattern", MENU_MODE_PRIV, "CAMERA PATTERN [PATTERN] {SPEED}",
+      "Test pattern: bars, scroll, box, noise or all; speed -32..32 (default 1, 0 = still)", cli_camera_pattern, MENU_MODE_NONE },
     { "cli_framebuffer_crc", MENU_MODE_PRIV, "FRAMEBUFFER CRC",
       "CRC-32 of the latest published frame, read through the cache", cli_framebuffer_crc, MENU_MODE_NONE },
     { "cli_stream_h264", MENU_MODE_PRIV, "STREAM H264 [IP] [PORT]",
@@ -133,6 +138,12 @@ const MenuCommandDef g_menu_commands[] = {
       "H.264 quantizer 0..51, fixed (the driver raises values below 12 to 12; default 28)", cli_encoder_qp, MENU_MODE_NONE },
     { "cli_encoder_gop", MENU_MODE_PRIV, "ENCODER GOP [GOP]",
       "IDR picture every GOP pictures, P pictures between, 1..255 (1 = all IDR; default 30)", cli_encoder_gop, MENU_MODE_NONE },
+    { "cli_encoder_bitrate", MENU_MODE_PRIV, "ENCODER BITRATE [KBPS]",
+      "Constant bit rate target in kb/s, 0..100000 (0 = constant QP, the default)", cli_encoder_bitrate, MENU_MODE_NONE },
+    { "cli_encoder_buffer", MENU_MODE_PRIV, "ENCODER BUFFER [MS]",
+      "Rate control virtual buffer in ms of the target rate, 100..2000 (default 500)", cli_encoder_buffer, MENU_MODE_NONE },
+    { "cli_encoder_qprange", MENU_MODE_PRIV, "ENCODER QPRANGE [MIN] [MAX]",
+      "Rate control QP range, 12 <= MIN <= MAX <= 51 (default 12 51)", cli_encoder_qprange, MENU_MODE_NONE },
     { "cli_debug_read", MENU_MODE_PRIV, "DEBUG READ [ADDR]",
       "Read a 32-bit word (hex 0x... or decimal address)", cli_debug_read, MENU_MODE_NONE },
     { "cli_debug_write", MENU_MODE_PRIV, "DEBUG WRITE [ADDR] [VALUE]",
