@@ -377,6 +377,7 @@ int rtlnet_h264_enc_probe(uintptr_t base, rtlnet_h264_enc_caps_t *caps)
         caps->max_mb_w    = c & RTLNET_H264_CAPS_MB_W_MASK;
         caps->max_mb_h    = (c >> RTLNET_H264_CAPS_MB_H_SHIFT) & RTLNET_H264_CAPS_MB_H_MASK;
         caps->num_engines = (c >> RTLNET_H264_CAPS_ENG_SHIFT) & RTLNET_H264_CAPS_ENG_MASK;
+        caps->hp_seam     = (c & RTLNET_H264_CAPS_HP_SEAM) != 0u ? 1u : 0u;
     }
     return 0;
 }
@@ -624,6 +625,87 @@ int rtlnet_h264_enc_wait_done(uintptr_t base, uint32_t max_polls, uint32_t *err_
         *err_code = ERR_TIMEOUT_CODE;
     }
     return -1;
+}
+
+/*
+ * hp_decode -- HP_STATUS into the struct
+ */
+static void hp_decode(uint32_t v, rtlnet_h264_enc_hp_t *out)
+{
+    out->present      = ((v & RTLNET_H264_HP_STATUS_PRESENT) != 0u) ? 1u : 0u;
+    out->licensed     = ((v & RTLNET_H264_HP_STATUS_LICENSED) != 0u) ? 1u : 0u;
+    out->active       = ((v & RTLNET_H264_HP_STATUS_ACTIVE) != 0u) ? 1u : 0u;
+    out->enabled      = ((v & RTLNET_H264_HP_STATUS_ENABLED) != 0u) ? 1u : 0u;
+    out->profile_chg  = ((v & RTLNET_H264_HP_STATUS_CHG) != 0u) ? 1u : 0u;
+    out->caps         = (v >> RTLNET_H264_HP_STATUS_CAPS_SHIFT) & RTLNET_H264_HP_STATUS_CAPS_MASK;
+    out->seconds_left = v >> RTLNET_H264_HP_STATUS_SEC_SHIFT;
+}
+
+/*
+ * hp_seam_present -- 1 when CAPS bit 20 says the build has the High profile registers
+ */
+static int hp_seam_present(uintptr_t base)
+{
+    return (rtlnet_reg_read32(base, RTLNET_REG_CAPS) & RTLNET_H264_CAPS_HP_SEAM) != 0u;
+}
+
+/*
+ * rtlnet_h264_enc_hp_status -- see the header
+ */
+int rtlnet_h264_enc_hp_status(uintptr_t base, rtlnet_h264_enc_hp_t *out)
+{
+    if (out == NULL) {
+        return -1;
+    }
+    if (!hp_seam_present(base)) {
+        return RTLNET_H264_HP_ERR_NO_SEAM;
+    }
+    hp_decode(rtlnet_reg_read32(base, RTLNET_H264_REG_HP_STATUS), out);
+    return 0;
+}
+
+/*
+ * rtlnet_h264_enc_set_profile -- see the header
+ * Steps: baseline writes hp_enable 0 (when the seam exists); high checks seam, module, caps and license in that order and
+ * writes hp_enable 1 only when all hold.
+ */
+int rtlnet_h264_enc_set_profile(uintptr_t base, int high)
+{
+    rtlnet_h264_enc_hp_t hp;
+    if (!hp_seam_present(base)) {
+        return high ? RTLNET_H264_HP_ERR_NO_SEAM : 0;
+    }
+    if (!high) {
+        rtlnet_reg_write32(base, RTLNET_H264_REG_HP_CTRL, 0u);
+        return 0;
+    }
+    hp_decode(rtlnet_reg_read32(base, RTLNET_H264_REG_HP_STATUS), &hp);
+    if (hp.present == 0u) {
+        return RTLNET_H264_HP_ERR_NO_MODULE;
+    }
+    if (hp.caps == 0u) {
+        return RTLNET_H264_HP_ERR_NO_CAPS;
+    }
+    if (hp.licensed == 0u) {
+        return RTLNET_H264_HP_ERR_NOT_LICENSED;
+    }
+    rtlnet_reg_write32(base, RTLNET_H264_REG_HP_CTRL, 1u);
+    return 0;
+}
+
+/*
+ * rtlnet_h264_enc_hp_clear_change -- see the header
+ */
+int rtlnet_h264_enc_hp_clear_change(uintptr_t base)
+{
+    if (!hp_seam_present(base)) {
+        return -1;
+    }
+    if ((rtlnet_reg_read32(base, RTLNET_H264_REG_HP_STATUS) & RTLNET_H264_HP_STATUS_CHG) == 0u) {
+        return 0;
+    }
+    rtlnet_reg_write32(base, RTLNET_H264_REG_HP_STATUS, RTLNET_H264_HP_STATUS_CHG);
+    return 1;
 }
 
 /*

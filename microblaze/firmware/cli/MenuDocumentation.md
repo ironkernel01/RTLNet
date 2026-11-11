@@ -24,9 +24,9 @@ SPDX-License-Identifier: LGPL-2.1-or-later
 
 | Item | Value |
 |---|---|
-| Revision | 11-10-2026 (newest row of the revision history in cli/cli_commands.txt) |
-| Generated | 2026-11-10 00:00:00 -04:00 by cli/gen_menu.py from cli/cli_commands.txt |
-| Commands | 104 table entries (5 mode-entry), 30 keyword groups, 3 built-ins (exit, end, help) |
+| Revision | 11-11-2026 (newest row of the revision history in cli/cli_commands.txt) |
+| Generated | 2026-11-11 00:00:00 -04:00 by cli/gen_menu.py from cli/cli_commands.txt |
+| Commands | 105 table entries (5 mode-entry), 30 keyword groups, 3 built-ins (exit, end, help) |
 
 ## 1. Title and overview
 
@@ -262,69 +262,70 @@ token counts; exec commands are also accepted in priv.
 | 39 | cli_encoder_bitrate | priv | `ENCODER BITRATE [KBPS]` | KBPS | — | 3 | 3 | — | Constant bit rate target in kb/s, 0..100000 (0 = constant QP, the default) |
 | 40 | cli_encoder_buffer | priv | `ENCODER BUFFER [MS]` | MS | — | 3 | 3 | — | Rate control virtual buffer in ms of the target rate, 100..2000 (default 500) |
 | 41 | cli_encoder_qprange | priv | `ENCODER QPRANGE [MIN] [MAX]` | MIN, MAX | — | 4 | 4 | — | Rate control QP range, 12 <= MIN <= MAX <= 51 (default 12 51) |
-| 42 | cli_debug_read | priv | `DEBUG READ [ADDR]` | ADDR | — | 3 | 3 | — | Read a 32-bit word (hex 0x... or decimal address) |
-| 43 | cli_debug_write | priv | `DEBUG WRITE [ADDR] [VALUE]` | ADDR, VALUE | — | 4 | 4 | — | Write a 32-bit word |
-| 44 | cli_phy_read | priv | `PHY READ [REG]` | REG | — | 3 | 3 | — | Read a PHY register (0..31) over MDIO |
-| 45 | cli_phy_write | priv | `PHY WRITE [REG] [VALUE]` | REG, VALUE | — | 4 | 4 | — | Write a PHY register (0..31) over MDIO |
-| 46 | cli_phy_dump | priv | `PHY DUMP` | — | — | 2 | 2 | — | Read PHY registers 0..31 |
-| 47 | cli_phy_mmd_read | priv | `PHY MMD READ [DEVAD] [REG]` | DEVAD, REG | — | 5 | 5 | — | Read an MMD register (Clause 45 over Clause 22) |
-| 48 | cli_phy_mmd_write | priv | `PHY MMD WRITE [DEVAD] [REG] [VALUE]` | DEVAD, REG, VALUE | — | 6 | 6 | — | Write an MMD register (Clause 45 over Clause 22) |
-| 49 | cli_phy_c45_read | priv | `PHY C45 READ [DEVAD] [REG]` | DEVAD, REG | — | 5 | 5 | — | Native Clause 45 read (the RTL8211E answers only phy mmd) |
-| 50 | cli_phy_c45_write | priv | `PHY C45 WRITE [DEVAD] [REG] [VALUE]` | DEVAD, REG, VALUE | — | 6 | 6 | — | Native Clause 45 write (the RTL8211E answers only phy mmd) |
-| 51 | cli_phy_reset | priv | `PHY RESET` | — | — | 2 | 2 | — | Hardware PHY reset, then InitPHY (RX delay, LEDs, EEE, advertisement) |
-| 52 | cli_clear_counters | priv | `CLEAR COUNTERS` | — | — | 2 | 2 | — | Clear the counters of every core |
-| 53 | cli_led_on | priv | `LED [N] ON` | N | — | 3 | 3 | — | Turn user LED n (2..7) on |
-| 54 | cli_led_off | priv | `LED [N] OFF` | N | — | 3 | 3 | — | Turn user LED n (2..7) off |
-| 55 | cli_reload | priv | `RELOAD` | — | — | 1 | 1 | — | Restart the firmware (soft restart) |
-| 56 | cli_ip_gateway | config | `IP DEFAULT-GATEWAY [ADDR]` | ADDR | — | 3 | 3 | — | Set the static IPv4 default gateway |
-| 57 | cli_no_ip_gateway | config | `NO IP DEFAULT-GATEWAY` | — | — | 3 | 3 | — | Remove the static default gateway (0.0.0.0) |
-| 58 | cli_echo_enable | config | `ECHO ENABLE {SOCKET}` | — | SOCKET | 2 | 3 | — | Enable the UDP echo server (configured socket, or the one given) |
-| 59 | cli_no_echo_enable | config | `NO ECHO ENABLE` | — | — | 3 | 3 | — | Disable the UDP echo server |
-| 60 | cli_echo_socket | config | `ECHO SOCKET [INDEX]` | INDEX | — | 3 | 3 | — | Echo on socket 0..3, or "any" |
-| 61 | cli_iperf_port | config | `IPERF PORT [PORT]` | PORT | — | 3 | 3 | — | iperf server UDP port (default 5001) |
-| 62 | cli_iperf_tcp_enable | config | `IPERF TCP ENABLE` | — | — | 3 | 3 | — | Enable the TCP iperf server |
-| 63 | cli_iperf_tcp_disable | config | `IPERF TCP DISABLE` | — | — | 3 | 3 | — | Disable the TCP iperf server |
-| 64 | cli_iperf_tcp_port | config | `IPERF TCP PORT [PORT]` | PORT | — | 4 | 4 | — | TCP iperf server port (default 5001) |
-| 65 | cli_tcp_echo_enable | config | `TCP ECHO ENABLE` | — | — | 3 | 3 | — | Enable the TCP echo server |
-| 66 | cli_tcp_echo_disable | config | `TCP ECHO DISABLE` | — | — | 3 | 3 | — | Disable the TCP echo server (open connections stay) |
-| 67 | cli_tcp_echo_port | config | `TCP ECHO PORT [PORT]` | PORT | — | 4 | 4 | — | TCP echo server port (default 7) |
-| 68 | cli_offload | config | `OFFLOAD [WHAT] [STATE]` | WHAT, STATE | — | 3 | 3 | — | Checksum offload: tx-ip, tx-l4, rx or all, on or off (as far as the build has it; lwIP follows) |
-| 69 | cli_cls_mode | config | `CLASSIFIER MODE [MODE]` | MODE | — | 3 | 3 | — | Mode: drop-all, pass-all, pass-on-match or drop-on-match |
-| 70 | cli_cls_policer | config | `CLASSIFIER POLICER [INDEX] [PKTS] [MS] {DISABLE}` | INDEX, PKTS, MS | DISABLE | 5 | 6 | — | Policer 0..3: frames per window in ms (or disable) |
-| 71 | cli_cls_mac | config | `CLASSIFIER MAC [ENTRY] [WHICH] [MAC] {W1} {W2} {W3} {W4}` | ENTRY, WHICH, MAC | W1, W2, W3, W4 | 5 | 9 | — | MAC entry (0..15): dst\|src <mac> gate\|classify\|police <p> |
-| 72 | cli_cls_ethertype | config | `CLASSIFIER ETHERTYPE [ENTRY] [TYPE] {W1} {W2} {W3} {W4}` | ENTRY, TYPE | W1, W2, W3, W4 | 4 | 8 | — | EtherType entry (0..7): <type> [to <type>] gate\|classify\|police <p> |
-| 73 | cli_cls_acl | config | `CLASSIFIER ACL [ENTRY] [PROTO] {W1} {W2} {W3} {W4} {W5} {W6} {W7} {W8} {W9} {W10}` | ENTRY, PROTO | W1, W2, W3, W4, W5, W6, W7, W8, W9, W10 | 4 | 14 | — | ACL entry: tcp\|udp\|any src <ip>/<len> dst <ip>/<len> [sport <lo>[-<hi>]] [dport <lo>[-<hi>]] gate\|classify\|police <p> |
-| 74 | cli_cls_defaults | config | `CLASSIFIER DEFAULTS` | — | — | 2 | 2 | — | Broadcast storm default (pass-all, broadcast 10 per 100 ms) |
-| 75 | cli_no_cls_mac | config | `NO CLASSIFIER MAC [ENTRY]` | ENTRY | — | 4 | 4 | — | Clear a MAC entry |
-| 76 | cli_no_cls_ethertype | config | `NO CLASSIFIER ETHERTYPE [ENTRY]` | ENTRY | — | 4 | 4 | — | Clear an EtherType entry |
-| 77 | cli_no_cls_acl | config | `NO CLASSIFIER ACL [ENTRY]` | ENTRY | — | 4 | 4 | — | Clear an ACL entry |
-| 78 | cli_no_cls_policer | config | `NO CLASSIFIER POLICER [INDEX]` | INDEX | — | 4 | 4 | — | Disable a policer |
-| 79 | cli_if_speed | config-if | `SPEED [MBPS]` | MBPS | — | 2 | 2 | — | Link speed: 10, 100, 1000 or auto |
-| 80 | cli_if_duplex | config-if | `DUPLEX [MODE]` | MODE | — | 2 | 2 | — | Duplex: full, half or auto (the MAC is full duplex only) |
-| 81 | cli_if_autoneg | config-if | `AUTONEG` | — | — | 1 | 1 | — | Enable auto-negotiation (speed/duplex limit the advertisement) |
-| 82 | cli_if_no_autoneg | config-if | `NO AUTONEG` | — | — | 2 | 2 | — | Disable auto-negotiation (forced 10 or 100 Mb/s) |
-| 83 | cli_if_advertise | config-if | `ADVERTISE [MODES]` | MODES | — | 2 | 2 | — | Advertise modes, e.g. 10f,100f,1000f or all |
-| 84 | cli_if_no_advertise | config-if | `NO ADVERTISE` | — | — | 2 | 2 | — | Advertisement from speed and duplex again |
-| 85 | cli_if_shutdown | config-if | `SHUTDOWN` | — | — | 1 | 1 | — | Disable the interface (MAC receive and transmit) |
-| 86 | cli_if_no_shutdown | config-if | `NO SHUTDOWN` | — | — | 2 | 2 | — | Enable the interface |
-| 87 | cli_if_ip_address | config-if | `IP ADDRESS [ADDR] [MASK]` | ADDR, MASK | — | 4 | 4 | — | Set the static IPv4 address and mask |
-| 88 | cli_if_no_ip_address | config-if | `NO IP ADDRESS` | — | — | 3 | 3 | — | Remove the static IPv4 address (0.0.0.0) |
-| 89 | cli_if_ip_netmask | config-if | `IP NETMASK [MASK]` | MASK | — | 3 | 3 | — | Set the static netmask |
-| 90 | cli_if_mac | config-if | `MAC-ADDRESS [MAC]` | MAC | — | 2 | 2 | — | Set the node MAC address (aa:bb:cc:dd:ee:ff) |
-| 91 | cli_if_storm | config-if | `STORM-CONTROL BROADCAST [PKTS] [MS]` | PKTS, MS | — | 4 | 4 | — | Pass at most PKTS broadcast frames per MS milliseconds to the CPU |
-| 92 | cli_if_storm_enable | config-if | `STORM-CONTROL BROADCAST ENABLE` | — | — | 3 | 3 | — | Enable the broadcast storm limiter |
-| 93 | cli_if_storm_disable | config-if | `STORM-CONTROL BROADCAST DISABLE` | — | — | 3 | 3 | — | Disable the broadcast storm limiter (every broadcast passes) |
-| 94 | cli_if_no_storm | config-if | `NO STORM-CONTROL BROADCAST` | — | — | 3 | 3 | — | Disable the broadcast storm limiter |
-| 95 | cli_dhcp_start | config-dhcp | `START` | — | — | 1 | 1 | — | Start DHCP discovery now |
-| 96 | cli_dhcp_stop | config-dhcp | `STOP` | — | — | 1 | 1 | — | Stop the DHCP client and release the lease |
-| 97 | cli_dhcp_renew | config-dhcp | `RENEW` | — | — | 1 | 1 | — | Renew the lease now |
-| 98 | cli_dhcp_auto | config-dhcp | `AUTO` | — | — | 1 | 1 | — | Start DHCP automatically on link up |
-| 99 | cli_dhcp_no_auto | config-dhcp | `NO AUTO` | — | — | 2 | 2 | — | Do not start DHCP on link up |
-| 100 | cli_sock_open | config-sock | `OPEN [PORT]` | PORT | — | 2 | 2 | — | Open the socket on a local UDP port |
-| 101 | cli_sock_close | config-sock | `CLOSE` | — | — | 1 | 1 | — | Close the socket |
-| 102 | cli_sock_remote | config-sock | `REMOTE [ADDR] [PORT] {MAC}` | ADDR, PORT | MAC | 3 | 4 | — | Remote IPv4 address, UDP port and next-hop MAC |
-| 103 | cli_sock_connect | config-sock | `CONNECT-ON-RECEIVE` | — | — | 1 | 1 | — | Follow the sender of the last datagram |
-| 104 | cli_sock_no_connect | config-sock | `NO CONNECT-ON-RECEIVE` | — | — | 2 | 2 | — | Keep the configured remote address |
+| 42 | cli_encoder_profile | priv | `ENCODER PROFILE [PROFILE]` | PROFILE | — | 3 | 3 | — | Stream profile: baseline (Constrained Baseline, default) or high (High profile tools, needs the High profile netlist) |
+| 43 | cli_debug_read | priv | `DEBUG READ [ADDR]` | ADDR | — | 3 | 3 | — | Read a 32-bit word (hex 0x... or decimal address) |
+| 44 | cli_debug_write | priv | `DEBUG WRITE [ADDR] [VALUE]` | ADDR, VALUE | — | 4 | 4 | — | Write a 32-bit word |
+| 45 | cli_phy_read | priv | `PHY READ [REG]` | REG | — | 3 | 3 | — | Read a PHY register (0..31) over MDIO |
+| 46 | cli_phy_write | priv | `PHY WRITE [REG] [VALUE]` | REG, VALUE | — | 4 | 4 | — | Write a PHY register (0..31) over MDIO |
+| 47 | cli_phy_dump | priv | `PHY DUMP` | — | — | 2 | 2 | — | Read PHY registers 0..31 |
+| 48 | cli_phy_mmd_read | priv | `PHY MMD READ [DEVAD] [REG]` | DEVAD, REG | — | 5 | 5 | — | Read an MMD register (Clause 45 over Clause 22) |
+| 49 | cli_phy_mmd_write | priv | `PHY MMD WRITE [DEVAD] [REG] [VALUE]` | DEVAD, REG, VALUE | — | 6 | 6 | — | Write an MMD register (Clause 45 over Clause 22) |
+| 50 | cli_phy_c45_read | priv | `PHY C45 READ [DEVAD] [REG]` | DEVAD, REG | — | 5 | 5 | — | Native Clause 45 read (the RTL8211E answers only phy mmd) |
+| 51 | cli_phy_c45_write | priv | `PHY C45 WRITE [DEVAD] [REG] [VALUE]` | DEVAD, REG, VALUE | — | 6 | 6 | — | Native Clause 45 write (the RTL8211E answers only phy mmd) |
+| 52 | cli_phy_reset | priv | `PHY RESET` | — | — | 2 | 2 | — | Hardware PHY reset, then InitPHY (RX delay, LEDs, EEE, advertisement) |
+| 53 | cli_clear_counters | priv | `CLEAR COUNTERS` | — | — | 2 | 2 | — | Clear the counters of every core |
+| 54 | cli_led_on | priv | `LED [N] ON` | N | — | 3 | 3 | — | Turn user LED n (2..7) on |
+| 55 | cli_led_off | priv | `LED [N] OFF` | N | — | 3 | 3 | — | Turn user LED n (2..7) off |
+| 56 | cli_reload | priv | `RELOAD` | — | — | 1 | 1 | — | Restart the firmware (soft restart) |
+| 57 | cli_ip_gateway | config | `IP DEFAULT-GATEWAY [ADDR]` | ADDR | — | 3 | 3 | — | Set the static IPv4 default gateway |
+| 58 | cli_no_ip_gateway | config | `NO IP DEFAULT-GATEWAY` | — | — | 3 | 3 | — | Remove the static default gateway (0.0.0.0) |
+| 59 | cli_echo_enable | config | `ECHO ENABLE {SOCKET}` | — | SOCKET | 2 | 3 | — | Enable the UDP echo server (configured socket, or the one given) |
+| 60 | cli_no_echo_enable | config | `NO ECHO ENABLE` | — | — | 3 | 3 | — | Disable the UDP echo server |
+| 61 | cli_echo_socket | config | `ECHO SOCKET [INDEX]` | INDEX | — | 3 | 3 | — | Echo on socket 0..3, or "any" |
+| 62 | cli_iperf_port | config | `IPERF PORT [PORT]` | PORT | — | 3 | 3 | — | iperf server UDP port (default 5001) |
+| 63 | cli_iperf_tcp_enable | config | `IPERF TCP ENABLE` | — | — | 3 | 3 | — | Enable the TCP iperf server |
+| 64 | cli_iperf_tcp_disable | config | `IPERF TCP DISABLE` | — | — | 3 | 3 | — | Disable the TCP iperf server |
+| 65 | cli_iperf_tcp_port | config | `IPERF TCP PORT [PORT]` | PORT | — | 4 | 4 | — | TCP iperf server port (default 5001) |
+| 66 | cli_tcp_echo_enable | config | `TCP ECHO ENABLE` | — | — | 3 | 3 | — | Enable the TCP echo server |
+| 67 | cli_tcp_echo_disable | config | `TCP ECHO DISABLE` | — | — | 3 | 3 | — | Disable the TCP echo server (open connections stay) |
+| 68 | cli_tcp_echo_port | config | `TCP ECHO PORT [PORT]` | PORT | — | 4 | 4 | — | TCP echo server port (default 7) |
+| 69 | cli_offload | config | `OFFLOAD [WHAT] [STATE]` | WHAT, STATE | — | 3 | 3 | — | Checksum offload: tx-ip, tx-l4, rx or all, on or off (as far as the build has it; lwIP follows) |
+| 70 | cli_cls_mode | config | `CLASSIFIER MODE [MODE]` | MODE | — | 3 | 3 | — | Mode: drop-all, pass-all, pass-on-match or drop-on-match |
+| 71 | cli_cls_policer | config | `CLASSIFIER POLICER [INDEX] [PKTS] [MS] {DISABLE}` | INDEX, PKTS, MS | DISABLE | 5 | 6 | — | Policer 0..3: frames per window in ms (or disable) |
+| 72 | cli_cls_mac | config | `CLASSIFIER MAC [ENTRY] [WHICH] [MAC] {W1} {W2} {W3} {W4}` | ENTRY, WHICH, MAC | W1, W2, W3, W4 | 5 | 9 | — | MAC entry (0..15): dst\|src <mac> gate\|classify\|police <p> |
+| 73 | cli_cls_ethertype | config | `CLASSIFIER ETHERTYPE [ENTRY] [TYPE] {W1} {W2} {W3} {W4}` | ENTRY, TYPE | W1, W2, W3, W4 | 4 | 8 | — | EtherType entry (0..7): <type> [to <type>] gate\|classify\|police <p> |
+| 74 | cli_cls_acl | config | `CLASSIFIER ACL [ENTRY] [PROTO] {W1} {W2} {W3} {W4} {W5} {W6} {W7} {W8} {W9} {W10}` | ENTRY, PROTO | W1, W2, W3, W4, W5, W6, W7, W8, W9, W10 | 4 | 14 | — | ACL entry: tcp\|udp\|any src <ip>/<len> dst <ip>/<len> [sport <lo>[-<hi>]] [dport <lo>[-<hi>]] gate\|classify\|police <p> |
+| 75 | cli_cls_defaults | config | `CLASSIFIER DEFAULTS` | — | — | 2 | 2 | — | Broadcast storm default (pass-all, broadcast 10 per 100 ms) |
+| 76 | cli_no_cls_mac | config | `NO CLASSIFIER MAC [ENTRY]` | ENTRY | — | 4 | 4 | — | Clear a MAC entry |
+| 77 | cli_no_cls_ethertype | config | `NO CLASSIFIER ETHERTYPE [ENTRY]` | ENTRY | — | 4 | 4 | — | Clear an EtherType entry |
+| 78 | cli_no_cls_acl | config | `NO CLASSIFIER ACL [ENTRY]` | ENTRY | — | 4 | 4 | — | Clear an ACL entry |
+| 79 | cli_no_cls_policer | config | `NO CLASSIFIER POLICER [INDEX]` | INDEX | — | 4 | 4 | — | Disable a policer |
+| 80 | cli_if_speed | config-if | `SPEED [MBPS]` | MBPS | — | 2 | 2 | — | Link speed: 10, 100, 1000 or auto |
+| 81 | cli_if_duplex | config-if | `DUPLEX [MODE]` | MODE | — | 2 | 2 | — | Duplex: full, half or auto (the MAC is full duplex only) |
+| 82 | cli_if_autoneg | config-if | `AUTONEG` | — | — | 1 | 1 | — | Enable auto-negotiation (speed/duplex limit the advertisement) |
+| 83 | cli_if_no_autoneg | config-if | `NO AUTONEG` | — | — | 2 | 2 | — | Disable auto-negotiation (forced 10 or 100 Mb/s) |
+| 84 | cli_if_advertise | config-if | `ADVERTISE [MODES]` | MODES | — | 2 | 2 | — | Advertise modes, e.g. 10f,100f,1000f or all |
+| 85 | cli_if_no_advertise | config-if | `NO ADVERTISE` | — | — | 2 | 2 | — | Advertisement from speed and duplex again |
+| 86 | cli_if_shutdown | config-if | `SHUTDOWN` | — | — | 1 | 1 | — | Disable the interface (MAC receive and transmit) |
+| 87 | cli_if_no_shutdown | config-if | `NO SHUTDOWN` | — | — | 2 | 2 | — | Enable the interface |
+| 88 | cli_if_ip_address | config-if | `IP ADDRESS [ADDR] [MASK]` | ADDR, MASK | — | 4 | 4 | — | Set the static IPv4 address and mask |
+| 89 | cli_if_no_ip_address | config-if | `NO IP ADDRESS` | — | — | 3 | 3 | — | Remove the static IPv4 address (0.0.0.0) |
+| 90 | cli_if_ip_netmask | config-if | `IP NETMASK [MASK]` | MASK | — | 3 | 3 | — | Set the static netmask |
+| 91 | cli_if_mac | config-if | `MAC-ADDRESS [MAC]` | MAC | — | 2 | 2 | — | Set the node MAC address (aa:bb:cc:dd:ee:ff) |
+| 92 | cli_if_storm | config-if | `STORM-CONTROL BROADCAST [PKTS] [MS]` | PKTS, MS | — | 4 | 4 | — | Pass at most PKTS broadcast frames per MS milliseconds to the CPU |
+| 93 | cli_if_storm_enable | config-if | `STORM-CONTROL BROADCAST ENABLE` | — | — | 3 | 3 | — | Enable the broadcast storm limiter |
+| 94 | cli_if_storm_disable | config-if | `STORM-CONTROL BROADCAST DISABLE` | — | — | 3 | 3 | — | Disable the broadcast storm limiter (every broadcast passes) |
+| 95 | cli_if_no_storm | config-if | `NO STORM-CONTROL BROADCAST` | — | — | 3 | 3 | — | Disable the broadcast storm limiter |
+| 96 | cli_dhcp_start | config-dhcp | `START` | — | — | 1 | 1 | — | Start DHCP discovery now |
+| 97 | cli_dhcp_stop | config-dhcp | `STOP` | — | — | 1 | 1 | — | Stop the DHCP client and release the lease |
+| 98 | cli_dhcp_renew | config-dhcp | `RENEW` | — | — | 1 | 1 | — | Renew the lease now |
+| 99 | cli_dhcp_auto | config-dhcp | `AUTO` | — | — | 1 | 1 | — | Start DHCP automatically on link up |
+| 100 | cli_dhcp_no_auto | config-dhcp | `NO AUTO` | — | — | 2 | 2 | — | Do not start DHCP on link up |
+| 101 | cli_sock_open | config-sock | `OPEN [PORT]` | PORT | — | 2 | 2 | — | Open the socket on a local UDP port |
+| 102 | cli_sock_close | config-sock | `CLOSE` | — | — | 1 | 1 | — | Close the socket |
+| 103 | cli_sock_remote | config-sock | `REMOTE [ADDR] [PORT] {MAC}` | ADDR, PORT | MAC | 3 | 4 | — | Remote IPv4 address, UDP port and next-hop MAC |
+| 104 | cli_sock_connect | config-sock | `CONNECT-ON-RECEIVE` | — | — | 1 | 1 | — | Follow the sender of the last datagram |
+| 105 | cli_sock_no_connect | config-sock | `NO CONNECT-ON-RECEIVE` | — | — | 2 | 2 | — | Keep the configured remote address |
 
 Built-ins (menu.c): `EXIT` (every mode), `END` (privileged and configuration modes), `HELP` and `?`
 (every mode, identical listing), `!!` (repeat the previous line), Ctrl-C (cancel the line),

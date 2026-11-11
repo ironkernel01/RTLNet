@@ -18,8 +18,14 @@
 //     engine 0. Each engine has its own compressed ring and index ring: the configured ring is split into equal parts.
 //   * Counters (PIC_COUNT, SLICE_COUNT) are 32-bit, wrap and reset to 0; PIC_COUNT[15:0] is the picture number
 //     stamped into the index entries.
+//   * High profile seam (parameter HIGH_PROFILE, default 0): CAPS bit 20 (HP_SEAM) reports the parameter. With HIGH_PROFILE = 1 the
+//     register HP_CTRL (0x0C0) holds hp_enable (bit 0, writable only while hp_caps is not 0) and HP_STATUS (0x0C4) reads present
+//     [0], licensed [1], active [2], enable [3], PROFILE_CHG [4] (sticky, set when a picture start applied a changed license or enable
+//     and forced an IDR picture, write 1 to clear), caps [11:8] (bit 0 CABAC, bit 1 8x8 transform), seconds left [31:16]
+//     (0xFFFF unlimited). With HIGH_PROFILE = 0 both registers read 0 and the logic is that of the Constrained Baseline encoder.
 // Language: SystemVerilog-2012.
-// Revision: 11-10-2026
+// Revision: 11-11-2026
+//   * 11-11-2026: High profile seam: CAPS bit 20, HP_CTRL, HP_STATUS.
 //   * 11-09-2026: initial version.
 //   * 11-10-2026: tiled rebuilt picture: RY_BASE and RU_BASE are the luma and chroma tile bases, the stride registers and
 //     RV_BASE are reserved; index records are 128 bytes.
@@ -31,7 +37,8 @@
 module rtlnet_h264_enc_regs #(
   parameter int MAX_MB_W     = 120,
   parameter int MAX_MB_H     = 68,
-  parameter int NUM_ENGINES  = 1
+  parameter int NUM_ENGINES  = 1,
+  parameter bit HIGH_PROFILE = 1'b0
 )(
   // Register clock and synchronous active-low reset.
   input  logic        clk,
@@ -75,6 +82,17 @@ module rtlnet_h264_enc_regs #(
   output logic [NUM_ENGINES*32-1:0] rptr_val,
   output logic [NUM_ENGINES-1:0]    idx_rptr_wr,
   output logic [NUM_ENGINES*32-1:0] idx_rptr_val,
+
+  // High profile control and status, clk domain (all 0 / unused when HIGH_PROFILE = 0): hp_enable to the engines; the status of
+  // the rtlnet_h264_hp modules (present, licensed, active, caps, seconds left) and hp_chg, a one-clock pulse when a picture start
+  // applied a changed license or enable (sets PROFILE_CHG).
+  output logic        hp_enable,
+  input  logic        hp_present,
+  input  logic        hp_licensed,
+  input  logic        hp_active,
+  input  logic [3:0]  hp_caps,
+  input  logic [15:0] hp_seconds_left,
+  input  logic        hp_chg,
 
   // Engine status and events, clk domain: busy level, one-clock pulses done, slice_pulse and the error
   // pulses, and the statistics and pointer values.
@@ -147,6 +165,8 @@ module rtlnet_h264_enc_regs #(
   localparam logic [11:0] REG_RD_CYC      = 12'h0A8;
   localparam logic [11:0] REG_PK_CYC      = 12'h0AC;
   localparam logic [11:0] REG_WR_CYC      = 12'h0B0;
+  localparam logic [11:0] REG_HP_CTRL     = 12'h0C0;   // [0] hp_enable (High profile seam builds)
+  localparam logic [11:0] REG_HP_STATUS   = 12'h0C4;   // see the header
 
   localparam int CTRL_START_BIT      = 0;
   localparam int CTRL_RING_RESET_BIT = 1;
@@ -155,11 +175,16 @@ module rtlnet_h264_enc_regs #(
   localparam int STATUS_DONE_BIT     = 1;
   localparam int STATUS_ERR_BIT      = 2;
   localparam int STATUS_STALL_BIT    = 3;
+  localparam int HP_STATUS_PRESENT_BIT  = 0;
+  localparam int HP_STATUS_LICENSED_BIT = 1;
+  localparam int HP_STATUS_ACTIVE_BIT   = 2;
+  localparam int HP_STATUS_ENABLE_BIT   = 3;
+  localparam int HP_STATUS_CHG_BIT      = 4;
 
   localparam logic [31:0] CORE_ID      = id4("H", "2", "6", "4");
   localparam logic [31:0] CORE_VERSION = 32'h1110_2C02;   // 11-10, phase 2c-2 (motion search; the register map is that of 2c-1)
-  // CAPS: [7:0] MAX_MB_W, [15:8] MAX_MB_H, [19:16] NUM_ENGINES.
-  localparam logic [31:0] CORE_CAPS    = {12'd0, 4'(NUM_ENGINES), 8'(MAX_MB_H), 8'(MAX_MB_W)};
+  // CAPS: [7:0] MAX_MB_W, [15:8] MAX_MB_H, [19:16] NUM_ENGINES, [20] HP_SEAM (HIGH_PROFILE build).
+  localparam logic [31:0] CORE_CAPS    = {11'd0, HIGH_PROFILE, 4'(NUM_ENGINES), 8'(MAX_MB_H), 8'(MAX_MB_W)};
 
   logic        irq_en;
   logic        done_flag;
@@ -174,6 +199,7 @@ module rtlnet_h264_enc_regs #(
   logic        err_any;
   logic [7:0]  err_new;
   logic [31:0] status_word;
+  logic [31:0] hp_status_word;
 
   assign err_any = err_cfg || err_axi || err_rptr || err_busy;
   assign err_new = err_cfg ? ERR_CONFIG : (err_busy ? ERR_BUSY : (err_rptr ? ERR_RPTR : ERR_AXI));
@@ -187,6 +213,44 @@ module rtlnet_h264_enc_regs #(
     status_word[STATUS_ERR_BIT]   = err_flag;
     status_word[STATUS_STALL_BIT] = |ring_stall;
   end
+
+  // High profile registers: present only in a HIGH_PROFILE build; otherwise hp_enable is 0 and HP_STATUS reads 0.
+  generate
+    if (HIGH_PROFILE) begin : g_hp
+      logic chg_flag;
+
+      always_comb begin
+        hp_status_word                          = '0;
+        hp_status_word[HP_STATUS_PRESENT_BIT]   = hp_present;
+        hp_status_word[HP_STATUS_LICENSED_BIT]  = hp_licensed;
+        hp_status_word[HP_STATUS_ACTIVE_BIT]    = hp_active;
+        hp_status_word[HP_STATUS_ENABLE_BIT]    = hp_enable;
+        hp_status_word[HP_STATUS_CHG_BIT]       = chg_flag;
+        hp_status_word[11:8]                    = hp_caps;
+        hp_status_word[31:16]                   = hp_seconds_left;
+      end
+
+      // hp_enable can be set only while the module offers a tool (hp_caps not 0); PROFILE_CHG is sticky, write 1 to clear.
+      always_ff @(posedge clk) begin
+        if (!resetn) begin
+          hp_enable <= 1'b0;
+          chg_flag  <= 1'b0;
+        end else begin
+          if (hp_chg) chg_flag <= 1'b1;
+          if (reg_wr_en && (reg_wr_addr == REG_HP_CTRL)) hp_enable <= reg_wr_data[0] && (|hp_caps);
+          if (reg_wr_en && (reg_wr_addr == REG_HP_STATUS) && reg_wr_data[HP_STATUS_CHG_BIT] && !hp_chg) chg_flag <= 1'b0;
+        end
+      end
+    end else begin : g_nohp
+      assign hp_status_word = '0;
+      assign hp_enable      = 1'b0;
+
+      /* verilator lint_off UNUSEDSIGNAL */
+      logic unused_hp;
+      assign unused_hp = &{1'b0, hp_present, hp_licensed, hp_active, hp_caps, hp_seconds_left, hp_chg};
+      /* verilator lint_on UNUSEDSIGNAL */
+    end
+  endgenerate
 
   always_ff @(posedge clk) begin
     if (!resetn) begin
@@ -391,6 +455,8 @@ module rtlnet_h264_enc_regs #(
         REG_RD_CYC:      reg_rd_data <= st_rd_cyc[31:0];
         REG_PK_CYC:      reg_rd_data <= st_pk_cyc[31:0];
         REG_WR_CYC:      reg_rd_data <= st_wr_cyc[31:0];
+        REG_HP_CTRL:     reg_rd_data <= {31'd0, hp_enable};
+        REG_HP_STATUS:   reg_rd_data <= hp_status_word;
         default:         reg_rd_data <= '0;
       endcase
     end

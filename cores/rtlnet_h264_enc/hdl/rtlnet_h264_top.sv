@@ -18,8 +18,12 @@
 //   * SPS and PPS are written by firmware (driver rtlnet_h264_enc_write_sps_pps()); the core writes the access
 //     unit delimiter, the slice NAL units and their index entries.
 //   * irq is a level on enc_clk: high while CTRL.IRQ_EN and (STATUS.DONE or STATUS.ERR).
+//   * HIGH_PROFILE (default 0): 1 instantiates rtlnet_h264_hp (the High profile extension, a separately delivered netlist) in every
+//     engine; the registers HP_CTRL and HP_STATUS and CAPS bit 20 describe it. With 0 no reference to the module exists and the
+//     logic is that of the Constrained Baseline encoder.
 // Language: SystemVerilog-2012.
-// Revision: 11-10-2026
+// Revision: 11-11-2026
+//   * 11-11-2026: HIGH_PROFILE parameter and the hp seam to the registers.
 //   * 11-09-2026: initial version.
 //   * 11-10-2026: phase 2c-1: REF_BUF_KB, MV_LINE_KB; the P picture and reference base registers go to the engines.
 //   * 11-10-2026: phase 2c-2: WIN_KB, SR (motion search window and range); REF_BUF_KB is the prediction buffer.
@@ -43,7 +47,8 @@ module rtlnet_h264_top #(
   parameter int    WIN_KB      = 4,      // each of the two motion search window RAMs (P pictures), KiB
   parameter int    SR          = 16,     // motion search range in whole samples, 0 .. 16 (0: only the vector (0, 0), the phase 2c-1 behaviour)
   parameter int    MV_LINE_KB  = 1,      // motion vector line RAM (P pictures): one 32-bit word per macroblock column
-  parameter string RAM_STYLE   = "block"  // "block" | "distributed", for every engine memory (RAM instancing rule)
+  parameter string RAM_STYLE   = "block", // "block" | "distributed", for every engine memory (RAM instancing rule)
+  parameter bit    HIGH_PROFILE = 1'b0    // 1: High profile extension (rtlnet_h264_hp) in every engine
 )(
   // Engine clock (MIG ui_clk, 100 MHz) and its reset (synchronous, active low); the register clock and its
   // reset (synchronous, active low, released with enc_resetn from the same assertion).
@@ -178,6 +183,25 @@ module rtlnet_h264_top #(
   logic [NUM_ENGINES-1:0]    idx_rptr_wr;
   logic [NUM_ENGINES*32-1:0] idx_rptr_val;
 
+  // High profile seam: enable from the registers; status of the engines' modules (engine 0 reports present, seconds left and
+  // caps; licensed and caps are the AND over the engines, active the OR, the change pulse the OR).
+  logic                      hp_enable;
+  logic [NUM_ENGINES-1:0]    eng_hp_present;
+  logic [NUM_ENGINES-1:0]    eng_hp_licensed;
+  // The status register shows engine 0's seconds left (the engines' timers run alike).
+  /* verilator lint_off UNUSEDSIGNAL */
+  logic [NUM_ENGINES*16-1:0] eng_hp_seconds;
+  /* verilator lint_on UNUSEDSIGNAL */
+  logic [NUM_ENGINES*4-1:0]  eng_hp_caps;
+  logic [NUM_ENGINES-1:0]    eng_hp_active;
+  logic [NUM_ENGINES-1:0]    eng_hp_chg;
+  logic [3:0]                hp_caps_all;
+
+  always_comb begin
+    hp_caps_all = 4'hF;
+    for (int k = 0; k < NUM_ENGINES; k++) hp_caps_all = hp_caps_all & eng_hp_caps[k*4 +: 4];
+  end
+
   // Per-engine status and statistics, packed (engine e at [e*32 +: 32]).
   logic [NUM_ENGINES-1:0]    eng_busy;
   logic [NUM_ENGINES-1:0]    eng_done;
@@ -273,7 +297,7 @@ module rtlnet_h264_top #(
     .reg_rd_en(reg_rd_en), .reg_rd_addr(reg_rd_addr), .reg_rd_data(reg_rd_data)
   );
 
-  rtlnet_h264_enc_regs #(.MAX_MB_W(MAX_MB_W), .MAX_MB_H(MAX_MB_H), .NUM_ENGINES(NUM_ENGINES)) u_regs (
+  rtlnet_h264_enc_regs #(.MAX_MB_W(MAX_MB_W), .MAX_MB_H(MAX_MB_H), .NUM_ENGINES(NUM_ENGINES), .HIGH_PROFILE(HIGH_PROFILE)) u_regs (
     .clk(enc_clk), .resetn(enc_resetn),
     .reg_wr_en(reg_wr_en), .reg_wr_addr(reg_wr_addr), .reg_wr_data(reg_wr_data),
     .reg_rd_en(reg_rd_en), .reg_rd_addr(reg_rd_addr), .reg_rd_data(reg_rd_data),
@@ -288,6 +312,8 @@ module rtlnet_h264_top #(
     .cfg_ring_base(cfg_ring_base), .cfg_ring_size(cfg_ring_size), .cfg_idx_base(cfg_idx_base),
     .cfg_idx_entries(cfg_idx_entries),
     .rptr_wr(rptr_wr), .rptr_val(rptr_val), .idx_rptr_wr(idx_rptr_wr), .idx_rptr_val(idx_rptr_val),
+    .hp_enable(hp_enable), .hp_present(&eng_hp_present), .hp_licensed(&eng_hp_licensed), .hp_active(|eng_hp_active),
+    .hp_caps(hp_caps_all), .hp_seconds_left(eng_hp_seconds[15:0]), .hp_chg(|eng_hp_chg),
     .busy(busy_all), .done(done_all), .slice_pulse(|eng_slice),
     .err_cfg(|eng_err_cfg), .err_axi(|eng_err_axi), .err_rptr(|eng_err_rp), .err_busy(|eng_err_bsy),
     .ring_stall(eng_stall), .ring_wptr(eng_wptr), .ring_fill(eng_fill), .idx_wptr(eng_iwptr),
@@ -302,9 +328,13 @@ module rtlnet_h264_top #(
       rtlnet_h264_engine #(
         .ADDR_W(ADDR_W), .ID_W(ID_W), .MAX_MB_W(MAX_MB_W), .MAX_MB_H(MAX_MB_H), .MB_BUF_KB(MB_BUF_KB), .RD_STRIP_MB(RD_STRIP_MB),
         .REC_BUF_KB(REC_BUF_KB), .COEF_BUF_KB(COEF_BUF_KB), .LINE_KB(LINE_KB), .FIFO_KB(FIFO_KB), .REF_BUF_KB(REF_BUF_KB),
-        .MV_LINE_KB(MV_LINE_KB), .WIN_KB(WIN_KB), .SR(SR), .EMIT_AUD(e == 0), .RAM_STYLE(RAM_STYLE)
+        .MV_LINE_KB(MV_LINE_KB), .WIN_KB(WIN_KB), .SR(SR), .EMIT_AUD(e == 0), .RAM_STYLE(RAM_STYLE),
+        .HIGH_PROFILE(HIGH_PROFILE)
       ) u_engine (
         .clk(enc_clk), .resetn(enc_resetn),
+        .hp_enable(hp_enable), .hp_present(eng_hp_present[e]), .hp_licensed(eng_hp_licensed[e]),
+        .hp_seconds_left(eng_hp_seconds[e*16 +: 16]), .hp_caps(eng_hp_caps[e*4 +: 4]), .hp_active(eng_hp_active[e]),
+        .hp_chg(eng_hp_chg[e]),
         .start(start), .busy(eng_busy[e]), .done(eng_done[e]), .err_cfg(eng_err_cfg[e]), .err_axi(eng_err_axi[e]),
         .err_rptr(eng_err_rp[e]), .err_busy(eng_err_bsy[e]),
         .cfg_mb_w(cfg_mb_w), .cfg_mb_h(cfg_mb_h), .eng_slices(eng_slices_w), .slice_base(slice_base[e]),

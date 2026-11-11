@@ -53,6 +53,7 @@
 #include "rtlnet_axi_arbiter.h"
 #include "rtlnet_csi2_rx.h"
 #include "rtlnet_framebuf.h"
+#include "rtlnet_h264_enc.h"
 #include "rtlnet_vdma_s2mm.h"
 #include "rtlnet_classifier.h"
 #include "rtlnet_ddrtest.h"
@@ -91,6 +92,16 @@ static uint32_t  g_cls_mem[HOST_CLS_WORDS];   /* every other register word as wr
 #define HOST_DDR_PAGES       (RTLNET_PLAT_DDR_SIZE / HOST_DDR_PAGE_BYTES)
 #define HOST_ARB_CAPS        0x02081102u   /* 2 masters, 16-byte beat, ID_W 1, 8 outstanding, high-priority mask 2 */
 static int       g_ddr_arb_on;
+static int       g_h264_on;          /* H.264 encoder model present */
+static int       g_h264_seam;        /* CAPS bit 20 */
+static uint32_t  g_h264_hp_present;
+static uint32_t  g_h264_hp_licensed;
+static uint32_t  g_h264_hp_caps;
+static uint32_t  g_h264_hp_seconds;
+static uint32_t  g_h264_hp_enable;
+static uint32_t  g_h264_hp_chg;
+static uint32_t host_h264_read(uint32_t off);
+static void     host_h264_write(uint32_t off, uint32_t value);
 static int       g_ddr_cal;
 static unsigned  g_ddr_alias;
 static uint32_t  g_ddr_and = 0xFFFFFFFFu;
@@ -966,6 +977,9 @@ uint32_t rtlnet_host_reg_read32(uintptr_t addr)
     if (g_ddr_arb_on && addr >= RTLNET_PLAT_ARB_BASE && addr < RTLNET_PLAT_ARB_BASE + 0x1000u) {
         return host_arb_read((uint32_t)(addr - RTLNET_PLAT_ARB_BASE));
     }
+    if (g_h264_on && addr >= RTLNET_PLAT_H264_BASE && addr < RTLNET_PLAT_H264_BASE + 0x1000u) {
+        return host_h264_read((uint32_t)(addr - RTLNET_PLAT_H264_BASE));
+    }
     if (g_wrap_on == 1 && addr == RTLNET_PLAT_PROT_BASE + 0x008u) {
         return 0x00000020u;                    /* CAPS: CPU_PATH_PRESENT */
     }
@@ -990,6 +1004,90 @@ uint32_t rtlnet_host_reg_read32(uintptr_t addr)
         }
     }
     return 0u;
+}
+
+/**
+ * @brief H.264 encoder model: switch it on or off, with or without the High profile seam.
+ * @param on   1 = the core answers.
+ * @param seam 1 = CAPS bit 20 (HIGH_PROFILE build).
+ * @return None. The High profile state resets: the module present, licensed, hp_caps 0, unlimited.
+ */
+void host_model_h264_set(int on, int seam)
+{
+    g_h264_on          = on;
+    g_h264_seam        = seam;
+    g_h264_hp_present  = 1u;
+    g_h264_hp_licensed = 1u;
+    g_h264_hp_caps     = 0u;
+    g_h264_hp_seconds  = RTLNET_H264_HP_SECONDS_UNLIMITED;
+    g_h264_hp_enable   = 0u;
+    g_h264_hp_chg      = 0u;
+}
+
+/**
+ * @brief H.264 encoder model: the High profile status.
+ * @param present  1 = the netlist, 0 = the simulation stub.
+ * @param licensed 1 = High profile coding allowed.
+ * @param caps     hp_caps.
+ * @param seconds  License seconds left (0xFFFF unlimited).
+ * @return None.
+ */
+void host_model_h264_hp(uint32_t present, uint32_t licensed, uint32_t caps, uint32_t seconds)
+{
+    g_h264_hp_present  = present;
+    g_h264_hp_licensed = licensed;
+    g_h264_hp_caps     = caps;
+    g_h264_hp_seconds  = seconds;
+}
+
+/**
+ * @brief H.264 encoder model: the value of HP_CTRL (hp_enable).
+ * @return hp_enable as the last write set it.
+ */
+uint32_t host_model_h264_hp_ctrl(void)
+{
+    return g_h264_hp_enable;
+}
+
+/**
+ * @brief H.264 encoder register read model.
+ * @param off Register offset.
+ * @return ID, VERSION, CAPS (1 engine window of 2: 120 x 68 macroblocks, bit 20 per host_model_h264_set), the High profile
+ *         registers; every other register reads 0.
+ */
+static uint32_t host_h264_read(uint32_t off)
+{
+    switch (off) {
+    case RTLNET_REG_ID:               return RTLNET_H264_ID_VALUE;
+    case RTLNET_REG_VERSION:          return RTLNET_H264_VERSION_VALUE;
+    case RTLNET_REG_CAPS:             return 120u | (68u << RTLNET_H264_CAPS_MB_H_SHIFT) | (2u << RTLNET_H264_CAPS_ENG_SHIFT) |
+                                             (g_h264_seam ? RTLNET_H264_CAPS_HP_SEAM : 0u);
+    case RTLNET_H264_REG_HP_CTRL:     return g_h264_seam ? g_h264_hp_enable : 0u;
+    case RTLNET_H264_REG_HP_STATUS:
+        if (!g_h264_seam) {
+            return 0u;
+        }
+        return (g_h264_hp_present ? RTLNET_H264_HP_STATUS_PRESENT : 0u) | (g_h264_hp_licensed ? RTLNET_H264_HP_STATUS_LICENSED : 0u) |
+               (g_h264_hp_enable ? RTLNET_H264_HP_STATUS_ENABLED : 0u) | (g_h264_hp_chg ? RTLNET_H264_HP_STATUS_CHG : 0u) |
+               (g_h264_hp_caps << RTLNET_H264_HP_STATUS_CAPS_SHIFT) | (g_h264_hp_seconds << RTLNET_H264_HP_STATUS_SEC_SHIFT);
+    default:                          return 0u;
+    }
+}
+
+/**
+ * @brief H.264 encoder register write model: HP_CTRL (enable only while hp_caps is not 0, like the register block) and HP_STATUS
+ *        (write 1 to PROFILE_CHG clears it).
+ * @param off   Register offset.
+ * @param value Value.
+ * @return None.
+ */
+static void host_h264_write(uint32_t off, uint32_t value)
+{
+    if (off == RTLNET_H264_REG_HP_CTRL && g_h264_seam) {
+        g_h264_hp_enable = ((value & 1u) != 0u && g_h264_hp_caps != 0u) ? 1u : 0u;
+    } else if (off == RTLNET_H264_REG_HP_STATUS && g_h264_seam && (value & RTLNET_H264_HP_STATUS_CHG) != 0u) {
+        g_h264_hp_chg = 0u;
+    }
 }
 
 /**
@@ -1023,6 +1121,10 @@ void rtlnet_host_reg_write32(uintptr_t addr, uint32_t value)
     }
     if (g_ddr_arb_on && addr >= RTLNET_PLAT_ARB_BASE && addr < RTLNET_PLAT_ARB_BASE + 0x1000u) {
         host_arb_write((uint32_t)(addr - RTLNET_PLAT_ARB_BASE), value);
+        return;
+    }
+    if (g_h264_on && addr >= RTLNET_PLAT_H264_BASE && addr < RTLNET_PLAT_H264_BASE + 0x1000u) {
+        host_h264_write((uint32_t)(addr - RTLNET_PLAT_H264_BASE), value);
         return;
     }
     if (addr >= RTLNET_PLAT_SYS_BASE && addr < RTLNET_PLAT_SYS_BASE + 0x1000u) {

@@ -19,6 +19,8 @@
 #     route, reports, gates, write_bitstream, write_mem_info, the fixed
 #     hardware platform (XSA, write_hw_platform -fixed, the input of the
 #     firmware BSP flow microblaze/firmware/build.ps1), build_info.txt.
+#   * High profile: `highprofile full|demo hp_netlist <dir>` (build.ps1 -HighProfile) reads the black box hp/rtlnet_h264_hp_bb.sv and the EDIF
+#     <dir>/rtlnet_h264_hp.edf instead of the stand-in module and sets the generic HIGH_PROFILE 1; `none` (default) leaves the flow unchanged.
 #   * Gates (each its own exit code; nothing is written past a failed gate):
 #       99 bad arguments            11 missing source, filelist or XDC
 #       12 block design failure     10 synthesis error or critical warning
@@ -92,9 +94,11 @@ set opt(network)  0
 set opt(build_id) ""
 set opt(dirty)    ""
 set opt(tag)      ""
+set opt(highprofile) none
+set opt(hp_netlist)  ""
 set toks {}
 foreach a $argv { foreach t [split $a ",="] { if {$t ne ""} { lappend toks $t } } }
-if {[llength $toks] % 2 != 0} { puts "usage: \[network 0|1\] \[build_id XXXXXXXX\] \[dirty 0|1\] \[tag name\]"; exit 99 }
+if {[llength $toks] % 2 != 0} { puts "usage: \[network 0|1\] \[build_id XXXXXXXX\] \[dirty 0|1\] \[tag name\] \[highprofile none|full|demo hp_netlist <dir>\]"; exit 99 }
 foreach {k v} $toks {
   set k [string tolower $k]
   if {![info exists opt($k)]} { puts "rtlnet_build: unknown argument '$k'"; exit 99 }
@@ -120,8 +124,16 @@ if {$opt(dirty) eq ""} {
 }
 if {![regexp {^[0-9a-fA-F]{1,8}$} $opt(build_id)]} { puts "rtlnet_build: bad build_id '$opt(build_id)'"; exit 99 }
 if {$opt(dirty) ni {0 1}} { puts "rtlnet_build: dirty must be 0 or 1"; exit 99 }
+# highprofile full|demo: the High profile netlist of that variant (hp_netlist <dir>, the folder netlist/<variant> of the separately
+# delivered High profile repository) replaces the stand-in module: the black-box declaration and the EDIF are read, HIGH_PROFILE is 1.
+# none (default): the flow is unchanged and the stand-in is built.
+if {$opt(highprofile) ni {none full demo}} { puts "rtlnet_build: highprofile must be none, full or demo"; exit 99 }
+if {$opt(highprofile) ne "none" && ![file exists [file join $opt(hp_netlist) rtlnet_h264_hp.edf]]} {
+  puts "rtlnet_build: no netlist rtlnet_h264_hp.edf in '$opt(hp_netlist)' for highprofile $opt(highprofile)"; exit 11
+}
 set BUILD_ID_HEX [format %08x [scan $opt(build_id) %x]]
 set NETWORK $opt(network)
+set ::HP_NETLIST [expr {$opt(highprofile) eq "none" ? "" : $opt(hp_netlist)}]
 puts "rtlnet_build: repo $REPO"
 puts "rtlnet_build: build_id $BUILD_ID_HEX dirty $opt(dirty) network $NETWORK part $PART"
 
@@ -152,6 +164,8 @@ proc read_filelist {repo path} {
     if {[regexp {^\+define\+} $line]} continue
     set src [file normalize [file join $repo $line]]
     if {[lsearch -exact $::read_files $src] >= 0} continue
+    # With a High profile netlist the stand-in module is not read: the black box and the netlist take its place.
+    if {$::HP_NETLIST ne "" && [string match "*/hp/rtlnet_h264_hp_stub.sv" $src]} continue
     if {![file exists $src]} { nv_exit 11 "source not found: $line (from $path)" }
     lappend ::read_files $src
     read_verilog -sv $src
@@ -187,6 +201,11 @@ if {[catch {
 read_filelist $REPO cores/rtlnet_common/hdl/rtlnet_common.f
 if {$NETWORK} { read_filelist $REPO boards/nexys_video/hdl/rtlnet_nexys_video_network.f }
 read_filelist $REPO boards/nexys_video/hdl/rtlnet_nexys_video.f
+if {$::HP_NETLIST ne ""} {
+  read_verilog -sv [file join $REPO cores rtlnet_h264_enc hdl hp rtlnet_h264_hp_bb.sv]
+  read_edif [file join $::HP_NETLIST rtlnet_h264_hp.edf]
+  puts "rtlnet_build: High profile netlist $opt(highprofile) from $::HP_NETLIST"
+}
 set xdc_list [list [file join $BOARD_DIR constraints rtlnet_nexys_video.xdc]]
 if {!$NETWORK} { lappend xdc_list [file join $BOARD_DIR constraints rtlnet_nexys_video_cpu_only.xdc] }
 foreach x $xdc_list {
@@ -200,6 +219,7 @@ foreach x $xdc_list {
 set synth_args [list -top $TOP -part $PART -include_dirs $::incdirs \
   -generic BUILD_ID=32'h$BUILD_ID_HEX -generic BUILD_DIRTY=1'b$opt(dirty)]
 if {$NETWORK} { lappend synth_args -verilog_define RTLNET_WITH_NETWORK }
+if {$::HP_NETLIST ne ""} { lappend synth_args -generic HIGH_PROFILE=1'b1 }
 if {[catch {synth_design {*}$synth_args} err]} { nv_exit 10 "synth_design: $err" }
 set crit_synth [get_msg_config -count -severity {CRITICAL WARNING}]
 if {$crit_synth > 0} { nv_exit 10 "$crit_synth critical warning(s) up to synthesis (see the log)" }
@@ -569,6 +589,14 @@ puts $fh "part          $PART"
 puts $fh "git_hash      $BUILD_ID_HEX"
 puts $fh "git_dirty     $opt(dirty)"
 puts $fh "network       $NETWORK"
+if {$::HP_NETLIST ne ""} {
+  puts $fh "high_profile  $opt(highprofile)"
+  if {[file exists [file join $::HP_NETLIST netlist_info.txt]]} {
+    set nf [open [file join $::HP_NETLIST netlist_info.txt] r]
+    foreach l [split [string trim [read $nf]] "\n"] { puts $fh "hp_netlist    $l" }
+    close $nf
+  }
+}
 puts $fh "tool          [version -short]"
 puts $fh "built         [clock format [clock seconds] -format {%Y-%m-%d %H:%M:%S %z}]"
 puts $fh "wns_ns        $wns"

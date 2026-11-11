@@ -84,6 +84,7 @@ typedef struct {
     uint32_t last_frame;        /* frame number of the last picture */
     uint32_t fb_dropped;        /* frame-buffer DROPPED counter (frames the writer could not place) */
     uint32_t fb_published;
+    uint32_t hp_forced_idr;     /* pictures the encoder turned into IDR pictures (license or profile change, High profile seam) */
 } venc_status_t;
 
 /* Reset the session state (not running, QP 28). Called once at start-up. */

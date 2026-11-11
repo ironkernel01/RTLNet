@@ -416,6 +416,49 @@ int main(void)
         check((bufs.cur == 0u) && (bufs.has_ref == 0u), "a new IDR picture restarts the buffers");
     }
 
+    /* High profile seam: CAPS bit 20, HP_STATUS decode, the profile selection and its named errors, PROFILE_CHG. */
+    {
+        rtlnet_h264_enc_hp_t hp;
+        rtlnet_h264_enc_caps_t c2;
+
+        g_reg[RTLNET_REG_CAPS / 4u] = MODEL_CAPS;
+        check((rtlnet_h264_enc_probe(TEST_BASE, &c2) == 0) && (c2.hp_seam == 0u), "no seam: CAPS bit 20 clear");
+        check(rtlnet_h264_enc_hp_status(TEST_BASE, &hp) == RTLNET_H264_HP_ERR_NO_SEAM, "hp_status without the seam");
+        check(rtlnet_h264_enc_set_profile(TEST_BASE, 1) == RTLNET_H264_HP_ERR_NO_SEAM, "profile high without the seam refused");
+        check(rtlnet_h264_enc_set_profile(TEST_BASE, 0) == 0, "profile baseline without the seam is a no-op");
+        check(rtlnet_h264_enc_hp_clear_change(TEST_BASE) == -1, "clear_change without the seam");
+        g_reg[RTLNET_REG_CAPS / 4u] = MODEL_CAPS | RTLNET_H264_CAPS_HP_SEAM;
+        check((rtlnet_h264_enc_probe(TEST_BASE, &c2) == 0) && (c2.hp_seam == 1u), "seam: CAPS bit 20 set");
+        check(rtlnet_h264_enc_hp_status(TEST_BASE, NULL) == -1, "hp_status NULL");
+        /* The stub: seam built, module not present. */
+        g_reg[RTLNET_H264_REG_HP_STATUS / 4u] = 0u;
+        check(rtlnet_h264_enc_set_profile(TEST_BASE, 1) == RTLNET_H264_HP_ERR_NO_MODULE, "profile high with the stub refused: no module");
+        /* Stage 1 netlist, unlimited: present, licensed, caps 0, seconds 0xFFFF. */
+        g_reg[RTLNET_H264_REG_HP_STATUS / 4u] = RTLNET_H264_HP_STATUS_PRESENT | RTLNET_H264_HP_STATUS_LICENSED | (0xFFFFu << 16);
+        g_reg[RTLNET_H264_REG_HP_CTRL / 4u] = 0xA5u;
+        check((rtlnet_h264_enc_hp_status(TEST_BASE, &hp) == 0) && hp.present && hp.licensed && !hp.active && !hp.enabled &&
+              (hp.caps == 0u) && (hp.seconds_left == RTLNET_H264_HP_SECONDS_UNLIMITED), "hp_status decode, stage 1 unlimited");
+        check(rtlnet_h264_enc_set_profile(TEST_BASE, 1) == RTLNET_H264_HP_ERR_NO_CAPS, "profile high refused: hp_caps is 0");
+        check(g_reg[RTLNET_H264_REG_HP_CTRL / 4u] == 0xA5u, "a refused profile change writes nothing");
+        /* A netlist with CABAC, licensed with 90 s left, then expired. */
+        g_reg[RTLNET_H264_REG_HP_STATUS / 4u] = RTLNET_H264_HP_STATUS_PRESENT | RTLNET_H264_HP_STATUS_LICENSED |
+                                                (RTLNET_H264_HP_CAP_CABAC << 8) | (90u << 16);
+        check((rtlnet_h264_enc_hp_status(TEST_BASE, &hp) == 0) && (hp.caps == RTLNET_H264_HP_CAP_CABAC) && (hp.seconds_left == 90u),
+              "hp_status decode, CABAC");
+        check(rtlnet_h264_enc_set_profile(TEST_BASE, 1) == 0, "profile high accepted with caps and license");
+        check(g_reg[RTLNET_H264_REG_HP_CTRL / 4u] == 1u, "hp_enable written 1");
+        check(rtlnet_h264_enc_set_profile(TEST_BASE, 0) == 0, "profile baseline");
+        check(g_reg[RTLNET_H264_REG_HP_CTRL / 4u] == 0u, "hp_enable written 0");
+        g_reg[RTLNET_H264_REG_HP_STATUS / 4u] = RTLNET_H264_HP_STATUS_PRESENT | (RTLNET_H264_HP_CAP_CABAC << 8);
+        check(rtlnet_h264_enc_set_profile(TEST_BASE, 1) == RTLNET_H264_HP_ERR_NOT_LICENSED, "profile high refused: license ended");
+        /* PROFILE_CHG: read, cleared by a write of 1 (the model stores the written value). */
+        g_reg[RTLNET_H264_REG_HP_STATUS / 4u] = RTLNET_H264_HP_STATUS_PRESENT | RTLNET_H264_HP_STATUS_CHG;
+        check(rtlnet_h264_enc_hp_clear_change(TEST_BASE) == 1, "clear_change reports a set flag");
+        check(g_reg[RTLNET_H264_REG_HP_STATUS / 4u] == RTLNET_H264_HP_STATUS_CHG, "clear_change writes 1 to bit 4");
+        g_reg[RTLNET_H264_REG_HP_STATUS / 4u] = RTLNET_H264_HP_STATUS_PRESENT;
+        check(rtlnet_h264_enc_hp_clear_change(TEST_BASE) == 0, "clear_change with the flag clear");
+    }
+
     if (g_fails == 0) {
         printf("DRIVER TEST PASS: rtlnet_h264_enc checks=%d\n", g_checks);
         return 0;

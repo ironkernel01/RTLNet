@@ -21,6 +21,7 @@ REVISION:11-09-2026:Video (Phase 1): show camera, show framebuffer, camera mode|
 REVISION:11-09-2026:H.264 stream (Phase 2b-3): stream h264 <ip> <port>, stream stop, show stream, encoder qp, show encoder
 REVISION:11-10-2026:H.264 P pictures (Phase 2c): encoder gop <1..255>, GOP and IDR/P counts in show stream and show encoder
 REVISION:11-10-2026:Rate control (Phase 2d): encoder bitrate|buffer|qprange, show encoder history, camera pattern, rate-control lines in show stream and show encoder
+REVISION:11-11-2026:High profile seam: encoder profile baseline|high, High profile line in show encoder
 
 # ---------------------------------------------------------------------------
 # Modes
@@ -109,6 +110,7 @@ cli_encoder_gop:priv:ENCODER GOP [GOP]:IDR picture every GOP pictures, P picture
 cli_encoder_bitrate:priv:ENCODER BITRATE [KBPS]:Constant bit rate target in kb/s, 0..100000 (0 = constant QP, the default)
 cli_encoder_buffer:priv:ENCODER BUFFER [MS]:Rate control virtual buffer in ms of the target rate, 100..2000 (default 500)
 cli_encoder_qprange:priv:ENCODER QPRANGE [MIN] [MAX]:Rate control QP range, 12 <= MIN <= MAX <= 51 (default 12 51)
+cli_encoder_profile:priv:ENCODER PROFILE [PROFILE]:Stream profile: baseline (Constrained Baseline, default) or high (High profile tools, needs the High profile netlist)
 cli_debug_read:priv:DEBUG READ [ADDR]:Read a 32-bit word (hex 0x... or decimal address)
 cli_debug_write:priv:DEBUG WRITE [ADDR] [VALUE]:Write a 32-bit word
 cli_phy_read:priv:PHY READ [REG]:Read a PHY register (0..31) over MDIO

@@ -438,6 +438,31 @@ static int begin_picture(void)
 }
 
 /*
+ * hp_after_picture -- High profile seam: the picture just completed.
+ * The encoder codes a picture as a forced IDR picture (frame_num 0, new idr_pic_id, intra only) when the license or the profile
+ * changed at its start, and sets PROFILE_CHG. Steps: read and clear the flag; when it was set, the picture in flight was an IDR
+ * picture whatever was requested: restart the GOP at it (frame_num counting from 0, the next IDR picture's id differs), and
+ * rewrite the parameter sets, which the mux sends in front of every IDR picture. Builds without the seam do nothing.
+ */
+static void hp_after_picture(void)
+{
+    if (rtlnet_h264_enc_hp_clear_change(RTLNET_PLAT_H264_BASE) != 1) {
+        return;
+    }
+    g.st.hp_forced_idr++;
+    if (g.pic_type != RTLNET_H264_PIC_IDR) {
+        g.pic_type = RTLNET_H264_PIC_IDR;
+        g.prev_fn = 0u;
+        g.gop_pos = 1u;
+        g.need_idr = 0u;
+        g.idr_id ^= 1u;       /* the next IDR picture differs from the forced one (clause 7.4.3) */
+    }
+    /* Stage 1 of the High profile module codes Constrained Baseline on both sides of a change: the parameter sets are rewritten from
+     * the unchanged configuration. A later stage sets the profile fields of g.sps_cfg here. */
+    (void)rtlnet_h264_enc_write_sps_pps(g.sps_pps, sizeof(g.sps_pps), &g.sps_cfg, &g.sps_len);
+}
+
+/*
  * mux_picture -- read both engines' picture entries and send the access unit.
  * Steps: for each engine find the next picture entry in its index ring; check the access unit delimiter at the start of
  * engine 0's data; au_begin; AUD, SPS and PPS, the rest of engine 0, all of the other engines; au_end; advance the
@@ -588,6 +613,7 @@ void venc_poll(void)
             } else {
                 rtlnet_h264_enc_clear_status(RTLNET_PLAT_H264_BASE);
                 rtlnet_h264_enc_buffers_end(&g.bufs);   /* the picture just rebuilt is the reference of the next one */
+                hp_after_picture();
                 if (mux_picture() != 0) {
                     g.st.errors++;
                     g.cfg_mode = 0xFFFFFFFFu;
@@ -625,6 +651,7 @@ void venc_clear_counters(void)
     g.st.es_bytes = 0u;
     g.st.dropped_pictures = 0u;
     g.st.idr_pictures = 0u;
+    g.st.hp_forced_idr = 0u;
     g.st.p_pictures = 0u;
     g.st.idr_bytes = 0u;
     g.st.p_bytes = 0u;

@@ -53,6 +53,7 @@
  *  11-09-2026  MenuBuilder AI / Steve Spano    H.264 stream (Phase 2b-3): stream h264, stream stop, show stream, encoder qp, show encoder
  *  11-09-2026  MenuBuilder AI / Steve Spano    Video (Phase 1): show camera, show framebuffer, camera mode|source|rate, framebuffer crc
  *  11-10-2026  MenuBuilder AI / Steve Spano    H.264 P pictures (Phase 2c): encoder gop, GOP and IDR/P counts in show stream and show encoder; show ddr cache line
+ *  11-11-2026  MenuBuilder AI / Steve Spano    High profile seam: encoder profile baseline|high, High profile line in show encoder
  * ===========================================================================
  */
 #include "cli_commands.h"
@@ -3674,6 +3675,86 @@ int cli_encoder_qp(const MenuCommandContext *ctx)
 }
 
 /**
+ * @brief ENCODER PROFILE [PROFILE]: select the stream profile, baseline or high.
+ * @param ctx argv[0] = profile name.
+ * @return 0, or -1 for a bad name, an absent core, or a refused High profile (named reason).
+ */
+int cli_encoder_profile(const MenuCommandContext *ctx)
+{
+    int high;
+    int rc;
+    if (cli_word_is(ctx->argv[0], "baseline")) {
+        high = 0;
+    } else if (cli_word_is(ctx->argv[0], "high")) {
+        high = 1;
+    } else {
+        return cli_bad_value("profile (baseline or high)", ctx->argv[0]);
+    }
+    if (!cli_core_check(&g_core_h264)) {
+        return -1;
+    }
+    rc = rtlnet_h264_enc_set_profile(RTLNET_PLAT_H264_BASE, high);
+    if (rc == RTLNET_H264_HP_ERR_NO_SEAM) {
+        fmt_printf("%% Profile high refused: this build has no High profile seam (CAPS HP_SEAM 0)\n");
+        return -1;
+    }
+    if (rc == RTLNET_H264_HP_ERR_NO_MODULE) {
+        fmt_printf("%% Profile high refused: the High profile netlist is not in this build (simulation stub)\n");
+        return -1;
+    }
+    if (rc == RTLNET_H264_HP_ERR_NO_CAPS) {
+        fmt_printf("%% Profile high refused: the High profile module offers no tool yet (hp_caps is 0)\n");
+        return -1;
+    }
+    if (rc == RTLNET_H264_HP_ERR_NOT_LICENSED) {
+        fmt_printf("%% Profile high refused: the High profile license has ended\n");
+        return -1;
+    }
+    if (rc != 0) {
+        fmt_printf("%% Profile change failed (code %d)\n", rc);
+        return -1;
+    }
+    if (high) {
+        fmt_printf("Profile high, effective at the next picture (an IDR picture with new parameter sets starts it)\n");
+    } else {
+        fmt_printf("Profile baseline (Constrained Baseline), effective at the next picture\n");
+    }
+    return 0;
+}
+
+/**
+ * @brief The High profile line of SHOW ENCODER.
+ * @param forced IDR pictures the encoder forced because the license or the profile changed.
+ * @return None.
+ */
+static void cli_print_high_profile(uint32_t forced)
+{
+    rtlnet_h264_enc_hp_t hp;
+    int rc = rtlnet_h264_enc_hp_status(RTLNET_PLAT_H264_BASE, &hp);
+    if (rc != 0) {
+        fmt_printf("  High profile    : not present (this build has no High profile seam)\n");
+        return;
+    }
+    if (hp.present == 0u) {
+        fmt_printf("  High profile    : not present (the High profile netlist is not in this build)\n");
+        return;
+    }
+    fmt_printf("  High profile    : present, %s, ", hp.licensed ? "licensed" : "license ended");
+    if (hp.seconds_left == RTLNET_H264_HP_SECONDS_UNLIMITED) {
+        fmt_printf("time left unlimited, ");
+    } else {
+        fmt_printf("time left %u min %u s, ", (unsigned)(hp.seconds_left / 60u), (unsigned)(hp.seconds_left % 60u));
+    }
+    if (hp.caps == 0u) {
+        fmt_printf("tools none (hp_caps 0), ");
+    } else {
+        fmt_printf("tools%s%s (hp_caps %u), ", (hp.caps & RTLNET_H264_HP_CAP_CABAC) ? " CABAC" : "",
+                   (hp.caps & RTLNET_H264_HP_CAP_TRANSFORM8X8) ? " 8x8-transform" : "", (unsigned)hp.caps);
+    }
+    fmt_printf("profile %s, %u forced IDR pictures\n", hp.enabled ? "high" : "baseline", (unsigned)forced);
+}
+
+/**
  * @brief ENCODER GOP [GOP]: set the GOP length (an IDR picture every GOP pictures, P pictures between).
  * @param ctx argv[0] = GOP 1..255.
  * @return 0, or -1 for a value outside 1..255.
@@ -3902,6 +3983,7 @@ int cli_show_encoder(const MenuCommandContext *ctx)
     fmt_printf("  GOP             : %u (IDR every %u pictures, P pictures between), last picture %s\n", (unsigned)s.gop,
                (unsigned)s.gop, s.last_idr ? "IDR" : "P");
     cli_print_ratectl();
+    cli_print_high_profile(s.hp_forced_idr);
     fmt_printf("  Pictures        : %u coded (PIC_COUNT), %u slices\n",
                (unsigned)board_debug_read32(RTLNET_PLAT_H264_BASE + RTLNET_H264_REG_PIC_COUNT),
                (unsigned)board_debug_read32(RTLNET_PLAT_H264_BASE + RTLNET_H264_REG_SLICE_COUNT));

@@ -51,7 +51,11 @@
  * start rtlnet_h264_enc_start_picture_ex and the frame_num helper. rtlnet_h264_enc_start_picture is unchanged (it starts
  * an I picture, IDR or not, and clears the P bit).
  * Revision 11-10-2026 (VERSION 0x11102C02, phase 2c-2, motion search): no register or API change; the reference picture is searched
- * (integer vectors, +-16) instead of read at the co-located macroblock. */
+ * (integer vectors, +-16) instead of read at the co-located macroblock.
+ * Revision 11-11-2026 (High profile seam, HIGH_PROFILE builds; VERSION unchanged): CAPS bit 20 HP_SEAM, registers HP_CTRL (0x0C0) and
+ * HP_STATUS (0x0C4), rtlnet_h264_enc_hp_status / _set_profile / _hp_clear_change. A build without the seam reads CAPS bit 20 as 0 and
+ * 0 in both registers. The rtlnet_h264_hp module that fills the registers is delivered separately; in its stage 1 hp_caps is 0, so
+ * rtlnet_h264_enc_set_profile(high) is refused with RTLNET_H264_HP_ERR_NO_CAPS. */
 
 /* Real-time QP floor: rtlnet_h264_enc_configure writes max(cfg->qp, RTLNET_H264_QP_MIN_REALTIME) into the QP register. Below
  * this QP dense macroblocks leave the macroblock coder over its clock budget (documentation section "Throughput"); the
@@ -96,6 +100,8 @@
 #define RTLNET_H264_REG_RD_CYC           0x0A8u   /* RO, clocks the read DMA was busy */
 #define RTLNET_H264_REG_PK_CYC           0x0ACu   /* RO, clocks the macroblock coder was busy */
 #define RTLNET_H264_REG_WR_CYC           0x0B0u   /* RO, clocks the write master was busy */
+#define RTLNET_H264_REG_HP_CTRL          0x0C0u   /* [0] hp_enable (settable only while hp_caps is not 0), HIGH_PROFILE builds */
+#define RTLNET_H264_REG_HP_STATUS        0x0C4u   /* HIGH_PROFILE builds, see RTLNET_H264_HP_STATUS_* */
 
 /* CTRL bits. */
 #define RTLNET_H264_CTRL_START           (1u << 0)    /* self-clearing: code one picture */
@@ -107,6 +113,26 @@
 #define RTLNET_H264_STATUS_DONE          (1u << 1)    /* write 1 to clear */
 #define RTLNET_H264_STATUS_ERR           (1u << 2)    /* write 1 to clear; also clears ERR_CODE */
 #define RTLNET_H264_STATUS_RING_STALL    (1u << 3)    /* the ring is full and the writer waits */
+
+/* HP_STATUS fields (read as 0 in a build without the High profile seam). */
+#define RTLNET_H264_HP_STATUS_PRESENT    (1u << 0)    /* the rtlnet_h264_hp netlist is in the design (0: the simulation stub) */
+#define RTLNET_H264_HP_STATUS_LICENSED   (1u << 1)    /* High profile coding is allowed */
+#define RTLNET_H264_HP_STATUS_ACTIVE     (1u << 2)    /* a High profile picture is in progress */
+#define RTLNET_H264_HP_STATUS_ENABLED    (1u << 3)    /* hp_enable */
+#define RTLNET_H264_HP_STATUS_CHG        (1u << 4)    /* PROFILE_CHG: a picture start applied a changed license or enable and was coded as a
+                                                       * forced IDR picture; sticky, write 1 to clear */
+#define RTLNET_H264_HP_STATUS_CAPS_SHIFT 8u           /* [11:8] hp_caps */
+#define RTLNET_H264_HP_STATUS_CAPS_MASK  0xFu
+#define RTLNET_H264_HP_STATUS_SEC_SHIFT  16u          /* [31:16] license seconds left, 0xFFFF unlimited */
+#define RTLNET_H264_HP_CAP_CABAC         (1u << 0)
+#define RTLNET_H264_HP_CAP_TRANSFORM8X8  (1u << 1)
+#define RTLNET_H264_HP_SECONDS_UNLIMITED 0xFFFFu
+
+/* Named errors of the profile functions (negative return values besides -1). */
+#define RTLNET_H264_HP_ERR_NO_SEAM       (-2)   /* the build has no High profile seam (CAPS bit 20 is 0) */
+#define RTLNET_H264_HP_ERR_NO_CAPS       (-3)   /* the High profile module offers no tool (hp_caps is 0): stage 1 of the module */
+#define RTLNET_H264_HP_ERR_NOT_LICENSED  (-4)   /* the license has ended */
+#define RTLNET_H264_HP_ERR_NO_MODULE     (-5)   /* the seam is built but the module is the simulation stub (not present) */
 
 /* ERR_CODE values (hdl/rtlnet_h264_pkg.sv ERR_*). */
 #define RTLNET_H264_ERR_NONE             0u
@@ -127,6 +153,7 @@
 #define RTLNET_H264_CAPS_MB_H_MASK       0xFFu
 #define RTLNET_H264_CAPS_ENG_SHIFT       16u            /* [19:16] NUM_ENGINES */
 #define RTLNET_H264_CAPS_ENG_MASK        0xFu
+#define RTLNET_H264_CAPS_HP_SEAM         (1u << 20)     /* [20] HIGH_PROFILE build: HP_CTRL and HP_STATUS exist */
 
 /*
  * Index entry: four little-endian 32-bit words at the start of the 128-byte record at idx_base + 128 * index.
@@ -177,7 +204,19 @@ typedef struct {
     uint32_t max_mb_w;
     uint32_t max_mb_h;
     uint32_t num_engines;
+    uint32_t hp_seam;      /* 1 in a HIGH_PROFILE build */
 } rtlnet_h264_enc_caps_t;
+
+/* High profile status, decoded from HP_STATUS. */
+typedef struct {
+    uint32_t present;        /* the netlist, not the stub */
+    uint32_t licensed;
+    uint32_t active;
+    uint32_t enabled;
+    uint32_t profile_chg;
+    uint32_t caps;           /* RTLNET_H264_HP_CAP_* */
+    uint32_t seconds_left;   /* 0xFFFF unlimited */
+} rtlnet_h264_enc_hp_t;
 
 /* Picture-level configuration written by rtlnet_h264_enc_configure(). */
 typedef struct {
@@ -261,6 +300,20 @@ typedef struct {
 
 /* Check ID and VERSION; read the build parameters into caps when it is not NULL. 0 when present. */
 int rtlnet_h264_enc_probe(uintptr_t base, rtlnet_h264_enc_caps_t *caps);
+
+/* Read HP_STATUS into out. -2 (RTLNET_H264_HP_ERR_NO_SEAM) when the build has no High profile seam, -1 for a NULL argument or a core
+ * that does not answer. Reads nothing else and clears nothing. */
+int rtlnet_h264_enc_hp_status(uintptr_t base, rtlnet_h264_enc_hp_t *out);
+
+/* Select the profile of the stream: high != 0 writes hp_enable = 1, 0 writes 0. High is refused, with nothing written, when the build
+ * has no seam (RTLNET_H264_HP_ERR_NO_SEAM), the module is the stub (RTLNET_H264_HP_ERR_NO_MODULE), hp_caps is 0
+ * (RTLNET_H264_HP_ERR_NO_CAPS: no High profile tool is present in the module) or the license has ended
+ * (RTLNET_H264_HP_ERR_NOT_LICENSED), checked in that order. Effective at the next picture start, which is then
+ * coded as an IDR picture: the caller writes new parameter sets for the profile in force. */
+int rtlnet_h264_enc_set_profile(uintptr_t base, int high);
+
+/* Clear PROFILE_CHG (write 1) and return 1 when it was set, 0 when it was not (-1 on a build without the seam). */
+int rtlnet_h264_enc_hp_clear_change(uintptr_t base);
 
 /* Geometry of a video mode (720p30 or 1080p30). -1 for any other mode. */
 int rtlnet_h264_enc_get_mode(uint32_t video_mode, rtlnet_h264_enc_mode_t *out);

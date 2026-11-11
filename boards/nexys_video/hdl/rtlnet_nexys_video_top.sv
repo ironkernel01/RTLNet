@@ -89,6 +89,7 @@
 module rtlnet_nexys_video_top #(
   parameter logic [31:0] BUILD_ID     = 32'h0000_0000,  // git hash (build script: git rev-parse --short=8 HEAD)
   parameter logic        BUILD_DIRTY  = 1'b0,           // build tree had uncommitted changes
+  parameter bit          HIGH_PROFILE = 1'b0,           // 1: rtlnet_h264_top with the High profile extension (netlist added by build.ps1 -HighProfile)
   parameter int          MS_CYCLES    = 90_000,         // ui_clk clocks per millisecond (bench may shorten)
   parameter int          POR_RESET_MS = 20              // PHY reset hold after reset release, CPU-only build
 )(
@@ -1226,7 +1227,8 @@ module rtlnet_nexys_video_top #(
     .NUM_ENGINES (2),
     .ADDR_W      (32),
     .ID_W        (ARB_ID_W),
-    .RAM_STYLE   ("block")
+    .RAM_STYLE   ("block"),
+    .HIGH_PROFILE(HIGH_PROFILE)
   ) u_h264 (
     .enc_clk        (ui_clk),
     .enc_resetn     (ddr_resetn),

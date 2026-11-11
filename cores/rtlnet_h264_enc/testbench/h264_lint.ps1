@@ -11,8 +11,9 @@ Overview:
     `/* verilator lint_off <RULE> */` / `lint_on` pair and a reason comment.
   * Prints `LINT PASS: rtlnet_h264_top` or `LINT FAIL: ...` and exits 0 / 1.
 Usage: powershell -NoProfile -ExecutionPolicy Bypass -File h264_lint.ps1
-Revision: 11-09-2026
+Revision: 11-11-2026
   * 11-09-2026: initial version.
+  * 11-11-2026: nested -f filelists are expanded.
 -------------------------------------------------------------------------------
 #>
 $ErrorActionPreference = 'Stop'
@@ -22,12 +23,14 @@ $Vl = Resolve-RtlnetVerilator
 $work = Join-Path $Repo '.sim/lint'
 New-Item -ItemType Directory -Force -Path $work | Out-Null
 $lines = @()
-foreach ($f in @('cores/rtlnet_common/hdl/rtlnet_common.f', 'cores/rtlnet_h264_enc/hdl/rtlnet_h264_enc.f')) {
+function Add-ListLines([string]$f) {
     foreach ($raw in Get-Content -LiteralPath (Join-Path $Repo $f)) {
         $l = ($raw -replace '#.*$', '').Trim()
-        if ($l -and ($l -notlike '-f*') -and ($l -notlike '+incdir*')) { $lines += $l }
+        if ($l -match '^-f\s+(.+)$') { Add-ListLines $Matches[1].Trim() }
+        elseif ($l -and ($l -notlike '+incdir*')) { $script:lines += $l }
     }
 }
+foreach ($f in @('cores/rtlnet_common/hdl/rtlnet_common.f', 'cores/rtlnet_h264_enc/hdl/rtlnet_h264_enc.f')) { Add-ListLines $f }
 $files = ($lines | Select-Object -Unique) -join ' '
 $drive = $Repo.Substring(0, 1).ToLower()
 $msysRepo = '/' + $drive + '/' + ($Repo.Substring(3).Replace([string][char]92, '/'))

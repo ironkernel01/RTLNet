@@ -68,6 +68,12 @@ int         host_model_video_fw_holds(void);
 
 /* Checksum offload window: present with this CAPS (0 removes it); STATUS.TX_IDLE after this many STATUS
  * reads (0xFFFFFFFF: never); CTRL bits that do not stick; CTRL and counters as the harness sees them. */
+/* H.264 encoder register model (ID, VERSION, CAPS, STATUS and the High profile registers; the engine windows read 0): on = 0/1,
+ * seam = CAPS bit 20 (HIGH_PROFILE build). host_model_h264_hp sets the High profile status the model reports: module present (the
+ * netlist, not the stub), licensed, hp_caps (bits 0 CABAC, 1 8x8 transform) and the license seconds left (0xFFFF unlimited). */
+void        host_model_h264_set(int on, int seam);
+void        host_model_h264_hp(uint32_t present, uint32_t licensed, uint32_t caps, uint32_t seconds);
+uint32_t    host_model_h264_hp_ctrl(void);
 void        host_model_txo_set(int present, uint32_t caps);
 void        host_model_txo_idle_after(uint32_t reads);
 void        host_model_txo_stuck(uint32_t mask);

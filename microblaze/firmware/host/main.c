@@ -52,6 +52,7 @@
 #include "rtlnet_classifier.h"
 #include "rtlnet_cpupath.h"
 #include "rtlnet_eth_protocol.h"
+#include "rtlnet_h264_enc.h"
 #include "rtlnet_offload.h"
 #include "rtlnet_platform.h"
 #include "rtlnet_tcp_offload.h"
@@ -833,6 +834,62 @@ static void demo_video(void)
     host_capture_clear();
     demo_type("show encoder\r");
     demo_check(demo_has("% rtlnet_h264_enc not present in this build"), "show encoder: core absent");
+    /* High profile seam: the encoder register model with the seam and the High profile status in its states. */
+    host_capture_clear();
+    demo_type("encoder profile high\r");
+    demo_check(demo_has("% rtlnet_h264_enc not present in this build"), "encoder profile: core absent");
+    host_model_h264_set(1, 1);   /* seam built, stage 1 netlist: present, licensed, unlimited, hp_caps 0 */
+    host_capture_clear();
+    demo_type("show encoder\r");
+    demo_check(demo_has("  High profile    : present, licensed, time left unlimited, tools none (hp_caps 0), profile baseline, 0 forced IDR pictures"),
+               "show encoder: High profile line, stage 1 netlist unlimited");
+    host_capture_clear();
+    demo_type("encoder profile high\r");
+    demo_check(demo_has("% Profile high refused: the High profile module offers no tool yet (hp_caps is 0)") && host_model_h264_hp_ctrl() == 0u,
+               "encoder profile high: refused with hp_caps 0, nothing written");
+    host_capture_clear();
+    demo_type("encoder profile baseline\r");
+    demo_check(demo_has("Profile baseline (Constrained Baseline), effective at the next picture"), "encoder profile baseline accepted");
+    host_capture_clear();
+    demo_type("encoder profile main\r");
+    demo_check(demo_has("profile (baseline or high)"), "encoder profile: bad name rejected");
+    host_model_h264_hp(1u, 1u, 0u, 1781u);   /* demo netlist: 29 min 41 s left */
+    host_capture_clear();
+    demo_type("show encoder\r");
+    demo_check(demo_has("  High profile    : present, licensed, time left 29 min 41 s, tools none (hp_caps 0), profile baseline, 0 forced IDR pictures"),
+               "show encoder: High profile line, demo netlist with time left");
+    host_model_h264_hp(1u, 0u, 0u, 0u);      /* the license has ended */
+    host_capture_clear();
+    demo_type("show encoder\r");
+    demo_check(demo_has("  High profile    : present, license ended, time left 0 min 0 s, tools none (hp_caps 0), profile baseline"),
+               "show encoder: High profile line, license ended");
+    host_model_h264_hp(1u, 1u, RTLNET_H264_HP_CAP_CABAC, 600u);   /* a later stage: CABAC offered */
+    host_capture_clear();
+    demo_type("encoder profile high\r");
+    demo_check(demo_has("Profile high, effective at the next picture") && host_model_h264_hp_ctrl() == 1u, "encoder profile high: accepted with hp_caps");
+    host_capture_clear();
+    demo_type("show encoder\r");
+    demo_check(demo_has("  High profile    : present, licensed, time left 10 min 0 s, tools CABAC (hp_caps 1), profile high, 0 forced IDR pictures"),
+               "show encoder: High profile line, CABAC offered, profile high");
+    host_model_h264_hp(1u, 0u, RTLNET_H264_HP_CAP_CABAC, 0u);
+    host_capture_clear();
+    demo_type("encoder profile high\r");
+    demo_check(demo_has("% Profile high refused: the High profile license has ended"), "encoder profile high: refused, license ended");
+    host_model_h264_hp(0u, 0u, 0u, 0u);      /* the simulation stub */
+    host_capture_clear();
+    demo_type("show encoder\r");
+    demo_check(demo_has("  High profile    : not present (the High profile netlist is not in this build)"), "show encoder: High profile line, stub");
+    host_capture_clear();
+    demo_type("encoder profile high\r");
+    demo_check(demo_has("% Profile high refused: the High profile netlist is not in this build (simulation stub)"), "encoder profile high: refused, stub");
+    host_model_h264_set(1, 0);               /* no seam in the build */
+    host_capture_clear();
+    demo_type("show encoder\r");
+    demo_check(demo_has("  High profile    : not present (this build has no High profile seam)"), "show encoder: High profile line, no seam");
+    host_capture_clear();
+    demo_type("encoder profile high\r");
+    demo_check(demo_has("% Profile high refused: this build has no High profile seam (CAPS HP_SEAM 0)"), "encoder profile high: refused, no seam");
+    host_model_h264_set(0, 0);
     host_capture_clear();
     demo_type("stream stop\r");
     demo_check(demo_has("No stream is running"), "stream stop: nothing running");

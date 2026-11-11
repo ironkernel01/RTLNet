@@ -22,11 +22,15 @@ Overview:
     code (the Vivado gate codes are listed in build_bitstream.tcl).
 Usage:
   powershell -NoProfile -ExecutionPolicy Bypass -File boards/nexys_video/scripts/build.ps1 `
-    [-Network] [-SkipFirmware] [-Program] [-Test] [-Port COM3] [-Tag <name>]
+    [-Network] [-SkipFirmware] [-Program] [-Test] [-Port COM3] [-Tag <name>] [-HighProfile none|full|demo]
   * -Tag <name>: variant gate build. Only the bitstream step runs, with every output (log, reports, hardware
     bitstream, MMI, XSA, build_info.txt) in build/<name>/; the network image build/rtlnet_nexys_video.{bit,mmi,xsa}
     and the firmware build are untouched. Example: -Tag cpu (the cpu-only variant, no -Network).
-Revision: 11-09-2026
+  * -HighProfile <none|full|demo> (default none): none is the flow above, unchanged. full or demo builds rtlnet_h264_top with HIGH_PROFILE 1 and
+    the netlist of that variant from the High profile repository (H264HighProfile\netlist\<variant>, found through $env:H264_HIGHPROFILE_ROOT or
+    next to this repository); the build refuses to start when the netlist is missing.
+Revision: 11-11-2026
+  * 11-11-2026: -HighProfile.
   * 11-09-2026: -Program and -Test take the machine-wide board lock first (rtlnet_board_lock.ps1).
   * 10-22-2026: initial version.
   * 10-22-2026: bitstream before firmware (the BSP comes from the XSA).
@@ -39,7 +43,8 @@ param(
     [switch]$Program,
     [switch]$Test,
     [string]$Port = 'COM3',
-    [string]$Tag = ''
+    [string]$Tag = '',
+    [ValidateSet('none', 'full', 'demo')][string]$HighProfile = 'none'
 )
 $ErrorActionPreference = 'Stop'
 $Board = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
@@ -62,11 +67,22 @@ function Step([string]$name, [scriptblock]$body) {
 
 $net = $(if ($Network) { '1' } else { '0' })
 $tclArgs = "network,$net"
+$hpArgs = ''
+if ($HighProfile -ne 'none') {
+    $hpRoot = if ($env:H264_HIGHPROFILE_ROOT) { $env:H264_HIGHPROFILE_ROOT } else { Join-Path $Repo '..\H264HighProfile' }
+    $hpNetlist = Join-Path $hpRoot "netlist\$HighProfile"
+    if (-not (Test-Path -LiteralPath (Join-Path $hpNetlist 'rtlnet_h264_hp.edf'))) {
+        Write-Output "RTLNET_BUILD: FAIL no High profile netlist at $hpNetlist (build it with scripts\build_netlist.ps1 -Variant $HighProfile in the High profile repository)"
+        exit 99
+    }
+    $hpArgs = ",highprofile,$HighProfile,hp_netlist," + ((Resolve-Path -LiteralPath $hpNetlist).Path -replace '\\', '/')
+    $tclArgs = "network,$net$hpArgs"
+}
 if ($Tag) {
     if ($Program -or $Test) { Write-Output 'RTLNET_BUILD: FAIL -Tag builds are not programmed (no firmware merge)'; exit 99 }
     $Build = Join-Path $Build $Tag
     New-Item -ItemType Directory -Force -Path $Build | Out-Null
-    $tclArgs = "network,$net,tag,$Tag"
+    $tclArgs = "network,$net,tag,$Tag$hpArgs"
 }
 Step 'bitstream' {
     & (Join-Path $Repo 'scripts\rtlnet_vivado.ps1') -Tcl (Join-Path $PSScriptRoot 'build_bitstream.tcl') `
