@@ -50,13 +50,14 @@ module rtlnet_h264_wr_master #(
   output logic              ix_ack,
 
   // Rebuilt-picture tile burst request from rtlnet_h264_recon_wr: descriptor valid with address and beats-1; rc_pop pulses
-  // in the grant clock; the beats (full strobe) come from rc_w_*: rc_w_pop pulses per beat taken.
+  // in the grant clock; the beats (with their byte strobes rc_w_strb) come from rc_w_*: rc_w_pop pulses per beat taken.
   input  logic              rc_valid,
   input  logic [ADDR_W-1:0] rc_addr,
   input  logic [3:0]        rc_len,
   output logic              rc_pop,
   input  logic              rc_w_valid,
   input  logic [127:0]      rc_w_data,
+  input  logic [15:0]       rc_w_strb,
   output logic              rc_w_pop,
 
   // AXI4 write channels, clk domain.
@@ -151,7 +152,7 @@ module rtlnet_h264_wr_master #(
   assign wvalid   = (st == M_XFER) && (w_left != 5'd0) && src_valid;
   assign wdata    = (sel == SEL_RING) ? rg_w_data : ((sel == SEL_REC) ? rc_w_data :
                     ((w_left == 5'(IDX_REC_BEATS)) ? ld_data : 128'd0));
-  assign wstrb    = (sel == SEL_RING) ? rg_w_strb : 16'hFFFF;
+  assign wstrb    = (sel == SEL_RING) ? rg_w_strb : ((sel == SEL_REC) ? rc_w_strb : 16'hFFFF);
   assign wlast    = (w_left == 5'd1);
   assign w_hs     = wvalid && wready;
   assign rg_w_pop = w_hs && (sel == SEL_RING);

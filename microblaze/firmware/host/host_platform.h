@@ -82,6 +82,12 @@ uint32_t    host_model_h264_hp_ctrl(void);
 uint32_t    host_model_h264_hp_ctrl_t8(void);
 uint32_t    host_model_h264_hp_ctrl_auto(void);
 void        host_model_h264_t8_counts(uint32_t n8, uint32_t n4);
+/* Deblocking filter: host_model_h264_dbk(present) builds the model with the filter (CAPS bit 22, the default after host_model_h264_set: enable 1, offsets 0)
+ * or without it (CAPS bit 22 clear, DBK registers read 0). host_model_h264_dbk_ctrl and _dbk_status return the register values as the core reads
+ * them (DBK_STATUS holds the state latched at the last START). */
+void        host_model_h264_dbk(int present);
+uint32_t    host_model_h264_dbk_ctrl(void);
+uint32_t    host_model_h264_dbk_status(void);
 void        host_model_h264_irq_caps(int capable);
 void        host_model_h264_timing(uint32_t pic_ticks, uint32_t access_period);
 void        host_model_h264_advance(uint32_t ticks);

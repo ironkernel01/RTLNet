@@ -57,6 +57,7 @@
  *  11-12-2026  MenuBuilder AI / Steve Spano    8x8 transform (High profile stage 3): encoder transform8x8 on|off, Transform 8x8 line in show encoder
  *  11-12-2026  MenuBuilder AI / Steve Spano    Adaptive transform (stage 3a): encoder transform8x8 on|off|auto (default auto), macroblock counts in show encoder
  *  11-12-2026  MenuBuilder AI / Steve Spano    Encoder interrupt: encoder notify interrupt|polled, encoder irqtest, notification and interrupt lines in show stream and show encoder; the encoder is controlled through the driver layer only
+ *  11-12-2026  MenuBuilder AI / Steve Spano    Deblocking filter: encoder deblock on|off, encoder deblock-offsets <alpha> <beta>, Deblocking line in show encoder
  * ===========================================================================
  */
 #include "cli_commands.h"
@@ -3779,6 +3780,128 @@ int cli_encoder_transform8x8(const MenuCommandContext *ctx)
 }
 
 /**
+ * @brief Parse a signed decimal number of up to 6 digits.
+ * @param s   Text with an optional leading '-' or '+'; the whole string must be a number.
+ * @param out Parsed value.
+ * @return 0 on success, -1 on an empty string, a bad digit or more than 6 digits.
+ */
+static int cli_parse_i32(const char *s, int *out)
+{
+    int neg = 0;
+    int v = 0;
+    int digits = 0;
+    if (s == NULL) {
+        return -1;
+    }
+    if (*s == '-' || *s == '+') {
+        neg = (*s == '-') ? 1 : 0;
+        s++;
+    }
+    for (; *s != '\0'; s++) {
+        if (*s < '0' || *s > '9' || digits >= 6) {
+            return -1;
+        }
+        v = v * 10 + (*s - '0');
+        digits++;
+    }
+    if (digits == 0) {
+        return -1;
+    }
+    *out = neg ? -v : v;
+    return 0;
+}
+
+/**
+ * @brief ENCODER DEBLOCK [STATE]: the in-loop deblocking filter of the encoder core (idc 2: filtered inside each slice, not across slice
+ *        boundaries): on (the default) or off.
+ * @param ctx argv[0] = on or off.
+ * @return 0, or -1 for a bad word, an absent core or a build without the filter (named reason). Takes effect at the next picture; no IDR
+ *         picture and no new parameter sets are needed.
+ */
+int cli_encoder_deblock(const MenuCommandContext *ctx)
+{
+    int on;
+    int rc;
+    if (cli_word_is(ctx->argv[0], "on")) {
+        on = 1;
+    } else if (cli_word_is(ctx->argv[0], "off")) {
+        on = 0;
+    } else {
+        return cli_bad_value("state (on or off)", ctx->argv[0]);
+    }
+    if (!cli_core_check(&g_core_h264)) {
+        return -1;
+    }
+    rc = rtlnet_venc_set_deblock(on);
+    if (rc == RTLNET_H264_CTL_DBK_ERR_NOT_PRESENT) {
+        fmt_printf("%% Deblock on refused: this build has no deblocking filter (CAPS bit 22 is 0)\n");
+        return -1;
+    }
+    if (rc != 0) {
+        fmt_printf("%% Deblock change failed (code %d)\n", rc);
+        return -1;
+    }
+    if (on) {
+        fmt_printf("Deblock on, effective at the next picture (in-loop filter, filtered inside each slice, not across slice boundaries)\n");
+    } else {
+        fmt_printf("Deblock off, effective at the next picture\n");
+    }
+    return 0;
+}
+
+/**
+ * @brief ENCODER DEBLOCK-OFFSETS [ALPHA] [BETA]: the filter offsets written into the slice headers (slice_alpha_c0_offset_div2 and
+ *        slice_beta_offset_div2).
+ * @param ctx argv[0] = alpha, argv[1] = beta, each -6..6.
+ * @return 0, or -1 for a value out of range, an absent core or a build without the filter (named reason). Takes effect at the next picture.
+ */
+int cli_encoder_deblock_offsets(const MenuCommandContext *ctx)
+{
+    int alpha;
+    int beta;
+    int rc;
+    if (cli_parse_i32(ctx->argv[0], &alpha) != 0 || cli_parse_i32(ctx->argv[1], &beta) != 0 ||
+        alpha < RTLNET_H264_CTL_DBK_OFFSET_MIN || alpha > RTLNET_H264_CTL_DBK_OFFSET_MAX ||
+        beta < RTLNET_H264_CTL_DBK_OFFSET_MIN || beta > RTLNET_H264_CTL_DBK_OFFSET_MAX) {
+        fmt_printf("%% Invalid deblock offsets \"%s %s\" (alpha and beta -6..6)\n", ctx->argv[0], ctx->argv[1]);
+        return -1;
+    }
+    if (!cli_core_check(&g_core_h264)) {
+        return -1;
+    }
+    rc = rtlnet_venc_set_deblock_offsets(alpha, beta);
+    if (rc == RTLNET_H264_CTL_DBK_ERR_NOT_PRESENT) {
+        fmt_printf("%% Deblock offsets refused: this build has no deblocking filter (CAPS bit 22 is 0)\n");
+        return -1;
+    }
+    if (rc != 0) {
+        fmt_printf("%% Deblock offsets change failed (code %d)\n", rc);
+        return -1;
+    }
+    fmt_printf("Deblock offsets alpha %d, beta %d, effective at the next picture\n", alpha, beta);
+    return 0;
+}
+
+/**
+ * @brief The Deblocking line of SHOW ENCODER: the state requested and what the last picture used.
+ * @return None.
+ */
+static void cli_print_deblock(void)
+{
+    rtlnet_h264_ctl_dbk_t k;
+    if (rtlnet_venc_deblock_info(&k) != 0 || k.present == 0u) {
+        fmt_printf("  Deblocking      : not present (this build has no deblocking filter)\n");
+        return;
+    }
+    fmt_printf("  Deblocking      : %s (in force: last picture %s, alpha %d, beta %d", k.enable ? "on" : "off",
+               k.applied ? "filtered" : "not filtered", (int)k.alpha_applied, (int)k.beta_applied);
+    if (k.alpha_req != k.alpha_applied || k.beta_req != k.beta_applied) {
+        fmt_printf("; next picture alpha %d, beta %d", (int)k.alpha_req, (int)k.beta_req);
+    }
+    fmt_printf(")\n");
+}
+
+/**
  * @brief The Transform 8x8 line of SHOW ENCODER.
  * @return None.
  */
@@ -4174,6 +4297,7 @@ int cli_show_encoder(const MenuCommandContext *ctx)
     cli_print_ratectl();
     cli_print_high_profile(s.hp_forced_idr);
     cli_print_transform8x8();
+    cli_print_deblock();
     fmt_printf("  Pictures        : %u coded (PIC_COUNT), %u slices\n", (unsigned)d.pic_count, (unsigned)d.slice_count);
     for (uint32_t e = 0; e < d.engines; e++) {
         const rtlnet_h264_ctl_stats_t *t = &d.eng[e];

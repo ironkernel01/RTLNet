@@ -46,6 +46,8 @@ Revision: 11-10-2026
     the rate-control lines of show stream, show encoder history, back to constant QP.
   * 11-11-2026: the full High profile image (tools CABAC, encoder profile high accepted) passes the same steps.
   * 11-12-2026: Transform 8x8 line of show encoder, encoder transform8x8 (bad, off, on), hp_caps 3; tolerant of every image kind.
+  * 11-12-2026: encoder VERSION 0x11122C04 (the deblocking filter registers); the Deblocking line of show encoder, encoder deblock (bad, off, on) and
+    encoder deblock-offsets (bad, 0 0); tolerant of an image without the filter (named refusal, "not present" line).
   * 11-11-2026: High profile seam: the High profile line of show encoder, encoder profile (bad, high refused, baseline); tolerant of the default image and the High profile netlist image.
   * 11-10-2026: Phase 2c: encoder VERSION 0x11102C02, encoder gop (bad values, 1, 30) and the GOP lines of show stream and show encoder,
     the cache line of show ddr (32 KiB, 512-bit buses).
@@ -224,7 +226,7 @@ try {
     Send-Step $sp 'framebuffer crc' "framebuffer crc`r" @(
         'Framebuffer CRC-32 : 0x[0-9A-F]{8} \(frame \d+, slot \d, \d+x\d+, (pattern|camera), \d+ bytes\)') 'rtlnet#' 60000
     # H.264 stream (Phase 2b-3): command formats and refusals; the stream itself is checked by stream_test.ps1.
-    Send-Step $sp 'encoder VERSION' "debug read 0x44a08004`r" @('0x44A08004 = 0x11122C03') 'rtlnet#'
+    Send-Step $sp 'encoder VERSION' "debug read 0x44a08004`r" @('0x44A08004 = 0x11122C04') 'rtlnet#'
     Send-Step $sp 'show encoder' "show encoder`r" @(
         'ID "H264" 0x48323634', 'GOP\s+: \d+ \(IDR every \d+ pictures, P pictures between\), last picture (IDR|P)', 'Build\s+: 2 engines, up to 120 x 68 macroblocks', 'QP\s+: \d+ configured, \d+ written; STATUS 0x[0-9A-F]{8}',
         'Engine 0\s+: \d+ macroblocks, picture \d+ cycles', 'Engine 1\s+: \d+ macroblocks, picture \d+ cycles') 'rtlnet#'
@@ -240,6 +242,13 @@ try {
     Send-Step $sp 'encoder transform8x8 (bad)' "encoder transform8x8 maybe`r" @('% Invalid state \(on or off\) "maybe"') 'rtlnet#'
     Send-Step $sp 'encoder transform8x8 off' "encoder transform8x8 off`r" @('(Transform8x8 off \(4x4 transform\), effective at the next picture|% Transform8x8 on refused: (this build has no High profile seam|the High profile netlist is not in this build|the High profile module offers no 8x8 transform \(hp_caps bit 1 is 0\)))') 'rtlnet#'
     Send-Step $sp 'encoder transform8x8 on' "encoder transform8x8 on`r" @('(Transform8x8 on, effective at the next picture in the High profile|% Transform8x8 on refused: (this build has no High profile seam|the High profile netlist is not in this build|the High profile module offers no 8x8 transform \(hp_caps bit 1 is 0\)))') 'rtlnet#'
+    # Deblocking filter (11-12-2026): tolerant of an image without the filter (CAPS bit 22 clear: named refusal and the "not present" line).
+    Send-Step $sp 'show encoder (Deblocking line)' "show encoder`r" @('Deblocking\s+: (not present \(this build has no deblocking filter\)|(on|off) \(in force: last picture (filtered|not filtered), alpha -?\d, beta -?\d)') 'rtlnet#'
+    Send-Step $sp 'encoder deblock (bad)' "encoder deblock maybe`r" @('% Invalid state \(on or off\) "maybe"') 'rtlnet#'
+    Send-Step $sp 'encoder deblock off' "encoder deblock off`r" @('Deblock off, effective at the next picture') 'rtlnet#'
+    Send-Step $sp 'encoder deblock on' "encoder deblock on`r" @('(Deblock on, effective at the next picture|% Deblock on refused: this build has no deblocking filter \(CAPS bit 22 is 0\))') 'rtlnet#'
+    Send-Step $sp 'encoder deblock-offsets (bad)' "encoder deblock-offsets 7 0`r" @('% Invalid deblock offsets "7 0" \(alpha and beta -6\.\.6\)') 'rtlnet#'
+    Send-Step $sp 'encoder deblock-offsets 0 0' "encoder deblock-offsets 0 0`r" @('(Deblock offsets alpha 0, beta 0, effective at the next picture|% Deblock offsets refused: this build has no deblocking filter \(CAPS bit 22 is 0\))') 'rtlnet#'
     Send-Step $sp 'encoder qp (bad)' "encoder qp 52`r" @('% Invalid QP \(0\.\.51\) "52"') 'rtlnet#'
     Send-Step $sp 'encoder qp 8 (floor)' "encoder qp 8`r" @('QP 8 set; the driver writes 12') 'rtlnet#'
     Send-Step $sp 'encoder qp 28' "encoder qp 28`r" @('QP 28, effective at the next picture') 'rtlnet#'

@@ -32,6 +32,7 @@
  *
  * Revision: 11-12-2026
  *   * 11-12-2026: initial version (interrupt mode; the control code moved here from firmware rtlnet_venc.c).
+ *   * 11-12-2026: deblocking filter controls (rtlnet_h264_ctl_set_deblock, _set_deblock_offsets, _deblock_wanted, _deblock_in_force, _deblock_info).
  */
 #ifndef RTLNET_H264_ENC_CTL_H
 #define RTLNET_H264_ENC_CTL_H
@@ -80,6 +81,12 @@
 #define RTLNET_H264_CTL_HP_ERR_NO_MODULE  (-5)
 #define RTLNET_H264_CTL_HP_ERR_NO_T8      (-6)
 #define RTLNET_H264_CTL_HP_ERR_NO_AUTO    (-7)
+
+/* Deblocking filter results (RTLNET_H264_DBK_ERR_*) and the offset range. */
+#define RTLNET_H264_CTL_DBK_ERR_NOT_PRESENT (-8)   /* the build has no deblocking filter (CAPS bit 22 is 0) */
+#define RTLNET_H264_CTL_DBK_ERR_RANGE     (-9)     /* an offset outside -6..+6 */
+#define RTLNET_H264_CTL_DBK_OFFSET_MIN    (-6)
+#define RTLNET_H264_CTL_DBK_OFFSET_MAX    6
 
 /* hp_caps bits of the High profile module. */
 #define RTLNET_H264_CTL_HP_CAP_CABAC          (1u << 0)
@@ -166,6 +173,15 @@ typedef struct {
 typedef struct {
     uint32_t present, licensed, active, enabled, t8_enabled, t8_auto, profile_chg, caps, seconds_left;
 } rtlnet_h264_ctl_hp_t;
+
+/* Deblocking filter state. Offsets are signed slice-header values (div2 units), -6..+6. */
+typedef struct {
+    uint32_t present;            /* the filter logic is built */
+    uint32_t enable;             /* the filter is requested for the next picture (DBK_CTRL) */
+    uint32_t applied;            /* the last started picture was coded with the filter */
+    int32_t  alpha_applied, beta_applied;   /* offsets of the last started picture */
+    int32_t  alpha_req, beta_req;           /* offsets requested for the next picture */
+} rtlnet_h264_ctl_dbk_t;
 
 /* Per-engine statistics of the last picture. */
 typedef struct {
@@ -257,6 +273,19 @@ int  rtlnet_h264_ctl_transform8x8_wanted(void);
 int  rtlnet_h264_ctl_transform8x8_in_force(void);
 int  rtlnet_h264_ctl_profile_in_force(void);
 int  rtlnet_h264_ctl_transform8x8_counts(uint32_t *n8, uint32_t *n4);
+
+/* Deblocking filter (CAPS bit 22; the in-loop filter of the core, on by default, no parameter-set change). set_deblock: on != 0 enables, 0
+ * disables; on is refused with RTLNET_H264_CTL_DBK_ERR_NOT_PRESENT when the build has no filter, off is always accepted. set_deblock_offsets:
+ * alpha and beta (slice_alpha_c0_offset_div2, slice_beta_offset_div2), each -6..+6, else RTLNET_H264_CTL_DBK_ERR_RANGE (checked first) or
+ * _NOT_PRESENT; nothing is written on an error. Both requests are remembered (deblock_wanted: 1 for on, the default) and re-applied at every
+ * set_mode; the core takes the register state at each picture start, so a change is effective at the next picture and needs no IDR picture.
+ * deblock_info: 0 and the state, or RTLNET_H264_CTL_DBK_ERR_NOT_PRESENT (the structure is zeroed), -1 for a NULL pointer. deblock_in_force: 1
+ * when the filter is present and enabled, i.e. the next picture is filtered. */
+int  rtlnet_h264_ctl_set_deblock(int on);
+int  rtlnet_h264_ctl_set_deblock_offsets(int alpha_div2, int beta_div2);
+int  rtlnet_h264_ctl_deblock_wanted(void);
+int  rtlnet_h264_ctl_deblock_in_force(void);
+int  rtlnet_h264_ctl_deblock_info(rtlnet_h264_ctl_dbk_t *out);
 
 /* Console view of the core (works without open): version, status, counters, statistics. -1 when the core does not answer. */
 int rtlnet_h264_ctl_debug(rtlnet_h264_ctl_debug_t *out);

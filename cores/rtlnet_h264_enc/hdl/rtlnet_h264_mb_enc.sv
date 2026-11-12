@@ -133,6 +133,11 @@ module rtlnet_h264_mb_enc #(
   output logic                o_inter,
   output logic                o_skip,
   output logic [3:0]          o_cbp4,
+  // Deblocking filter inputs, valid with done: the 4x4 luma blocks (bit 4 * by + bx) of an inter macroblock with non-zero levels (an 8x8 transform
+  // macroblock: all four blocks of a coded 8x8 block; a dropped residual: none) and the macroblock's motion vector in quarter samples (0 for intra).
+  output logic [15:0]         o_nz16,
+  output logic signed [13:0]  o_mv_x,
+  output logic signed [13:0]  o_mv_y,
   output logic signed [15:0]  o_mvd_x,
   output logic signed [15:0]  o_mvd_y,
 
@@ -297,6 +302,8 @@ module rtlnet_h264_mb_enc #(
   logic [19:0]        cost_in;
   logic [19:0]        cost_ia;
   logic [3:0]         nz8;
+  logic [15:0]        nz16;
+  logic [15:0]        nz16_t8;
   logic               drop_q;
   logic               big_q;
   logic [15:0]        lv_sum;
@@ -787,6 +794,11 @@ module rtlnet_h264_mb_enc #(
 
   assign iq_in_v     = p3_s1_v;
   assign iq_in_first = (p3_s1_r == 2'd0);
+  // An 8x8 transform macroblock: the coded 8x8 blocks (t8_nz4, index 2 * by8 + bx8) cover all four of their 4x4 blocks.
+  always_comb begin
+    nz16_t8 = '0;
+    for (int b = 0; b < 16; b++) nz16_t8[b] = t8_nz4[2 * (b / 8) + ((b % 4) / 2)];
+  end
   assign nz8_e       = drop_q ? 4'd0 : ((T8 && t8_use_q) ? t8_nz4 : nz8);
   assign iq_in_lvl   = drop_q ? 48'd0 : cof_rdata;
   assign iq_in_tag   = {3'd0, p3_s1_b};
@@ -1104,6 +1116,10 @@ module rtlnet_h264_mb_enc #(
       cost_in     <= '0;
       cost_ia     <= '0;
       nz8         <= '0;
+      nz16        <= '0;
+      o_nz16      <= '0;
+      o_mv_x      <= '0;
+      o_mv_y      <= '0;
       drop_q      <= 1'b0;
       big_q       <= 1'b0;
       lv_sum      <= '0;
@@ -1268,6 +1284,7 @@ module rtlnet_h264_mb_enc #(
           if (|fq_out_lvl) begin
             ac_nz_y <= 1'b1;
             nz8[{fq_out_tag[3], fq_out_tag[1]}] <= 1'b1;
+            nz16[fq_out_tag[3:0]] <= 1'b1;
           end
         end else begin
           if (|fq_out_lvl) ac_nz_c <= 1'b1;
@@ -1392,6 +1409,7 @@ module rtlnet_h264_mb_enc #(
             o_skip  <= 1'b0;
             inter_q <= 1'b0;
             nz8     <= '0;
+            nz16    <= '0;
             drop_q  <= 1'b0;
             big_q   <= 1'b0;
             mv_ready_seen <= 1'b0;
@@ -1572,6 +1590,9 @@ module rtlnet_h264_mb_enc #(
           if (dcw_n == 3'd5) begin
             o_cbp_luma   <= ac_nz_y;
             o_cbp4       <= nz8_e;
+            o_nz16       <= drop_q ? 16'd0 : ((T8 && t8_use_q) ? nz16_t8 : nz16);
+            o_mv_x       <= inter_q ? inter_mv_x : 14'sd0;
+            o_mv_y       <= inter_q ? inter_mv_y : 14'sd0;
             o_cbp_chroma <= drop_q ? 2'd0 : (ac_nz_c ? 2'd2 : ((dqcb_nz || dqcr_nz) ? 2'd1 : 2'd0));
             // P_Skip (clause 8.4.1.1): the inter candidate with nothing to code, and the skip vector equal to the vector of the prediction
             // (a decoder predicts a skipped macroblock at the skip vector; the search vector is inside the picture and the window, so the

@@ -22,8 +22,10 @@
 //   * HIGH_PROFILE (default 0): 1 instantiates rtlnet_h264_hp (the High profile extension, a separately delivered netlist) in every
 //     engine; the registers HP_CTRL and HP_STATUS and CAPS bit 20 describe it. With 0 no reference to the module exists and the
 //     logic is that of the Constrained Baseline encoder.
+//   * DEBLOCK (default 1): the in-loop deblocking filter rtlnet_h264_deblock in every engine (documentation section 19), DBK_LINE_KB its line store; registers DBK_CTRL, DBK_STATUS, CAPS bit 22.
 // Language: SystemVerilog-2012.
 // Revision: 11-12-2026
+//   * 11-12-2026: DEBLOCK and DBK_LINE_KB parameters, the filter state of the register block to the engines.
 //   * 11-12-2026: irq from the IRQ_STATUS / IRQ_ENABLE registers.
 //   * 11-11-2026: HIGH_PROFILE parameter and the hp seam to the registers.
 //   * 11-09-2026: initial version.
@@ -50,7 +52,9 @@ module rtlnet_h264_top #(
   parameter int    SR          = 16,     // motion search range in whole samples, 0 .. 16 (0: only the vector (0, 0), the phase 2c-1 behaviour)
   parameter int    MV_LINE_KB  = 1,      // motion vector line RAM (P pictures): one 32-bit word per macroblock column
   parameter string RAM_STYLE   = "block", // "block" | "distributed", for every engine memory (RAM instancing rule)
-  parameter bit    HIGH_PROFILE = 1'b0    // 1: High profile extension (rtlnet_h264_hp) in every engine
+  parameter bit    HIGH_PROFILE = 1'b0,   // 1: High profile extension (rtlnet_h264_hp) in every engine
+  parameter int    DBK_LINE_KB = 16,     // deblocking filter line store per engine, KiB (6 beats of 16 bytes per macroblock column, 8 reserved)
+  parameter bit    DEBLOCK     = 1'b1    // 1: in-loop deblocking filter (clause 8.7) in every engine; 0: none (slice header idc 1)
 )(
   // Engine clock (MIG ui_clk, 100 MHz) and its reset (synchronous, active low); the register clock and its
   // reset (synchronous, active low, released with enc_resetn from the same assertion).
@@ -187,6 +191,9 @@ module rtlnet_h264_top #(
 
   // High profile seam: enable from the registers; status of the engines' modules (engine 0 reports present, seconds left and
   // caps; licensed and caps are the AND over the engines, active the OR, the change pulse the OR).
+  logic                      dbk_en;
+  logic signed [3:0]         dbk_a;
+  logic signed [3:0]         dbk_b;
   logic                      hp_enable;
   logic                      hp_t8_enable;
   logic                      hp_t8_auto;
@@ -324,7 +331,7 @@ module rtlnet_h264_top #(
     .reg_rd_en(reg_rd_en), .reg_rd_addr(reg_rd_addr), .reg_rd_data(reg_rd_data)
   );
 
-  rtlnet_h264_enc_regs #(.MAX_MB_W(MAX_MB_W), .MAX_MB_H(MAX_MB_H), .NUM_ENGINES(NUM_ENGINES), .HIGH_PROFILE(HIGH_PROFILE)) u_regs (
+  rtlnet_h264_enc_regs #(.MAX_MB_W(MAX_MB_W), .MAX_MB_H(MAX_MB_H), .NUM_ENGINES(NUM_ENGINES), .HIGH_PROFILE(HIGH_PROFILE), .DEBLOCK(DEBLOCK)) u_regs (
     .clk(enc_clk), .resetn(enc_resetn),
     .reg_wr_en(reg_wr_en), .reg_wr_addr(reg_wr_addr), .reg_wr_data(reg_wr_data),
     .reg_rd_en(reg_rd_en), .reg_rd_addr(reg_rd_addr), .reg_rd_data(reg_rd_data),
@@ -341,6 +348,7 @@ module rtlnet_h264_top #(
     .rptr_wr(rptr_wr), .rptr_val(rptr_val), .idx_rptr_wr(idx_rptr_wr), .idx_rptr_val(idx_rptr_val),
     .hp_enable(hp_enable), .hp_t8_enable(hp_t8_enable), .hp_t8_auto(hp_t8_auto), .hp_t8_n8(hp_t8_n8), .hp_t8_n4(hp_t8_n4), .hp_present(&eng_hp_present), .hp_licensed(&eng_hp_licensed), .hp_active(|eng_hp_active),
     .hp_caps(hp_caps_all), .hp_seconds_left(eng_hp_seconds[15:0]), .hp_chg(|eng_hp_chg),
+    .cfg_dbk_en(dbk_en), .cfg_dbk_a(dbk_a), .cfg_dbk_b(dbk_b),
     .busy(busy_all), .done(done_all), .slice_pulse(|eng_slice),
     .err_cfg(|eng_err_cfg), .err_axi(|eng_err_axi), .err_rptr(|eng_err_rp), .err_busy(|eng_err_bsy),
     .ring_stall(eng_stall), .ring_wptr(eng_wptr), .ring_fill(eng_fill), .idx_wptr(eng_iwptr),
@@ -356,8 +364,9 @@ module rtlnet_h264_top #(
         .ADDR_W(ADDR_W), .ID_W(ID_W), .MAX_MB_W(MAX_MB_W), .MAX_MB_H(MAX_MB_H), .MB_BUF_KB(MB_BUF_KB), .RD_STRIP_MB(RD_STRIP_MB),
         .REC_BUF_KB(REC_BUF_KB), .COEF_BUF_KB(COEF_BUF_KB), .LINE_KB(LINE_KB), .FIFO_KB(FIFO_KB), .REF_BUF_KB(REF_BUF_KB),
         .MV_LINE_KB(MV_LINE_KB), .WIN_KB(WIN_KB), .SR(SR), .EMIT_AUD(e == 0), .RAM_STYLE(RAM_STYLE),
-        .HIGH_PROFILE(HIGH_PROFILE)
+        .HIGH_PROFILE(HIGH_PROFILE), .DBK_LINE_KB(DBK_LINE_KB), .DEBLOCK(DEBLOCK)
       ) u_engine (
+        .cfg_dbk_en(dbk_en), .cfg_dbk_a(dbk_a), .cfg_dbk_b(dbk_b),
         .clk(enc_clk), .resetn(enc_resetn),
         .hp_enable(hp_enable), .hp_t8_enable(hp_t8_enable), .hp_t8_auto(hp_t8_auto), .hp_t8_n8(eng_t8_n8[e*16 +: 16]), .hp_t8_n4(eng_t8_n4[e*16 +: 16]),
         .hp_present(eng_hp_present[e]), .hp_licensed(eng_hp_licensed[e]),

@@ -40,8 +40,9 @@
 #include <stdint.h>   /* uint32_t, uint8_t, uintptr_t */
 
 #define RTLNET_H264_ID_VALUE             0x48323634u   /* "H264" */
-#define RTLNET_H264_VERSION_VALUE        0x11122C03u   /* with the interrupt registers (CAPS bit 21) */
-#define RTLNET_H264_VERSION_PRE_IRQ      0x11102C02u   /* the core before them: probe accepts it, caps.irq is 0 */
+#define RTLNET_H264_VERSION_VALUE        0x11122C04u   /* with the deblocking filter registers (CAPS bit 22) */
+#define RTLNET_H264_VERSION_PRE_DBK      0x11122C03u   /* the core before them: probe accepts it, caps.dbk is 0, the interrupt registers exist */
+#define RTLNET_H264_VERSION_PRE_IRQ      0x11102C02u   /* the core before the interrupt registers: probe accepts it, caps.irq is 0 */
 /* Revision 11-09-2026: initial register map (phase 2b-1); MB_MODE register and cfg->mb_pcm (phase 2b-2);
  * RTLNET_H264_QP_MIN_REALTIME (the QP clamp of rtlnet_h264_enc_configure).
  * Revision 11-10-2026 (VERSION 0x11102026, burst-only DDR3 access): the rebuilt picture is macroblock-tiled (RY_BASE and
@@ -59,7 +60,11 @@
  * Revision 11-11-2026 (High profile seam, HIGH_PROFILE builds; VERSION unchanged): CAPS bit 20 HP_SEAM, registers HP_CTRL (0x0C0) and
  * HP_STATUS (0x0C4), rtlnet_h264_enc_hp_status / _set_profile / _hp_clear_change. A build without the seam reads CAPS bit 20 as 0 and
  * 0 in both registers. The rtlnet_h264_hp module that fills the registers is delivered separately; in its stage 1 hp_caps is 0, so
- * rtlnet_h264_enc_set_profile(high) is refused with RTLNET_H264_HP_ERR_NO_CAPS. */
+ * rtlnet_h264_enc_set_profile(high) is refused with RTLNET_H264_HP_ERR_NO_CAPS.
+ * Revision 11-12-2026 (VERSION 0x11122C04, deblocking filter): CAPS bit 22 DBK (the build parameter DEBLOCK), registers DBK_CTRL (0x0E0) and
+ * DBK_STATUS (0x0E4), rtlnet_h264_enc_set_deblock / _set_deblock_offsets / _deblock_status. Every earlier register is unchanged. The stream
+ * syntax is written by the core (slice header disable_deblocking_filter_idc 1 or 2 and the offsets); the SPS and PPS writers are unchanged.
+ * rtlnet_h264_enc_probe still accepts VERSION 0x11122C03 (caps.dbk 0) and 0x11102C02. */
 
 /* Real-time QP floor: rtlnet_h264_enc_configure writes max(cfg->qp, RTLNET_H264_QP_MIN_REALTIME) into the QP register. Below
  * this QP dense macroblocks leave the macroblock coder over its clock budget (documentation section "Throughput"); the
@@ -112,6 +117,24 @@
 #define RTLNET_H264_REG_IRQ_STATUS       0x0D0u   /* sticky event bits (RTLNET_H264_IRQ_*), write 1 to clear; an event in the clock of its clear keeps the bit */
 #define RTLNET_H264_REG_IRQ_ENABLE       0x0D4u   /* one enable bit per source, reset 0 (bits of sources the build lacks read 0) */
 #define RTLNET_H264_REG_IRQ_FORCE        0x0D8u   /* WO: a 1 sets the status bit (self-test); reads 0 */
+#define RTLNET_H264_REG_DBK_CTRL         0x0E0u   /* RW, see RTLNET_H264_DBK_CTRL_*; reset: enable 1 when CAPS bit 22 is set, else 0 */
+#define RTLNET_H264_REG_DBK_STATUS       0x0E4u   /* RO, see RTLNET_H264_DBK_STATUS_* */
+
+/* DBK_CTRL fields. The core latches the register at every picture START (a change while busy takes effect at the next picture). The offset fields are
+ * 4-bit two's complement values, range RTLNET_H264_DBK_OFFSET_MIN..MAX; a write whose field is outside that range leaves that field unchanged. Other
+ * bits read 0 and ignore writes. A build without the filter (CAPS bit 22 clear) keeps the enable bit at 0 and ignores a write of 1. */
+#define RTLNET_H264_DBK_CTRL_ENABLE      (1u << 0)    /* the in-loop filter runs (slice header disable_deblocking_filter_idc 2; off: 1) */
+#define RTLNET_H264_DBK_CTRL_ALPHA_SHIFT 4u           /* [7:4] slice_alpha_c0_offset_div2 */
+#define RTLNET_H264_DBK_CTRL_BETA_SHIFT  8u           /* [11:8] slice_beta_offset_div2 */
+#define RTLNET_H264_DBK_FIELD_MASK       0xFu
+#define RTLNET_H264_DBK_OFFSET_MIN       (-6)
+#define RTLNET_H264_DBK_OFFSET_MAX       6
+
+/* DBK_STATUS fields. */
+#define RTLNET_H264_DBK_STATUS_PRESENT   (1u << 0)    /* the filter logic is built (same as CAPS bit 22) */
+#define RTLNET_H264_DBK_STATUS_APPLIED   (1u << 1)    /* the filter was applied to the last started picture */
+#define RTLNET_H264_DBK_STATUS_ALPHA_SHIFT 8u         /* [11:8] alpha offset applied (4-bit two's complement) */
+#define RTLNET_H264_DBK_STATUS_BETA_SHIFT  12u        /* [15:12] beta offset applied (4-bit two's complement) */
 
 /* Interrupt sources: the bits of IRQ_STATUS, IRQ_ENABLE and IRQ_FORCE. The irq output is CTRL.IRQ_EN and (IRQ_STATUS and IRQ_ENABLE not 0). */
 #define RTLNET_H264_IRQ_PIC_DONE         (1u << 0)    /* a picture is complete (every engine done) */
@@ -150,6 +173,10 @@
 #define RTLNET_H264_HP_CAP_ADAPTIVE      (1u << 2)    /* the module chooses the 4x4 or the 8x8 transform per macroblock (hp_t8_auto) */
 #define RTLNET_H264_HP_SECONDS_UNLIMITED 0xFFFFu
 
+/* Named errors of the deblocking filter functions (negative return values besides -1; distinct from the RTLNET_H264_HP_ERR_* values). */
+#define RTLNET_H264_DBK_ERR_NOT_PRESENT  (-8)   /* the build has no deblocking filter (CAPS bit 22 is 0) */
+#define RTLNET_H264_DBK_ERR_RANGE        (-9)   /* an offset outside RTLNET_H264_DBK_OFFSET_MIN..MAX */
+
 /* Named errors of the profile functions (negative return values besides -1). */
 #define RTLNET_H264_HP_ERR_NO_SEAM       (-2)   /* the build has no High profile seam (CAPS bit 20 is 0) */
 #define RTLNET_H264_HP_ERR_NO_CAPS       (-3)   /* the High profile module offers no tool (hp_caps is 0): stage 1 of the module */
@@ -179,6 +206,7 @@
 #define RTLNET_H264_CAPS_ENG_MASK        0xFu
 #define RTLNET_H264_CAPS_HP_SEAM         (1u << 20)     /* [20] HIGH_PROFILE build: HP_CTRL and HP_STATUS exist */
 #define RTLNET_H264_CAPS_IRQ             (1u << 21)     /* [21] the interrupt registers exist (VERSION 0x11122C03 and later) */
+#define RTLNET_H264_CAPS_DBK             (1u << 22)     /* [22] the deblocking filter is built (DEBLOCK = 1): DBK_CTRL and DBK_STATUS are live (VERSION 0x11122C04) */
 #define RTLNET_H264_CAPS_IRQ_SRC_SHIFT   24u            /* [31:24] mask of the implemented interrupt sources */
 #define RTLNET_H264_CAPS_IRQ_SRC_MASK    0xFFu
 
@@ -234,6 +262,7 @@ typedef struct {
     uint32_t hp_seam;      /* 1 in a HIGH_PROFILE build */
     uint32_t irq;          /* 1 when the core has the interrupt registers */
     uint32_t irq_sources;  /* RTLNET_H264_IRQ_* bits the build implements (0 without the registers) */
+    uint32_t dbk;          /* 1 when the deblocking filter is built (CAPS bit 22) */
     uint32_t version;      /* VERSION register */
 } rtlnet_h264_enc_caps_t;
 
@@ -249,6 +278,17 @@ typedef struct {
     uint32_t caps;           /* RTLNET_H264_HP_CAP_* */
     uint32_t seconds_left;   /* 0xFFFF unlimited */
 } rtlnet_h264_enc_hp_t;
+
+/* Deblocking filter state, decoded from DBK_CTRL and DBK_STATUS. Offsets are signed values -6..+6 (div2 units of the slice header). */
+typedef struct {
+    uint32_t present;        /* the filter logic is built (DBK_STATUS bit 0) */
+    uint32_t enable;         /* DBK_CTRL enable: the filter is requested for the next picture */
+    uint32_t applied;        /* the last started picture was coded with the filter */
+    int32_t  alpha_applied;  /* alpha_c0_offset_div2 of the last started picture */
+    int32_t  beta_applied;   /* beta_offset_div2 of the last started picture */
+    int32_t  alpha_req;      /* alpha_c0_offset_div2 requested (DBK_CTRL) */
+    int32_t  beta_req;       /* beta_offset_div2 requested (DBK_CTRL) */
+} rtlnet_h264_enc_dbk_t;
 
 /* Picture-level configuration written by rtlnet_h264_enc_configure(). */
 typedef struct {
@@ -361,6 +401,20 @@ int rtlnet_h264_enc_set_transform8x8(uintptr_t base, int mode);
 /* The numbers of macroblocks of the last picture coded with the 8x8 transform (n8) and with the 4x4 transform (n4): inter macroblocks with a coded luma
  * block. 0 on success, RTLNET_H264_HP_ERR_NO_SEAM without a seam, -1 for a NULL pointer. */
 int rtlnet_h264_enc_t8_counts(uintptr_t base, uint32_t *n8, uint32_t *n4);
+
+/* The in-loop deblocking filter (CAPS bit 22). It is on at reset and needs no profile or parameter-set change: the core writes disable_deblocking_filter_idc
+ * (2 on: filtered inside each slice, not across slice boundaries; 1 off) and the offsets into every slice header, and every picture is coded with the
+ * register state at its START. Switching between pictures is legal, without an IDR picture.
+ * rtlnet_h264_enc_set_deblock: on != 0 sets DBK_CTRL.enable, 0 clears it; the offsets are kept. On is refused, with nothing written, with
+ * RTLNET_H264_DBK_ERR_NOT_PRESENT when CAPS bit 22 is 0; off is always accepted (0). */
+int rtlnet_h264_enc_set_deblock(uintptr_t base, int on);
+
+/* Write the filter offsets (slice_alpha_c0_offset_div2 and slice_beta_offset_div2), each -6..+6; the enable bit is kept. RTLNET_H264_DBK_ERR_RANGE for a value
+ * outside the range and RTLNET_H264_DBK_ERR_NOT_PRESENT when CAPS bit 22 is 0 (the range is checked first); nothing is written on an error. */
+int rtlnet_h264_enc_set_deblock_offsets(uintptr_t base, int alpha_div2, int beta_div2);
+
+/* Read DBK_CTRL and DBK_STATUS into out. RTLNET_H264_DBK_ERR_NOT_PRESENT (out is zeroed) when CAPS bit 22 is 0, -1 for a NULL pointer. Writes nothing. */
+int rtlnet_h264_enc_deblock_status(uintptr_t base, rtlnet_h264_enc_dbk_t *out);
 
 /* Clear PROFILE_CHG (write 1) and return 1 when it was set, 0 when it was not (-1 on a build without the seam). */
 int rtlnet_h264_enc_hp_clear_change(uintptr_t base);

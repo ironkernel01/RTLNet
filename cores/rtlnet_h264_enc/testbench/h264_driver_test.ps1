@@ -10,6 +10,7 @@ Purpose: build and run the host unit tests of the rtlnet_h264_enc driver (test_r
 Usage: powershell -NoProfile -ExecutionPolicy Bypass -File h264_driver_test.ps1
 Revision: 11-12-2026
   * 11-12-2026: the control layer test (both notification modes), its negative control, and the rate controller test (moved with the controller).
+  * 11-12-2026: VERSION 0x11122C04 and the deblocking filter registers (CAPS bit 22, DBK_CTRL, DBK_STATUS) in both tests; VERSION 0x11122C03 still probes.
   * 11-09-2026: initial version.
   * 11-10-2026: the test covers the P picture fields of the driver.
 -------------------------------------------------------------------------------

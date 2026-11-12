@@ -70,3 +70,12 @@ tb_rtlnet_h264_regs  cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_regs.f  neg 
 tb_rtlnet_h264_regs  cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_regs.f  hp  defines=TB_HP
 tb_rtlnet_h264_regs  cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_regs.f  hp_neg  defines=TB_HP  plusargs=INJECT_FAILURE  expectfail
 h264_harness_irq     script:cores/rtlnet_h264_enc/testbench/h264_harness.ps1 -Irq -Config qcif_s1,qcif_e2_s4,p_qcif_pan_q28,p_qcif_pan_e2_s2_q28
+# Deblocking filter (11-12-2026, section 19): tb_rtlnet_h264_dbk is the module bench of rtlnet_h264_deblock against the clause 8.7 model (h264_dbk_run.ps1: random and directed vector sets in Verilator,
+# its -Inject run is the negative control, h264_dbk_mutation.ps1 applies source mutations that the bench must catch). The harness entries run the encoder with the filter in force (default), with the filter
+# switched off (-DbkCtl 0: the stream equals the stream of the encoder without the filter; compared against the previous commit by hand, documentation section 19.3) and on and off between pictures; every decoder must equal the encoder's filtered reference picture.
+h264_dbk_run            script:cores/rtlnet_h264_enc/testbench/h264_dbk_run.ps1
+h264_dbk_run_neg        script:cores/rtlnet_h264_enc/testbench/h264_dbk_run.ps1 -Inject -Sets 6
+h264_dbk_mutation       script:cores/rtlnet_h264_enc/testbench/h264_dbk_mutation.ps1 -Sets 10
+h264_harness_dbkoff     script:cores/rtlnet_h264_enc/testbench/h264_harness.ps1 -DbkCtl 0 -Tag off -Config qcif_s3,qcif_e2_s4,p_qcif_pan_s3_q28,p_qcif_pan_e2_s2_q28
+h264_harness_dbkmid     script:cores/rtlnet_h264_enc/testbench/h264_harness.ps1 -DbkCtl 1101001011 -Tag mid -Config p_qcif_pan_q28,p_qcif_cut_q28,p_qcif_pan_e2_s2_q28
+h264_harness_dbkoffs    script:cores/rtlnet_h264_enc/testbench/h264_harness.ps1 -DbkCtl dcbaf9 -Tag offs -Config p_qcif_pan_q28,qcif_photo_q38,qcif_noise_q18

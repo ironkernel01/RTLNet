@@ -1391,6 +1391,7 @@ Open:
    for about 100 us. The 0x44A2_0000 main-ingress classifier window stays a stub.
 6. The LED behaviour of the RTL8211E (LINK steady, ACT blink) is configured and read back but was not observed.
 7. The classifier STALL_SEEN flag under load (section 6.5) is not analysed beyond the absence of any drop.
+8. Deblocking filter: board step open.
 
 ## 8. Revision history
 

@@ -5,7 +5,8 @@
  *
  * Role: see host_h264_model.h. Registers: ID, VERSION (with or without the interrupt registers), CAPS, CTRL, STATUS, ERR_CODE, the configuration
  * registers read back as written, the per-engine pointers (window 0x100 * e), PIC_COUNT, SLICE_COUNT, HP_CTRL, HP_STATUS, HP_T8COUNT,
- * IRQ_STATUS, IRQ_ENABLE, IRQ_FORCE. A picture takes pic_ticks model ticks (host_model_h264_advance, or one tick per access_period register
+ * IRQ_STATUS, IRQ_ENABLE, IRQ_FORCE, DBK_CTRL, DBK_STATUS (the deblocking filter registers follow the core's rules: reset enable 1 when the filter is
+ * built, a write of 1 ignored without it, an offset field outside -6..+6 left unchanged, the state applied latched at START). A picture takes pic_ticks model ticks (host_model_h264_advance, or one tick per access_period register
  * accesses); on completion the model writes into the DDR3 model, for each engine, a slice entry and a picture entry in its index ring and the
  * bytes of the picture (engine 0 starts with the access unit delimiter) in its ring share, then sets DONE and the IRQ_STATUS bit. The sizes and
  * bytes are deterministic functions of the picture number, the QP and the type, so two runs of the same sequence produce the same stream.
@@ -55,6 +56,9 @@ static struct {
     /* High profile */
     uint32_t hp_present, hp_licensed, hp_caps, hp_seconds, hp_enable, hp_t8, hp_auto, t8_n8, t8_n4, hp_chg;
     uint32_t hp_last_cfg;
+    /* Deblocking filter (CAPS bit 22) */
+    uint32_t dbk_present, dbk_enable, dbk_applied;
+    int      dbk_alpha, dbk_beta, dbk_alpha_a, dbk_beta_a;
     int      hp_last_valid;
     uint32_t forced_count;
     host_h264_pic_t rec[HOST_H264_REC];
@@ -94,7 +98,38 @@ void host_model_h264_set(int on, int seam)
     m.hp_present = 1u;
     m.hp_licensed = 1u;
     m.hp_seconds = RTLNET_H264_HP_SECONDS_UNLIMITED;
+    m.dbk_present = 1u;
+    m.dbk_enable = 1u;
     update_line();
+}
+
+void host_model_h264_dbk(int present)
+{
+    m.dbk_present = (present != 0) ? 1u : 0u;
+    m.dbk_enable = m.dbk_present;
+    m.dbk_alpha = 0;
+    m.dbk_beta = 0;
+    m.dbk_applied = 0u;
+    m.dbk_alpha_a = 0;
+    m.dbk_beta_a = 0;
+}
+
+static uint32_t dbk_ctrl_value(void)
+{
+    return m.dbk_present ? (m.dbk_enable | (((uint32_t)m.dbk_alpha & 0xFu) << RTLNET_H264_DBK_CTRL_ALPHA_SHIFT) |
+                            (((uint32_t)m.dbk_beta & 0xFu) << RTLNET_H264_DBK_CTRL_BETA_SHIFT)) : 0u;
+}
+
+uint32_t host_model_h264_dbk_ctrl(void)
+{
+    return dbk_ctrl_value();
+}
+
+uint32_t host_model_h264_dbk_status(void)
+{
+    return m.dbk_present ? (RTLNET_H264_DBK_STATUS_PRESENT | (m.dbk_applied ? RTLNET_H264_DBK_STATUS_APPLIED : 0u) |
+                            (((uint32_t)m.dbk_alpha_a & 0xFu) << RTLNET_H264_DBK_STATUS_ALPHA_SHIFT) |
+                            (((uint32_t)m.dbk_beta_a & 0xFu) << RTLNET_H264_DBK_STATUS_BETA_SHIFT)) : 0u;
 }
 
 void host_model_h264_hp(uint32_t present, uint32_t licensed, uint32_t caps, uint32_t seconds)
@@ -306,6 +341,11 @@ static void start_picture(void)
     m.cur_type = ((pic_cfg & RTLNET_H264_PIC_CFG_IDR) != 0u) ? RTLNET_H264_PIC_IDR : RTLNET_H264_PIC_P;
     m.cur_qp = m.reg[RTLNET_H264_REG_QP / 4u];
     m.cur_forced = 0u;
+    if (m.dbk_present) {   /* the core latches DBK_CTRL at START */
+        m.dbk_applied = m.dbk_enable;
+        m.dbk_alpha_a = m.dbk_alpha;
+        m.dbk_beta_a = m.dbk_beta;
+    }
     raise_irq(RTLNET_H264_IRQ_PIC_START);
     if (m.seam) {
         uint32_t cfg_now = m.hp_enable | (m.hp_licensed << 1);
@@ -341,7 +381,7 @@ uint32_t host_h264_read(uint32_t off)
     case RTLNET_REG_ID:               return RTLNET_H264_ID_VALUE;
     case RTLNET_REG_VERSION:          return m.irq_capable ? RTLNET_H264_VERSION_VALUE : RTLNET_H264_VERSION_PRE_IRQ;
     case RTLNET_REG_CAPS:             return 120u | (68u << RTLNET_H264_CAPS_MB_H_SHIFT) | (NENG << RTLNET_H264_CAPS_ENG_SHIFT) |
-                                             (m.seam ? RTLNET_H264_CAPS_HP_SEAM : 0u) |
+                                             (m.seam ? RTLNET_H264_CAPS_HP_SEAM : 0u) | (m.dbk_present ? RTLNET_H264_CAPS_DBK : 0u) |
                                              (m.irq_capable ? (RTLNET_H264_CAPS_IRQ | (impl_mask() << RTLNET_H264_CAPS_IRQ_SRC_SHIFT)) : 0u);
     case RTLNET_H264_REG_CTRL:        return m.irq_en ? RTLNET_H264_CTRL_IRQ_EN : 0u;
     case RTLNET_H264_REG_STATUS:      return (m.busy ? RTLNET_H264_STATUS_BUSY : 0u) | (m.done_flag ? RTLNET_H264_STATUS_DONE : 0u) |
@@ -361,6 +401,8 @@ uint32_t host_h264_read(uint32_t off)
         }
         return (off == RTLNET_H264_REG_IRQ_STATUS) ? m.irq_status : m.irq_enable;
     case RTLNET_H264_REG_IRQ_FORCE:   return 0u;
+    case RTLNET_H264_REG_DBK_CTRL:    return dbk_ctrl_value();
+    case RTLNET_H264_REG_DBK_STATUS:  return host_model_h264_dbk_status();
     case RTLNET_H264_REG_HP_CTRL:     return m.seam ? (m.hp_enable | (m.hp_t8 << 1) | (m.hp_auto << 2)) : 0u;
     case RTLNET_H264_REG_HP_T8COUNT:  return m.seam ? ((m.t8_n8 & 0xFFFFu) | (m.t8_n4 << 16)) : 0u;
     case RTLNET_H264_REG_HP_STATUS:
@@ -424,6 +466,23 @@ void host_h264_write(uint32_t off, uint32_t value)
         } else {
             m.irq_status |= value & impl_mask();
         }
+        break;
+    case RTLNET_H264_REG_DBK_CTRL:
+        if (m.dbk_present) {
+            uint32_t a = (value >> RTLNET_H264_DBK_CTRL_ALPHA_SHIFT) & 0xFu;
+            uint32_t b = (value >> RTLNET_H264_DBK_CTRL_BETA_SHIFT) & 0xFu;
+            int      sa = (a >= 8u) ? ((int)a - 16) : (int)a;
+            int      sb = (b >= 8u) ? ((int)b - 16) : (int)b;
+            m.dbk_enable = value & 1u;
+            if (sa >= RTLNET_H264_DBK_OFFSET_MIN && sa <= RTLNET_H264_DBK_OFFSET_MAX) {
+                m.dbk_alpha = sa;
+            }
+            if (sb >= RTLNET_H264_DBK_OFFSET_MIN && sb <= RTLNET_H264_DBK_OFFSET_MAX) {
+                m.dbk_beta = sb;
+            }
+        }
+        break;
+    case RTLNET_H264_REG_DBK_STATUS:
         break;
     case RTLNET_H264_REG_HP_CTRL:
         if (m.seam) {

@@ -40,6 +40,8 @@ static int      g_fails;
 static uint32_t g_irq_impl;        /* implemented interrupt sources; 0 with no interrupt registers (an older core) */
 static int      g_new_core;        /* 1: VERSION with the interrupt registers */
 static int      g_seam;            /* 1: High profile registers */
+static int      g_dbk_build = 1;   /* 1: the deblocking filter is built (CAPS bit 22) on a core with the current VERSION */
+static uint32_t g_wr_dbk;          /* writes to DBK_CTRL seen */
 static uint32_t g_busy_ticks;      /* ticks left of the picture in progress */
 static uint32_t g_pic_ticks = 3u;  /* ticks a picture takes */
 static uint32_t g_ring_w[NENG];
@@ -147,10 +149,16 @@ static void model_reset(int new_core, uint32_t impl, int seam)
     g_bad_aud = 0;
     g_hp_chg_next = 0u;
     g_wr_log_irq_en = 0u;
+    g_wr_dbk = 0u;
     w32(RTLNET_REG_ID, RTLNET_H264_ID_VALUE);
     w32(RTLNET_REG_VERSION, new_core ? RTLNET_H264_VERSION_VALUE : RTLNET_H264_VERSION_PRE_IRQ);
     w32(RTLNET_REG_CAPS, 120u | (68u << 8) | (NENG << 16) | (seam ? RTLNET_H264_CAPS_HP_SEAM : 0u) |
-                         (new_core ? (RTLNET_H264_CAPS_IRQ | (impl << RTLNET_H264_CAPS_IRQ_SRC_SHIFT)) : 0u));
+                         (new_core ? (RTLNET_H264_CAPS_IRQ | (impl << RTLNET_H264_CAPS_IRQ_SRC_SHIFT)) : 0u) |
+                         ((new_core && g_dbk_build) ? RTLNET_H264_CAPS_DBK : 0u));
+    if (new_core && g_dbk_build) {   /* reset: enable 1, offsets 0; DBK_STATUS reports the filter present */
+        w32(RTLNET_H264_REG_DBK_CTRL, RTLNET_H264_DBK_CTRL_ENABLE);
+        w32(RTLNET_H264_REG_DBK_STATUS, RTLNET_H264_DBK_STATUS_PRESENT);
+    }
     if (seam) {
         w32(RTLNET_H264_REG_HP_STATUS, RTLNET_H264_HP_STATUS_PRESENT | RTLNET_H264_HP_STATUS_LICENSED | (RTLNET_H264_HP_CAP_CABAC << RTLNET_H264_HP_STATUS_CAPS_SHIFT) |
                                        (600u << RTLNET_H264_HP_STATUS_SEC_SHIFT));
@@ -214,6 +222,22 @@ void rtlnet_host_reg_write32(uintptr_t addr, uint32_t value)
         g_wr_log_irq_en++;
         w32(off, value & g_irq_impl);
         return;
+    case RTLNET_H264_REG_DBK_STATUS:
+        return;   /* read only */
+    case RTLNET_H264_REG_DBK_CTRL:
+        g_wr_dbk++;
+        if ((reg(RTLNET_REG_CAPS) & RTLNET_H264_CAPS_DBK) != 0u) {   /* the core's rules: enable, two offset fields of -6..+6, the rest reads 0 */
+            uint32_t nv = value & RTLNET_H264_DBK_CTRL_ENABLE;
+
+            for (uint32_t sh = RTLNET_H264_DBK_CTRL_ALPHA_SHIFT; sh <= RTLNET_H264_DBK_CTRL_BETA_SHIFT; sh += 4u) {
+                uint32_t fld = (value >> sh) & 0xFu;
+                int      sv = (fld >= 8u) ? ((int)fld - 16) : (int)fld;
+
+                nv |= ((sv >= -6) && (sv <= 6)) ? (fld << sh) : (reg(off) & (0xFu << sh));
+            }
+            w32(off, nv);
+        }
+        return;
     case RTLNET_H264_REG_HP_CTRL:
         w32(off, value);
         w32(RTLNET_H264_REG_HP_STATUS, (reg(RTLNET_H264_REG_HP_STATUS) & ~RTLNET_H264_HP_STATUS_ENABLED) | (((value & 1u) != 0u) ? RTLNET_H264_HP_STATUS_ENABLED : 0u));
@@ -238,6 +262,13 @@ void rtlnet_host_reg_write32(uintptr_t addr, uint32_t value)
                 ev_error(RTLNET_H264_ERR_BUSY);
             } else {
                 g_busy_ticks = g_pic_ticks;
+                if ((reg(RTLNET_REG_CAPS) & RTLNET_H264_CAPS_DBK) != 0u) {   /* DBK_CTRL is latched at START */
+                    uint32_t cur = reg(RTLNET_H264_REG_DBK_CTRL);
+
+                    w32(RTLNET_H264_REG_DBK_STATUS, RTLNET_H264_DBK_STATUS_PRESENT | (((cur & RTLNET_H264_DBK_CTRL_ENABLE) != 0u) ? RTLNET_H264_DBK_STATUS_APPLIED : 0u) |
+                                                    (((cur >> RTLNET_H264_DBK_CTRL_ALPHA_SHIFT) & 0xFu) << RTLNET_H264_DBK_STATUS_ALPHA_SHIFT) |
+                                                    (((cur >> RTLNET_H264_DBK_CTRL_BETA_SHIFT) & 0xFu) << RTLNET_H264_DBK_STATUS_BETA_SHIFT));
+                }
                 ev_irq(RTLNET_H264_IRQ_PIC_START);
                 if (g_hp_chg_next != 0u) {
                     w32(RTLNET_H264_REG_HP_STATUS, reg(RTLNET_H264_REG_HP_STATUS) | RTLNET_H264_HP_STATUS_CHG);
@@ -540,12 +571,86 @@ int main(void)
     rtlnet_h264_ctl_irq_service();
     check(g_cb_done == 1, "older core: the service does nothing");
     check(g_wr_log_irq_en == 0u, "older core: IRQ_ENABLE never written");
+    {
+        rtlnet_h264_ctl_dbk_t k;
+
+        check(rtlnet_h264_ctl_deblock_info(&k) == RTLNET_H264_CTL_DBK_ERR_NOT_PRESENT && k.present == 0u, "older core: no deblocking filter");
+        check(rtlnet_h264_ctl_set_deblock(1) == RTLNET_H264_CTL_DBK_ERR_NOT_PRESENT && g_wr_dbk == 0u, "older core: deblock on refused, nothing written");
+    }
 
     /* A core with the registers but no High profile sources (mask 0x27): enable drops the absent ones. */
     setup(1, 0x27u, 0);
     check(rtlnet_h264_ctl_open(&info) == 0 && info.irq_sources == 0x27u, "mask 0x27 build opens");
     check(reg(RTLNET_H264_REG_IRQ_ENABLE) == (RTLNET_H264_IRQ_PIC_DONE | RTLNET_H264_IRQ_ERR | RTLNET_H264_IRQ_RING_STALL), "only the implemented sources enabled");
     check(rtlnet_h264_ctl_set_mode(RTLNET_H264_CTL_MODE_720P30, 28u) == 0 && run_picture(RTLNET_H264_CTL_PIC_IDR, 0u) == 1, "mask 0x27 build: picture");
+
+    /* Deblocking filter, a build with it: on by default, the request re-applied at set_mode, latched at START. */
+    {
+        rtlnet_h264_ctl_dbk_t k;
+        uint32_t              w0;
+
+        g_dbk_build = 1;
+        setup(1, 0x3Fu, 1);
+        check(rtlnet_h264_ctl_open(&info) == 0, "deblock: open");
+        check(rtlnet_h264_ctl_deblock_wanted() == 1, "deblock: the request defaults to on");
+        check((rtlnet_h264_ctl_deblock_info(&k) == 0) && (k.present == 1u) && (k.enable == 1u) && (k.applied == 0u) && (k.alpha_req == 0) && (k.beta_req == 0) &&
+              (k.alpha_applied == 0) && (k.beta_applied == 0), "deblock: reset state, on, offsets 0, nothing applied yet");
+        check(rtlnet_h264_ctl_deblock_in_force() == 1, "deblock: in force at reset");
+        check(rtlnet_h264_ctl_deblock_info(NULL) == -1, "deblock: info NULL");
+        check(rtlnet_h264_ctl_set_mode(RTLNET_H264_CTL_MODE_720P30, 28u) == 0, "deblock: set_mode");
+        check((reg(RTLNET_H264_REG_DBK_CTRL) == 1u) && (rtlnet_h264_ctl_deblock_in_force() == 1), "deblock: set_mode keeps the default request (on, offsets 0)");
+        check(run_picture(RTLNET_H264_CTL_PIC_IDR, 0u) == 1, "deblock: IDR picture");
+        check((rtlnet_h264_ctl_deblock_info(&k) == 0) && (k.applied == 1u) && (k.alpha_applied == 0) && (k.beta_applied == 0), "deblock: the first picture was filtered");
+        /* Offsets: range, nothing written on a refusal, kept while on/off changes. */
+        w0 = g_wr_dbk;
+        check(rtlnet_h264_ctl_set_deblock_offsets(7, 0) == RTLNET_H264_CTL_DBK_ERR_RANGE && rtlnet_h264_ctl_set_deblock_offsets(0, -7) == RTLNET_H264_CTL_DBK_ERR_RANGE &&
+              g_wr_dbk == w0 && reg(RTLNET_H264_REG_DBK_CTRL) == 1u, "deblock: offsets outside -6..+6 refused, nothing written");
+        check(rtlnet_h264_ctl_set_deblock_offsets(-3, 4) == 0 && reg(RTLNET_H264_REG_DBK_CTRL) == (1u | (0xDu << 4) | (4u << 8)), "deblock: offsets -3 and +4 written, enable kept");
+        check((rtlnet_h264_ctl_deblock_info(&k) == 0) && (k.alpha_req == -3) && (k.beta_req == 4) && (k.alpha_applied == 0), "deblock: requested offsets differ from the applied ones until a picture starts");
+        check(run_picture(RTLNET_H264_CTL_PIC_P, 1u) == 1 && g_cb_pic.forced_idr == 0u, "deblock: P picture, not a forced IDR picture");
+        check((rtlnet_h264_ctl_deblock_info(&k) == 0) && (k.applied == 1u) && (k.alpha_applied == -3) && (k.beta_applied == 4), "deblock: the next picture applied the offsets");
+        /* Off, then a change while a picture runs: effective at the next picture. */
+        check(rtlnet_h264_ctl_set_deblock(0) == 0 && rtlnet_h264_ctl_deblock_wanted() == 0 && rtlnet_h264_ctl_deblock_in_force() == 0, "deblock: off accepted");
+        check(reg(RTLNET_H264_REG_DBK_CTRL) == ((0xDu << 4) | (4u << 8)), "deblock: off keeps the offsets");
+        check(run_picture(RTLNET_H264_CTL_PIC_P, 2u) == 1 && g_cb_pic.forced_idr == 0u, "deblock: picture with the filter off, no IDR needed");
+        check((rtlnet_h264_ctl_deblock_info(&k) == 0) && (k.applied == 0u) && (k.enable == 0u), "deblock: the picture after off was not filtered");
+        check(start(RTLNET_H264_CTL_PIC_P, 3u) == 0, "deblock: start with the filter off");
+        check(rtlnet_h264_ctl_set_deblock(1) == 0, "deblock: on while the picture runs");
+        check((rtlnet_h264_ctl_deblock_info(&k) == 0) && (k.applied == 0u) && (k.enable == 1u), "deblock: a change while busy does not touch the picture in progress");
+        for (int n = 0; (n < 20) && (g_cb_done < 4); n++) {
+            tick(1);
+        }
+        check(g_cb_done == 4, "deblock: the picture in progress completes");
+        rtlnet_h264_ctl_release(0u, g_cb_pic.ring_end[0], g_cb_pic.idx_end[0]);
+        rtlnet_h264_ctl_release(1u, g_cb_pic.ring_end[1], g_cb_pic.idx_end[1]);
+        check(run_picture(RTLNET_H264_CTL_PIC_P, 4u) == 1, "deblock: the next picture");
+        check((rtlnet_h264_ctl_deblock_info(&k) == 0) && (k.applied == 1u) && (k.alpha_applied == -3) && (k.beta_applied == 4), "deblock: the change took effect at the next picture");
+        /* The request survives a mode set: the register is rewritten from it. */
+        check(rtlnet_h264_ctl_set_deblock(0) == 0 && rtlnet_h264_ctl_set_deblock_offsets(2, -2) == 0, "deblock: off and offsets 2 and -2");
+        w32(RTLNET_H264_REG_DBK_CTRL, 1u);   /* clobber the register: the core was reset */
+        check(rtlnet_h264_ctl_set_mode(RTLNET_H264_CTL_MODE_720P30, 28u) == 0, "deblock: set_mode again");
+        check(reg(RTLNET_H264_REG_DBK_CTRL) == ((2u << 4) | (0xEu << 8)), "deblock: set_mode re-applies the request (off, offsets 2 and -2)");
+        check(rtlnet_h264_ctl_deblock_wanted() == 0, "deblock: the request is still off");
+        rtlnet_h264_ctl_close();
+    }
+
+    /* Deblocking filter, a build without it (DEBLOCK = 0): named refusal, off accepted, set_mode never writes DBK_CTRL. */
+    {
+        rtlnet_h264_ctl_dbk_t k;
+
+        g_dbk_build = 0;
+        setup(1, 0x3Fu, 1);
+        check(rtlnet_h264_ctl_open(&info) == 0, "deblock absent: open");
+        check((rtlnet_h264_ctl_deblock_info(&k) == RTLNET_H264_CTL_DBK_ERR_NOT_PRESENT) && (k.present == 0u) && (k.enable == 0u), "deblock absent: info reports not present");
+        check(rtlnet_h264_ctl_deblock_in_force() == 0, "deblock absent: not in force");
+        check(rtlnet_h264_ctl_set_deblock(1) == RTLNET_H264_CTL_DBK_ERR_NOT_PRESENT && rtlnet_h264_ctl_deblock_wanted() == 1, "deblock absent: on refused, the request unchanged");
+        check(rtlnet_h264_ctl_set_deblock_offsets(1, 1) == RTLNET_H264_CTL_DBK_ERR_NOT_PRESENT && rtlnet_h264_ctl_set_deblock_offsets(9, 9) == RTLNET_H264_CTL_DBK_ERR_RANGE,
+              "deblock absent: offsets refused (range first)");
+        check(rtlnet_h264_ctl_set_deblock(0) == 0 && rtlnet_h264_ctl_deblock_wanted() == 0, "deblock absent: off accepted");
+        check(rtlnet_h264_ctl_set_mode(RTLNET_H264_CTL_MODE_720P30, 28u) == 0 && run_picture(RTLNET_H264_CTL_PIC_IDR, 0u) == 1, "deblock absent: set_mode and a picture work");
+        check(g_wr_dbk == 0u && reg(RTLNET_H264_REG_DBK_CTRL) == 0u, "deblock absent: DBK_CTRL never written");
+        g_dbk_build = 1;
+    }
 
     /* The console view. */
     {

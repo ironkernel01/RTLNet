@@ -28,6 +28,10 @@ _Static_assert(RTLNET_H264_CTL_HP_ERR_NO_SEAM == RTLNET_H264_HP_ERR_NO_SEAM, "hp
 _Static_assert(RTLNET_H264_CTL_HP_ERR_NO_CAPS == RTLNET_H264_HP_ERR_NO_CAPS, "hp err caps");
 _Static_assert(RTLNET_H264_CTL_HP_ERR_NOT_LICENSED == RTLNET_H264_HP_ERR_NOT_LICENSED, "hp err license");
 _Static_assert(RTLNET_H264_CTL_HP_ERR_NO_MODULE == RTLNET_H264_HP_ERR_NO_MODULE, "hp err module");
+_Static_assert(RTLNET_H264_CTL_DBK_ERR_NOT_PRESENT == RTLNET_H264_DBK_ERR_NOT_PRESENT, "dbk err not present");
+_Static_assert(RTLNET_H264_CTL_DBK_ERR_RANGE == RTLNET_H264_DBK_ERR_RANGE, "dbk err range");
+_Static_assert(RTLNET_H264_CTL_DBK_OFFSET_MIN == RTLNET_H264_DBK_OFFSET_MIN, "dbk offset min");
+_Static_assert(RTLNET_H264_CTL_DBK_OFFSET_MAX == RTLNET_H264_DBK_OFFSET_MAX, "dbk offset max");
 _Static_assert(RTLNET_H264_CTL_HP_ERR_NO_T8 == RTLNET_H264_HP_ERR_NO_T8, "hp err t8");
 _Static_assert(RTLNET_H264_CTL_HP_ERR_NO_AUTO == RTLNET_H264_HP_ERR_NO_AUTO, "hp err auto");
 _Static_assert(RTLNET_H264_CTL_HP_CAP_CABAC == RTLNET_H264_HP_CAP_CABAC, "cap cabac");
@@ -68,6 +72,9 @@ static struct {
     uint32_t                    qp_used;
     uint32_t                    pic_type;
     uint32_t                    t8_pref;
+    uint32_t                    dbk_pref;          /* deblocking filter requested (1 on, the default) */
+    int                         dbk_alpha;         /* offsets requested */
+    int                         dbk_beta;
     /* counters: the handler (or the poll function) writes them, the main loop reads */
     volatile uint32_t           irqs;
     volatile uint32_t           spurious;
@@ -93,6 +100,7 @@ void rtlnet_h264_ctl_init(uintptr_t base, const rtlnet_h264_ctl_layout_t *layout
     g.notify_wanted = RTLNET_H264_NOTIFY_INTERRUPT;
     g.mode = RTLNET_H264_CTL_MODE_NONE;
     g.t8_pref = (uint32_t)RTLNET_H264_T8_AUTO;
+    g.dbk_pref = 1u;
     (void)rtlnet_h264_enc_buffers_init(&g.bufs, g.layout.ry_base[0], g.layout.ru_base[0], g.layout.ry_base[1], g.layout.ru_base[1]);
 }
 
@@ -446,7 +454,8 @@ int rtlnet_h264_ctl_mode_info(uint32_t mode, rtlnet_h264_ctl_mode_t *out)
 
 /*
  * rtlnet_h264_ctl_set_mode -- see the header
- * Steps: apply the transform request (a module without the adaptive choice degrades auto to on); size registers and the SPS/PPS bytes from the
+ * Steps: apply the transform request (a module without the adaptive choice degrades auto to on); apply the deblocking filter request (enable and
+ * offsets; a build without the filter ignores it); size registers and the SPS/PPS bytes from the
  * driver; the configuration registers with the memory layout; ring reset; the index scan positions restart.
  */
 int rtlnet_h264_ctl_set_mode(uint32_t mode, uint32_t qp)
@@ -457,6 +466,8 @@ int rtlnet_h264_ctl_set_mode(uint32_t mode, uint32_t qp)
     if (rtlnet_h264_enc_set_transform8x8(g.base, (int)g.t8_pref) == RTLNET_H264_HP_ERR_NO_AUTO) {
         (void)rtlnet_h264_enc_set_transform8x8(g.base, RTLNET_H264_T8_ON);
     }
+    (void)rtlnet_h264_enc_set_deblock_offsets(g.base, g.dbk_alpha, g.dbk_beta);
+    (void)rtlnet_h264_enc_set_deblock(g.base, (int)g.dbk_pref);
     if ((rtlnet_h264_enc_get_mode(mode, &m) != 0) || (rtlnet_h264_enc_set_mode(g.base, mode, &g.sps_cfg) != 0) ||
         (rtlnet_h264_enc_write_sps_pps_tools(g.sps_pps, sizeof(g.sps_pps), &g.sps_cfg, rtlnet_h264_ctl_profile_in_force(),
                                              rtlnet_h264_ctl_transform8x8_in_force(), &g.sps_len) != 0)) {
@@ -635,6 +646,63 @@ int rtlnet_h264_ctl_transform8x8_wanted(void)
 int rtlnet_h264_ctl_transform8x8_counts(uint32_t *n8, uint32_t *n4)
 {
     return rtlnet_h264_enc_t8_counts(g.base, n8, n4);
+}
+
+int rtlnet_h264_ctl_set_deblock(int on)
+{
+    int rc = rtlnet_h264_enc_set_deblock(g.base, on);
+
+    if (rc == 0) {
+        g.dbk_pref = (on != 0) ? 1u : 0u;
+    }
+    return rc;
+}
+
+int rtlnet_h264_ctl_set_deblock_offsets(int alpha_div2, int beta_div2)
+{
+    int rc = rtlnet_h264_enc_set_deblock_offsets(g.base, alpha_div2, beta_div2);
+
+    if (rc == 0) {
+        g.dbk_alpha = alpha_div2;
+        g.dbk_beta = beta_div2;
+    }
+    return rc;
+}
+
+int rtlnet_h264_ctl_deblock_wanted(void)
+{
+    return (int)g.dbk_pref;
+}
+
+/* 1 when the filter is present and enabled for the next picture. */
+int rtlnet_h264_ctl_deblock_in_force(void)
+{
+    rtlnet_h264_enc_dbk_t dbk;
+
+    if (rtlnet_h264_enc_deblock_status(g.base, &dbk) != 0) {
+        return 0;
+    }
+    return ((dbk.present != 0u) && (dbk.enable != 0u)) ? 1 : 0;
+}
+
+/* 0 and the state, RTLNET_H264_CTL_DBK_ERR_NOT_PRESENT when the build has no filter, -1 for a NULL pointer. */
+int rtlnet_h264_ctl_deblock_info(rtlnet_h264_ctl_dbk_t *out)
+{
+    rtlnet_h264_enc_dbk_t dbk;
+    int rc;
+
+    if (out == NULL) {
+        return -1;
+    }
+    rc = rtlnet_h264_enc_deblock_status(g.base, &dbk);
+    out->present = dbk.present;
+    out->enable = dbk.enable;
+    out->applied = dbk.applied;
+    out->alpha_applied = dbk.alpha_applied;
+    out->beta_applied = dbk.beta_applied;
+    out->alpha_req = dbk.alpha_req;
+    out->beta_req = dbk.beta_req;
+    return rc;
 }
 
 /*

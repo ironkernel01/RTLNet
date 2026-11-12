@@ -443,6 +443,38 @@ static int slot_padded(uint32_t base)
 }
 
 /*
+ * rtlnet_venc_set_deblock -- see the header
+ */
+int rtlnet_venc_set_deblock(int on)
+{
+    return rtlnet_h264_ctl_set_deblock(on);
+}
+
+/*
+ * rtlnet_venc_set_deblock_offsets -- see the header
+ */
+int rtlnet_venc_set_deblock_offsets(int alpha_div2, int beta_div2)
+{
+    return rtlnet_h264_ctl_set_deblock_offsets(alpha_div2, beta_div2);
+}
+
+/*
+ * rtlnet_venc_deblock_wanted -- see the header
+ */
+int rtlnet_venc_deblock_wanted(void)
+{
+    return rtlnet_h264_ctl_deblock_wanted();
+}
+
+/*
+ * rtlnet_venc_deblock_info -- see the header
+ */
+int rtlnet_venc_deblock_info(rtlnet_h264_ctl_dbk_t *out)
+{
+    return rtlnet_h264_ctl_deblock_info(out);
+}
+
+/*
  * rtlnet_venc_set_transform8x8 -- see the header
  */
 int rtlnet_venc_set_transform8x8(int mode)
