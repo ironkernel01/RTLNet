@@ -55,6 +55,7 @@
  *  11-10-2026  MenuBuilder AI / Steve Spano    H.264 P pictures (Phase 2c): encoder gop, GOP and IDR/P counts in show stream and show encoder; show ddr cache line
  *  11-11-2026  MenuBuilder AI / Steve Spano    High profile seam: encoder profile baseline|high, High profile line in show encoder
  *  11-12-2026  MenuBuilder AI / Steve Spano    8x8 transform (High profile stage 3): encoder transform8x8 on|off, Transform 8x8 line in show encoder
+ *  11-12-2026  MenuBuilder AI / Steve Spano    Adaptive transform (stage 3a): encoder transform8x8 on|off|auto (default auto), macroblock counts in show encoder
  * ===========================================================================
  */
 #include "cli_commands.h"
@@ -3724,43 +3725,52 @@ int cli_encoder_profile(const MenuCommandContext *ctx)
 }
 
 /**
- * @brief ENCODER TRANSFORM8X8 [STATE]: request the 8x8 transform of inter macroblocks (on, the default) or the 4x4 transform (off).
- * @param ctx argv[0] = on or off.
+ * @brief ENCODER TRANSFORM8X8 [STATE]: the transform of inter macroblocks: auto (the default: the module chooses the 4x4 or the 8x8 transform per
+ *        macroblock), on (the 8x8 transform on every inter macroblock) or off (the 4x4 transform).
+ * @param ctx argv[0] = on, off or auto.
  * @return 0, or -1 for a bad word, an absent core or a refused request (named reason). Takes effect at the next picture while the profile is high:
- *         that picture is an IDR picture with new parameter sets.
+ *         between off and on or auto that picture is an IDR picture with new parameter sets.
  */
 int cli_encoder_transform8x8(const MenuCommandContext *ctx)
 {
     int on;
     int rc;
     if (cli_word_is(ctx->argv[0], "on")) {
-        on = 1;
+        on = RTLNET_H264_T8_ON;
     } else if (cli_word_is(ctx->argv[0], "off")) {
-        on = 0;
+        on = RTLNET_H264_T8_OFF;
+    } else if (cli_word_is(ctx->argv[0], "auto")) {
+        on = RTLNET_H264_T8_AUTO;
     } else {
-        return cli_bad_value("state (on or off)", ctx->argv[0]);
+        return cli_bad_value("state (on, off or auto)", ctx->argv[0]);
     }
     if (!cli_core_check(&g_core_h264)) {
         return -1;
     }
     rc = rtlnet_venc_set_transform8x8(on);
     if (rc == RTLNET_H264_HP_ERR_NO_SEAM) {
-        fmt_printf("%% Transform8x8 on refused: this build has no High profile seam (CAPS HP_SEAM 0)\n");
+        fmt_printf("%% Transform8x8 %s refused: this build has no High profile seam (CAPS HP_SEAM 0)\n", (on == RTLNET_H264_T8_AUTO) ? "auto" : "on");
         return -1;
     }
     if (rc == RTLNET_H264_HP_ERR_NO_MODULE) {
-        fmt_printf("%% Transform8x8 on refused: the High profile netlist is not in this build (simulation stub)\n");
+        fmt_printf("%% Transform8x8 %s refused: the High profile netlist is not in this build (simulation stub)\n", (on == RTLNET_H264_T8_AUTO) ? "auto" : "on");
         return -1;
     }
     if (rc == RTLNET_H264_HP_ERR_NO_T8) {
-        fmt_printf("%% Transform8x8 on refused: the High profile module offers no 8x8 transform (hp_caps bit 1 is 0)\n");
+        fmt_printf("%% Transform8x8 %s refused: the High profile module offers no 8x8 transform (hp_caps bit 1 is 0)\n", (on == RTLNET_H264_T8_AUTO) ? "auto" : "on");
+        return -1;
+    }
+    if (rc == RTLNET_H264_HP_ERR_NO_AUTO) {
+        fmt_printf("%% Transform8x8 auto refused: the High profile module offers no adaptive transform choice (hp_caps bit 2 is 0)\n");
         return -1;
     }
     if (rc != 0) {
         fmt_printf("%% Transform8x8 change failed (code %d)\n", rc);
         return -1;
     }
-    if (on) {
+    if (on == RTLNET_H264_T8_AUTO) {
+        fmt_printf("Transform8x8 auto, effective at the next picture in the High profile (the module chooses the 4x4 or the 8x8 transform per macroblock; an IDR picture with new parameter sets starts it after off)\n");
+    } else if (on == RTLNET_H264_T8_ON) {
         fmt_printf("Transform8x8 on, effective at the next picture in the High profile (an IDR picture with new parameter sets starts it)\n");
     } else {
         fmt_printf("Transform8x8 off (4x4 transform), effective at the next picture\n");
@@ -3782,8 +3792,20 @@ static void cli_print_transform8x8(void)
         fmt_printf("  Transform 8x8   : not offered (hp_caps bit 1 is 0)\n");
         return;
     }
-    fmt_printf("  Transform 8x8   : %s, %s\n", rtlnet_venc_transform8x8_wanted() ? "on" : "off",
-               rtlnet_venc_transform8x8_in_force() ? "in force (inter macroblocks use the 8x8 transform)" : "not in force (4x4 transform)");
+    {
+        int         want  = rtlnet_venc_transform8x8_wanted();
+        int         force = rtlnet_venc_transform8x8_in_force();
+        uint32_t    n8    = 0u;
+        uint32_t    n4    = 0u;
+        int         adaptive = ((hp.caps & RTLNET_H264_HP_CAP_ADAPTIVE) != 0u) ? 1 : 0;
+        const char *state = (want == RTLNET_H264_T8_AUTO) ? (adaptive ? "auto" : "on") : ((want != 0) ? "on" : "off");
+        const char *use   = (want == RTLNET_H264_T8_AUTO && adaptive) ? "in force (the module chooses the 4x4 or the 8x8 transform per macroblock)" :
+                            "in force (inter macroblocks use the 8x8 transform)";
+        fmt_printf("  Transform 8x8   : %s, %s\n", state, force ? use : "not in force (4x4 transform)");
+        if (force && (rtlnet_venc_transform8x8_counts(&n8, &n4) == 0)) {
+            fmt_printf("  Transform MBs   : last picture 8x8 %u, 4x4 %u\n", (unsigned)n8, (unsigned)n4);
+        }
+    }
 }
 
 /**
@@ -3812,8 +3834,9 @@ static void cli_print_high_profile(uint32_t forced)
     if (hp.caps == 0u) {
         fmt_printf("tools none (hp_caps 0), ");
     } else {
-        fmt_printf("tools%s%s (hp_caps %u), ", (hp.caps & RTLNET_H264_HP_CAP_CABAC) ? " CABAC" : "",
-                   (hp.caps & RTLNET_H264_HP_CAP_TRANSFORM8X8) ? " 8x8-transform" : "", (unsigned)hp.caps);
+        fmt_printf("tools%s%s%s (hp_caps %u), ", (hp.caps & RTLNET_H264_HP_CAP_CABAC) ? " CABAC" : "",
+                   (hp.caps & RTLNET_H264_HP_CAP_TRANSFORM8X8) ? " 8x8-transform" : "",
+                   (hp.caps & RTLNET_H264_HP_CAP_ADAPTIVE) ? " adaptive-choice" : "", (unsigned)hp.caps);
     }
     fmt_printf("profile %s, %u forced IDR pictures\n", hp.enabled ? "high" : "baseline", (unsigned)forced);
 }

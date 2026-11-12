@@ -456,11 +456,11 @@ int main(void)
         check(rtlnet_h264_enc_set_profile(TEST_BASE, 1) == RTLNET_H264_HP_ERR_NO_MODULE, "profile high with the stub refused: no module");
         /* Stage 1 netlist, unlimited: present, licensed, caps 0, seconds 0xFFFF. */
         g_reg[RTLNET_H264_REG_HP_STATUS / 4u] = RTLNET_H264_HP_STATUS_PRESENT | RTLNET_H264_HP_STATUS_LICENSED | (0xFFFFu << 16);
-        g_reg[RTLNET_H264_REG_HP_CTRL / 4u] = 0xA5u;
+        g_reg[RTLNET_H264_REG_HP_CTRL / 4u] = 0xA1u;
         check((rtlnet_h264_enc_hp_status(TEST_BASE, &hp) == 0) && hp.present && hp.licensed && !hp.active && !hp.enabled &&
               (hp.caps == 0u) && (hp.seconds_left == RTLNET_H264_HP_SECONDS_UNLIMITED), "hp_status decode, stage 1 unlimited");
         check(rtlnet_h264_enc_set_profile(TEST_BASE, 1) == RTLNET_H264_HP_ERR_NO_CAPS, "profile high refused: hp_caps is 0");
-        check(g_reg[RTLNET_H264_REG_HP_CTRL / 4u] == 0xA5u, "a refused profile change writes nothing");
+        check(g_reg[RTLNET_H264_REG_HP_CTRL / 4u] == 0xA1u, "a refused profile change writes nothing");
         /* A netlist with CABAC, licensed with 90 s left, then expired. */
         g_reg[RTLNET_H264_REG_HP_STATUS / 4u] = RTLNET_H264_HP_STATUS_PRESENT | RTLNET_H264_HP_STATUS_LICENSED |
                                                 (RTLNET_H264_HP_CAP_CABAC << 8) | (90u << 16);
@@ -510,6 +510,50 @@ int main(void)
         check(rtlnet_h264_enc_set_transform8x8(TEST_BASE, 0) == 0 && g_reg[RTLNET_H264_REG_HP_CTRL / 4u] == 1u, "transform8x8 off keeps hp_enable");
         check(rtlnet_h264_enc_set_transform8x8(TEST_BASE, 1) == 0 && g_reg[RTLNET_H264_REG_HP_CTRL / 4u] == 3u, "transform8x8 on keeps hp_enable");
         check(rtlnet_h264_enc_set_profile(TEST_BASE, 0) == 0 && g_reg[RTLNET_H264_REG_HP_CTRL / 4u] == 2u, "profile baseline keeps the transform8x8 request");
+        /* Stage 3a: the adaptive choice (HP_CTRL bit 2 with bit 1), the macroblock counts. */
+        g_reg[RTLNET_H264_REG_HP_CTRL / 4u] = 0x41u;
+        g_reg[RTLNET_H264_REG_HP_STATUS / 4u] = RTLNET_H264_HP_STATUS_PRESENT | RTLNET_H264_HP_STATUS_LICENSED |
+                                                ((RTLNET_H264_HP_CAP_CABAC | RTLNET_H264_HP_CAP_TRANSFORM8X8) << 8);
+        check(rtlnet_h264_enc_set_transform8x8(TEST_BASE, RTLNET_H264_T8_AUTO) == RTLNET_H264_HP_ERR_NO_AUTO && g_reg[RTLNET_H264_REG_HP_CTRL / 4u] == 0x41u,
+              "transform8x8 auto refused: hp_caps bit 2 is 0, nothing written");
+        check(rtlnet_h264_enc_set_transform8x8(TEST_BASE, 1) == 0 && g_reg[RTLNET_H264_REG_HP_CTRL / 4u] == 3u, "transform8x8 on accepted without hp_caps bit 2");
+        g_reg[RTLNET_H264_REG_HP_STATUS / 4u] = RTLNET_H264_HP_STATUS_PRESENT | RTLNET_H264_HP_STATUS_LICENSED |
+                                                ((RTLNET_H264_HP_CAP_CABAC | RTLNET_H264_HP_CAP_TRANSFORM8X8 | RTLNET_H264_HP_CAP_ADAPTIVE) << 8);
+        g_reg[RTLNET_H264_REG_HP_CTRL / 4u] = 2u;
+        check(rtlnet_h264_enc_set_transform8x8(TEST_BASE, RTLNET_H264_T8_AUTO) == 0 && g_reg[RTLNET_H264_REG_HP_CTRL / 4u] == 6u, "transform8x8 auto: bits 1 and 2 written");
+        check(rtlnet_h264_enc_set_profile(TEST_BASE, 1) == 0 && g_reg[RTLNET_H264_REG_HP_CTRL / 4u] == 7u, "profile high keeps the auto request");
+        check(rtlnet_h264_enc_set_profile(TEST_BASE, 0) == 0 && g_reg[RTLNET_H264_REG_HP_CTRL / 4u] == 6u, "profile baseline keeps the auto request");
+        check(rtlnet_h264_enc_set_profile(TEST_BASE, 1) == 0 && rtlnet_h264_enc_set_transform8x8(TEST_BASE, 1) == 0 && g_reg[RTLNET_H264_REG_HP_CTRL / 4u] == 3u,
+              "transform8x8 on clears the auto request, keeps hp_enable");
+        check(rtlnet_h264_enc_set_transform8x8(TEST_BASE, RTLNET_H264_T8_AUTO) == 0 && rtlnet_h264_enc_set_transform8x8(TEST_BASE, 0) == 0 &&
+              g_reg[RTLNET_H264_REG_HP_CTRL / 4u] == 1u, "transform8x8 off clears bits 1 and 2");
+        check(rtlnet_h264_enc_set_transform8x8(TEST_BASE, 7) == 0 && g_reg[RTLNET_H264_REG_HP_CTRL / 4u] == 3u, "any other non-zero mode is on");
+        g_reg[RTLNET_H264_REG_HP_CTRL / 4u] = 0xA5u;
+        g_reg[RTLNET_H264_REG_HP_STATUS / 4u] = RTLNET_H264_HP_STATUS_PRESENT | RTLNET_H264_HP_STATUS_LICENSED | (RTLNET_H264_HP_CAP_CABAC << 8);
+        check(rtlnet_h264_enc_set_transform8x8(TEST_BASE, RTLNET_H264_T8_AUTO) == RTLNET_H264_HP_ERR_NO_T8 && g_reg[RTLNET_H264_REG_HP_CTRL / 4u] == 0xA5u,
+              "transform8x8 auto refused: hp_caps bit 1 is 0, nothing written");
+        g_reg[RTLNET_H264_REG_HP_STATUS / 4u] = 0u;
+        check(rtlnet_h264_enc_set_transform8x8(TEST_BASE, RTLNET_H264_T8_AUTO) == RTLNET_H264_HP_ERR_NO_MODULE, "transform8x8 auto refused with the stub");
+        g_reg[RTLNET_REG_CAPS / 4u] = MODEL_CAPS;
+        check(rtlnet_h264_enc_set_transform8x8(TEST_BASE, RTLNET_H264_T8_AUTO) == RTLNET_H264_HP_ERR_NO_SEAM, "transform8x8 auto refused without the seam");
+        g_reg[RTLNET_REG_CAPS / 4u] = MODEL_CAPS | RTLNET_H264_CAPS_HP_SEAM;
+        g_reg[RTLNET_H264_REG_HP_STATUS / 4u] = RTLNET_H264_HP_STATUS_PRESENT | RTLNET_H264_HP_STATUS_LICENSED | ((RTLNET_H264_HP_CAP_CABAC | RTLNET_H264_HP_CAP_TRANSFORM8X8 | RTLNET_H264_HP_CAP_ADAPTIVE) << 8) |
+                                                RTLNET_H264_HP_STATUS_T8ENABLED | RTLNET_H264_HP_STATUS_T8AUTO;
+        check((rtlnet_h264_enc_hp_status(TEST_BASE, &hp) == 0) && (hp.t8_enabled == 1u) && (hp.t8_auto == 1u), "hp_status decode, t8 enabled and auto");
+        g_reg[RTLNET_H264_REG_HP_STATUS / 4u] = RTLNET_H264_HP_STATUS_PRESENT | (7u << 8) | RTLNET_H264_HP_STATUS_T8ENABLED;
+        check((rtlnet_h264_enc_hp_status(TEST_BASE, &hp) == 0) && (hp.t8_enabled == 1u) && (hp.t8_auto == 0u), "hp_status decode, t8 enabled, not auto");
+        {
+            uint32_t n8 = 99u;
+            uint32_t n4 = 99u;
+            g_reg[RTLNET_H264_REG_HP_T8COUNT / 4u] = (7u << 16) | 1234u;
+            check(rtlnet_h264_enc_t8_counts(TEST_BASE, &n8, &n4) == 0 && n8 == 1234u && n4 == 7u, "t8_counts: 8x8 low half, 4x4 high half");
+            g_reg[RTLNET_H264_REG_HP_T8COUNT / 4u] = 0xFFFFFFFFu;
+            check(rtlnet_h264_enc_t8_counts(TEST_BASE, &n8, &n4) == 0 && n8 == 0xFFFFu && n4 == 0xFFFFu, "t8_counts: full 16 bit fields");
+            check(rtlnet_h264_enc_t8_counts(TEST_BASE, NULL, &n4) == -1 && rtlnet_h264_enc_t8_counts(TEST_BASE, &n8, NULL) == -1, "t8_counts: NULL pointer");
+            g_reg[RTLNET_REG_CAPS / 4u] = MODEL_CAPS;
+            check(rtlnet_h264_enc_t8_counts(TEST_BASE, &n8, &n4) == RTLNET_H264_HP_ERR_NO_SEAM, "t8_counts without the seam");
+            g_reg[RTLNET_REG_CAPS / 4u] = MODEL_CAPS | RTLNET_H264_CAPS_HP_SEAM;
+        }
         /* The parameter sets with the 8x8 transform: the same SPS, the PPS gains transform_8x8_mode_flag 1, pic_scaling_matrix_present_flag 0,
          * second_chroma_qp_index_offset se(0): three bits, so the PPS is as long or one byte longer. */
         sps3.width = 176u; sps3.height = 144u; sps3.display_width = 176u; sps3.display_height = 144u; sps3.fps = 30u; sps3.log2_max_frame_num = 4u;

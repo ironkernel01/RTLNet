@@ -124,14 +124,18 @@ void venc_get_status(venc_status_t *out);
 void venc_clear_counters(void);
 
 /*
- * 8x8 transform of inter macroblocks (High profile module with hp_caps bit 1). rtlnet_venc_set_transform8x8: request it (on != 0, the default) or the
- * 4x4 transform; returns the driver's result (0, or RTLNET_H264_HP_ERR_NO_SEAM / _NO_MODULE / _NO_T8 for on). The change takes effect at the next
- * picture start while the profile is High: that picture is a forced IDR picture and the parameter sets are rewritten (PPS transform_8x8_mode_flag).
- * rtlnet_venc_transform8x8_wanted: the request. rtlnet_venc_transform8x8_in_force: 1 when the pictures use the transform now (High profile in
- * force, requested, offered).
+ * Transform of inter macroblocks (High profile module with hp_caps bit 1). rtlnet_venc_set_transform8x8: RTLNET_H264_T8_OFF (0, the 4x4 transform),
+ * RTLNET_H264_T8_ON (1, the 8x8 transform on every inter macroblock) or RTLNET_H264_T8_AUTO (2, the default: the module chooses per macroblock);
+ * returns the driver's result (0, or RTLNET_H264_HP_ERR_NO_SEAM / _NO_MODULE / _NO_T8 for on and auto, _NO_AUTO for auto without hp_caps bit 2; the default auto degrades to on without bit 2). The change takes effect at the next
+ * picture start while the profile is High: between off and on or auto that picture is a forced IDR picture and the parameter sets are rewritten
+ * (PPS transform_8x8_mode_flag); between on and auto nothing else changes.
+ * rtlnet_venc_transform8x8_wanted: the request (0, 1 or 2). rtlnet_venc_transform8x8_in_force: 1 when the pictures use the transform now (High
+ * profile in force, requested, offered). rtlnet_venc_transform8x8_counts: the macroblocks of the last picture coded with the 8x8 and with the 4x4
+ * transform (0, or the driver's error).
  */
-int rtlnet_venc_set_transform8x8(int on);
+int rtlnet_venc_set_transform8x8(int mode);
 int rtlnet_venc_transform8x8_wanted(void);
 int rtlnet_venc_transform8x8_in_force(void);
+int rtlnet_venc_transform8x8_counts(uint32_t *n8, uint32_t *n4);
 
 #endif /* RTLNET_VENC_H */

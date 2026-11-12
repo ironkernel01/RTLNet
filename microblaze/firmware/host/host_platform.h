@@ -75,6 +75,8 @@ void        host_model_h264_set(int on, int seam);
 void        host_model_h264_hp(uint32_t present, uint32_t licensed, uint32_t caps, uint32_t seconds);
 uint32_t    host_model_h264_hp_ctrl(void);
 uint32_t    host_model_h264_hp_ctrl_t8(void);
+uint32_t    host_model_h264_hp_ctrl_auto(void);
+void        host_model_h264_t8_counts(uint32_t n8, uint32_t n4);
 void        host_model_txo_set(int present, uint32_t caps);
 void        host_model_txo_idle_after(uint32_t reads);
 void        host_model_txo_stuck(uint32_t mask);

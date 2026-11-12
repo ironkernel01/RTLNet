@@ -23,8 +23,8 @@ module rtlnet_h264_hp #(
   input  logic              resetn,
 
   // Status and control, clk domain: hp_enable is the register-block enable bit; hp_present is 1 in the delivered module and 0 in the stub; hp_licensed is 1 while High
-  // profile coding is allowed; hp_seconds_left is the license time left (16'hFFFF unlimited); hp_caps bit 0 CABAC, bit 1 8x8
-  // transform (bits 3:2 reserved 0); hp_active is high from pic_start to pic_done when this module codes the picture.
+  // profile coding is allowed; hp_seconds_left is the license time left (16'hFFFF unlimited); hp_caps bit 0 CABAC, bit 1 8x8, bit 2 adaptive choice
+  // transform (bit 3 reserved 0); hp_active is high from pic_start to pic_done when this module codes the picture.
   input  logic              hp_enable,
   // hp_t8_enable: the register block's 8x8 transform enable bit (applied with hp_enable at a picture start).
   input  logic              hp_t8_enable,
@@ -85,9 +85,11 @@ module rtlnet_h264_hp #(
 
   // 8x8 transform seam, clk domain. tf_req is high while the module wants the 8x8 transform for the current macroblock.
   // tf_res: residual of an 8x8 block from the engine, one row of 8 signed 9-bit samples per beat (sample 0 in bits [8:0]), 8 beats
-  // per block, tf_res_last on the 8th. tf_rec: the rebuilt residual (after quantization, dequantization and the inverse transform) of
-  // the block, same layout, to the engine's rebuild loop. tf_lvl: the quantized levels of the block, one row of 8 signed 16-bit
-  // levels per beat (level 0 in bits [15:0]) in raster order, tf_lvl_last on the 8th beat. Tied off in stages 1 and 2.
+  // per block. tf_res_last high with tf_res_valid is a request beat that carries no residual: it precedes a macroblock's 32 residual beats and
+  // asks the module for its choice of the 4x4 or the 8x8 transform (tf_lvl_data[26], 1 = 4x4; stage 3a, adaptive mode). tf_rec: the rebuilt
+  // residual (after quantization, dequantization and the inverse transform) of the block, same layout, to the engine's rebuild loop (none for
+  // a macroblock that chose the 4x4 transform). tf_lvl: one summary beat per macroblock (see the module's documentation), tf_lvl_last with it.
+  // Tied off in stages 1 and 2.
   output logic              tf_req,
   input  logic              tf_res_valid,
   output logic              tf_res_ready,

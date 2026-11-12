@@ -70,12 +70,20 @@
 //       the rebuilt residual back (tf_rec) and writes the luma words (prediction plus residual, clipped, zero residual when the macroblock was
 //       dropped) into the rebuilt RAM, then PASS3 rebuilds the chroma blocks; S_DRN takes and discards it when the macroblock falls back to I_PCM.
 //       o_t8sub tells stage B (and the module) that the luma residual was submitted. With T8 = 0 nothing of this exists.
+//   * Adaptive choice (stage 3a, T8 = 1 and the input t8_auto): the inter candidate that wins first sends a request beat on tf_res (tf_res_last
+//       high, no residual) and the macroblock's residual (S_T8S as above); PASS1 then runs the chroma blocks (items 64..95) as above, and the
+//       summary beat of the module carries its choice (tf_sum_data[26], 1 = the 4x4 transform). Chosen 8x8 (the module's rule, private to the module):
+//       the macroblock continues as the 8x8 transform macroblock above (t8_use_q set when the summary is in). Chosen 4x4: state S_T8L runs PASS1 for
+//       the luma blocks (items 0..63) as the 4x4 encoder does, the estimate, decisions, rebuild and descriptor are those of the 4x4 macroblock
+//       (the module released its levels and sends no rebuilt residual; o_t8sub stays 1 so that the module's banks keep in step, o_t8use is 0).
+//       Without t8_auto the 8x8 transform is used on every inter macroblock as in stage 3. o_t8use: the macroblock is coded with the 8x8 transform.
 // Language: SystemVerilog-2012.
 // Revision: 11-12-2026
 //   * 11-09-2026: initial version; per-macroblock I_PCM fallback.
 //   * 11-10-2026: phase 2c-1: P pictures (inter candidate, skip, inter residual and rebuild, motion vector context).
 //   * 11-10-2026: phase 2c-2: the inter vector comes from the motion search (mv_in_x / mv_in_y); P_Skip at the exact skip vector.
 //   * 11-12-2026: stage 3: 8x8 transform of inter luma on the High profile seam (parameter T8).
+//   * 11-12-2026: stage 3a: adaptive choice of the transform per macroblock (t8_auto, request beat, S_T8L, o_t8use).
 // Clocks: clk.
 // -----------------------------------------------------------------------------
 module rtlnet_h264_mb_enc #(
@@ -131,17 +139,21 @@ module rtlnet_h264_mb_enc #(
   // t8_en: the picture's inter macroblocks use the 8x8 transform. o_t8sub: this macroblock submitted its luma residual (valid with done).
   // tf_res: 4 blocks x 8 beats, one row of 8 signed 9-bit residual samples per beat; tf_rec: the rebuilt residual in the same form;
   // tf_sum: one beat per submitted macroblock: [3:0] non-zero 8x8 blocks, [19:4] level cost sum, [20] a level above 1, [21] a clamped level,
-  // [25:22] number of non-empty blocks.
+  // [25:22] number of non-empty blocks, [26] the module's choice of the 4x4 transform (only after a request beat: tf_res_last high, no residual).
+  // t8_auto: the picture lets the module choose the transform per macroblock. o_t8use: this macroblock is coded with the 8x8 transform.
   input  logic                t8_en,
+  input  logic                t8_auto,
   output logic                o_t8sub,
+  output logic                o_t8use,
   output logic                tf_res_valid,
+  output logic                tf_res_last,
   input  logic                tf_res_ready,
   output logic [71:0]         tf_res_data,
   input  logic                tf_rec_valid,
   output logic                tf_rec_ready,
   input  logic [71:0]         tf_rec_data,
   input  logic                tf_sum_valid,
-  input  logic [25:0]         tf_sum_data,
+  input  logic [26:0]         tf_sum_data,
 
   // Prediction buffer read port (the motion search's prediction of this macroblock): ref_rd_data is valid the clock after ref_rd_en.
   output logic                ref_rd_en,
@@ -210,6 +222,7 @@ module rtlnet_h264_mb_enc #(
   localparam logic [4:0] S_T8S   = 5'd20;   // 8x8 transform: send the luma residual
   localparam logic [4:0] S_T8R   = 5'd21;   // 8x8 transform: rebuild the luma
   localparam logic [4:0] S_DRN   = 5'd22;   // 8x8 transform: discard the rebuilt residual (I_PCM fallback)
+  localparam logic [4:0] S_T8L   = 5'd23;   // adaptive choice: the module chose the 4x4 transform, PASS1 of the luma blocks
 
   generate
     if ((2 * MAX_MB_W) > (1 << LINE_AW)) begin : g_line_small
@@ -306,9 +319,16 @@ module rtlnet_h264_mb_enc #(
   logic               t8_use_q;          // this macroblock sends its luma residual to the 8x8 transform (a register of g_t8, constant 0 with T8 = 0)
   /* verilator lint_off UNUSEDSIGNAL */   // used by g_t8 only
   logic               t8_use_clr;        // the macroblock starts: clear it
-  logic               t8_use_set;        // the inter candidate won in a picture with the 8x8 transform: set it (and o_t8sub)
+  logic               t8_use_set;        // the inter candidate won in a picture with the 8x8 transform: set it
+  logic               t8_sub_set;        // ... and o_t8sub
+  logic               t8_auto_mb;        // the macroblock asked the module for its choice (a g_t8 register)
+  logic               t8_rej_q;          // the module chose the 4x4 transform for it (a g_t8 register)
+  logic               t8_lum_q;          // the luma pass of the 4x4 transform has been started (a g_t8 register)
+  logic               t8_acc_set;        // the module chose the 8x8 transform: the summary is in
+  logic               p1w_ok;            // PASS1 of the macroblock's blocks is complete
   assign t8_use_clr = (st == S_IDLE) && start;
-  assign t8_use_set = (st == S_MD2) && t8_en && (cost_in <= cost_ia);
+  assign t8_sub_set = (st == S_MD2) && t8_en && (cost_in <= cost_ia);
+  assign t8_use_set = t8_sub_set && !t8_auto;
   /* verilator lint_on UNUSEDSIGNAL */
   logic               t8s_done;
   logic               t8r_done;
@@ -333,6 +353,8 @@ module rtlnet_h264_mb_enc #(
   logic [15:0]        t8_nb4_g;
   logic               t8_sat_g;
   logic               t8_big_g;
+  assign p1w_ok = (fq_rows == 7'd96) && dqy_done_q && dqcb_done_q && dqcr_done_q && (!o_t8sub || t8_sum_seen);
+  assign t8_acc_set = T8 && (st == S_P1W) && p1w_ok && t8_auto_mb && !t8_lum_q && !t8_rej_q;
   assign t8_cost_g = (T8 && t8_use_q) ? t8_cost : 16'd0;
   assign t8_nb4_g  = (T8 && t8_use_q) ? {10'd0, t8_nblk, 2'b00} : 16'd0;
   assign t8_sat_g  = T8 && t8_use_q && t8_sat;
@@ -749,7 +771,7 @@ module rtlnet_h264_mb_enc #(
 
   assign iq_in_v     = p3_s1_v;
   assign iq_in_first = (p3_s1_r == 2'd0);
-  assign nz8_e       = drop_q ? 4'd0 : ((T8 && t8_use_q) ? (nz8 | t8_nz4) : nz8);
+  assign nz8_e       = drop_q ? 4'd0 : ((T8 && t8_use_q) ? t8_nz4 : nz8);
   assign iq_in_lvl   = drop_q ? 48'd0 : cof_rdata;
   assign iq_in_tag   = {3'd0, p3_s1_b};
   assign iq_in_full  = inter_q && (p3_s1_b < 5'd16);
@@ -789,20 +811,38 @@ module rtlnet_h264_mb_enc #(
   // ---------------------------------------------------------------------------
   generate
     if (T8) begin : g_t8
-      // The decision of the macroblock (set in S_MD2, cleared at the start of the next macroblock) and the flag for stage B.
+      // The decision of the macroblock (set in S_MD2 without t8_auto, else when the module's choice is in; cleared at the start of the next
+      // macroblock), the flag for stage B (the macroblock submitted its residual) and the request / choice bookkeeping of the adaptive mode.
+      logic mk_pend;                  // the request beat has still to be sent
+      logic res_last_q;
+      assign o_t8use     = t8_use_q;
+      assign tf_res_last = res_last_q;
       always_ff @(posedge clk) begin
         if (!resetn) begin
-          t8_use_q <= 1'b0;
-          o_t8sub  <= 1'b0;
+          t8_use_q   <= 1'b0;
+          o_t8sub    <= 1'b0;
+          t8_auto_mb <= 1'b0;
+          t8_rej_q   <= 1'b0;
+          t8_lum_q   <= 1'b0;
+          mk_pend    <= 1'b0;
         end else begin
           if (t8_use_clr) begin
-            t8_use_q <= 1'b0;
-            o_t8sub  <= 1'b0;
+            t8_use_q   <= 1'b0;
+            o_t8sub    <= 1'b0;
+            t8_auto_mb <= 1'b0;
+            t8_rej_q   <= 1'b0;
+            t8_lum_q   <= 1'b0;
+            mk_pend    <= 1'b0;
           end
-          if (t8_use_set) begin
-            t8_use_q <= 1'b1;
-            o_t8sub  <= 1'b1;
+          if (t8_sub_set) o_t8sub <= 1'b1;
+          if (t8_use_set || t8_acc_set) t8_use_q <= 1'b1;
+          if (t8_sub_set && t8_auto) begin
+            t8_auto_mb <= 1'b1;
+            mk_pend    <= 1'b1;
           end
+          if (mk_pend && res_v && tf_res_ready && res_last_q) mk_pend <= 1'b0;
+          if (tf_sum_valid && t8_auto_mb) t8_rej_q <= tf_sum_data[26];
+          if (st == S_T8L) t8_lum_q <= 1'b1;
         end
       end
 
@@ -839,16 +879,26 @@ module rtlnet_h264_mb_enc #(
       logic       fd_rd;
       assign fd_y   = {fd_cnt[4], fd_cnt[2:0]};
       assign fd_gx  = fd_cnt[3];
-      assign fd_rd  = (st == S_T8S) && (fd_ph == 2'd0) && (fd_cnt != 6'd32);
+      assign fd_rd  = (st == S_T8S) && !mk_pend && (fd_ph == 2'd0) && (fd_cnt != 6'd32);
       assign tf_res_valid = res_v;
       assign tf_res_data  = res_d;
       assign t8s_done     = (st == S_T8S) && (fd_cnt == 6'd32) && !res_v;
 
       always_ff @(posedge clk) begin
         if (!resetn || (st != S_T8S)) begin
-          fd_cnt <= 6'd0;
-          fd_ph  <= 2'd0;
-          res_v  <= 1'b0;
+          fd_cnt     <= 6'd0;
+          fd_ph      <= 2'd0;
+          res_v      <= 1'b0;
+          res_last_q <= 1'b0;
+        end else if (mk_pend) begin
+          // The request beat (no residual) of the adaptive mode.
+          if (!res_v) begin
+            res_v      <= 1'b1;
+            res_last_q <= 1'b1;
+          end else if (tf_res_ready) begin
+            res_v      <= 1'b0;
+            res_last_q <= 1'b0;
+          end
         end else begin
           case (fd_ph)
             2'd0: if (fd_cnt != 6'd32) fd_ph <= 2'd1;
@@ -951,6 +1001,11 @@ module rtlnet_h264_mb_enc #(
     end else begin : g_no_t8
       assign t8_use_q     = 1'b0;
       assign o_t8sub      = 1'b0;
+      assign o_t8use      = 1'b0;
+      assign tf_res_last  = 1'b0;
+      assign t8_auto_mb   = 1'b0;
+      assign t8_rej_q     = 1'b0;
+      assign t8_lum_q     = 1'b0;
       assign t8s_done     = 1'b0;
       assign t8r_done     = 1'b0;
       assign drn_done     = 1'b0;
@@ -974,7 +1029,7 @@ module rtlnet_h264_mb_enc #(
       assign tf_rec_ready = 1'b0;
       /* verilator lint_off UNUSEDSIGNAL */
       logic unused_t8;
-      assign unused_t8 = &{1'b0, tf_res_ready, tf_rec_valid, tf_rec_data, tf_sum_valid, tf_sum_data, t8_en};
+      assign unused_t8 = &{1'b0, tf_res_ready, tf_rec_valid, tf_rec_data, tf_sum_valid, tf_sum_data, t8_en, t8_auto};
       /* verilator lint_on UNUSEDSIGNAL */
     end
   endgenerate
@@ -1376,7 +1431,7 @@ module rtlnet_h264_mb_enc #(
 
         S_P1: begin
           if (iss_run) begin
-            if (iss_n == 7'd95) begin
+            if (iss_n == ((T8 && t8_lum_q) ? 7'd63 : 7'd95)) begin
               iss_run <= 1'b0;
               st      <= S_P1W;
             end
@@ -1386,7 +1441,7 @@ module rtlnet_h264_mb_enc #(
 
         // Wait for all coefficient rows written and the three DC units finished.
         S_P1W: begin
-          if ((fq_rows == 7'd96) && dqy_done_q && dqcb_done_q && dqcr_done_q && (!T8 || !t8_use_q || t8_sum_seen)) begin
+          if (p1w_ok) begin
             st    <= S_CHK;
             dcw_n <= '0;
           end
@@ -1533,6 +1588,18 @@ module rtlnet_h264_mb_enc #(
           p3_run  <= 1'b1;
           sel_p3  <= 1'b1;
           st      <= S_P3;
+        end
+        // Adaptive choice: the module chose the 4x4 transform, so PASS1 of the luma blocks (items 0..63) still has to run, after the chroma blocks that
+        // are done: the row and DC bookkeeping start like a 4x4 macroblock's (the chroma rows and DCs are in).
+        if ((st == S_P1W) && p1w_ok && t8_auto_mb && !t8_lum_q && t8_rej_q) st <= S_T8L;
+        if (st == S_T8L) begin
+          iss_n      <= 7'd0;
+          iss_run    <= 1'b1;
+          cnt        <= '0;
+          fq_rows    <= 7'd32;
+          dc_cnt     <= 5'd0;
+          dqy_done_q <= 1'b0;
+          st         <= S_P1;
         end
         // I_PCM fallback: the rebuilt residual is taken and discarded, then the I_PCM copy.
         if ((st == S_DRN) && drn_done) st <= S_PCM;

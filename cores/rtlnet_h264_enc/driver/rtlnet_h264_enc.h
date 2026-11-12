@@ -101,8 +101,10 @@
 #define RTLNET_H264_REG_PK_CYC           0x0ACu   /* RO, clocks the macroblock coder was busy */
 #define RTLNET_H264_REG_WR_CYC           0x0B0u   /* RO, clocks the write master was busy */
 #define RTLNET_H264_REG_HP_CTRL          0x0C0u   /* [0] hp_enable (settable only while hp_caps is not 0), [1] hp_t8_enable (8x8 transform of inter macroblocks, settable
-                                                     only while hp_caps bit 1 is set), HIGH_PROFILE builds */
+                                                     only while hp_caps bit 1 is set), [2] hp_t8_auto (with bit 1: the transform is chosen per macroblock), HIGH_PROFILE builds */
 #define RTLNET_H264_REG_HP_STATUS        0x0C4u   /* HIGH_PROFILE builds, see RTLNET_H264_HP_STATUS_* */
+#define RTLNET_H264_REG_HP_T8COUNT       0x0C8u   /* RO, HIGH_PROFILE builds: [15:0] macroblocks of the last picture coded with the 8x8 transform, [31:16] with the 4x4
+                                                     transform (inter macroblocks with luma residual, all engines added) */
 
 /* CTRL bits. */
 #define RTLNET_H264_CTRL_START           (1u << 0)    /* self-clearing: code one picture */
@@ -123,11 +125,13 @@
 #define RTLNET_H264_HP_STATUS_CHG        (1u << 4)    /* PROFILE_CHG: a picture start applied a changed license or enable and was coded as a
                                                        * forced IDR picture; sticky, write 1 to clear */
 #define RTLNET_H264_HP_STATUS_T8ENABLED  (1u << 5)    /* hp_t8_enable */
+#define RTLNET_H264_HP_STATUS_T8AUTO     (1u << 6)    /* hp_t8_auto: the transform is chosen per macroblock */
 #define RTLNET_H264_HP_STATUS_CAPS_SHIFT 8u           /* [11:8] hp_caps */
 #define RTLNET_H264_HP_STATUS_CAPS_MASK  0xFu
 #define RTLNET_H264_HP_STATUS_SEC_SHIFT  16u          /* [31:16] license seconds left, 0xFFFF unlimited */
 #define RTLNET_H264_HP_CAP_CABAC         (1u << 0)
 #define RTLNET_H264_HP_CAP_TRANSFORM8X8  (1u << 1)
+#define RTLNET_H264_HP_CAP_ADAPTIVE      (1u << 2)    /* the module chooses the 4x4 or the 8x8 transform per macroblock (hp_t8_auto) */
 #define RTLNET_H264_HP_SECONDS_UNLIMITED 0xFFFFu
 
 /* Named errors of the profile functions (negative return values besides -1). */
@@ -136,6 +140,7 @@
 #define RTLNET_H264_HP_ERR_NOT_LICENSED  (-4)   /* the license has ended */
 #define RTLNET_H264_HP_ERR_NO_MODULE     (-5)   /* the seam is built but the module is the simulation stub (not present) */
 #define RTLNET_H264_HP_ERR_NO_T8         (-6)   /* the module offers no 8x8 transform (hp_caps bit 1 is 0) */
+#define RTLNET_H264_HP_ERR_NO_AUTO       (-7)   /* the module offers no adaptive transform choice (hp_caps bit 2 is 0): auto refused */
 
 /* ERR_CODE values (hdl/rtlnet_h264_pkg.sv ERR_*). */
 #define RTLNET_H264_ERR_NONE             0u
@@ -217,6 +222,7 @@ typedef struct {
     uint32_t active;
     uint32_t enabled;
     uint32_t t8_enabled;     /* hp_t8_enable: the 8x8 transform of inter macroblocks is requested */
+    uint32_t t8_auto;        /* hp_t8_auto: with t8_enabled, the module chooses the transform per macroblock */
     uint32_t profile_chg;
     uint32_t caps;           /* RTLNET_H264_HP_CAP_* */
     uint32_t seconds_left;   /* 0xFFFF unlimited */
@@ -316,11 +322,23 @@ int rtlnet_h264_enc_hp_status(uintptr_t base, rtlnet_h264_enc_hp_t *out);
  * coded as an IDR picture: the caller writes new parameter sets for the profile in force. */
 int rtlnet_h264_enc_set_profile(uintptr_t base, int high);
 
-/* Request the 8x8 transform of inter macroblocks (on != 0, HP_CTRL bit 1 = 1) or the 4x4 transform (0); hp_enable (bit 0) is kept. On is refused,
- * with nothing written, by a named error checked in this order: RTLNET_H264_HP_ERR_NO_SEAM, _NO_MODULE (the stub), _NO_T8 (hp_caps bit 1 is 0).
- * Off is always accepted (0 without a seam). Effective at the next picture start while the profile is High; that picture is coded as an IDR
- * picture and the caller writes new parameter sets (rtlnet_h264_enc_write_sps_pps_tools with the 8x8 transform in force). */
-int rtlnet_h264_enc_set_transform8x8(uintptr_t base, int on);
+/* The transform of inter macroblocks, rtlnet_h264_enc_set_transform8x8 modes. */
+#define RTLNET_H264_T8_OFF   0     /* the 4x4 transform */
+#define RTLNET_H264_T8_ON    1     /* the 8x8 transform on every inter macroblock */
+#define RTLNET_H264_T8_AUTO  2     /* the module chooses the 4x4 or the 8x8 transform per macroblock */
+
+/* Select the transform of inter macroblocks: RTLNET_H264_T8_OFF (0: the 4x4 transform), _ON (1, or any other non-zero value except 2: the 8x8 transform on
+ * every inter macroblock; HP_CTRL bit 1 = 1) or _AUTO (2: the module chooses per macroblock; bits 1 and 2); hp_enable (bit 0) is kept. On and auto are
+ * refused, with nothing written, by a named error checked in this order: RTLNET_H264_HP_ERR_NO_SEAM, _NO_MODULE (the stub), _NO_T8 (hp_caps bit 1 is 0),
+ * and for auto RTLNET_H264_HP_ERR_NO_AUTO (hp_caps bit 2 is 0).
+ * Off is always accepted (0 without a seam). Effective at the next picture start while the profile is High; a change between off and on or auto is
+ * coded as an IDR picture and the caller writes new parameter sets (rtlnet_h264_enc_write_sps_pps_tools with the 8x8 transform in force); a change
+ * between on and auto needs neither (the parameter sets are the same). */
+int rtlnet_h264_enc_set_transform8x8(uintptr_t base, int mode);
+
+/* The numbers of macroblocks of the last picture coded with the 8x8 transform (n8) and with the 4x4 transform (n4): inter macroblocks with a coded luma
+ * block. 0 on success, RTLNET_H264_HP_ERR_NO_SEAM without a seam, -1 for a NULL pointer. */
+int rtlnet_h264_enc_t8_counts(uintptr_t base, uint32_t *n8, uint32_t *n4);
 
 /* Clear PROFILE_CHG (write 1) and return 1 when it was set, 0 when it was not (-1 on a build without the seam). */
 int rtlnet_h264_enc_hp_clear_change(uintptr_t base);

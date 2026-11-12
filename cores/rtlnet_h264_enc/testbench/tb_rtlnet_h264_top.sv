@@ -715,7 +715,9 @@ module tb_rtlnet_h264_top;
     reg_write(R_SLICES, SLICES);
     reg_write(R_QP, QP);
 `ifdef TB_HP_ENABLE
-`ifdef TB_HP_T8
+`ifdef TB_HP_T8AUTO
+    reg_write(12'h0C0, 32'h7);     // HP_CTRL.hp_enable, hp_t8_enable and hp_t8_auto: High profile, the transform of inter macroblocks chosen per macroblock
+`elsif TB_HP_T8
     reg_write(12'h0C0, 32'h3);     // HP_CTRL.hp_enable and hp_t8_enable: High profile with the 8x8 transform of inter macroblocks
 `else
     reg_write(12'h0C0, 32'h1);     // HP_CTRL.hp_enable: the High profile module codes the pictures
@@ -817,7 +819,9 @@ module tb_rtlnet_h264_top;
 
 `ifdef TB_DUMP_MB
   // Macroblock dump of stage B's input (the descriptor, the coefficient RAM words it reads and the slice events), one text
-  // line per item, for the reference models of entropy coders (+DUMP=<file>): S (slice start), M (macroblock), W (coefficient
+  // line per item, for the reference models of entropy coders (+DUMP=<file>): S (slice start; the last two fields: the picture's PPS has the 8x8
+  // transform mode flag, the module chooses the transform per macroblock), M (macroblock; the last two fields: the macroblock submitted its luma
+  // residual (R lines), and the macroblock uses the 8x8 transform), R (residual row of the 8x8 transform stream, not the request beat), W (coefficient
   // RAM word read by the entropy coder), D (clocks the entropy coder took for the macroblock: stage B's start to its done), E (slice
   // end). W lines follow their M line; idx is the word index inside the bank.
   integer dmp_f;
@@ -837,22 +841,27 @@ module tb_rtlnet_h264_top;
         if (resetn && (dmp_f != 0)) begin
           dst_q <= dut.g_engine[gd].u_engine.st;
           if ((dut.g_engine[gd].u_engine.st == 5'd7) && (dst_q != 5'd7))
-            $fdisplay(dmp_f, "S %0d %0d %0d %0d %0d %0d %0d %0d", gd, dut.g_engine[gd].u_engine.mbn, dut.g_engine[gd].u_engine.cfg_qp,
+            $fdisplay(dmp_f, "S %0d %0d %0d %0d %0d %0d %0d %0d %0d", gd, dut.g_engine[gd].u_engine.mbn, dut.g_engine[gd].u_engine.cfg_qp,
                       dut.g_engine[gd].u_engine.e_p, dut.g_engine[gd].u_engine.e_idr, dut.g_engine[gd].u_engine.e_frame_num,
-                      dut.g_engine[gd].u_engine.e_idr_pic_id, dut.g_engine[gd].u_engine.t8_req);
+                      dut.g_engine[gd].u_engine.e_idr_pic_id, dut.g_engine[gd].u_engine.t8_req, dut.g_engine[gd].u_engine.t8_auto_pic);
           if ((dut.g_engine[gd].u_engine.st == 5'd18) && (dst_q != 5'd18)) $fdisplay(dmp_f, "E %0d", gd);
           if (dut.g_engine[gd].u_engine.b_go) begin
             logic bbk;
             bbk = dut.g_engine[gd].u_engine.bb;
-            $fdisplay(dmp_f, "M %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d", gd,
+            $fdisplay(dmp_f, "M %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d %0d", gd,
                       dut.g_engine[gd].u_engine.bi_x[bbk], dut.g_engine[gd].u_engine.bi_avt[bbk], dut.g_engine[gd].u_engine.bi_avl[bbk],
                       dut.g_engine[gd].u_engine.bi_pcm[bbk], dut.g_engine[gd].u_engine.bi_mode[bbk], dut.g_engine[gd].u_engine.bi_cbpc[bbk],
                       dut.g_engine[gd].u_engine.bi_cbpl[bbk], dut.g_engine[gd].u_engine.bi_cm[bbk], dut.g_engine[gd].u_engine.bi_inter[bbk],
                       dut.g_engine[gd].u_engine.bi_skip[bbk], dut.g_engine[gd].u_engine.bi_cbp4[bbk],
                       $signed(dut.g_engine[gd].u_engine.bi_mvdx[bbk]), $signed(dut.g_engine[gd].u_engine.bi_mvdy[bbk]), dut.g_engine[gd].u_engine.cof_base_b,
-                      dut.g_engine[gd].u_engine.bi_t8sub[bbk]);
+                      dut.g_engine[gd].u_engine.bi_t8sub[bbk],
+`ifdef TB_HP_ENABLE
+                      dut.g_engine[gd].u_engine.g_hp.u_hp.t8_sub_eff);     // the macroblock uses the 8x8 transform (submitted and not given back to the 4x4 transform)
+`else
+                      1'b0);
+`endif
           end
-          if (dut.g_engine[gd].u_engine.tf_res_v && dut.g_engine[gd].u_engine.tf_res_r)
+          if (dut.g_engine[gd].u_engine.tf_res_v && dut.g_engine[gd].u_engine.tf_res_r && !dut.g_engine[gd].u_engine.tf_res_l)
             $fdisplay(dmp_f, "R %0d %018x", gd, dut.g_engine[gd].u_engine.tf_res_d);
 `ifdef TB_DUMP_TOK
           // The binarisation's tokens of the High profile module (kind 0 decision, 1 bypass, 2 terminate), for the comparison with the model.

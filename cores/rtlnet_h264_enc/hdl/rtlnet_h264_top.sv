@@ -187,6 +187,11 @@ module rtlnet_h264_top #(
   // caps; licensed and caps are the AND over the engines, active the OR, the change pulse the OR).
   logic                      hp_enable;
   logic                      hp_t8_enable;
+  logic                      hp_t8_auto;
+  logic [NUM_ENGINES*16-1:0] eng_t8_n8;
+  logic [NUM_ENGINES*16-1:0] eng_t8_n4;
+  logic [15:0]               hp_t8_n8;
+  logic [15:0]               hp_t8_n4;
   logic [NUM_ENGINES-1:0]    eng_hp_present;
   logic [NUM_ENGINES-1:0]    eng_hp_licensed;
   // The status register shows engine 0's seconds left (the engines' timers run alike).
@@ -197,6 +202,15 @@ module rtlnet_h264_top #(
   logic [NUM_ENGINES-1:0]    eng_hp_active;
   logic [NUM_ENGINES-1:0]    eng_hp_chg;
   logic [3:0]                hp_caps_all;
+
+  always_comb begin
+    hp_t8_n8 = 16'd0;
+    hp_t8_n4 = 16'd0;
+    for (int k = 0; k < NUM_ENGINES; k++) begin
+      hp_t8_n8 = hp_t8_n8 + eng_t8_n8[k*16 +: 16];
+      hp_t8_n4 = hp_t8_n4 + eng_t8_n4[k*16 +: 16];
+    end
+  end
 
   always_comb begin
     hp_caps_all = 4'hF;
@@ -313,7 +327,7 @@ module rtlnet_h264_top #(
     .cfg_ring_base(cfg_ring_base), .cfg_ring_size(cfg_ring_size), .cfg_idx_base(cfg_idx_base),
     .cfg_idx_entries(cfg_idx_entries),
     .rptr_wr(rptr_wr), .rptr_val(rptr_val), .idx_rptr_wr(idx_rptr_wr), .idx_rptr_val(idx_rptr_val),
-    .hp_enable(hp_enable), .hp_t8_enable(hp_t8_enable), .hp_present(&eng_hp_present), .hp_licensed(&eng_hp_licensed), .hp_active(|eng_hp_active),
+    .hp_enable(hp_enable), .hp_t8_enable(hp_t8_enable), .hp_t8_auto(hp_t8_auto), .hp_t8_n8(hp_t8_n8), .hp_t8_n4(hp_t8_n4), .hp_present(&eng_hp_present), .hp_licensed(&eng_hp_licensed), .hp_active(|eng_hp_active),
     .hp_caps(hp_caps_all), .hp_seconds_left(eng_hp_seconds[15:0]), .hp_chg(|eng_hp_chg),
     .busy(busy_all), .done(done_all), .slice_pulse(|eng_slice),
     .err_cfg(|eng_err_cfg), .err_axi(|eng_err_axi), .err_rptr(|eng_err_rp), .err_busy(|eng_err_bsy),
@@ -333,7 +347,8 @@ module rtlnet_h264_top #(
         .HIGH_PROFILE(HIGH_PROFILE)
       ) u_engine (
         .clk(enc_clk), .resetn(enc_resetn),
-        .hp_enable(hp_enable), .hp_t8_enable(hp_t8_enable), .hp_present(eng_hp_present[e]), .hp_licensed(eng_hp_licensed[e]),
+        .hp_enable(hp_enable), .hp_t8_enable(hp_t8_enable), .hp_t8_auto(hp_t8_auto), .hp_t8_n8(eng_t8_n8[e*16 +: 16]), .hp_t8_n4(eng_t8_n4[e*16 +: 16]),
+        .hp_present(eng_hp_present[e]), .hp_licensed(eng_hp_licensed[e]),
         .hp_seconds_left(eng_hp_seconds[e*16 +: 16]), .hp_caps(eng_hp_caps[e*4 +: 4]), .hp_active(eng_hp_active[e]),
         .hp_chg(eng_hp_chg[e]),
         .start(start), .busy(eng_busy[e]), .done(eng_done[e]), .err_cfg(eng_err_cfg[e]), .err_axi(eng_err_axi[e]),
