@@ -10,7 +10,13 @@
 //   * CTRL: bit 0 START (self-clearing strobe), bit 1 RING_RESET (self-clearing strobe), bit 8 IRQ_EN.
 //     STATUS: bit 0 BUSY, bit 1 DONE (set when a picture is complete, write 1 to clear), bit 2 ERR
 //     (set by any error pulse, write 1 to clear), bit 3 RING_STALL (live). ERR_CODE holds the
-//     first error code since the last ERR clear. irq is high while IRQ_EN and (DONE or ERR).
+//     first error code since the last ERR clear.
+//   * Interrupt (VERSION 0x11122C03, CAPS bit 21): IRQ_STATUS (0x0D0) holds one sticky bit per event (set by a one-clock event, write 1 to
+//     clear, an event in the clock of its clear keeps the bit set), IRQ_ENABLE (0x0D4) one enable bit per source (reset 0), IRQ_FORCE (0x0D8,
+//     write only) sets the status bits written as 1. Sources: [0] PIC_DONE, [1] ERR, [2] RING_STALL (rising edge of the stall), [3] PROFILE_CHG
+//     (HIGH_PROFILE builds), [4] LICENSE_LOST (hp_licensed falls, HIGH_PROFILE builds), [5] PIC_START (a start accepted while idle); [7:6] reserved,
+//     read 0. irq = CTRL.IRQ_EN (the global enable, reset 0) and (IRQ_STATUS and IRQ_ENABLE not 0). CAPS [31:24] is the mask of the implemented
+//     sources. STATUS and its flags are independent of IRQ_STATUS and unchanged.
 //   * Configuration registers are read back as written. They are written while the engine is idle; the
 //     read pointers RING_RPTR and IDX_RPTR are also written while it runs (consumption).
 //   * Engine windows: with NUM_ENGINES > 1 the per-engine registers (RING_WPTR, RING_RPTR, RING_FILL, IDX_WPTR, IDX_RPTR,
@@ -28,7 +34,8 @@
 //     [15:0] macroblocks of the last picture coded with the 8x8 transform, [31:16] with the 4x4 transform (inter macroblocks with luma residual;
 //     all engines added). With HIGH_PROFILE = 0 both registers read 0 and the logic is that of the Constrained Baseline encoder.
 // Language: SystemVerilog-2012.
-// Revision: 11-11-2026
+// Revision: 11-12-2026
+//   * 11-12-2026: interrupt controller: IRQ_STATUS, IRQ_ENABLE, IRQ_FORCE, CAPS bit 21 and [31:24], VERSION 0x11122C03; irq = IRQ_EN and an enabled event.
 //   * 11-11-2026: High profile seam: CAPS bit 20, HP_CTRL, HP_STATUS.
 //   * 11-12-2026: HP_CTRL bit 1 and HP_STATUS bit 5 (8x8 transform enable).
 //   * 11-12-2026: HP_CTRL bit 2 and HP_STATUS bit 6 (adaptive transform choice), HP_T8_COUNT.
@@ -126,7 +133,7 @@ module rtlnet_h264_enc_regs #(
   input  logic [NUM_ENGINES*32-1:0] st_pk_cyc,
   input  logic [NUM_ENGINES*32-1:0] st_wr_cyc,
 
-  // Interrupt, clk domain: level, high while IRQ_EN and (DONE or ERR) are set.
+  // Interrupt, clk domain: level, high while CTRL.IRQ_EN is set and an IRQ_STATUS bit with its IRQ_ENABLE bit is set.
   output logic        irq
 );
 
@@ -178,6 +185,9 @@ module rtlnet_h264_enc_regs #(
   localparam logic [11:0] REG_HP_CTRL     = 12'h0C0;   // [0] hp_enable, [1] hp_t8_enable (High profile seam builds)
   localparam logic [11:0] REG_HP_STATUS   = 12'h0C4;   // see the header
   localparam logic [11:0] REG_HP_T8CNT    = 12'h0C8;   // [15:0] macroblocks of the last picture with the 8x8 transform, [31:16] with the 4x4 transform
+  localparam logic [11:0] REG_IRQ_STATUS  = 12'h0D0;   // sticky event bits, write 1 to clear
+  localparam logic [11:0] REG_IRQ_ENABLE  = 12'h0D4;   // one enable bit per source, reset 0
+  localparam logic [11:0] REG_IRQ_FORCE   = 12'h0D8;   // write only: a 1 sets the status bit
 
   localparam int CTRL_START_BIT      = 0;
   localparam int CTRL_RING_RESET_BIT = 1;
@@ -195,11 +205,25 @@ module rtlnet_h264_enc_regs #(
   localparam int HP_STATUS_AUTO_BIT     = 6;
 
   localparam logic [31:0] CORE_ID      = id4("H", "2", "6", "4");
-  localparam logic [31:0] CORE_VERSION = 32'h1110_2C02;   // 11-10, phase 2c-2 (motion search; the register map is that of 2c-1)
-  // CAPS: [7:0] MAX_MB_W, [15:8] MAX_MB_H, [19:16] NUM_ENGINES, [20] HP_SEAM (HIGH_PROFILE build).
-  localparam logic [31:0] CORE_CAPS    = {11'd0, HIGH_PROFILE, 4'(NUM_ENGINES), 8'(MAX_MB_H), 8'(MAX_MB_W)};
+  localparam logic [31:0] CORE_VERSION = 32'h1112_2C03;   // 11-12, interrupt controller (the earlier registers are those of 11-10 phase 2c-2)
+  // Interrupt sources: bit numbers of IRQ_STATUS, IRQ_ENABLE and IRQ_FORCE; IRQ_IMPL is the mask of the implemented ones.
+  localparam int IRQ_PIC_DONE     = 0;
+  localparam int IRQ_ERR          = 1;
+  localparam int IRQ_RING_STALL   = 2;
+  localparam int IRQ_PROFILE_CHG  = 3;
+  localparam int IRQ_LICENSE_LOST = 4;
+  localparam int IRQ_PIC_START    = 5;
+  localparam logic [7:0] IRQ_IMPL = HIGH_PROFILE ? 8'h3F : 8'h27;
+  // CAPS: [7:0] MAX_MB_W, [15:8] MAX_MB_H, [19:16] NUM_ENGINES, [20] HP_SEAM (HIGH_PROFILE build), [21] IRQ (interrupt registers present),
+  // [31:24] implemented interrupt sources.
+  localparam logic [31:0] CORE_CAPS    = {IRQ_IMPL, 2'd0, 1'b1, HIGH_PROFILE, 4'(NUM_ENGINES), 8'(MAX_MB_H), 8'(MAX_MB_W)};
 
   logic        irq_en;
+  logic [7:0]  irq_status;
+  logic [7:0]  irq_enable;
+  logic [7:0]  irq_event;
+  logic        stall_q;
+  logic        lic_q;
   logic        done_flag;
   logic        err_flag;
   logic [7:0]  err_code;
@@ -216,7 +240,7 @@ module rtlnet_h264_enc_regs #(
 
   assign err_any = err_cfg || err_axi || err_rptr || err_busy;
   assign err_new = err_cfg ? ERR_CONFIG : (err_busy ? ERR_BUSY : (err_rptr ? ERR_RPTR : ERR_AXI));
-  assign irq     = irq_en && (done_flag || err_flag);
+  assign irq     = irq_en && (|(irq_status & irq_enable));
   assign cfg_pic_no = pic_count[15:0];
 
   always_comb begin
@@ -225,6 +249,17 @@ module rtlnet_h264_enc_regs #(
     status_word[STATUS_DONE_BIT]  = done_flag;
     status_word[STATUS_ERR_BIT]   = err_flag;
     status_word[STATUS_STALL_BIT] = |ring_stall;
+  end
+
+  // Interrupt events, one clock each: picture done, error pulse, rising edge of the ring stall, profile change, hp_licensed falling, accepted start.
+  always_comb begin
+    irq_event                   = '0;
+    irq_event[IRQ_PIC_DONE]     = done;
+    irq_event[IRQ_ERR]          = err_any;
+    irq_event[IRQ_RING_STALL]   = (|ring_stall) && !stall_q;
+    irq_event[IRQ_PROFILE_CHG]  = HIGH_PROFILE && hp_chg;
+    irq_event[IRQ_LICENSE_LOST] = HIGH_PROFILE && lic_q && !hp_licensed;
+    irq_event[IRQ_PIC_START]    = start && !busy;
   end
 
   // High profile registers: present only in a HIGH_PROFILE build; otherwise hp_enable is 0 and HP_STATUS reads 0.
@@ -280,6 +315,10 @@ module rtlnet_h264_enc_regs #(
       start           <= 1'b0;
       ring_reset      <= 1'b0;
       irq_en          <= 1'b0;
+      irq_status      <= '0;
+      irq_enable      <= '0;
+      stall_q         <= 1'b0;
+      lic_q           <= 1'b0;
       done_flag       <= 1'b0;
       err_flag        <= 1'b0;
       err_code        <= ERR_NONE;
@@ -318,6 +357,12 @@ module rtlnet_h264_enc_regs #(
       ring_reset  <= 1'b0;
       rptr_wr     <= '0;
       idx_rptr_wr <= '0;
+      stall_q     <= |ring_stall;
+      lic_q       <= hp_licensed;
+
+      // IRQ_STATUS: an event or a force sets, a written 1 clears, and an event in the clock of the clear wins.
+      irq_status <= (irq_status | irq_event | ((reg_wr_en && (reg_wr_addr == REG_IRQ_FORCE)) ? (reg_wr_data[7:0] & IRQ_IMPL) : 8'd0)) &
+                    ~((reg_wr_en && (reg_wr_addr == REG_IRQ_STATUS)) ? (reg_wr_data[7:0] & ~irq_event) : 8'd0);
 
       if (done) begin
         done_flag <= 1'b1;
@@ -365,6 +410,7 @@ module rtlnet_h264_enc_regs #(
               err_code <= '0;
             end
           end
+          REG_IRQ_ENABLE:  irq_enable      <= reg_wr_data[7:0] & IRQ_IMPL;
           REG_MB_W:        cfg_mb_w        <= reg_wr_data[7:0];
           REG_MB_H:        cfg_mb_h        <= reg_wr_data[7:0];
           REG_SLICES:      cfg_slices      <= reg_wr_data[7:0];
@@ -481,6 +527,8 @@ module rtlnet_h264_enc_regs #(
         REG_HP_CTRL:     reg_rd_data <= {29'd0, hp_t8_auto, hp_t8_enable, hp_enable};
         REG_HP_T8CNT:    reg_rd_data <= HIGH_PROFILE ? {hp_t8_n4, hp_t8_n8} : 32'd0;
         REG_HP_STATUS:   reg_rd_data <= hp_status_word;
+        REG_IRQ_STATUS:  reg_rd_data <= {24'd0, irq_status};
+        REG_IRQ_ENABLE:  reg_rd_data <= {24'd0, irq_enable};
         default:         reg_rd_data <= '0;
       endcase
     end

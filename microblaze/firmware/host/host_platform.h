@@ -68,15 +68,58 @@ int         host_model_video_fw_holds(void);
 
 /* Checksum offload window: present with this CAPS (0 removes it); STATUS.TX_IDLE after this many STATUS
  * reads (0xFFFFFFFF: never); CTRL bits that do not stick; CTRL and counters as the harness sees them. */
-/* H.264 encoder register model (ID, VERSION, CAPS, STATUS and the High profile registers; the engine windows read 0): on = 0/1,
- * seam = CAPS bit 20 (HIGH_PROFILE build). host_model_h264_hp sets the High profile status the model reports: module present (the
- * netlist, not the stub), licensed, hp_caps (bits 0 CABAC, 1 8x8 transform) and the license seconds left (0xFFFF unlimited). */
+/* H.264 encoder core model (host_h264_model.c): on = 0/1, seam = CAPS bit 20 (HIGH_PROFILE build). The model runs the encoder session end to
+ * end: START takes pic_ticks model ticks (host_model_h264_advance, or one tick per access_period register accesses of the firmware, which makes the
+ * completion arrive between any two accesses), the picture entries and bytes appear in the DDR3 model, DONE and the interrupt event follow, and
+ * the irq line (INTC input RTLNET_CPU_IRQ_H264) drives the interrupt controller model below. host_model_h264_hp sets the High profile status the
+ * model reports: module present (the netlist, not the stub), licensed (a change from 1 to 0 raises the license-lost event; a change of license or
+ * enable between two starts is PROFILE_CHG and a forced IDR picture at the second), hp_caps (bits 0 CABAC, 1 8x8 transform) and the license
+ * seconds left (0xFFFF unlimited). host_model_h264_irq_caps(0) models an older core without the interrupt registers (VERSION 0x11102C02;
+ * touching an interrupt register counts as an illegal access). host_model_h264_error and _event inject an error pulse and interrupt events. */
 void        host_model_h264_set(int on, int seam);
 void        host_model_h264_hp(uint32_t present, uint32_t licensed, uint32_t caps, uint32_t seconds);
 uint32_t    host_model_h264_hp_ctrl(void);
 uint32_t    host_model_h264_hp_ctrl_t8(void);
 uint32_t    host_model_h264_hp_ctrl_auto(void);
 void        host_model_h264_t8_counts(uint32_t n8, uint32_t n4);
+void        host_model_h264_irq_caps(int capable);
+void        host_model_h264_timing(uint32_t pic_ticks, uint32_t access_period);
+void        host_model_h264_advance(uint32_t ticks);
+void        host_model_h264_error(uint32_t code);
+void        host_model_h264_event(uint32_t irq_bits);
+#define HOST_H264_COUNT_PICTURES     1   /* pictures completed (PIC_COUNT) */
+#define HOST_H264_COUNT_STARTS       2   /* accepted starts */
+#define HOST_H264_COUNT_ILLEGAL_IRQ  3   /* interrupt registers touched on a core that has none */
+#define HOST_H264_COUNT_BUSY         4
+#define HOST_H264_COUNT_FORCED       5   /* pictures started after a profile or license change */
+#define HOST_H264_COUNT_IRQ_STATUS   6
+#define HOST_H264_COUNT_IRQ_ENABLE   7
+#define HOST_H264_COUNT_IRQ_GLOBAL   8
+uint32_t    host_model_h264_count(int which);
+/* Record of completed picture idx (0 = the first since host_model_h264_set): QP written, IDR flag, forced-IDR flag, bytes per engine; and the
+ * bytes of that picture of engine e (engine 0 starts with the 6-byte access unit delimiter). 0 on success, -1 when idx is out of range. */
+typedef struct {
+    uint32_t qp, idr, forced, len[2];
+} host_h264_pic_t;
+int         host_model_h264_picture(uint32_t idx, host_h264_pic_t *out);
+void        host_model_h264_bytes(uint32_t idx, uint32_t e, uint8_t *out);
+
+/* Interrupt controller model behind plat_irq_*: a model drives an input line; host_irq_deliver calls the handlers that are due; host_irq_delivered
+ * counts the handler calls. host_ddr_poke writes bytes into the DDR3 model without counting an arbiter access. */
+void        host_irq_set_line(unsigned input, uint32_t level);
+void        host_irq_deliver(void);
+uint32_t    host_irq_delivered(void);
+void        host_irq_access_stats(uint32_t *calls, uint32_t *total, uint32_t *max);   /* register accesses inside handler calls */
+void        host_ddr_poke(uint32_t ddr_off, const uint8_t *data, uint32_t n);
+
+/* Video UDP capture (host_lwip_stub.c): a running hash (FNV-1a 64) of all payload bytes handed to video_udp_send, their count and the datagram
+ * count since the last reset. */
+void        host_video_udp_reset(void);
+uint64_t    host_video_udp_hash(void);
+uint32_t    host_video_udp_bytes(void);
+uint32_t    host_video_udp_datagrams(void);
+void        host_video_udp_capture(uint32_t max_bytes);   /* keep the payload bytes (up to max_bytes; 0 stops); cleared by host_video_udp_reset */
+const uint8_t *host_video_udp_data(uint32_t *len);
 void        host_model_txo_set(int present, uint32_t caps);
 void        host_model_txo_idle_after(uint32_t reads);
 void        host_model_txo_stuck(uint32_t mask);

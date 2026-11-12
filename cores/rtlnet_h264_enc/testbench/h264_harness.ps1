@@ -39,7 +39,7 @@ Overview:
     named with -Config (-Config p_*); without -Config the earlier set runs. -InjectBurstRef is the negative control of the
     monitor's reference-read check (a 4-beat reference read; the bench must fail). -BuildToolsOnly builds the SPS/PPS tool and exits;
     -ListConfigs prints the names of the selected configurations (h264_harness_par.ps1 runs them in parallel).
-Usage: powershell -NoProfile -ExecutionPolicy Bypass -File h264_harness.ps1 [-Config qcif_s1,720p_*] [-Inject] [-InjectBurst] [-InjectBurstRef] [-Pcm] [-Measure] [-Threads N] [-Gap pct] [-Lat clocks]
+Usage: powershell -NoProfile -ExecutionPolicy Bypass -File h264_harness.ps1 [-Config qcif_s1,720p_*] [-Inject] [-InjectBurst] [-InjectBurstRef] [-Pcm] [-Irq] [-Measure] [-Threads N] [-Gap pct] [-Lat clocks]
   -Gap and -Lat set the memory model's ready/valid gap percentage (default 20) and read latency in clocks (default 20; rtlnet_ddr_sim: gap 0, latency 20).
   Without -Config every configuration of the default set runs (several minutes per ten configurations: each one builds the bench).
   * Motion search (phase 2c-2): configurations named m_* run the panning sequences panh<k> / panv<k> / pand<k> (the window moves k samples per
@@ -47,7 +47,8 @@ Usage: powershell -NoProfile -ExecutionPolicy Bypass -File h264_harness.ps1 [-Co
     `MVSTAT pic<n> interior=<I> true=<T>` per P picture (macroblocks whose block at the expected vector lies inside the picture, and those among
     them coded as inter with exactly that vector), and the harness requires T >= 90 % of I for every P picture. Sr = n sets the core's search
     range (TB_SR; Sr 0 is the phase 2c-1 behaviour, the baseline of the bits gate, see h264_check.py bitsratio).
-Revision: 11-10-2026
+Revision: 11-12-2026
+  * 11-12-2026: -Irq: the bench takes the picture end from the irq output (IRQ_ENABLE, CTRL.IRQ_EN) instead of polling STATUS; the streams must be byte-identical to the polled run.
   * 11-09-2026: initial version; QP/pattern configuration table, PSNR floors, bits per picture, -Pcm and -Measure.
   * 11-10-2026: phase 2c-1: GOP and sequence configurations (p_*), one input buffer reloaded per picture, -InjectBurstRef.
   * 11-10-2026: phase 2c-2: m_* motion configurations, ExpMv and Sr.
@@ -61,6 +62,7 @@ param(
     [switch]$BuildToolsOnly,
     [switch]$ListConfigs,
     [switch]$Pcm,
+    [switch]$Irq,
     [switch]$Measure,
     [int]$Threads = 1,
     [switch]$NoPng,
@@ -271,7 +273,7 @@ $VlExtra = '--unroll-count 8 --unroll-stmts 500 --output-split 5000'
 $allOk = $true
 foreach ($c in $Configs) {
     $name = $c.Name
-    $label = if ($InjectBurst) { "${name}_burstneg" } elseif ($InjectBurstRef) { "${name}_burstrefneg" } elseif ($Inject) { "${name}_neg" } else { $name }
+    $label = if ($InjectBurst) { "${name}_burstneg" } elseif ($InjectBurstRef) { "${name}_burstrefneg" } elseif ($Inject) { "${name}_neg" } elseif ($Irq) { "${name}_irq" } else { $name }
     $dir = "$Sim/$label"
     if (Test-Path -LiteralPath $dir) { Remove-Item -LiteralPath $dir -Recurse -Force }
     New-Item -ItemType Directory -Force -Path $dir, "$dir/png" | Out-Null
@@ -311,6 +313,7 @@ foreach ($c in $Configs) {
     $fdir = $dir.Replace([string][char]92, '/')
     $pa = @("INPFX=$fdir/in", "OUT=$fdir/o", "GOP=$($c.Gop)")
     if ($Inject) { $pa += 'INJECT' }
+    if ($Irq) { $pa += 'IRQ' }
     if ($InjectBurst) { $pa += 'INJECT_BURST' }
     if ($InjectBurstRef) { $pa += 'INJECT_BURST_REF' }
     if ($c.ContainsKey('ExpMv')) { $pa += "EXPMV_X=$($c.ExpMv[0])"; $pa += "EXPMV_Y=$($c.ExpMv[1])" }

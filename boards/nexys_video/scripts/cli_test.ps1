@@ -44,6 +44,7 @@ Revision: 11-10-2026
     skipped, reported as skipped and not counted as passed.
   * 11-10-2026: Phase 2d: camera pattern (bad name, bad speed, all -7, box 24, bars), encoder bitrate, buffer and qprange (bad values, good values),
     the rate-control lines of show stream, show encoder history, back to constant QP.
+  * 11-11-2026: the full High profile image (tools CABAC, encoder profile high accepted) passes the same steps.
   * 11-11-2026: High profile seam: the High profile line of show encoder, encoder profile (bad, high refused, baseline); tolerant of the default image and the High profile netlist image.
   * 11-10-2026: Phase 2c: encoder VERSION 0x11102C02, encoder gop (bad values, 1, 30) and the GOP lines of show stream and show encoder,
     the cache line of show ddr (32 KiB, 512-bit buses).
@@ -222,16 +223,16 @@ try {
     Send-Step $sp 'framebuffer crc' "framebuffer crc`r" @(
         'Framebuffer CRC-32 : 0x[0-9A-F]{8} \(frame \d+, slot \d, \d+x\d+, (pattern|camera), \d+ bytes\)') 'rtlnet#' 60000
     # H.264 stream (Phase 2b-3): command formats and refusals; the stream itself is checked by stream_test.ps1.
-    Send-Step $sp 'encoder VERSION' "debug read 0x44a08004`r" @('0x44A08004 = 0x11102C02') 'rtlnet#'
+    Send-Step $sp 'encoder VERSION' "debug read 0x44a08004`r" @('0x44A08004 = 0x11122C03') 'rtlnet#'
     Send-Step $sp 'show encoder' "show encoder`r" @(
         'ID "H264" 0x48323634', 'GOP\s+: \d+ \(IDR every \d+ pictures, P pictures between\), last picture (IDR|P)', 'Build\s+: 2 engines, up to 120 x 68 macroblocks', 'QP\s+: \d+ configured, \d+ written; STATUS 0x[0-9A-F]{8}',
         'Engine 0\s+: \d+ macroblocks, picture \d+ cycles', 'Engine 1\s+: \d+ macroblocks, picture \d+ cycles') 'rtlnet#'
     # High profile seam (11-11-2026): tolerant of the default image (no seam or no netlist) and of a High profile netlist image (stage 1: present, hp_caps 0).
     Send-Step $sp 'show encoder (High profile line)' "show encoder`r" @(
-        'High profile\s+: (not present \((this build has no High profile seam|the High profile netlist is not in this build)\)|present, (licensed|license ended), time left (unlimited|\d+ min \d+ s), tools none \(hp_caps 0\), profile baseline, \d+ forced IDR pictures)') 'rtlnet#'
+        'High profile\s+: (not present \((this build has no High profile seam|the High profile netlist is not in this build)\)|present, (licensed|license ended), time left (unlimited|\d+ min \d+ s), (tools none \(hp_caps 0\)|tools CABAC \(hp_caps 1\)), profile baseline, \d+ forced IDR pictures)') 'rtlnet#'
     Send-Step $sp 'encoder profile (bad)' "encoder profile main`r" @('% Invalid profile \(baseline or high\) "main"') 'rtlnet#'
     Send-Step $sp 'encoder profile high (refused)' "encoder profile high`r" @(
-        '% Profile high refused: (this build has no High profile seam|the High profile netlist is not in this build|the High profile module offers no tool yet \(hp_caps is 0\)|the High profile license has ended)') 'rtlnet#'
+        '(Profile high, effective at the next picture|% Profile high refused: (this build has no High profile seam|the High profile netlist is not in this build|the High profile module offers no tool yet \(hp_caps is 0\)|the High profile license has ended))') 'rtlnet#'
     Send-Step $sp 'encoder profile baseline' "encoder profile baseline`r" @('Profile baseline \(Constrained Baseline\), effective at the next picture') 'rtlnet#'
     Send-Step $sp 'encoder qp (bad)' "encoder qp 52`r" @('% Invalid QP \(0\.\.51\) "52"') 'rtlnet#'
     Send-Step $sp 'encoder qp 8 (floor)' "encoder qp 8`r" @('QP 8 set; the driver writes 12') 'rtlnet#'

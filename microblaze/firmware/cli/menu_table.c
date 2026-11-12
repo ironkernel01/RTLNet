@@ -47,6 +47,7 @@
  *  11-11-2026  MenuBuilder AI / Steve Spano    High profile seam: encoder profile baseline|high, High profile line in show encoder
  *  11-12-2026  MenuBuilder AI / Steve Spano    8x8 transform (High profile stage 3): encoder transform8x8 on|off, Transform 8x8 line in show encoder
  *  11-12-2026  MenuBuilder AI / Steve Spano    Adaptive transform (High profile stage 3a): encoder transform8x8 on|off|auto (default auto), macroblock counts in show encoder
+ *  11-12-2026  MenuBuilder AI / Steve Spano    Encoder interrupt: encoder notify interrupt|polled (default interrupt), encoder irqtest, notification and interrupt lines in show stream and show encoder
  * ===========================================================================
  */
 #include "menu.h"
@@ -149,6 +150,10 @@ const MenuCommandDef g_menu_commands[] = {
       "Rate control QP range, 12 <= MIN <= MAX <= 51 (default 12 51)", cli_encoder_qprange, MENU_MODE_NONE },
     { "cli_encoder_profile", MENU_MODE_PRIV, "ENCODER PROFILE [PROFILE]",
       "Stream profile: baseline (Constrained Baseline, default) or high (High profile tools, needs the High profile netlist)", cli_encoder_profile, MENU_MODE_NONE },
+    { "cli_encoder_notify", MENU_MODE_PRIV, "ENCODER NOTIFY [MODE]",
+      "How the end of a picture reaches the firmware: interrupt (default, the encoder interrupt starts the next picture) or polled (the main loop reads STATUS)", cli_encoder_notify, MENU_MODE_NONE },
+    { "cli_encoder_irqtest", MENU_MODE_PRIV, "ENCODER IRQTEST",
+      "Interrupt self-test: force an event in the encoder core and check that the interrupt handler counts it (needs a stream in interrupt mode)", cli_encoder_irqtest, MENU_MODE_NONE },
     { "cli_encoder_transform8x8", MENU_MODE_PRIV, "ENCODER TRANSFORM8X8 [STATE]",
       "Transform of inter macroblocks: auto (default, the module chooses per macroblock), on (8x8 always) or off (4x4); used in the High profile when the netlist offers it", cli_encoder_transform8x8, MENU_MODE_NONE },
     { "cli_debug_read", MENU_MODE_PRIV, "DEBUG READ [ADDR]",

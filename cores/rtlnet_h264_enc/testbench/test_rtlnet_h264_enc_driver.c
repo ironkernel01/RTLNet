@@ -31,6 +31,7 @@
 static uint32_t g_reg[TEST_WINDOW / 4u];
 static int      g_checks;
 static int      g_fails;
+static uint32_t g_irq_impl = 0x3Fu;   /* implemented interrupt sources of the model */
 
 static void check(int cond, const char *what)
 {
@@ -64,6 +65,18 @@ void rtlnet_host_reg_write32(uintptr_t addr, uint32_t value)
     }
     if (off == RTLNET_H264_REG_STATUS) {
         g_reg[off / 4u] &= ~(value & (RTLNET_H264_STATUS_DONE | RTLNET_H264_STATUS_ERR));
+        return;
+    }
+    if (off == RTLNET_H264_REG_IRQ_STATUS) {
+        g_reg[off / 4u] &= ~value;                            /* write 1 to clear */
+        return;
+    }
+    if (off == RTLNET_H264_REG_IRQ_FORCE) {
+        g_reg[RTLNET_H264_REG_IRQ_STATUS / 4u] |= value & g_irq_impl;
+        return;
+    }
+    if (off == RTLNET_H264_REG_IRQ_ENABLE) {
+        g_reg[off / 4u] = value & g_irq_impl;                 /* bits of sources the build lacks read 0 */
         return;
     }
     if (off == RTLNET_H264_REG_CTRL) {
@@ -376,7 +389,8 @@ int main(void)
     {
         rtlnet_h264_enc_buffers_t bufs;
 
-        check(RTLNET_H264_VERSION_VALUE == 0x11102C02u, "VERSION of phase 2c-2");
+        check(RTLNET_H264_VERSION_VALUE == 0x11122C03u, "VERSION with the interrupt registers");
+        check(RTLNET_H264_VERSION_PRE_IRQ == 0x11102C02u, "VERSION of phase 2c-2");
         check((RTLNET_H264_REG_REFY_BASE == 0x054u) && (RTLNET_H264_REG_REFU_BASE == 0x058u), "reference register offsets");
         g_reg[RTLNET_H264_REG_STATUS / 4u] = 0u;
         g_reg[RTLNET_H264_REG_PIC_CFG / 4u] = (4u << RTLNET_H264_PIC_CFG_LOG2FN_SHIFT) | RTLNET_H264_PIC_CFG_IDR;
@@ -585,6 +599,54 @@ int main(void)
             for (i = 0u; (i < len4) && (buf4[i] == buf8[i]); i++) { }
             check(i == len4, "Baseline bytes equal");
         }
+    }
+
+    /* Interrupt registers: capability detection, enable, global enable, status, acknowledge, force. */
+    {
+        uint32_t src = 0xFFu;
+        rtlnet_h264_enc_caps_t c;
+
+        memset(g_reg, 0, sizeof(g_reg));
+        g_reg[RTLNET_REG_ID / 4u] = RTLNET_H264_ID_VALUE;
+        /* An older core (VERSION 0x11102C02, CAPS bits 21 and [31:24] clear): probe accepts it, no interrupt capability, the writers refuse. */
+        g_reg[RTLNET_REG_VERSION / 4u] = RTLNET_H264_VERSION_PRE_IRQ;
+        g_reg[RTLNET_REG_CAPS / 4u] = MODEL_CAPS;
+        check((rtlnet_h264_enc_probe(TEST_BASE, &c) == 0) && (c.irq == 0u) && (c.irq_sources == 0u) && (c.version == RTLNET_H264_VERSION_PRE_IRQ),
+              "an older core probes with caps.irq 0");
+        check(rtlnet_h264_enc_irq_capable(TEST_BASE, &src) == 0 && src == 0u, "irq_capable: older core");
+        check(rtlnet_h264_enc_irq_set_enable(TEST_BASE, 1u) == -1, "irq_set_enable refused on an older core");
+        check(rtlnet_h264_enc_irq_global(TEST_BASE, 1) == -1, "irq_global refused on an older core");
+        check(rtlnet_h264_enc_irq_force(TEST_BASE, 1u) == -1, "irq_force refused on an older core");
+        check(g_reg[RTLNET_H264_REG_IRQ_ENABLE / 4u] == 0u && g_reg[RTLNET_H264_REG_CTRL / 4u] == 0u, "an older core: nothing written");
+        /* A core with the registers: CAPS bit 21, source mask 0x27 (no High profile sources) or 0x3F. */
+        g_irq_impl = 0x27u;
+        g_reg[RTLNET_REG_VERSION / 4u] = RTLNET_H264_VERSION_VALUE;
+        g_reg[RTLNET_REG_CAPS / 4u] = MODEL_CAPS | RTLNET_H264_CAPS_IRQ | (g_irq_impl << RTLNET_H264_CAPS_IRQ_SRC_SHIFT);
+        check((rtlnet_h264_enc_probe(TEST_BASE, &c) == 0) && (c.irq == 1u) && (c.irq_sources == 0x27u), "caps.irq and the source mask");
+        check(rtlnet_h264_enc_irq_capable(TEST_BASE, &src) == 1 && src == 0x27u, "irq_capable: source mask 0x27");
+        /* CAPS bit 21 with the older VERSION is not a capability. */
+        g_reg[RTLNET_REG_VERSION / 4u] = RTLNET_H264_VERSION_PRE_IRQ;
+        check(rtlnet_h264_enc_irq_capable(TEST_BASE, NULL) == 0, "irq_capable needs the current VERSION");
+        g_reg[RTLNET_REG_VERSION / 4u] = RTLNET_H264_VERSION_VALUE;
+        check(rtlnet_h264_enc_irq_set_enable(TEST_BASE, RTLNET_H264_IRQ_PIC_DONE | RTLNET_H264_IRQ_ERR | RTLNET_H264_IRQ_PROFILE_CHG) == 0, "irq_set_enable");
+        check(rtlnet_h264_enc_irq_get_enable(TEST_BASE) == (RTLNET_H264_IRQ_PIC_DONE | RTLNET_H264_IRQ_ERR), "irq_get_enable: bits of absent sources drop");
+        check(rtlnet_h264_enc_irq_global(TEST_BASE, 1) == 0 && (g_reg[RTLNET_H264_REG_CTRL / 4u] & RTLNET_H264_CTRL_IRQ_EN) != 0u, "irq_global on");
+        check(rtlnet_h264_enc_irq_global(TEST_BASE, 0) == 0 && (g_reg[RTLNET_H264_REG_CTRL / 4u] & RTLNET_H264_CTRL_IRQ_EN) == 0u, "irq_global off");
+        check(rtlnet_h264_enc_irq_status(TEST_BASE) == 0u, "irq_status after reset");
+        check(rtlnet_h264_enc_irq_force(TEST_BASE, RTLNET_H264_IRQ_RING_STALL | 0xC0u) == 0, "irq_force");
+        check(rtlnet_h264_enc_irq_status(TEST_BASE) == RTLNET_H264_IRQ_RING_STALL, "irq_force sets implemented bits only");
+        rtlnet_h264_enc_irq_ack(TEST_BASE, RTLNET_H264_IRQ_PIC_DONE);
+        check(rtlnet_h264_enc_irq_status(TEST_BASE) == RTLNET_H264_IRQ_RING_STALL, "acknowledge of another bit clears nothing");
+        rtlnet_h264_enc_irq_ack(TEST_BASE, RTLNET_H264_IRQ_RING_STALL);
+        check(rtlnet_h264_enc_irq_status(TEST_BASE) == 0u, "acknowledge clears the bit");
+        /* The polled start keeps the global enable (the earlier start functions preserve CTRL.IRQ_EN). */
+        (void)rtlnet_h264_enc_irq_global(TEST_BASE, 1);
+        g_reg[RTLNET_H264_REG_PIC_CFG / 4u] = 4u << RTLNET_H264_PIC_CFG_LOG2FN_SHIFT;
+        check(rtlnet_h264_enc_start_picture_ex(TEST_BASE, 0u, 0u, RTLNET_H264_PIC_IDR) == 0, "start with the global enable set");
+        check((g_reg[RTLNET_H264_REG_CTRL / 4u] & RTLNET_H264_CTRL_IRQ_EN) != 0u, "start_picture_ex keeps the global enable");
+        rtlnet_h264_enc_ring_reset(TEST_BASE);
+        check((g_reg[RTLNET_H264_REG_CTRL / 4u] & RTLNET_H264_CTRL_IRQ_EN) != 0u, "ring_reset keeps the global enable");
+        g_irq_impl = 0x3Fu;
     }
 
     if (g_fails == 0) {

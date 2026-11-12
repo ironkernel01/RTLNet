@@ -907,7 +907,7 @@ Note: `show encoder` prints the register-map date of VERSION 0x11102C02 as `11-1
 
 ### 6.14 Phase 2d board step (11-11-2026)
 
-Change: firmware rate control (`microblaze/documentation/rtlnet_ratectl.md`: `encoder bitrate <kbps>`, `encoder buffer <ms>`, `encoder qprange <min> <max>`, `show encoder history <n>` with the per-second ring), the moving test patterns of `rtlnet_csi2_rx`
+Change: firmware rate control (`cores/rtlnet_h264_enc/documentation/rtlnet_ratectl.md`: `encoder bitrate <kbps>`, `encoder buffer <ms>`, `encoder qprange <min> <max>`, `show encoder history <n>` with the per-second ring), the moving test patterns of `rtlnet_csi2_rx`
 (`camera pattern <bars|scroll|box|noise|all> <speed>`; static bars stay the reset default), and the dropped-picture gap counted once (`acct_frame` in `rtlnet_venc.c`). Encoder VERSION is unchanged (0x11102C02, no encoder RTL change in this step).
 
 Build (`build.ps1 -Network`, git cb094b18 plus the uncommitted Phase 2d firmware, tool 2026.1). **The Phase 2d image is built with `RTLNET_PLACE_DIRECTIVE=ExtraTimingOpt`.** The default placer directive (Explore) no longer closes timing:
@@ -1108,6 +1108,163 @@ after about 6 s, as before. The size model, not the step limit of 2, sets the pa
 `scroll` 330 kb/s: the QP pins at 51 for most of the run as before (44 overflows, all at QP max; 14.7 % worst second of the board history). Neither case is tuned further.
 Proposed, not done: after the first IDR picture seeds `K_i`, derive `K_p` from it (`K_i - log2 6`) instead of from the bits-per-picture guess, and let the QP step reach 4 during the first two seconds; both need a host model of `box` that matches the board (the table of the host gate is optimistic).
 
+### 6.17 Stream throughput: the mux runs apart from the encoder (11-11-2026)
+
+Change (firmware only, no RTL change, default image, no Vivado build): `microblaze/documentation/rtlnet_ts_mux.md` section 5.2 and `rtlnet_cpu_microblaze.md` section 9.2.1.
+
+1. The picture is queued at DONE (descriptor, rate control, slot released, next picture started at once) and sent in chunks of four datagrams by the main loop (`rtlnet_picq.c`, `rtlnet_muxjob.c`); the encoder never waits for the mux. At `PICQ_LIMIT` = 3 pictures queued a new frame is skipped on purpose (own counter), so RING_STALL cannot occur.
+2. Console output goes through a 4 KiB transmit ring and the UART interrupt (`rtlnet_txring.c`, `rtlnet_platform.c`); `plat_putc` no longer waits on the 16-character FIFO.
+3. `show stream` has new lines: cycle time and lag, the three-way mux split, the queue depth and the backlog skips, and the console transmit counters.
+
+Added latency: the datagrams of a picture leave at most `PICQ_LIMIT` picture periods (100 ms, the PCR lead) after its DONE under load; in steady state below the knee the queue holds 0 to 1 pictures (backlog maximum 1 in every run that stays under 70 % mux load, 2 at 86 to 94 %), so the delay is the send time of the picture, 3 to 27 ms.
+PTS and PCR are unchanged.
+
+**Before: measured, not estimated.** The counters were added first, on the unchanged sequencing (image `build/phase2f_base.bit`; the firmware of 6.16 plus the counters), and a 1080p30 `all` 4 constant QP 40 capture of 15 s was run (`phase2f_base_q40_*`):
+
+| Quantity | Before (blocking mux) | After (queue and chunks) |
+|---|---|---|
+| pictures sent / dropped, 15 s | 400 / 51 | 452 / 0 |
+| picture cycle time, begin to begin: min / avg / max | 30,373 / 37,612 / 39,795 us | 18,342 / 33,292 / 34,588 us |
+| lag at `begin_picture`: avg / max | 16,300 / 33,326 us | 643 / 1,571 us |
+| mux time per picture, ring read and TS build | 5,395 us | 5,761 us |
+| mux time per picture, copy into the pbuf | 5,420 us | 5,364 us |
+| mux time per picture, `udp_sendto` | 4,577 us | 4,541 us |
+| mux backlog max | none (the mux ran inside the picture) | 1 |
+| TS mux load | 40.4 % | 49.2 % |
+| ES per picture | 66 kB | 66 kB |
+
+The sum of the picture cycle and the mux (22.5 ms encoder + 15.4 ms mux = 37.9 ms) against the period of 33.3 ms gave the 12.7 % drops; the average cycle time of 37.6 ms is that sum. After the change the cycle is the frame period (33.29 ms average, the 18 ms minimum is a frame that waited in the frame buffer).
+
+**Mux split.** The three parts are about equal at every rate: ring read plus TS build 36 %, pbuf copy 33 %, `udp_sendto` 28 % (1080p QP 24: 11,934 / 10,778 / 9,120 us for 134 kB, 0.24 us per ES byte in all). The pbuf copy is 82 ns per byte, 7.3 cycles per byte at 90 MHz, which is the speed of a byte-wise `memcpy` (the 1316-byte datagram sits in the TS buffer and the pbuf payload starts behind the Ethernet, IP and UDP header gap, so the two addresses need not share an alignment; the cause is not confirmed on the target). The ring read and TS build copies the ring bytes into the datagram buffer at the packet payload offsets (4 to 12 bytes behind each header) and is probably byte-wise too. Together these two parts are 69 % of the mux time and the dominant avoidable cost; a word-aligned copy (the technique of `axi_put_chain` in `rtlnet_lwip_netif.c`) or building the datagram in the pbuf is the next step, not done here.
+
+**Phase 2d sweep points again** (pattern `all` 4, constant QP, GOP 30, 15 s, `stream_test.ps1 -Seconds 15 -PsnrStep 10`, logs `phase2f_sw_<mode>_q<QP>_run.txt`). Before is the sweep of 6.14 (rate with "d" dropped pictures; with drops the rate is an upper estimate). T_enc is the encoder time per picture, clocks per macroblock x macroblocks per engine at 90 MHz. Mux load is the `show stream` figure, the share of one second the main loop spends in the mux.
+
+| Case | Rate before | Dropped before | Rate after | Dropped after | T_enc | ES per picture | Mux load | Cycle min / avg / max | Backlog max | Skipped | STREAM_TEST |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1080p QP 48 | 8,433 kb/s | 0 | 8,421 kb/s | 0 | 22.7 ms | 35 kB | 25.3 % | 20.3 / 33.28 / 33.3 ms | 1 | 0 | PASS 11/11 |
+| 1080p QP 40 | 15,978 kb/s | 50 | 15,798 kb/s | 0 | 22.5 ms | 66 kB | 49.2 % | 18.3 / 33.29 / 34.6 ms | 1 | 0 | PASS 11/11 |
+| 1080p QP 32 | 23,798 kb/s | 110 | 23,297 kb/s | 0 | 22.3 ms | 97 kB | 70.6 % | 19.9 / 33.29 / 34.5 ms | 1 | 0 | PASS 11/11 |
+| 1080p QP 24 | 32,878 kb/s | 161 | 31,789 kb/s | 0 | 22.6 ms | 132 kB | 93.6 % | 18.5 / 33.27 / 34.5 ms | 2 | 0 | PASS 11/11 |
+| 1080p QP 20 | n/a | n/a | 32,635 kb/s | 61 | 19.7 ms | 157 kB | 99.1 % | 24.7 / 38.4 / 67.6 ms | 3 | 61 | FAIL 4/11 (drops, by design) |
+| 1080p QP 16 | n/a | n/a | 32,985 kb/s | 124 | 22.7 ms | 187 kB | 99.1 % | 20.3 / 45.9 / 67.9 ms | 3 | 124 | FAIL 4/11 (drops, by design) |
+| 720p QP 32 | 15,425 kb/s | 0 | 15,456 kb/s | 0 | 9.3 ms | 64 kB | 44.3 % | 18.7 / 33.30 / 33.3 ms | 1 | 0 | PASS 11/11 |
+| 720p QP 24 | 21,130 kb/s | 0 | 21,174 kb/s | 0 | 9.1 ms | 88 kB | 61.6 % | 26.4 / 33.32 / 33.3 ms | 1 | 0 | PASS 11/11 |
+| 720p QP 16 | 29,918 kb/s | 54 | 29,856 kb/s | 0 | 9.2 ms | 124 kB | 86.0 % | 14.6 / 33.29 / 34.7 ms | 2 | 0 | PASS 11/11 |
+
+The knee is the mux itself: 0.24 us per ES byte, so one second holds 4.17 MB of ES, **about 33 Mb/s**, at any resolution (the encoder is idle for 11 ms of every 33 ms at 1080p, and takes 9 ms at 720p). Up to 94 % load (31.8 Mb/s at 1080p QP 24, 29.9 Mb/s at 720p QP 16) no picture is dropped: the model expectation (no drops below about 90 % load, T_enc under 33 ms) holds, and 94 % and 86 % are inside it.
+Past the knee the demand is above what the main loop can send (1080p QP 20 needs 37.6 Mb/s, QP 16 45 Mb/s): the sustained rate stays 32.6 to 33.0 Mb/s, the queue fills to the limit of 3, and the skips are counted as backlog skips (61 and 124); the encoder never stalls (0 errors, no RING_STALL). Every skip forces an IDR picture, so the average picture grows (157 and 187 kB against 132 kB at QP 24).
+The old limit was the sum T_enc + T_mux = 33.3 ms: about 15 Mb/s at 1080p30 and about 25 Mb/s at 720p30; both are now about 33 Mb/s.
+
+**Gates** (board: `rtlnet_nexys_video.bit` with this firmware merged, programmed over JTAG, COM3, PC on Wi-Fi):
+
+| Gate | Result | Log |
+|---|---|---|
+| `show encoder` and `show stream` read 9 times (every 5 to 6 s) during a 60 s 1080p30 stream at 8,000 kb/s (`-PollSeconds 6 -PollStream`) | **0 dropped pictures**, 1,802 pictures sent, 0 UDP drops, 0 errors; mean 8,000.1 kb/s, `STREAM_TEST: PASS 17/17`, JM identical to FFmpeg, 1,801 of 1,801 pictures checked. Before: each read dropped 2 to 3 pictures (6.15) | `phase2f_poll_*` |
+| the same run with reads every 5 s (11 reads) as the rate-control regression rc1 | `STREAM_TEST: PASS 17/17` | `phase2f_rc1_*` |
+| rate-control regression rc1 (1080p `all` 4, 8,000 kb/s, GOP 30, 60 s) and rc3 (720p `all` 4, 12,000 kb/s, 60 s), the gates of 6.16 | rc1 `PASS 17/17` (below), rc3 `PASS 17/17` | `phase2f_rc1_*`, `phase2f_rc3_*` |
+| `phase1_gate` | `PHASE1_GATE: PASS 19/19` | `phase2f_phase1_gate.txt` |
+| `cli_test` | `CLI_TEST: PASS 83/83` | `phase2f_cli_test.txt` |
+| `tcp_test` | `TCP_TEST: PASS 8/8` | `phase2f_tcp_test.txt` |
+| `net_test` | `NET_TEST: FAIL 3/18`, **environment, not firmware**: the PC's wired NIC is disconnected (the PC is on Wi-Fi, the board on the LAN), so the three link tests of the forced 100 Mb/s step (`[100] link up 100 Mb/s full duplex`, `[100] PHYSR speed`, `speed auto restores 100 Mb/s`) fail against this link partner and the ping, UDP echo and iperf steps are BLOCKED; the other 15 checks pass. The same 3 failures and 4 blocked steps occur with the firmware of before this change (`build/phase2f_base.bit`, `phase2f_base_net_test.txt`) | `phase2f_net_test.txt` |
+| host: firmware demo, rate controller, queue, mux job, transmit ring | `TEST PASS: menu_demo checks=462`, `RATECTL_TEST: PASS (15 gates)`, `PICQ_TEST: both runs pass`, `TXRING_TEST: both runs pass` (each with a negative control) | |
+
+**Ten-minute run above the old limit** (1080p30 `all` 4, constant bit rate 16,000 kb/s, buffer 500 ms, GOP 30, `stream_test.ps1 -Seconds 600 -Gate10 -PsnrStep 10 -CcTolPct 0.01`, logs `phase2f_soak_*`; the old output path sustained about 15 Mb/s at 1080p30): `STREAM_TEST: PASS 18/18`.
+
+| Gate | Result |
+|---|---|
+| board | 18,003 pictures sent, **0 dropped**, 0 UDP drops, 0 errors, frame buffer drops 0, `show ddr` errors 0; 0 backlog skips, backlog maximum 1 |
+| rate | mean 16,000.1 kb/s (PC), TS 16,476 kb/s; worst 1 s window 0.77 % (17,883 windows), worst 10 s window 0.09 % (17,613); board history worst 1 s 1.54 %, 10 s 0.25 % |
+| QP | 39 to 41 (average 39.81), largest step between pictures 1 (17,972 of 17,972 pictures parsed) |
+| pictures | 601 IDR pictures (72,303 B average) and 17,402 P pictures (66,472 B); cycle time min / avg / max 20.3 / 33.33 / 34.7 ms, lag at begin avg 0.65 ms, max 1.6 ms |
+| load | TS mux 47.8 % (5,853 / 5,427 / 4,594 us per picture for ring and TS, pbuf copy, `udp_sendto`) |
+| transport | 946,809 datagrams received, 946,876 counted by the board (read after the capture), Windows receive errors 0, 0 continuity errors in 6,559,682 packets, 0 PTS gaps |
+| decode | FFmpeg 0 error lines over 17,972 access units; PSNR against the pattern model (every 10th picture, 1,798 pictures) at least 33.67 dB, 0 resyncs; JM not run on the 10-minute capture |
+| console | `Console TX: interrupt driven, ring 4096 bytes, high water 1,469, 600 interrupts, 5 refills by the main loop, 0 characters lost` |
+
+
+Console: `show stream` after the 60 s polled run reads `Console TX: interrupt driven, ring 4096 bytes, high water 3738, 17,569 interrupts, 228 refills by the main loop, 0 characters lost`. The high-water mark of 3,738 is the largest console output the ring held at once (a 3.7 kB command in the CLI test); the ring took it without a wait.
+Not done, stated plainly: the zero-copy rework of the mux copies (above), a `net_test` run against the wired NIC link partner of 6.14, and a JM decode of the 10-minute run.
+
+### 6.18 CABAC on the board: High profile images (11-11-2026)
+
+Change: the High profile netlist of stage 2 (CABAC for I and P slices, `hp_caps` bit 0; `rtlnet_h264_enc.md` section 17, `H264HighProfile/documentation/rtlnet_h264_hp.md`) is placed and routed and run on the board for the first time, in two tagged images, both with the firmware of 6.17: `build.ps1 -Network -HighProfile full -Tag hp_full -Image` (no license limit) and `-HighProfile demo -Tag hp_demo -Image` (30-minute license), both with `RTLNET_PLACE_DIRECTIVE=ExtraTimingOpt`.
+The netlists were present and newer than every HDL source of the private repository (`netlist_info.txt`: sources hash `ce22507ad67d000f`, full 2,567 LUT and 1,230 FF, demo 2,594 and 1,281, post-synthesis WNS +2.817 ns at 90 MHz), so they were not rebuilt. The default image in `build/` is untouched (its bit file is the 6.17 build).
+
+**Build.** Both images close timing on the first run (log `build/phase2f_hp_full_build_run1.txt`, `build/hp_full/`, about 40 min; `build/phase2f_hp_demo_build_run1.txt`, `build/hp_demo/`, built in parallel with the stream tests, about 50 min).
+
+| Gate | hp_full | hp_demo | default image (6.14, 6.17) |
+|---|---|---|---|
+| timing (WNS / WHS / WPWS), 0 failing endpoints | +0.024 / +0.004 / +0.131 ns | +0.031 / +0.007 / +0.131 ns | +0.044 / +0.016 / +0.131 ns |
+| LUT | 88,773 (66.35 %) | 88,703 (66.30 %) | 83,786 (62.62 %) |
+| FF | 82,330 (30.77 %) | 82,495 (30.83 %) | 79,780 (29.81 %) |
+| RAMB tiles | 284.5 (77.95 %) | 284.5 (77.95 %) | 284.5 (77.95 %) |
+| DSP | 82 | 82 | 82 |
+| CDC | `fifo 10`, `axil_cdc 5`, `gray 6`, `sync 31`, `reset 8`, `rtlnet_cdc: PASS` | same | same |
+| methodology | `PDRC-190` x12, `LUTAR-1` x3, `TIMING-9` x1, `TIMING-47` x4, `XDCB-5` x1 and the `REQP-1959` advisories, all waived by name in the flow | same classes | same classes |
+
+Two CABAC engines add 4,987 LUT and 2,550 FF to the default image (each netlist is 2,393 slice LUT and 1,230 FF; the rest is the seam), no RAMB and no DSP. The worst setup path of `hp_full` is not in the High profile module: `u_h264/g_engine[1].u_engine/u_wr/awvalid_reg` to `u_arb/wr_err_pend_reg[3]_replica/D`, 15 logic levels (CARRY4 1, LUT2 3, LUT3 1, LUT4 2, LUT5 6, LUT6 2), data path 10.927 ns of 11.111 ns, 72 % routing; the worst hold path is `u_h264/g_engine[0].u_engine/u_rd_dma/u_conv/y_data_reg[105]` to the macroblock RAM `DIBDI[1]` (+0.004 ns).
+
+**Constraint coverage check** (`scripts/timing_coverage.tcl` on the routed checkpoints, `build/phase2f_hp_full_coverage.txt` and `build/phase2f_default_coverage.txt`; the default image is the reference). `check_timing`: 0 register or latch pins without a clock, 0 constant clocks, 0 unconstrained internal endpoints, 0 loops, 0 multiple clocks; 18 input ports without an input delay and 13 output ports without an output delay, all with a user false path (MEDIUM, the same in the default image).
+The clock interaction table has 52 clock pairs. Every pair that is timed (constraint `Timed`, `Partial False Path` or `Max Delay Datapath Only`, 40 pairs) analyses endpoints (for example `axis_clk_mmcm` to itself 4,513, and its max-delay crossings to `clk_pll_i` 38, `proto_clk_mmcm` 136, `clk125_mmcm` 8 and `rgmii_rxc` 7); the design has 270,966 setup and 270,280 hold endpoints. The 12 pairs with 0 analysed endpoints are all constraints that remove the pair on purpose, and are the same 12 in the default image:
+`clk125_90_mmcm`, `clk125_mmcm`, `mem_refclk` to `clk_pll_i` (false path), `clk125_mmcm` to `rgmii_rxc` and `rgmii_rxc` to `clk125_mmcm` (false path), `clk_pll_i` to and from the MDM JTAG clocks `BUFG_UPDATE` and `BSCANE2 TCK` (asynchronous clock groups; 4 pairs), the two MDM clocks to each other and `UPDATE` to `TCK` (exclusive groups; 3 pairs).
+Clocks with no register of their own, all as in the default image: the MMCM feedback and input clocks (`clkfb`, `clkfb2`, `ddr_sys_clk_mmcm`, `pll_clk3_out`, `pll_clkfbout`), `sys_clk` and `freq_refclk`, `sync_pulse`, the virtual `rgmii_rxc_v`, `rgmii_txc` (output only; one setup path ends in it) and the MDM `UPDATE` clock. Every other clock has a timed setup path except the two MIG output serializer clocks `oserdes_clk` and `oserdes_clk_1` (13 registers each): no setup path ends in them, their paths start there and end in `oserdes_clkdiv` and `oserdes_clkdiv_1`, which the table lists as `Timed`; the same in the default image. `clk_pll_i` has 75,667 registers (72,797 in the default image; the 2,870 more are the CABAC engines).
+`report_exceptions -ignored` lists 31 exception positions that match no path (9, 11, 23 to 27, 60, 61, 64 to 67, 76, 77, 90, 91, 101, 102, 111, 113, 115 to 123 and one more): the MIG temperature monitor, the BSCAN pins, the `syncstages_ff` synchronizer exceptions of vendor IP, the RGMII virtual-clock pairs `rgmii_rxc_v` to `rgmii_rxc` (76, 77) and synchronizer groups of the MAC and MDIO (90, 91, 101). The list, the zero-endpoint pairs and the clock table are identical in the default image, so the High profile netlist adds no constraint without paths and no clock without analysed paths.
+
+**Board** (JTAG, COM3, PC on Wi-Fi 192.168.68.84; logs `build/phase2f_hp_*`). The `hp_full` image: `program.ps1 -Bit build/hp_full/rtlnet_nexys_video.bit` PASS; `cli_test` `CLI_TEST: PASS 83/83` (its High profile steps now accept the CABAC image). `show encoder`: `High profile: present, licensed, time left unlimited, tools CABAC (hp_caps 1), profile baseline, 0 forced IDR pictures`; `encoder profile high` is accepted ("Profile high, effective at the next picture (an IDR picture with new parameter sets starts it)"), `encoder profile baseline` returns.
+
+**Streams, 60 s each, `stream_test.ps1 -Profile baseline|high -Jm -CcTolPct 0.01 -PsnrStep 5`** (1080p30 unless named; patterns `all` 4, `scroll` -7, `box` 24; constant QP; the last row at 8,000 kb/s, GOP 30). Every run passes all its gates: 0 dropped pictures, 0 UDP drops, 0 errors, 0 continuity errors, FFmpeg 0 error lines, JM decodes every access unit, ffprobe reports Constrained Baseline for `baseline` and **High** for `high`. ES rate is from the IDR and P picture counts and sizes of `show stream`; clocks per macroblock is the larger of the two engines (budget 735 at 1080p30). Logs `phase2f_hp_<case>_<profile>_run.txt`.
+
+| Case | CAVLC kb/s | CABAC kb/s | Saving | IDR / P bytes CAVLC | IDR / P bytes CABAC | Clocks per MB CAVLC / CABAC | Encode time per picture CAVLC / CABAC | PSNR min / mean (both) | Results |
+|---|---|---|---|---|---|---|---|---|---|
+| bars 1080p QP 28 | 75 | 28 | 62.5 % | 8,370 / 31 | 1,042 / 85 | 491 / 488 | 22.3 / 22.1 ms | 51.14 / 51.14 | PASS 13/13 both |
+| bars 720p QP 28 | 38 | 18 | 51.9 % | 3,809 / 30 | 672 / 55 | 454 / 454 | 9.1 / 9.1 ms | 51.14 / 51.14 | PASS 13/13 both |
+| `all` 4 QP 28 | 27,227 | 23,830 | 12.5 % | 121,005 / 113,182 | 100,438 / 99,251 | 494 / 569 | 22.4 / 25.8 ms | 44.27 / 44.89 | PASS 13/13 both |
+| `all` 4 QP 40 | 15,827 | 12,936 | 18.3 % | 72,049 / 65,731 | 54,642 / 53,873 | 493 / 571 | 22.3 / 25.9 ms | 33.69 / 33.92 | PASS 13/13 both |
+| `scroll` -7 QP 28 | 523 | 250 | 52.3 % | 9,077 / 1,939 | 1,735 / 1,016 | 482 / 484 | 21.9 / 22.0 ms | 48.01 / 50.03 | PASS 13/13 both |
+| `scroll` -7 QP 40 | 473 | 224 | 52.7 % | 8,610 / 1,737 | 1,556 / 910 | 484 / 483 | 21.9 / 21.9 ms | 36.54 / 40.64 | PASS 13/13 both |
+| `box` 24 QP 28 | 162 | 87 | 46.0 % | 8,672 / 393 | 1,145 / 336 | 488 / 488 | 22.1 / 22.1 ms | 51.02 / 51.18 (CAVLC), 51.01 / 51.15 (CABAC); with every picture checked (`-PsnrStep 1`) 51.01 / 51.19 for both | PASS 13/13 both |
+| `box` 24 QP 40 | 145 | 72 | 50.2 % | 8,520 / 325 | 1,188 / 269 | 492 / 491 | 22.3 / 22.3 ms | 43.63 / 43.83 | PASS 13/13 both |
+| `all` 4, 8,000 kb/s | 8,001 | 8,000 | - | 39,453 / 33,122 | 33,780 / 33,319 | 512 / 526 | 23.2 / 23.8 ms | 25.09 / 25.55 (CAVLC), 26.63 / 27.41 (CABAC) | PASS 18/18 both (see below) |
+
+Encode time per picture is the clocks per macroblock times 4,080 macroblocks per engine (1080p; 1,800 at 720p) at 90 MHz. PSNR is against the pattern model, every 5th decoded picture.
+
+Findings:
+
+1. **PSNR**: equal to 0.00 dB (minimum and mean) in every constant-QP case but one, as the pictures are the same and only the entropy coder differs. `box` 24 QP 28 differs by 0.01 dB (minimum) and 0.03 dB (mean) with every 5th picture checked: the two captures start at different frame numbers (k 7 and k 8 of the pattern), so the every-5th sample falls on different pictures of a moving box whose PSNR varies from 51.0 to 51.2 dB by position. With every picture checked (`-PsnrStep 1`, `phase2f_hp_box24_q28_*_s1_*`; 1,771 and 1,801 pictures) the minimum is 51.01 dB and the mean 51.19 dB in both profiles. With rate control (8,000 kb/s) the pictures are not the same: at the same rate CABAC runs at a lower QP (average 46.5 against 48.7) and gains 1.54 dB (minimum) and 1.86 dB (mean).
+2. **Rate**: CABAC saves 12.5 % and 18.3 % on the detailed pattern (QP 28 and 40, the higher the QP the larger the share of header and skip bits that CABAC codes better), and 46 to 63 % on the near-static patterns, whose IDR pictures (8.5 to 9 kB with CAVLC, 1.0 to 1.7 kB with CABAC) dominate. The P pictures of static bars are larger with CABAC (85 against 31 bytes, 55 against 30 at 720p): 8,160 skipped macroblocks cost more as adaptive binary decisions than as one CAVLC `mb_skip_run`; the IDR saving is 7,300 bytes per second.
+3. **Encode time**: CABAC raises the clocks per macroblock only for the detailed patterns, 494 to 569 and 493 to 571 (+15 %, 25.8 ms per 1080p picture, 77 % of the 735-clock budget); for the sparse patterns it is within 3 clocks of CAVLC. The mux load of CABAC streams is lower (fewer bytes): `all` 4 QP 28 is 23.8 Mb/s ES against 27.2 Mb/s.
+4. **Checker**: the first `all` 8,000 kb/s High run failed one gate, `qp_steps` (a step of 22): `stream_check.py` read the slice QP of the CABAC P slices wrongly (a P slice of a CABAC stream carries `cabac_init_idc` before `slice_qp_delta`); the board's own QP record showed 46 to 48 throughout. `stream_check.py` now takes `entropy_coding_mode_flag` from the PPS and reads `cabac_init_idc`; the same capture re-checked offline gives largest step 1, and the rerun on the board passed 18/18 (`phase2f_hp_rc8000_high_r2_*`). `stream_check.py ts` also prints `PROFILE_RUN` lines (profile_idc, constraint_set1, entropy_coding_mode at each change).
+
+**Profile switch in mid-stream** (`stream_test.ps1 -SwitchProfile -ForcedIdr 2`, 1080p30 `all` 4 QP 28 GOP 30, 60 s, `-PsnrStep 1 -Jm`; the capture starts in baseline, `encoder profile high` at 20 s and `encoder profile baseline` at 40 s; `phase2f_hp_switch_*`): `STREAM_TEST: PASS 15/15`. Exactly two IDR pictures off the GOP 30 cadence, at access unit 605 (PTS 20.167 s, gap 5) and 1,208 (40.267 s, gap 3), each with NAL types 5, 7, 8 and 9; `PROFILE_RUN`: profile_idc 66 (constraint_set1, CAVLC) from access unit 0, 100 (CABAC) from 605, 66 from 1,208.
+FFmpeg decodes the 1,800 access units with 0 error lines, JM decodes 1,800 frames identical to FFmpeg, the PSNR minimum over 1,800 pictures is 44.27 dB, 0 dropped pictures, 0 continuity errors. The board counts 3 forced IDR pictures: the two switches and the profile command before the stream start, which coincides with the first IDR picture (every stream of this section counts 1).
+
+**Demo image: High profile across the 30-minute license end** (`hp_expiry_test.ps1 -Profile high`: programs `build/hp_demo/rtlnet_nexys_video.bit`, reads `show encoder`, starts a 1080p30 High profile stream of static bars at constant QP 28 (GOP 30), captures 1,980 s (33 min) with no CLI polling during the capture, then stops, restarts and reloads, and reprograms). The script now passes `-Profile high` to `stream_test.ps1` and its gates know the CABAC image (it was written for the stage 1 demo netlist with `hp_caps` 0). The first full run (`phase2f_hp_expiry_*`, configured at 21:39:28) passed every board and stream gate; its only failing gate was an expectation of the new script about the profile word on the `High profile` line after the license ended (the line prints the requested profile, `high`, next to "license ended": the stream falls back to Constrained Baseline on the license, the requested profile stays); the gate was corrected and the whole test run again (`phase2f_hp_expiry2_*`, `HP_EXPIRY_TEST: PASS`). Both runs give the same result:
+
+| Gate | Result (run 2; run 1 in brackets) |
+|---|---|
+| right after configuration | present, licensed, time left 29 min 59 s read 1.07 s after configuration (1.04 s); `show encoder` tools CABAC (hp_caps 1); `encoder profile high` accepted |
+| forced IDR picture | exactly 1 IDR picture off the GOP 30 cadence, access unit 53,430 (53,447), PTS 1,781.100 s (1,781.600 s) from the first access unit; the capture starts 18.7 s (18.2 s) after configuration, so the picture is **1,799.82 s after configuration** in both runs (1,800 s - 0.18 s; limit 1,800 s +- 5 s), NAL types 5, 7, 8, 9 |
+| High before, Constrained Baseline after | `PROFILE_RUN`: profile_idc 100, entropy_coding_mode 1 from access unit 0; profile_idc 66, constraint_set1 1, entropy_coding_mode 0 from the forced IDR picture, no other change; ffprobe reports `h264 High` (the first parameter sets) |
+| board | 59,404 pictures sent, **0 dropped**, 0 UDP drops, 0 errors, TS-mux load 0.6 %, cycle time min / avg / max 26.0 / 33.33 / 33.7 ms; after the capture `present, license ended, time left 0 min 0 s, tools CABAC (hp_caps 1), profile high, 2 forced IDR pictures` (the profile command before the stream start counts one, coinciding with the first IDR picture; the license end the other) |
+| transport and decode | 62,377 datagrams received (62,379), the board counted 62,386 (62,380) after the capture, Windows receive errors 0; 9 (3) continuity errors in 196,067 (196,073) packets and 3 (1) PTS gaps from 1 to 3 access units lost on the Wi-Fi leg, within the 0.01 % limit; FFmpeg decodes all 59,400 (59,402) access units with 0 error lines; PSNR against the bars at least 51.14 dB over 3,960 (3,961) pictures; 1,981 IDR pictures (1,778 B average) and 57,419 P pictures (79 B) |
+| `stream stop` then `stream h264` | still "license ended" |
+| `reload` (firmware restart) | still "license ended" (the forced IDR count restarts at 0 in the new firmware) |
+| reprogramming the FPGA | "present, licensed, time left 29 min 59 s": the license is back |
+
+The High profile stream is 33 kb/s of elementary stream (149 kb/s of TS, which carries the PAT and PMT with every access unit); the Constrained Baseline stream of the same content is 75 kb/s (203 kb/s of TS, 6.15). The license end costs one IDR picture of 8.4 kB at most (the largest IDR picture of the run).
+
+Open items: patterns were run at 1080p30 only for `all`, `scroll` and `box` (720p only for bars); the hp_demo and hp_full images were not run through `net_test` (environment, see 6.17); the JM output is compared with FFmpeg only where every picture is checked (`-PsnrStep 1`: the bars runs and the switch run), as in 6.14.
+
+### 6.19 Encoder interrupt (11-12-2026, board step open)
+
+Change: the `irq` output of `u_h264` (`rtlnet_h264_top`, level on `ui_clk`) drives the CPU interrupt input `irq[1]` (`cpu_irq = {6'd0, h264_irq, mdio_irq}` in both the network and
+the CPU-only build), INTC input 1 (`RTLNET_CPU_IRQ_H264`). The block design is unchanged (`irq[7:0]` already reaches INTC inputs 0..7, level). The core (VERSION 0x11122C03,
+`rtlnet_h264_enc.md` section 18) raises the interrupt for picture done, error, ring stall, profile change and license lost; the firmware connects the handler on that
+input and runs the encoder in interrupt mode by default (`encoder notify interrupt|polled`, `rtlnet_ts_mux.md` section 5.3). Status: simulation, host tests and the synthesis of the core are done
+(`rtlnet_h264_enc.md` section 18.5); no bitstream was built and the board was not used for this change. The encoder VERSION reads 0x11122C03 (`cli_test.ps1` and the board bench expect it). The board step is: build with the unchanged `build.ps1`, load the firmware,
+`stream h264 ...`, `encoder irqtest` (must pass), `show stream` (interrupts per source, handler time, pictures started by the handler), `encoder notify polled` and back (the stream
+continues), `stream_test.ps1` in both modes, and the handler time and the cycle time against the polled figures of section 6.17.
+
 ## 7. Network integration (done 10-22-2026) and what remains
 
 Integrated: `u_mac`, `u_mdio`, `u_protocol` (every leaf, the CPU network path and its classifier), `u_echo` under
@@ -1121,7 +1278,7 @@ Open:
    tap 12 (balanced +0.22 / +0.24 ns).
 3. The `ev_*` pulse outputs of the MAC, the protocol wrapper and the classifier (`ev_pass`, `ev_drop`) are unconnected
    (LED or interrupt use).
-4. Interrupts (PHY INTB through `rtlnet_mdio` irq[0], DMA) are wired but the firmware polls.
+4. Interrupts: the PHY INTB through `rtlnet_mdio` irq[0] and the DMA are wired but the firmware polls; the H.264 encoder interrupt (irq[1], section 6.19) is used.
 5. The CPU-path classifier is configured as a whole by the firmware (`hw_sync`): a CLI change drops CPU-bound frames
    for about 100 us. The 0x44A2_0000 main-ingress classifier window stays a stub.
 6. The LED behaviour of the RTL8211E (LINK steady, ACT blink) is configured and read back but was not observed.
@@ -1143,4 +1300,7 @@ Open:
 | 11-09-2026 | Phase 0 stage 2: `C_PC_WIDTH` 32, `build.ps1 -Tag` variant builds, `jtag_load_elf` with calibration wait, download check and `-Image`, DDR3 image (`build.ps1 -Ddr`); CPU-only counts `fifo 5 axil_cdc 1 gray 0` built and passing; results and the open arbiter finding in section 6.9 |
 | 11-09-2026 | Phase 1 (section 6.10): video cores `u_csi2`, `u_s2mm`, `u_fb` on decoder slaves 7 to 9, arbiter with two masters, CDC expectation `axil_cdc 9` (network) and `4` (CPU-only), firmware video commands and the Phase 1 gate |
 | 11-10-2026 | Wide cache bus (512-bit cache buses, 32 KiB caches, AXI BRAM 64 KiB): build and board results in section 6.12 |
+| 11-12-2026 | Section 6.19: the encoder interrupt wired to the CPU interrupt input irq[1] (INTC input 1); the firmware runs the encoder in interrupt mode by default; board step open |
+| 11-11-2026 | Section 6.18: CABAC on the board (hp_full and hp_demo images placed and routed, stream matrix CABAC against CAVLC, profile switch, 30-minute license end) |
+| 11-11-2026 | Section 6.17: stream throughput, the mux runs apart from the encoder (picture queue, resumable mux, console transmit on the UART interrupt); sweep before and after, knee at about 33 Mb/s |
 | 11-11-2026 | Section 6.15: High profile demo netlist image (`build.ps1 -HighProfile demo -Tag hp_demo -Image`), license timer test; section 6.16: start QP of the rate control (board before and after) |

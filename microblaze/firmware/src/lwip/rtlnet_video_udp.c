@@ -5,7 +5,7 @@
  *
  * Role: implementation of the contract in rtlnet_video_udp.h.
  *
- * Revision: 11-09-2026
+ * Revision: 11-11-2026 (send-time profile)
  */
 #include "rtlnet_video_udp.h"
 
@@ -26,6 +26,8 @@ static uint16_t        g_port;
 static uint32_t        g_sent;
 static uint32_t        g_dropped;
 static uint32_t        g_retries;
+static uint64_t        g_copy_ticks;   /* ticks in the pbuf copy */
+static uint64_t        g_send_ticks;   /* ticks in the rest of video_udp_send */
 
 int video_udp_open(uint32_t ip, uint16_t port)
 {
@@ -68,16 +70,20 @@ int video_udp_send(const uint8_t *data, uint32_t len)
         struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, (u16_t)len, PBUF_RAM);
         if (p != NULL) {
             err_t e;
+            uint32_t t1 = plat_ticks();
             memcpy(p->payload, data, len);
+            g_copy_ticks += plat_ticks() - t1;
             e = udp_sendto(g_pcb, p, &g_dst, g_port);
             pbuf_free(p);
             if (e == ERR_OK) {
                 g_sent++;
+                g_send_ticks += (plat_ticks() - t0);
                 return 0;
             }
         }
         if ((plat_ticks() - t0) >= VIDEO_UDP_RETRY_US * RTLNET_PLAT_TICKS_PER_US) {
             g_dropped++;
+            g_send_ticks += (plat_ticks() - t0);
             return -1;
         }
         g_retries++;
@@ -90,4 +96,11 @@ void video_udp_counters(uint32_t *sent, uint32_t *dropped, uint32_t *retries)
     *sent = g_sent;
     *dropped = g_dropped;
     *retries = g_retries;
+}
+
+void video_udp_profile(uint64_t *copy_ticks, uint64_t *send_ticks)
+{
+    *copy_ticks = g_copy_ticks;
+    /* g_send_ticks holds the whole call (copy included): the rest is the difference. */
+    *send_ticks = g_send_ticks - g_copy_ticks;
 }

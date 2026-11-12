@@ -65,7 +65,7 @@
 //     firmware heartbeat by convention).
 //   * MMCM, BUFG and IOBUF primitives appear in this file only (the MIG clocking is inside its IP).
 // Language: SystemVerilog-2012.
-// Revision: 11-09-2026
+// Revision: 11-12-2026
 //   * 10-22-2026: initial version.
 //   * 10-22-2026: CPU network path between u_cpu and u_protocol.
 //   * 11-09-2026: DDR3 memory controller, AXI4 arbiter (decoder slave 6), CPU DDR3 master, DDR3 pins,
@@ -79,6 +79,7 @@
 //     run without a clock crossing (AXIL_SYNC 1).
 //   * 11-09-2026: Phase 2b-3: u_h264 (rtlnet_h264_top, decoder slave 10, 0x44A0_8000), two engine masters on the arbiter (masters 2 and 3),
 //     the MIG project's AXI ID width goes from 2 to 4 bits (arbiter ID_W 2 + IDX_W 2).
+//   * 11-12-2026: the encoder's irq output goes to the CPU interrupt input irq[1] (cpu_irq = {6'd0, h264_irq, mdio_irq}).
 // Clocks: sysclk (100 MHz pin) -> MMCM and MMCM2 (-> MIG PLL); clk125, clk125_90, clk200, axis_clk,
 //   proto_clk as above; ui_clk (MIG user clock, 90 MHz) = ui_clk; the MAC's
 //   receive clock is internal to it.
@@ -484,7 +485,7 @@ module rtlnet_nexys_video_top #(
   logic [1:0] e_rlast;
   logic [1:0] e_rvalid;
   logic [1:0] e_rready;
-  logic                    h264_irq_nc;
+  logic                    h264_irq;       // rtlnet_h264_top irq: level, ui_clk, CPU interrupt input irq[1] (INTC input RTLNET_CPU_IRQ_H264)
 
   // CPU network path (ui_clk): eth_tx = frames the CPU sends, eth_rx =
   // frames to the CPU.
@@ -1279,7 +1280,7 @@ module rtlnet_nexys_video_top #(
     .m_axi_rlast    (h_rlast),
     .m_axi_rvalid   (h_rvalid),
     .m_axi_rready   (h_rready),
-    .irq            (h264_irq_nc)
+    .irq            (h264_irq)
   );
 
   // DDR3 controller: sys_clk is MMCM2 CLKOUT0 (ddr_sys_clk, 102.857 MHz), ref_clk clk200.
@@ -1655,7 +1656,7 @@ module rtlnet_nexys_video_top #(
     .s_axi_rready  (dec_rready[SLV_ECHO])
   );
 
-  assign cpu_irq         = {7'd0, mdio_irq};
+  assign cpu_irq         = {6'd0, h264_irq, mdio_irq};   // irq[0] MDIO, irq[1] H.264 encoder (INTC inputs 0 and 1)
   assign net_status      = {prot_stat_dhcp_bound, prot_stat_ip_valid, mac_stat_rx_clk_ok,
                             mac_stat_speed, mac_stat_link_up};
   assign rgmii_rx_levels = 6'd0;
@@ -1684,7 +1685,7 @@ module rtlnet_nexys_video_top #(
     end
   end
 
-  assign cpu_irq           = 8'd0;
+  assign cpu_irq           = {6'd0, h264_irq, 1'b0};
   assign net_status        = 6'd0;
   // CPU network path without the protocol wrapper: no frames to the CPU;
   // frames from the CPU are accepted and discarded.

@@ -33,7 +33,8 @@
 // (10 us) so the uptime, clock windows and PHY timer run in simulation.
 // Ends with one anchored verdict line from rtlnet_tb_pkg::tb_verdict.
 // Language: SystemVerilog-2012 (simulation only).
-// Revision: 11-09-2026
+// Revision: 11-12-2026
+//   * 11-12-2026: H264 VERSION 0x11122C03 and CAPS bit 21 with the source mask 0x27 (the interrupt registers of rtlnet_h264_enc).
 //   * 10-22-2026: initial version.
 //   * 11-09-2026: DDR3 calibration status, arbiter window, VERSION 11-09-2026.
 //   * 11-09-2026: DDR3 data path test through the arbiter.
@@ -458,8 +459,8 @@ module tb_rtlnet_nexys_video_top;
     check_reg(WIN + 32'h0_4004, 32'h1109_2026, "ARBITER VERSION");
     check_reg(WIN + 32'h0_4008, 32'h0208_2104, "ARBITER CAPS (4 masters, 16-byte beat, ID_W 2, 8 outstanding, HP mask 2)");
     check_reg(WIN + 32'h0_8000, 32'h4832_3634, "H264 ID");
-    check_reg(WIN + 32'h0_8004, 32'h1110_2C02, "H264 VERSION");
-    check_reg(WIN + 32'h0_8008, 32'h0002_4478, "H264 CAPS (120 x 68 macroblocks, 2 engines)");
+    check_reg(WIN + 32'h0_8004, 32'h1112_2C03, "H264 VERSION");
+    check_reg(WIN + 32'h0_8008, 32'h2722_4478, "H264 CAPS (120 x 68 macroblocks, 2 engines, interrupt registers, sources 0x27)");
     check_reg(WIN + 32'h0_4010, 32'h0000_0000, "ARBITER STATUS idle");
     check_reg(WIN + 32'h0_4100, 32'h0000_0000, "ARBITER master 0 AW_BURSTS");
     check_reg(WIN + 32'h0_4110, 32'h0000_0000, "ARBITER master 0 ERRORS");

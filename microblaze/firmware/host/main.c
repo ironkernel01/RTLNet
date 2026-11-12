@@ -52,7 +52,8 @@
 #include "rtlnet_classifier.h"
 #include "rtlnet_cpupath.h"
 #include "rtlnet_eth_protocol.h"
-#include "rtlnet_h264_enc.h"
+#include "rtlnet_h264_enc_ctl.h"
+#include "rtlnet_venc.h"
 #include "rtlnet_offload.h"
 #include "rtlnet_platform.h"
 #include "rtlnet_tcp_offload.h"
@@ -838,7 +839,37 @@ static void demo_video(void)
     host_capture_clear();
     demo_type("encoder profile high\r");
     demo_check(demo_has("% rtlnet_h264_enc not present in this build"), "encoder profile: core absent");
+    demo_type("encoder notify polled\r");
+    demo_check(demo_has("% rtlnet_h264_enc not present in this build") || demo_has("Notification polled"), "encoder notify polled: accepted without the core");
     host_model_h264_set(1, 1);   /* seam built, stage 1 netlist: present, licensed, unlimited, hp_caps 0 */
+    /* Notification mode (interrupt registers present in the model): the request, the lines of show encoder and show stream, the self-test refusal. */
+    host_capture_clear();
+    demo_type("encoder notify polled\r");
+    demo_check(demo_has("Notification polled: the main loop reads STATUS and starts the next picture (applied at the next stream start)"), "encoder notify polled: accepted, no stream");
+    host_capture_clear();
+    demo_type("show encoder\r");
+    demo_check(demo_has("  Notification    : polled (requested; applied at the next stream start)") && demo_has("interrupt registers present"),
+               "show encoder: notification line polled, interrupt registers present");
+    host_capture_clear();
+    demo_type("encoder notify interrupt\r");
+    demo_check(demo_has("Notification interrupt requested: the encoder interrupt starts the next picture (applied at the next stream start)"), "encoder notify interrupt: accepted, no stream");
+    host_capture_clear();
+    demo_type("encoder notify bogus\r");
+    demo_check(demo_has("notification mode (interrupt or polled)"), "encoder notify: bad word rejected");
+    host_capture_clear();
+    demo_type("encoder irqtest\r");
+    demo_check(demo_has("The interrupt test needs a running stream in interrupt mode"), "encoder irqtest: refused without a stream");
+    host_capture_clear();
+    demo_type("show stream\r");
+    demo_check(demo_has("  Notification    : interrupt (requested; applied at the next stream start)") && demo_has("  Interrupts      : 0 taken (0 with no enabled event); picture done 0, error 0, ring stall 0, profile change 0, license lost 0"),
+               "show stream: notification line and zero interrupt counts while stopped");
+    host_model_h264_irq_caps(0);   /* an older core: no interrupt registers */
+    host_model_h264_set(1, 1);
+    host_capture_clear();
+    demo_type("show encoder\r");
+    demo_check(demo_has("interrupt registers absent (polled mode only)") && !demo_has("Interrupt regs"), "show encoder: older core, interrupt registers absent");
+    host_model_h264_irq_caps(1);
+    host_model_h264_set(1, 1);
     host_capture_clear();
     demo_type("show encoder\r");
     demo_check(demo_has("  High profile    : present, licensed, time left unlimited, tools none (hp_caps 0), profile baseline, 0 forced IDR pictures"),
@@ -863,7 +894,7 @@ static void demo_video(void)
     demo_type("show encoder\r");
     demo_check(demo_has("  High profile    : present, license ended, time left 0 min 0 s, tools none (hp_caps 0), profile baseline"),
                "show encoder: High profile line, license ended");
-    host_model_h264_hp(1u, 1u, RTLNET_H264_HP_CAP_CABAC, 600u);   /* a later stage: CABAC offered */
+    host_model_h264_hp(1u, 1u, RTLNET_H264_CTL_HP_CAP_CABAC, 600u);   /* a later stage: CABAC offered */
     host_capture_clear();
     demo_type("encoder profile high\r");
     demo_check(demo_has("Profile high, effective at the next picture") && host_model_h264_hp_ctrl() == 1u, "encoder profile high: accepted with hp_caps");
@@ -879,7 +910,7 @@ static void demo_video(void)
     host_capture_clear();
     demo_type("show encoder\r");
     demo_check(demo_has("  Transform 8x8   : not offered (hp_caps bit 1 is 0)"), "show encoder: Transform 8x8 line, not offered");
-    host_model_h264_hp(1u, 1u, RTLNET_H264_HP_CAP_CABAC | RTLNET_H264_HP_CAP_TRANSFORM8X8, 600u);   /* stage 3: CABAC and the 8x8 transform */
+    host_model_h264_hp(1u, 1u, RTLNET_H264_CTL_HP_CAP_CABAC | RTLNET_H264_CTL_HP_CAP_TRANSFORM8X8, 600u);   /* stage 3: CABAC and the 8x8 transform */
     host_capture_clear();
     demo_type("encoder transform8x8 on\r");
     demo_check(demo_has("Transform8x8 on, effective at the next picture in the High profile") && host_model_h264_hp_ctrl_t8() == 1u,
@@ -903,12 +934,12 @@ static void demo_video(void)
     demo_type("encoder transform8x8 on\r");
     demo_check(host_model_h264_hp_ctrl_t8() == 1u && host_model_h264_hp_ctrl_auto() == 0u, "encoder transform8x8 on again");
     /* Stage 3a: the adaptive choice, the macroblock counts of the last picture in show encoder. */
-    host_model_h264_hp(1u, 1u, RTLNET_H264_HP_CAP_CABAC | RTLNET_H264_HP_CAP_TRANSFORM8X8, 600u);   /* a netlist with bits 0 and 1 only: auto refused */
+    host_model_h264_hp(1u, 1u, RTLNET_H264_CTL_HP_CAP_CABAC | RTLNET_H264_CTL_HP_CAP_TRANSFORM8X8, 600u);   /* a netlist with bits 0 and 1 only: auto refused */
     host_capture_clear();
     demo_type("encoder transform8x8 auto\r");
     demo_check(demo_has("% Transform8x8 auto refused: the High profile module offers no adaptive transform choice (hp_caps bit 2 is 0)") && host_model_h264_hp_ctrl_auto() == 0u,
                "encoder transform8x8 auto: refused with hp_caps bit 2 clear");
-    host_model_h264_hp(1u, 1u, RTLNET_H264_HP_CAP_CABAC | RTLNET_H264_HP_CAP_TRANSFORM8X8 | RTLNET_H264_HP_CAP_ADAPTIVE, 600u);
+    host_model_h264_hp(1u, 1u, RTLNET_H264_CTL_HP_CAP_CABAC | RTLNET_H264_CTL_HP_CAP_TRANSFORM8X8 | RTLNET_H264_CTL_HP_CAP_ADAPTIVE, 600u);
     host_model_h264_t8_counts(321u, 45u);
     host_capture_clear();
     demo_type("show encoder\r");
@@ -930,17 +961,17 @@ static void demo_video(void)
     host_capture_clear();
     demo_type("show encoder\r");
     demo_check(demo_has("  Transform 8x8   : off, not in force (4x4 transform)") && !demo_has("  Transform MBs   :"), "show encoder: Transform 8x8 off, no macroblock counts");
-    host_model_h264_hp(1u, 1u, RTLNET_H264_HP_CAP_CABAC, 600u);
+    host_model_h264_hp(1u, 1u, RTLNET_H264_CTL_HP_CAP_CABAC, 600u);
     host_capture_clear();
     demo_type("encoder transform8x8 auto\r");
     demo_check(demo_has("% Transform8x8 auto refused: the High profile module offers no 8x8 transform (hp_caps bit 1 is 0)") && host_model_h264_hp_ctrl_auto() == 0u,
                "encoder transform8x8 auto: refused with hp_caps bit 1 clear");
-    host_model_h264_hp(1u, 1u, RTLNET_H264_HP_CAP_CABAC | RTLNET_H264_HP_CAP_TRANSFORM8X8 | RTLNET_H264_HP_CAP_ADAPTIVE, 600u);
+    host_model_h264_hp(1u, 1u, RTLNET_H264_CTL_HP_CAP_CABAC | RTLNET_H264_CTL_HP_CAP_TRANSFORM8X8 | RTLNET_H264_CTL_HP_CAP_ADAPTIVE, 600u);
     host_capture_clear();
     demo_type("encoder transform8x8 on\r");
     demo_check(host_model_h264_hp_ctrl_t8() == 1u, "encoder transform8x8 on, last");
-    host_model_h264_hp(1u, 1u, RTLNET_H264_HP_CAP_CABAC, 600u);   /* back to the CABAC-only module for the checks below */
-    host_model_h264_hp(1u, 0u, RTLNET_H264_HP_CAP_CABAC, 0u);
+    host_model_h264_hp(1u, 1u, RTLNET_H264_CTL_HP_CAP_CABAC, 600u);   /* back to the CABAC-only module for the checks below */
+    host_model_h264_hp(1u, 0u, RTLNET_H264_CTL_HP_CAP_CABAC, 0u);
     host_capture_clear();
     demo_type("encoder profile high\r");
     demo_check(demo_has("% Profile high refused: the High profile license has ended"), "encoder profile high: refused, license ended");
@@ -1243,6 +1274,7 @@ static int demo_run(int inject_failure)
     const char *verdict_msg;
 
     plat_init();
+    venc_init();
     host_capture_clear();
     cli_start();
     demo_check(strstr(host_capture_text(), "RTLNet Nexys Video -- rtlnet-fw") != NULL, "start-up banner");
@@ -1339,6 +1371,7 @@ int main(int argc, char **argv)
         return demo_run(argc > 2 && strcmp(argv[2], "--inject-failure") == 0);
     }
     plat_init();
+    venc_init();
     cli_start();
     for (;;) {
         int c = getchar();

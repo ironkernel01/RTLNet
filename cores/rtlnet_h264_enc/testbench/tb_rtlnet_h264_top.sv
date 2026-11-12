@@ -127,7 +127,9 @@ module tb_rtlnet_h264_top;
                           R_IDX_ENTRIES = 12'h07C, R_IDX_WPTR = 12'h080, R_IDX_RPTR = 12'h084,
                           R_PIC_COUNT = 12'h090, R_SLICE_COUNT = 12'h094, R_MB_COUNT = 12'h098,
                           R_CYC_LAST = 12'h09C, R_CYC_MAX = 12'h0A0, R_PIC_CYC = 12'h0A4, R_RD_CYC = 12'h0A8,
-                          R_PK_CYC = 12'h0AC, R_WR_CYC = 12'h0B0;
+                          R_PK_CYC = 12'h0AC, R_WR_CYC = 12'h0B0,
+                          R_IRQ_STATUS = 12'h0D0, R_IRQ_ENABLE = 12'h0D4;
+  bit irq_mode;      // +IRQ: the picture end is taken from the irq output (IRQ_ENABLE = PIC_DONE | ERR, CTRL.IRQ_EN); otherwise polled and irq must stay low
 
   // Clocks and reset.
   logic enc_clk = 1'b0;
@@ -577,8 +579,9 @@ module tb_rtlnet_h264_top;
   endtask
 
   task automatic run_picture(input int p);
-    logic [31:0] st, c;
+    logic [31:0] st, c, ist;
     int t, n, got_done;
+    bit irq_seen;
     int total_entries [4];
     bit all_entries;
     cur_pic = p;
@@ -628,14 +631,24 @@ module tb_rtlnet_h264_top;
     reg_write(R_REFU_BASE, (p % 2 == 0) ? RUB_BASE : RUA_BASE);
     reg_write(R_PIC_CFG, {19'd0, 5'd4, 6'd0, pic_is_p, !pic_is_p});
     reg_write(R_IN_BASE, IN0_BASE);
-    reg_write(R_CTRL, 32'h1);
+    reg_write(R_CTRL, irq_mode ? 32'h101 : 32'h1);
     got_done = 0;
+    irq_seen = 0;
     all_entries = 0;
     t = 0;
     while (!(got_done && all_entries) && t < 400000) begin
       reg_read(R_STATUS, st);
       if (st[1]) got_done = 1;
       tb_check(!st[2], "STATUS.ERR set");
+      if (!irq_mode) begin
+        tb_check(!irq, "polled: irq stays low (nothing enabled)");
+      end else if (irq && !irq_seen) begin
+        reg_read(R_IRQ_STATUS, ist);
+        tb_check(ist[0] && !ist[1], $sformatf("irq: IRQ_STATUS %08x has PIC_DONE and no ERR", ist));
+        reg_write(R_IRQ_STATUS, 32'h1);       // acknowledge; the level falls
+        tb_check(!irq, "irq falls after the acknowledge");
+        irq_seen = 1;
+      end
       repeat (`TB_CONSUMER_DELAY) @(negedge s_clk);
       all_entries = 1;
       for (int e = 0; e < NE; e++) begin
@@ -646,6 +659,17 @@ module tb_rtlnet_h264_top;
       t++;
     end
     tb_check(got_done && all_entries, $sformatf("picture %0d: done %0d, all index entries seen %0d", p, got_done, all_entries));
+    if (irq_mode) begin
+      tb_check(irq_seen, $sformatf("picture %0d: the interrupt came", p));
+    end else begin
+      reg_read(R_IRQ_STATUS, ist);             // the sticky bit is readable by polled software, and clears by write 1
+      tb_check(ist[0] && !irq, $sformatf("polled: IRQ_STATUS %08x has PIC_DONE, irq low", ist));
+      reg_write(R_IRQ_STATUS, 32'h1);
+      reg_read(R_IRQ_STATUS, ist);
+      tb_check(ist[0] == 1'b0, "polled: IRQ_STATUS PIC_DONE cleared by write 1");
+    end
+    reg_read(R_STATUS, st);
+    tb_check(st[1], "STATUS.DONE is independent of IRQ_STATUS (still set)");
     reg_write(R_STATUS, 32'h2);
     // The picture: the access unit delimiter and the slices of engine 0, then those of the later engines.
     for (int e = 0; e < NE; e++) for (int i = 0; i < estream[e].size(); i++) stream.push_back(estream[e][i]);
@@ -709,6 +733,12 @@ module tb_rtlnet_h264_top;
     tb_check(v == 32'h48323634, $sformatf("ID %08x", v));
     reg_read(R_CAPS, v);
     tb_check(v[7:0] == 8'd120 && v[15:8] == 8'd68 && v[19:16] == 4'(NE), $sformatf("CAPS %08x", v));
+    tb_check(v[21] == 1'b1 && v[31:24] == (`TB_HIGH_PROFILE ? 8'h3F : 8'h27), $sformatf("CAPS interrupt bits %08x", v));
+    reg_read(R_VERSION, v);
+    tb_check(v == 32'h1112_2C03, $sformatf("VERSION %08x", v));
+    reg_read(R_IRQ_ENABLE, v);
+    tb_check(v == 32'd0 && !irq, "reset: nothing enabled, irq low");
+    irq_mode = $test$plusargs("IRQ");
 
     reg_write(R_MB_W, MBW);
     reg_write(R_MB_H, MBH);
@@ -732,6 +762,7 @@ module tb_rtlnet_h264_top;
     reg_write(R_IDX_BASE, IDX_BASE);
     reg_write(R_IDX_ENTRIES, IDX_ENTRIES);
     reg_write(R_CTRL, 32'h2);
+    if (irq_mode) reg_write(R_IRQ_ENABLE, 32'h3);   // PIC_DONE and ERR
     reg_read(R_MB_W, v);
     tb_check(int'(v) == MBW, "MB_W readback");
 

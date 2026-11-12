@@ -389,18 +389,20 @@ int rtlnet_h264_enc_set_mode(uintptr_t base, uint32_t video_mode, rtlnet_h264_en
 /*
  * rtlnet_h264_enc_probe -- see the header
  * Steps:
- *   1. Check ID and VERSION.
- *   2. Decode CAPS into caps when it is not NULL.
+ *   1. Check ID and VERSION (current, or the one before the interrupt registers).
+ *   2. Decode CAPS into caps when it is not NULL; the interrupt capability needs CAPS bit 21 and the current VERSION.
  * Returns: 0 when present and matching, -1 otherwise.
  */
 int rtlnet_h264_enc_probe(uintptr_t base, rtlnet_h264_enc_caps_t *caps)
 {
     uint32_t c;
+    uint32_t v;
 
     if (rtlnet_reg_read32(base, RTLNET_REG_ID) != RTLNET_H264_ID_VALUE) {
         return -1;
     }
-    if (rtlnet_reg_read32(base, RTLNET_REG_VERSION) != RTLNET_H264_VERSION_VALUE) {
+    v = rtlnet_reg_read32(base, RTLNET_REG_VERSION);
+    if ((v != RTLNET_H264_VERSION_VALUE) && (v != RTLNET_H264_VERSION_PRE_IRQ)) {
         return -1;
     }
     if (caps != NULL) {
@@ -409,6 +411,9 @@ int rtlnet_h264_enc_probe(uintptr_t base, rtlnet_h264_enc_caps_t *caps)
         caps->max_mb_h    = (c >> RTLNET_H264_CAPS_MB_H_SHIFT) & RTLNET_H264_CAPS_MB_H_MASK;
         caps->num_engines = (c >> RTLNET_H264_CAPS_ENG_SHIFT) & RTLNET_H264_CAPS_ENG_MASK;
         caps->hp_seam     = (c & RTLNET_H264_CAPS_HP_SEAM) != 0u ? 1u : 0u;
+        caps->irq         = (((c & RTLNET_H264_CAPS_IRQ) != 0u) && (v == RTLNET_H264_VERSION_VALUE)) ? 1u : 0u;
+        caps->irq_sources = (caps->irq != 0u) ? ((c >> RTLNET_H264_CAPS_IRQ_SRC_SHIFT) & RTLNET_H264_CAPS_IRQ_SRC_MASK) : 0u;
+        caps->version     = v;
     }
     return 0;
 }
@@ -794,6 +799,80 @@ int rtlnet_h264_enc_hp_clear_change(uintptr_t base)
 uint32_t rtlnet_h264_enc_status(uintptr_t base)
 {
     return rtlnet_reg_read32(base, RTLNET_H264_REG_STATUS);
+}
+
+/*
+ * rtlnet_h264_enc_irq_capable -- see the header
+ */
+int rtlnet_h264_enc_irq_capable(uintptr_t base, uint32_t *sources)
+{
+    uint32_t c = rtlnet_reg_read32(base, RTLNET_REG_CAPS);
+    int      ok = ((c & RTLNET_H264_CAPS_IRQ) != 0u) && (rtlnet_reg_read32(base, RTLNET_REG_VERSION) == RTLNET_H264_VERSION_VALUE);
+
+    if (sources != NULL) {
+        *sources = ok ? ((c >> RTLNET_H264_CAPS_IRQ_SRC_SHIFT) & RTLNET_H264_CAPS_IRQ_SRC_MASK) : 0u;
+    }
+    return ok ? 1 : 0;
+}
+
+/*
+ * rtlnet_h264_enc_irq_set_enable -- see the header
+ */
+int rtlnet_h264_enc_irq_set_enable(uintptr_t base, uint32_t mask)
+{
+    if (rtlnet_h264_enc_irq_capable(base, NULL) == 0) {
+        return -1;
+    }
+    rtlnet_reg_write32(base, RTLNET_H264_REG_IRQ_ENABLE, mask);
+    return 0;
+}
+
+/*
+ * rtlnet_h264_enc_irq_get_enable -- see the header
+ */
+uint32_t rtlnet_h264_enc_irq_get_enable(uintptr_t base)
+{
+    return rtlnet_reg_read32(base, RTLNET_H264_REG_IRQ_ENABLE);
+}
+
+/*
+ * rtlnet_h264_enc_irq_global -- see the header
+ */
+int rtlnet_h264_enc_irq_global(uintptr_t base, int on)
+{
+    if (rtlnet_h264_enc_irq_capable(base, NULL) == 0) {
+        return -1;
+    }
+    rtlnet_reg_write32(base, RTLNET_H264_REG_CTRL, (on != 0) ? RTLNET_H264_CTRL_IRQ_EN : 0u);
+    return 0;
+}
+
+/*
+ * rtlnet_h264_enc_irq_status -- see the header
+ */
+uint32_t rtlnet_h264_enc_irq_status(uintptr_t base)
+{
+    return rtlnet_reg_read32(base, RTLNET_H264_REG_IRQ_STATUS);
+}
+
+/*
+ * rtlnet_h264_enc_irq_ack -- see the header
+ */
+void rtlnet_h264_enc_irq_ack(uintptr_t base, uint32_t mask)
+{
+    rtlnet_reg_write32(base, RTLNET_H264_REG_IRQ_STATUS, mask);
+}
+
+/*
+ * rtlnet_h264_enc_irq_force -- see the header
+ */
+int rtlnet_h264_enc_irq_force(uintptr_t base, uint32_t mask)
+{
+    if (rtlnet_h264_enc_irq_capable(base, NULL) == 0) {
+        return -1;
+    }
+    rtlnet_reg_write32(base, RTLNET_H264_REG_IRQ_FORCE, mask);
+    return 0;
 }
 
 /*

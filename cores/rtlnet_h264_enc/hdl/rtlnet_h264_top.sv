@@ -17,12 +17,14 @@
 //     beats that never cross 4 KiB. The board runs enc_clk from the MIG ui_clk, so these ports reach the DDR3 arbiter directly.
 //   * SPS and PPS are written by firmware (driver rtlnet_h264_enc_write_sps_pps()); the core writes the access
 //     unit delimiter, the slice NAL units and their index entries.
-//   * irq is a level on enc_clk: high while CTRL.IRQ_EN and (STATUS.DONE or STATUS.ERR).
+//   * irq is a level on enc_clk: high while CTRL.IRQ_EN is set and an IRQ_STATUS event bit has its IRQ_ENABLE bit set (sources: picture done,
+//     error, ring stall, profile change, license lost, picture start; see the register file).
 //   * HIGH_PROFILE (default 0): 1 instantiates rtlnet_h264_hp (the High profile extension, a separately delivered netlist) in every
 //     engine; the registers HP_CTRL and HP_STATUS and CAPS bit 20 describe it. With 0 no reference to the module exists and the
 //     logic is that of the Constrained Baseline encoder.
 // Language: SystemVerilog-2012.
-// Revision: 11-11-2026
+// Revision: 11-12-2026
+//   * 11-12-2026: irq from the IRQ_STATUS / IRQ_ENABLE registers.
 //   * 11-11-2026: HIGH_PROFILE parameter and the hp seam to the registers.
 //   * 11-09-2026: initial version.
 //   * 11-10-2026: phase 2c-1: REF_BUF_KB, MV_LINE_KB; the P picture and reference base registers go to the engines.
@@ -108,7 +110,7 @@ module rtlnet_h264_top #(
   input  logic [NUM_ENGINES-1:0]        m_axi_rvalid,
   output logic [NUM_ENGINES-1:0]        m_axi_rready,
 
-  // Picture-done and error interrupt, enc_clk domain, level.
+  // Interrupt, enc_clk domain, level: CTRL.IRQ_EN and an enabled IRQ_STATUS event.
   output logic              irq
 );
 

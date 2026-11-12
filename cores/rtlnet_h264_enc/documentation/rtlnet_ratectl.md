@@ -6,14 +6,14 @@ Revision: 11-11-2026 (start QP, Phase 2e)
 
 ## 1. Purpose
 
-`microblaze/firmware/src/video/rtlnet_ratectl.{h,c}` picks one QP per picture for the two-engine H.264 encoder. It is pure C: no
-hardware access, no floating point (fixed point), no dynamic allocation, so `microblaze/firmware/host/test_ratectl.c` drives it on
+`cores/rtlnet_h264_enc/driver/rtlnet_ratectl.{h,c}` (a file pair of the H.264 encoder driver folder since 11-12-2026) picks one QP per picture for the two-engine H.264 encoder. It is pure C: no
+hardware access, no floating point (fixed point), no dynamic allocation, so `cores/rtlnet_h264_enc/testbench/test_rtlnet_ratectl.c` drives it on
 the host with a synthetic encoder model. `rtlnet_venc.c` owns one instance and calls it twice per picture:
 
 | Moment | Call | Data |
 |---|---|---|
 | start of a picture, after its type is decided | `ratectl_pick(rc, is_idr, gop)` | the QP written to the core |
-| end of a picture, in `mux_picture` | `ratectl_picture_done(rc, is_idr, qp, bits, dt90)` | the coded size in bits (the picture entry lengths of every engine plus the SPS and PPS of an IDR picture), the QP read back from the core, the stream time since the previous picture in 90 kHz ticks (more than one period after a dropped picture) |
+| end of a picture, in `queue_picture` (the picture-done callback of `rtlnet_venc.c`: the encoder interrupt in interrupt mode, `venc_poll` in polled mode; the controller has no locking, the caller serialises: the console commands that change it run in a critical section) | `ratectl_picture_done(rc, is_idr, qp, bits, dt90)` | the coded size in bits (the picture entry lengths of every engine plus the SPS and PPS of an IDR picture), the QP read back from the core, the stream time since the previous picture in 90 kHz ticks (more than one period after a dropped picture) |
 
 The target is the elementary stream rate (coded picture bits). The MPEG-TS stream carries about 3 % more (188-byte packets, PES headers,
 PCR, PAT and PMT; `show stream` prints both).
@@ -131,7 +131,7 @@ command calls the driver.
 
 ## 6. Host test
 
-`microblaze/firmware/host/test_ratectl.c`, built and run by `build.ps1 -RatectlTest` and as part of `build.ps1 -Demo`; log `microblaze/firmware/build/ratectl_test.log`
+`cores/rtlnet_h264_enc/testbench/test_rtlnet_ratectl.c`, built and run by `testbench/h264_driver_test.ps1`, `build.ps1 -RatectlTest` and as part of `build.ps1 -Demo`; log `microblaze/firmware/build/ratectl_test.log`
 (the whole `-Demo` run is in `microblaze/firmware/build/phase2d_build_demo.txt`). The synthetic encoder: `bits = complexity x 2^((34 - QP)/6) x (1 + noise)`, noise uniform within +-10 %
 (fixed-seed generator), an IDR picture 6 x a P picture at equal QP (4 x and 8 x also run for constant motion), 2700 pictures (90 s) per run at 30 fps. Sequences: static (0.02 of
 the moderate complexity), constant moderate motion (equilibrium QP 34), a 3 s noise burst of 4 x complexity from t = 20.5 s, a scene cut to 3 x complexity at t = 30.5 s, ramps

@@ -40,7 +40,8 @@
 #include <stdint.h>   /* uint32_t, uint8_t, uintptr_t */
 
 #define RTLNET_H264_ID_VALUE             0x48323634u   /* "H264" */
-#define RTLNET_H264_VERSION_VALUE        0x11102C02u
+#define RTLNET_H264_VERSION_VALUE        0x11122C03u   /* with the interrupt registers (CAPS bit 21) */
+#define RTLNET_H264_VERSION_PRE_IRQ      0x11102C02u   /* the core before them: probe accepts it, caps.irq is 0 */
 /* Revision 11-09-2026: initial register map (phase 2b-1); MB_MODE register and cfg->mb_pcm (phase 2b-2);
  * RTLNET_H264_QP_MIN_REALTIME (the QP clamp of rtlnet_h264_enc_configure).
  * Revision 11-10-2026 (VERSION 0x11102026, burst-only DDR3 access): the rebuilt picture is macroblock-tiled (RY_BASE and
@@ -52,6 +53,9 @@
  * an I picture, IDR or not, and clears the P bit).
  * Revision 11-10-2026 (VERSION 0x11102C02, phase 2c-2, motion search): no register or API change; the reference picture is searched
  * (integer vectors, +-16) instead of read at the co-located macroblock.
+ * Revision 11-12-2026 (VERSION 0x11122C03, interrupt registers): IRQ_STATUS (0x0D0), IRQ_ENABLE (0x0D4), IRQ_FORCE (0x0D8), CAPS bit 21 and
+ * [31:24]; CTRL.IRQ_EN is the global enable; the irq output follows IRQ_STATUS and IRQ_ENABLE instead of DONE and ERR. Every earlier register is
+ * unchanged. rtlnet_h264_enc_probe still accepts VERSION 0x11102C02 (caps.irq 0: no interrupt registers, the polled method only).
  * Revision 11-11-2026 (High profile seam, HIGH_PROFILE builds; VERSION unchanged): CAPS bit 20 HP_SEAM, registers HP_CTRL (0x0C0) and
  * HP_STATUS (0x0C4), rtlnet_h264_enc_hp_status / _set_profile / _hp_clear_change. A build without the seam reads CAPS bit 20 as 0 and
  * 0 in both registers. The rtlnet_h264_hp module that fills the registers is delivered separately; in its stage 1 hp_caps is 0, so
@@ -105,11 +109,23 @@
 #define RTLNET_H264_REG_HP_STATUS        0x0C4u   /* HIGH_PROFILE builds, see RTLNET_H264_HP_STATUS_* */
 #define RTLNET_H264_REG_HP_T8COUNT       0x0C8u   /* RO, HIGH_PROFILE builds: [15:0] macroblocks of the last picture coded with the 8x8 transform, [31:16] with the 4x4
                                                      transform (inter macroblocks with luma residual, all engines added) */
+#define RTLNET_H264_REG_IRQ_STATUS       0x0D0u   /* sticky event bits (RTLNET_H264_IRQ_*), write 1 to clear; an event in the clock of its clear keeps the bit */
+#define RTLNET_H264_REG_IRQ_ENABLE       0x0D4u   /* one enable bit per source, reset 0 (bits of sources the build lacks read 0) */
+#define RTLNET_H264_REG_IRQ_FORCE        0x0D8u   /* WO: a 1 sets the status bit (self-test); reads 0 */
+
+/* Interrupt sources: the bits of IRQ_STATUS, IRQ_ENABLE and IRQ_FORCE. The irq output is CTRL.IRQ_EN and (IRQ_STATUS and IRQ_ENABLE not 0). */
+#define RTLNET_H264_IRQ_PIC_DONE         (1u << 0)    /* a picture is complete (every engine done) */
+#define RTLNET_H264_IRQ_ERR              (1u << 1)    /* an error pulse (the STATUS.ERR event) */
+#define RTLNET_H264_IRQ_RING_STALL       (1u << 2)    /* rising edge of the ring-full stall of any engine */
+#define RTLNET_H264_IRQ_PROFILE_CHG      (1u << 3)    /* a picture start applied a changed license or enable (HIGH_PROFILE builds) */
+#define RTLNET_H264_IRQ_LICENSE_LOST     (1u << 4)    /* hp_licensed fell: the demo time ended (HIGH_PROFILE builds) */
+#define RTLNET_H264_IRQ_PIC_START        (1u << 5)    /* a start accepted while idle */
+/* Bits [7:6] are reserved and read 0. */
 
 /* CTRL bits. */
 #define RTLNET_H264_CTRL_START           (1u << 0)    /* self-clearing: code one picture */
 #define RTLNET_H264_CTRL_RING_RESET      (1u << 1)    /* self-clearing: clear ring and index pointers (core idle) */
-#define RTLNET_H264_CTRL_IRQ_EN          (1u << 8)    /* irq high while IRQ_EN and (DONE or ERR) */
+#define RTLNET_H264_CTRL_IRQ_EN          (1u << 8)    /* global interrupt enable (reset 0): the irq output is high while it is set and an enabled IRQ_STATUS bit is set */
 
 /* STATUS bits. */
 #define RTLNET_H264_STATUS_BUSY          (1u << 0)
@@ -162,6 +178,9 @@
 #define RTLNET_H264_CAPS_ENG_SHIFT       16u            /* [19:16] NUM_ENGINES */
 #define RTLNET_H264_CAPS_ENG_MASK        0xFu
 #define RTLNET_H264_CAPS_HP_SEAM         (1u << 20)     /* [20] HIGH_PROFILE build: HP_CTRL and HP_STATUS exist */
+#define RTLNET_H264_CAPS_IRQ             (1u << 21)     /* [21] the interrupt registers exist (VERSION 0x11122C03 and later) */
+#define RTLNET_H264_CAPS_IRQ_SRC_SHIFT   24u            /* [31:24] mask of the implemented interrupt sources */
+#define RTLNET_H264_CAPS_IRQ_SRC_MASK    0xFFu
 
 /*
  * Index entry: four little-endian 32-bit words at the start of the 128-byte record at idx_base + 128 * index.
@@ -213,6 +232,9 @@ typedef struct {
     uint32_t max_mb_h;
     uint32_t num_engines;
     uint32_t hp_seam;      /* 1 in a HIGH_PROFILE build */
+    uint32_t irq;          /* 1 when the core has the interrupt registers */
+    uint32_t irq_sources;  /* RTLNET_H264_IRQ_* bits the build implements (0 without the registers) */
+    uint32_t version;      /* VERSION register */
 } rtlnet_h264_enc_caps_t;
 
 /* High profile status, decoded from HP_STATUS. */
@@ -308,7 +330,7 @@ typedef struct {
  * bounded by the poll count the caller passes.
  */
 
-/* Check ID and VERSION; read the build parameters into caps when it is not NULL. 0 when present. */
+/* Check ID and VERSION (the current one or RTLNET_H264_VERSION_PRE_IRQ); read the build parameters into caps when it is not NULL. 0 when present. */
 int rtlnet_h264_enc_probe(uintptr_t base, rtlnet_h264_enc_caps_t *caps);
 
 /* Read HP_STATUS into out. -2 (RTLNET_H264_HP_ERR_NO_SEAM) when the build has no High profile seam, -1 for a NULL argument or a core
@@ -402,6 +424,34 @@ int rtlnet_h264_enc_wait_done(uintptr_t base, uint32_t max_polls, uint32_t *err_
 
 /* Read STATUS, clearing nothing. */
 uint32_t rtlnet_h264_enc_status(uintptr_t base);
+
+/*
+ * Interrupt registers. The core is silent after reset (CTRL.IRQ_EN 0, IRQ_ENABLE 0); IRQ_STATUS collects the events whether or not they are
+ * enabled, so polled software can read it too. A core without the registers (CAPS bit 21 clear) refuses the functions that write them with -1.
+ * Context: irq_status, irq_ack and irq_get_enable are one register access and may be called from an interrupt handler; the others read CAPS
+ * and VERSION first (three accesses), and are for the main context.
+ */
+
+/* 1 when the core has the interrupt registers, else 0; the implemented source mask goes to *sources when it is not NULL. */
+int rtlnet_h264_enc_irq_capable(uintptr_t base, uint32_t *sources);
+
+/* Write IRQ_ENABLE: the sources of mask (RTLNET_H264_IRQ_*; bits the build lacks are dropped by the core). 0, or -1 without the registers. */
+int rtlnet_h264_enc_irq_set_enable(uintptr_t base, uint32_t mask);
+
+/* Read IRQ_ENABLE. */
+uint32_t rtlnet_h264_enc_irq_get_enable(uintptr_t base);
+
+/* Global enable (CTRL.IRQ_EN): on != 0 sets it, 0 clears it. 0, or -1 without the registers. Other CTRL bits are written 0 (START and RING_RESET are strobes). */
+int rtlnet_h264_enc_irq_global(uintptr_t base, int on);
+
+/* Read IRQ_STATUS (sticky event bits, whether enabled or not). */
+uint32_t rtlnet_h264_enc_irq_status(uintptr_t base);
+
+/* Acknowledge: write 1 to the status bits of mask. A bit whose event arrives in the same clock stays set. */
+void rtlnet_h264_enc_irq_ack(uintptr_t base, uint32_t mask);
+
+/* Force: set the status bits of mask (self-test of the interrupt path). 0, or -1 without the registers. */
+int rtlnet_h264_enc_irq_force(uintptr_t base, uint32_t mask);
 
 /* Clear the DONE and ERR flags. */
 void rtlnet_h264_enc_clear_status(uintptr_t base);

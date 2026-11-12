@@ -23,11 +23,12 @@
  *
  * This header holds constants and contract prose only.
  *
- * Revision: 11-10-2026
+ * Revision: 11-12-2026
  *   * 11-09-2026: MicroBlaze V; classic vector slots replaced by the reset
  *     vector (traps use mtvec).
  *   * 11-09-2026: DDR3 window 0x8000_0000 (512 MiB, cached), cache sizes and line length.
  *   * 11-10-2026: AXI BRAM 64 KiB (was 128 KiB).
+ *   * 11-12-2026: INTC input 1 (irq[1]) carries the H.264 encoder interrupt.
  */
 #ifndef RTLNET_CPU_MICROBLAZE_H
 #define RTLNET_CPU_MICROBLAZE_H
@@ -83,6 +84,8 @@
 /* INTC input numbering: core port irq[7:0] on inputs 0..7. */
 #define RTLNET_CPU_IRQ_EXT0         0u            /* irq[0] .. irq[7] = inputs 0..7 */
 #define RTLNET_CPU_IRQ_EXT_COUNT    8u
+#define RTLNET_CPU_IRQ_MDIO         0u            /* irq[0]: rtlnet_mdio */
+#define RTLNET_CPU_IRQ_H264         1u            /* irq[1]: rtlnet_h264_enc (rtlnet_h264_top irq, level) */
 #define RTLNET_CPU_IRQ_TIMER        8u
 #define RTLNET_CPU_IRQ_UART         9u
 #define RTLNET_CPU_IRQ_DMA_MM2S     10u           /* AXI DMA mm2s_introut */

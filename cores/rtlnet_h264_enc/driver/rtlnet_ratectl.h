@@ -4,16 +4,19 @@
  * Copyright (C) 2026 IronKernel. All rights reserved.
  *
  * Role: pure C with no hardware access and no floating point (fixed point, no dynamic allocation), so the host unit test
- * (host/test_ratectl.c) drives it with a synthetic encoder model. rtlnet_venc.c owns one instance:
+ * (testbench/test_rtlnet_ratectl.c) drives it with a synthetic encoder model. rtlnet_venc.c owns one instance:
  *   begin of a picture   qp = ratectl_pick(rc, is_idr, gop)               the QP written to the core
  *   end of a picture     ratectl_picture_done(rc, is_idr, qp, bits, dt90) the coded size, the QP actually used, the time step
+ *
+ * Concurrency: no locking and no static state. rtlnet_venc.c calls ratectl_pick and ratectl_picture_done from the encoder side (the encoder
+ * interrupt handler in interrupt mode) and the console commands (set_*, get_stats, history, clear_stats) inside a critical section.
  *
  * Modes: target 0 is constant QP (ratectl_pick returns the configured QP, today's behaviour); a target in kb/s is constant bit
  * rate with a virtual buffer (leaky bucket) of target x buffer_ms / 1000 bits. The controller never drops a picture: a buffer that
  * would overflow is counted (overflow, and overflow_below_max when the picture's QP was below the range maximum) and the fill
  * saturates at 100 %; a buffer that runs empty (static content at the minimum QP) is counted as underflow.
  *
- * Model (section 2 of microblaze/documentation/rtlnet_ratectl.md): the size of a picture of type t at QP q is 2^(K_t - q/6) bits;
+ * Model (section 2 of cores/rtlnet_h264_enc/documentation/rtlnet_ratectl.md): the size of a picture of type t at QP q is 2^(K_t - q/6) bits;
  * K_t is tracked in the log domain (Q8) for the I and the P type separately. The QP of the next picture solves "the pictures of the
  * next H coded at one QP use the bit budget of H picture periods plus the distance of the buffer from its set point"; the result is
  * clamped to the QP range, limited to +-2 from the previous picture and rounded with error feedback so the average QP is exact.
