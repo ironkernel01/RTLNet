@@ -24,6 +24,11 @@
  * Phase 2d: rate control (rtlnet_ratectl.c). Target 0 is constant QP (the QP of venc_set_qp for every picture); a target in kb/s
  * picks the QP of each picture from the coded sizes of the pictures before it (the entry lengths of every engine's index record).
  *
+ * Phase 2f: the multiplexer runs apart from the encoder. On DONE the picture is queued (rtlnet_picq.c: a descriptor with everything the multiplexer
+ * needs), the slot is released and the next picture starts at once; every venc_poll call sends one chunk of the oldest queued picture
+ * (rtlnet_muxjob.c). Pictures leave in coding order. At PICQ_LIMIT pictures queued a new frame is skipped on purpose (a dropped picture with its
+ * own counter, the next picture an IDR picture), so the encoder cannot stall on a full ring. See rtlnet_ts_mux.md section 5.2.
+ *
  * DDR3 map (byte offsets in DDR3, CPU address = DDR3 window + offset; the frame buffer holds 0x1000_0000 to 0x10C0_0000):
  *   0x1100_0000 / 0x1120_0000  rebuilt picture A, luma tiles / chroma tiles (2 MiB each)
  *   0x1140_0000 / 0x1160_0000  rebuilt picture B, luma tiles / chroma tiles (2 MiB each)
@@ -85,6 +90,21 @@ typedef struct {
     uint32_t fb_dropped;        /* frame-buffer DROPPED counter (frames the writer could not place) */
     uint32_t fb_published;
     uint32_t hp_forced_idr;     /* pictures the encoder turned into IDR pictures (license or profile change, High profile seam) */
+    /* Sequencing measurements (phase 2f), cleared with the stream statistics. Times in microseconds. */
+    uint32_t cyc_n;             /* pictures started since the clear (cycle times counted from the second one) */
+    uint32_t cyc_min_us;        /* picture cycle time, begin to begin */
+    uint32_t cyc_avg_us;
+    uint32_t cyc_max_us;
+    uint32_t lag_avg_us;        /* lag at begin_picture: now minus the frame's time stamp, relative to the smallest lag seen */
+    uint32_t lag_max_us;
+    uint32_t mux_n;             /* pictures sent since the clear */
+    uint32_t mux_ring_ts_us;    /* per picture: ring read (cache invalidate) and TS build */
+    uint32_t mux_copy_us;       /* per picture: copy of the datagrams into the pbufs */
+    uint32_t mux_send_us;       /* per picture: pbuf allocation, udp_sendto (lwIP and the network interface), pbuf release */
+    uint32_t backlog;           /* pictures queued for the mux now (coded, not yet sent) */
+    uint32_t backlog_max;
+    uint32_t skipped_backlog;   /* frames skipped on purpose because the mux backlog was at its limit (a subset of dropped_pictures) */
+    uint32_t backlog_limit;     /* the limit */
 } venc_status_t;
 
 /* Reset the session state (not running, QP 28). Called once at start-up. */

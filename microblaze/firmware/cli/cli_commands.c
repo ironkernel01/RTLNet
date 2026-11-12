@@ -3947,6 +3947,20 @@ int cli_show_stream(const MenuCommandContext *ctx)
                (unsigned)(s.mux_load_permille / 10u), (unsigned)(s.mux_load_permille % 10u),
                (unsigned)(s.venc_load_permille / 10u), (unsigned)(s.venc_load_permille % 10u), (unsigned)s.last_mux_us,
                (unsigned)s.max_mux_us);
+    fmt_printf("  Cycle time      : %u pictures started; begin to begin min %u, avg %u, max %u us; lag at begin avg %u, max %u us\n",
+               (unsigned)s.cyc_n, (unsigned)s.cyc_min_us, (unsigned)s.cyc_avg_us, (unsigned)s.cyc_max_us, (unsigned)s.lag_avg_us,
+               (unsigned)s.lag_max_us);
+    fmt_printf("  Mux split       : per picture (%u sent) ring read and TS build %u us, pbuf copy %u us, udp_sendto %u us\n",
+               (unsigned)s.mux_n, (unsigned)s.mux_ring_ts_us, (unsigned)s.mux_copy_us, (unsigned)s.mux_send_us);
+    fmt_printf("  Mux backlog     : %u queued now, max %u (limit %u); %u frames skipped for the backlog\n", (unsigned)s.backlog,
+               (unsigned)s.backlog_max, (unsigned)s.backlog_limit, (unsigned)s.skipped_backlog);
+    {
+        plat_console_tx_t tx;
+        plat_console_tx_stats(&tx);
+        fmt_printf("  Console TX      : %s, ring %u bytes, high water %u, %u interrupts, %u refills by the main loop, %u characters lost\n",
+                   tx.irq_mode ? "interrupt driven" : "polled", (unsigned)tx.ring_bytes, (unsigned)tx.high_water,
+                   (unsigned)tx.irqs, (unsigned)tx.refills, (unsigned)tx.drops);
+    }
     fmt_printf("  Errors          : %u; frame buffer published %u, dropped %u\n", (unsigned)s.errors,
                (unsigned)s.fb_published, (unsigned)s.fb_dropped);
     return 0;

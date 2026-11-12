@@ -39,6 +39,10 @@ Overview:
     with the JM ldecod (clean, as many frames as access units, same pictures as FFmpeg when -PsnrStep is 1). The decode step also fails on
     any FFmpeg error message. A "RUN_SUMMARY" line gives target, measured rate, worst windows, QP and PSNR of each mode.
   * -PollSeconds <n>: during the capture read show encoder every n s (every 5 s near a license end; each read of show encoder blocks the firmware for 2 to 3 pictures, so a polled capture has dropped pictures: the license test of hp_expiry_test.ps1 does not poll) into <prefix>_<mode>_poll.txt (High profile license timer test).
+  * -PollStream: with -PollSeconds, each poll also reads show stream (pictures sent and dropped, backlog) into the poll log. The board gate "pictures, drops, load" still requires 0 dropped pictures over the whole capture, so it covers the polls (Phase 2f: console output no longer blocks the firmware).
+  * -Profile baseline|high: "encoder profile <name>" before the stream starts (the full High profile image, CABAC); with high the ffprobe step requires profile High
+    (baseline: Constrained Baseline). -SwitchProfile: the capture starts in baseline, "encoder profile high" is sent one third into the capture and
+    "encoder profile baseline" at two thirds; use -ForcedIdr 2 (one forced IDR picture at each switch); the ffprobe profile is not gated.
   * -ForcedIdr <n>: exactly n IDR pictures off the GOP cadence are expected (the forced IDR picture at the license end of the High profile demo netlist).
   * -InputTs <file>: check an existing capture offline (no board, no capture).
   * The transcript is boards/nexys_video/build/phase2c_gop<N>_stream_transcript.txt. The last line is
@@ -87,7 +91,10 @@ param(
     [switch]$Jm,
     [string]$FilePrefix = '',
     [int]$PollSeconds = 0,
-    [int]$ForcedIdr = -1
+    [switch]$PollStream,
+    [int]$ForcedIdr = -1,
+    [ValidateSet('', 'baseline', 'high')][string]$Profile = '',
+    [switch]$SwitchProfile
 )
 $ErrorActionPreference = 'Stop'
 $Repo  = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..')).Path
@@ -273,6 +280,8 @@ function Test-Capture([string]$tag, [string]$ts, [int]$w, [int]$h, [double]$fps)
     $rate = 0.0
     if ($vs.Count -ge 1 -and $vs[0].avg_frame_rate -match '^(\d+)/(\d+)$' -and [int]$Matches[2] -gt 0) { $rate = [int]$Matches[1] / [int]$Matches[2] }
     $okp = $okp -and ([Math]::Abs($rate - $fps) -lt 1.0)
+    if ($Profile -eq 'high' -and -not $SwitchProfile) { $okp = $okp -and ($vs.Count -ge 1 -and $vs[0].profile -eq 'High') }
+    if ($Profile -eq 'baseline' -and -not $SwitchProfile) { $okp = $okp -and ($vs.Count -ge 1 -and $vs[0].profile -eq 'Constrained Baseline') }
     Add-Result "$tag probe: stream, size, rate" $okp ("{0} stream(s), {1} {2} {3}x{4}, {5:N2} fps" -f $vs.Count, $(if ($vs.Count) { $vs[0].codec_name } else { '-' }), $(if ($vs.Count) { $vs[0].profile } else { '-' }), $(if ($vs.Count) { $vs[0].width } else { 0 }), $(if ($vs.Count) { $vs[0].height } else { 0 }), $rate)
     # decode and compare with the expected bars
     $yuv = Join-Path $Build ($name + '_decoded.yuv')
@@ -420,6 +429,11 @@ try {
         $pr = Invoke-Cli $sp "camera pattern $patName $Speed"
         Add-Result "$m pattern set" ($pr -match "Test pattern $patName, speed $Speed") ($pr.Trim() -replace '\s+', ' ')
         [void](Invoke-Cli $sp 'clear counters')
+        $pfWanted = $(if ($SwitchProfile) { 'baseline' } else { $Profile })
+        if ($pfWanted) {
+            $pfr = Invoke-Cli $sp "encoder profile $pfWanted"
+            Add-Result "$m encoder profile $pfWanted" ($pfr -match "Profile $pfWanted") ($pfr.Trim() -replace '\s+', ' ')
+        }
         $tA = [int64]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()
         $r = Invoke-Cli $sp "stream h264 $HostIp $UdpPort"
         $tB = [int64]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()
@@ -440,11 +454,24 @@ try {
                 $pr2 = Invoke-Cli $sp 'show encoder'
                 $hpl = Get-Field $pr2 'High profile\s+: ([^\r\n]*)'
                 $pl = Get-Field $pr2 'Pictures\s+: ([^\r\n]*)'
+                if ($PollStream) {
+                    $pr3 = Invoke-Cli $sp 'show stream'
+                    $pl = $pl + ' || stream ' + (Get-Field $pr3 'Pictures\s+: ([^\r\n]*)') + ' || ' + (Get-Field $pr3 'Mux backlog\s+: ([^\r\n]*)')
+                }
                 Add-Content -LiteralPath $pollLog -Value ("{0:yyyy-MM-dd HH:mm:ss.fff} {1} | {2} | {3}" -f $tp, $epoch, $hpl, $pl) -Encoding ascii
                 $wait = [double]$PollSeconds
                 if ($hpl -match 'time left (\d+) min (\d+) s') { if ([int]$Matches[1] * 60 + [int]$Matches[2] -le 90) { $wait = 5.0 } }
                 if ($hpl -match 'license ended') { if ($null -eq $endedAt) { $endedAt = $tp }; if (($tp - $endedAt).TotalSeconds -lt 40) { $wait = 5.0 } }
             }
+        }
+        if ($SwitchProfile) {
+            # Profile switch in mid-stream: high at one third, baseline at two thirds of the capture.
+            [void]$capObj.Join([int]($Seconds * 1000 / 3))
+            $pfr = Invoke-Cli $sp 'encoder profile high'
+            Add-Result "$m profile switch to high" ($pfr -match 'Profile high') ($pfr.Trim() -replace '\s+', ' ')
+            [void]$capObj.Join([int]($Seconds * 1000 / 3))
+            $pfr = Invoke-Cli $sp 'encoder profile baseline'
+            Add-Result "$m profile switch to baseline" ($pfr -match 'Profile baseline') ($pfr.Trim() -replace '\s+', ' ')
         }
         if (-not $capObj.Join(($Seconds + 40) * 1000)) { $capObj.Abort(); [void]$capObj.Join(5000) }
         $cap = [pscustomobject]@{ Datagrams = $capObj.Datagrams; Bytes = $capObj.Bytes; Seconds = $capObj.Seconds; Odd = $capObj.Odd }
@@ -455,6 +482,7 @@ try {
         $sd = Invoke-Cli $sp 'show ddr'
         if ($sd -notmatch 'Master 3') { Start-Sleep -Milliseconds 700; [void]$sp.ReadExisting(); $sd = Invoke-Cli $sp 'show ddr' }   # the previous command's late prompt can end the read early
         [void](Invoke-Cli $sp 'stream stop')
+        if ($Profile -or $SwitchProfile) { [void](Invoke-Cli $sp 'encoder profile baseline') }   # leave the board in the default profile
         $histN = [Math]::Min(3600, $Seconds + 15)
         $sh = Invoke-Cli $sp "show encoder history $histN" 120000
         Set-Content -LiteralPath (Join-Path $Build "${Prefix}_${m}_history.txt") -Value ($sh -replace "`r", '') -Encoding ascii

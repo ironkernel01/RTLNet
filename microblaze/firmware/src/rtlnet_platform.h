@@ -141,6 +141,18 @@ void     plat_led_set(unsigned index, int on);
 uint32_t plat_led_state(void);
 void     plat_reload(void);
 
+/* Console transmit counters: the target sends through a 4 KiB ring and the UART interrupt (rtlnet_cpu_microblaze.md); the harness reports
+ * a zero ring. irq_mode is 1 while the interrupt runs; drops counts characters lost to a full ring whose wait timed out. */
+typedef struct {
+    uint32_t ring_bytes;
+    uint32_t high_water;
+    uint32_t irqs;
+    uint32_t refills;
+    uint32_t drops;
+    uint32_t irq_mode;
+} plat_console_tx_t;
+void     plat_console_tx_stats(plat_console_tx_t *out);
+
 /* Data cache maintenance for the DDR3 window. The range is widened to whole cache lines
  * (RTLNET_PLAT_CACHE_LINE, 64 bytes). The data cache is write-back: flush writes dirty lines back to memory and
  * invalidates them (call it on a buffer the CPU wrote before hardware reads it); invalidate drops the lines,

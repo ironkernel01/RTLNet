@@ -16,6 +16,13 @@
  * written by the interrupt, read by the main loop with a single 32-bit
  * load). Everything else, lwIP included, runs in the main loop.
  *
+ * Console transmit: plat_putc writes into a 4 KiB ring (rtlnet_txring.c) and returns; the UART interrupt (INTC input RTLNET_CPU_IRQ_UART,
+ * edge, raised when the transmit FIFO empties and when a character arrives) refills the 16-character FIFO from the ring and moves received
+ * characters into the receive ring. The main loop touches the transmit ring and the receive ring only with interrupts masked (plat_irq_save
+ * and plat_irq_restore, nesting safe), so the interrupt and the main loop never see a ring half updated. A full ring makes the caller
+ * wait (bounded by PLAT_UART_TX_WAIT polls of the FIFO, which the main loop refills itself); only a wait that times out loses a character,
+ * and it is counted (plat_console_tx_stats, drops). Until the interrupt is running (plat_init, a failed INTC setup) the console is polled.
+ *
  * Failure policy: a BSP driver that does not initialize (status other than
  * XST_SUCCESS) is reported on the console with the API name and code once the
  * UART is up; the firmware then continues without that service (polled time
@@ -24,6 +31,7 @@
 #include "rtlnet_platform.h"
 
 #include "rtlnet_board.h"
+#include "rtlnet_txring.h"
 
 #include "xil_cache.h"      /* Xil_DCacheFlushRange, Xil_DCacheInvalidateRange */
 #include "xil_exception.h"  /* Xil_ExceptionInit, Xil_ExceptionRegisterHandler, Xil_ExceptionEnable, Xil_ExceptionDisable */
@@ -42,6 +50,9 @@
  * 20 ms, far above the drain time. A timeout drops the character. */
 #define PLAT_UART_TX_WAIT    200000u
 #define PLAT_RX_RING         256u       /* software receive ring, power of two */
+#define PLAT_TX_RING         4096u      /* software transmit ring, power of two */
+#define PLAT_RELOAD_TX_MS    500u       /* most time plat_reload waits for the transmit ring to drain */
+#define PLAT_MSTATUS_MIE     8u         /* RISC-V mstatus machine interrupt enable bit */
 
 static XUartLite g_uart;
 static XTmrCtr   g_tmr;
@@ -53,6 +64,13 @@ static int       g_tick_irq;            /* 1 when the 1 ms interrupt runs */
 static uint8_t   g_rx_ring[PLAT_RX_RING];
 static unsigned  g_rx_head;
 static unsigned  g_rx_tail;
+static uint8_t   g_tx_buf[PLAT_TX_RING];
+static txring_t  g_tx;                  /* transmit ring: put by the main loop, taken by the interrupt and the main loop (interrupts masked) */
+static volatile int g_tx_busy;          /* 1 while characters are in the UART FIFO and a transmit-empty interrupt is due */
+static int       g_uart_irq;            /* 1 when the UART interrupt runs: transmit through the ring */
+static volatile uint32_t g_tx_irqs;     /* UART interrupts */
+static volatile uint32_t g_tx_refills;  /* FIFO refills made by the main loop (a full ring waiting, or the poll below) */
+static volatile uint32_t g_tx_drops;    /* characters lost: a full ring whose wait timed out (PLAT_ERR_TX_TIMEOUT) */
 static uint32_t  g_last_ticks;          /* polled fallback when the interrupt is not running */
 static uint32_t  g_tick_rem;
 
@@ -67,6 +85,25 @@ static void plat_tick_isr(void *ref, u8 counter)
     (void)ref;
     if (counter == PLAT_TMR_TICK) {
         g_ms++;
+    }
+}
+
+/*
+ * plat_irq_save -- mask interrupts and return the previous state (nesting safe).
+ * Returns: the mstatus value before the change, for plat_irq_restore.
+ */
+static uint32_t plat_irq_save(void)
+{
+    uint32_t s;
+    __asm__ volatile ("csrrci %0, mstatus, 8" : "=r"(s) : : "memory");
+    return s;
+}
+
+/* plat_irq_restore -- unmask interrupts when plat_irq_save found them unmasked. */
+static void plat_irq_restore(uint32_t s)
+{
+    if ((s & PLAT_MSTATUS_MIE) != 0u) {
+        __asm__ volatile ("csrsi mstatus, 8" : : : "memory");
     }
 }
 
@@ -87,19 +124,83 @@ static void plat_rx_pull(void)
 }
 
 /*
- * plat_putc -- send one character, keeping the receive side drained.
- * Returns: nothing; the character is dropped after PLAT_UART_TX_WAIT reads.
+ * plat_tx_fill -- move characters from the transmit ring into the UART FIFO until the FIFO is full or the ring is empty.
+ * Called with interrupts masked (from the interrupt, or between plat_irq_save and plat_irq_restore).
+ * Steps: write while the FIFO has room; when something was written a transmit-empty interrupt is due (busy); when nothing was written
+ * and the FIFO is empty, no interrupt is due (not busy).
+ * Returns: nothing.
+ */
+static void plat_tx_fill(void)
+{
+    uint32_t wrote = 0u;
+    while (!XUartLite_IsTransmitFull(RTLNET_PLAT_UART_BASE)) {
+        int c = txring_get(&g_tx);
+        if (c < 0) {
+            break;
+        }
+        XUartLite_WriteReg(RTLNET_PLAT_UART_BASE, XUL_TX_FIFO_OFFSET, (u32)c);
+        wrote++;
+    }
+    if (wrote != 0u) {
+        g_tx_busy = 1;
+    } else if ((XUartLite_GetStatusReg(RTLNET_PLAT_UART_BASE) & XUL_SR_TX_FIFO_EMPTY) != 0u) {
+        g_tx_busy = 0;
+    }
+}
+
+/*
+ * plat_uart_isr -- INTC handler of the UART (edge: transmit FIFO became empty, or a character arrived).
+ * Steps: count; move received characters into the receive ring; refill the transmit FIFO from the ring.
+ * Returns: nothing.
+ */
+static void plat_uart_isr(void *ref)
+{
+    (void)ref;
+    g_tx_irqs++;
+    plat_rx_pull();
+    plat_tx_fill();
+}
+
+/*
+ * plat_putc -- queue one character for transmission, keeping the receive side drained.
+ * Steps: with the interrupt running, put the character in the ring and, when no transmit-empty interrupt is due, prime the FIFO from
+ * the ring; a full ring is waited out (the main loop refills the FIFO itself and pulls received characters) for at most
+ * PLAT_UART_TX_WAIT polls. Without the interrupt: poll the FIFO.
+ * Returns: nothing; the character is lost only when the wait times out (counted in g_tx_drops).
  */
 static void plat_putc(char c)
 {
     uint32_t n = 0u;
-    while (XUartLite_IsTransmitFull(RTLNET_PLAT_UART_BASE)) {
+    if (!g_uart_irq) {
+        while (XUartLite_IsTransmitFull(RTLNET_PLAT_UART_BASE)) {
+            plat_rx_pull();
+            if (++n >= PLAT_UART_TX_WAIT) {
+                return;
+            }
+        }
+        XUartLite_WriteReg(RTLNET_PLAT_UART_BASE, XUL_TX_FIFO_OFFSET, (u32)(uint8_t)c);
+        return;
+    }
+    for (;;) {
+        uint32_t s = plat_irq_save();
+        if (txring_put(&g_tx, (uint8_t)c) == TXRING_OK) {
+            if (!g_tx_busy) {
+                plat_tx_fill();
+            }
+            plat_irq_restore(s);
+            return;
+        }
+        if (!XUartLite_IsTransmitFull(RTLNET_PLAT_UART_BASE)) {
+            plat_tx_fill();   /* the ring is full but the FIFO has room: an interrupt is late or lost, refill here */
+            g_tx_refills++;
+        }
         plat_rx_pull();
+        plat_irq_restore(s);
         if (++n >= PLAT_UART_TX_WAIT) {
+            g_tx_drops++;
             return;
         }
     }
-    XUartLite_WriteReg(RTLNET_PLAT_UART_BASE, XUL_TX_FIFO_OFFSET, (u32)(uint8_t)c);
 }
 
 /*
@@ -119,8 +220,13 @@ void plat_init(void)
     int st_uart;
     int st_tmr;
     int st_intc = XST_FAILURE;
+    int st_uirq = XST_FAILURE;
 
     Xil_ExceptionDisable();
+    XUartLite_DisableIntr(RTLNET_PLAT_UART_BASE);   /* a soft restart can leave the enable set */
+    g_uart_irq = 0;
+    g_tx_busy = 0;
+    (void)txring_init(&g_tx, g_tx_buf, PLAT_TX_RING);
     g_rx_head = 0u;
     g_rx_tail = 0u;
     g_ms = 0u;
@@ -147,6 +253,9 @@ void plat_init(void)
             st_intc = XIntc_Connect(&g_intc, RTLNET_CPU_IRQ_TIMER, (XInterruptHandler)XTmrCtr_InterruptHandler, &g_tmr);
         }
         if (st_intc == XST_SUCCESS) {
+            st_uirq = XIntc_Connect(&g_intc, RTLNET_CPU_IRQ_UART, (XInterruptHandler)plat_uart_isr, NULL);
+        }
+        if (st_intc == XST_SUCCESS) {
             st_intc = XIntc_Start(&g_intc, XIN_REAL_MODE);
         }
         if (st_intc == XST_SUCCESS) {
@@ -159,15 +268,22 @@ void plat_init(void)
             Xil_ExceptionInit();
             Xil_ExceptionRegisterHandler(XIL_EXCEPTION_ID_INT, (Xil_ExceptionHandler)XIntc_InterruptHandler, &g_intc);
             XTmrCtr_Start(&g_tmr, PLAT_TMR_TICK);
+            if (st_uirq == XST_SUCCESS && st_uart == XST_SUCCESS) {
+                XIntc_Enable(&g_intc, RTLNET_CPU_IRQ_UART);
+            }
             Xil_ExceptionEnable();
             g_tick_irq = 1;
+            if (st_uirq == XST_SUCCESS && st_uart == XST_SUCCESS) {
+                g_uart_irq = 1;
+                XUartLite_EnableIntr(RTLNET_PLAT_UART_BASE);
+            }
         }
     }
 
     g_led_bits = 0u;
     board_sys_write(NXV_SYS_LEDS, g_led_bits);
     g_heartbeat_next_ms = RTLNET_PLAT_HEARTBEAT_MS;
-    if (st_uart != XST_SUCCESS || st_tmr != XST_SUCCESS || st_intc != XST_SUCCESS) {
+    if (st_uart != XST_SUCCESS || st_tmr != XST_SUCCESS || st_intc != XST_SUCCESS || st_uirq != XST_SUCCESS) {
         static const char msg[] = "\r\n% platform: XUartLite/XTmrCtr/XIntc initialization failed\r\n";
         plat_console_write(msg, sizeof(msg) - 1u);
     }
@@ -194,7 +310,9 @@ void plat_console_write(const char *s, size_t n)
 int plat_console_getc(void)
 {
     int c;
+    uint32_t s = plat_irq_save();
     plat_rx_pull();
+    plat_irq_restore(s);
     if (g_rx_tail == g_rx_head) {
         return -1;
     }
@@ -260,14 +378,22 @@ void plat_delay_ms(uint32_t ms)
 }
 
 /*
- * plat_poll -- periodic main-loop work: heartbeat LED.
+ * plat_poll -- periodic main-loop work: transmit safety refill, heartbeat LED.
  * Steps:
+ *   0. Characters waiting with the UART FIFO empty (a lost interrupt): refill the FIFO.
  *   1. Every RTLNET_PLAT_HEARTBEAT_MS toggle led[1] in the LEDS register.
  * Returns: nothing.
  */
 void plat_poll(void)
 {
     uint32_t now = plat_uptime_ms();
+    if (g_uart_irq && txring_count(&g_tx) != 0u && (XUartLite_GetStatusReg(RTLNET_PLAT_UART_BASE) & XUL_SR_TX_FIFO_EMPTY) != 0u) {
+        /* characters wait and the FIFO is empty: the interrupt is late or was lost; refill from the main loop */
+        uint32_t s = plat_irq_save();
+        plat_tx_fill();
+        plat_irq_restore(s);
+        g_tx_refills++;
+    }
     if ((int32_t)(now - g_heartbeat_next_ms) >= 0) {
         g_heartbeat_next_ms = now + RTLNET_PLAT_HEARTBEAT_MS;
         g_led_bits ^= NXV_LED_HEARTBEAT;
@@ -387,6 +513,19 @@ void plat_dcache_invalidate_all(void)
  */
 void plat_reload(void)
 {
+    if (g_uart_irq) {
+        /* let the transmit ring and the FIFO empty (bounded), then stop the UART interrupt */
+        uint32_t t0 = plat_uptime_ms();
+        while ((txring_count(&g_tx) != 0u || (XUartLite_GetStatusReg(RTLNET_PLAT_UART_BASE) & XUL_SR_TX_FIFO_EMPTY) == 0u) &&
+               (plat_uptime_ms() - t0) < PLAT_RELOAD_TX_MS) {
+            uint32_t s = plat_irq_save();
+            if (!XUartLite_IsTransmitFull(RTLNET_PLAT_UART_BASE)) {
+                plat_tx_fill();
+            }
+            plat_irq_restore(s);
+        }
+        XUartLite_DisableIntr(RTLNET_PLAT_UART_BASE);
+    }
     plat_delay_ms(PLAT_UART_DRAIN_MS);
     Xil_ExceptionDisable();
     if (g_tick_irq) {
@@ -396,4 +535,19 @@ void plat_reload(void)
     __asm__ volatile ("jr zero" ::: "memory");
     for (;;) {
     }
+}
+
+/*
+ * plat_console_tx_stats -- counters of the interrupt-driven console transmit path.
+ * Returns: nothing; *out holds the ring size, its high-water mark, the UART interrupts, the refills made by the main loop and the
+ * characters lost to a wait that timed out.
+ */
+void plat_console_tx_stats(plat_console_tx_t *out)
+{
+    out->ring_bytes = PLAT_TX_RING;
+    out->high_water = g_tx.high;
+    out->irqs = g_tx_irqs;
+    out->refills = g_tx_refills;
+    out->drops = g_tx_drops;
+    out->irq_mode = (uint32_t)g_uart_irq;
 }

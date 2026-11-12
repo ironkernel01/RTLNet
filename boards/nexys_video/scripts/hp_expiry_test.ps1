@@ -31,6 +31,7 @@ param(
     [int]$LimitMinutes = 30,
     [int64]$CfgEpoch = 0,
     [string]$HostIp = '',
+    [ValidateSet('', 'baseline', 'high')][string]$Profile = '',
     [switch]$SkipStream
 )
 $ErrorActionPreference = 'Stop'
@@ -125,7 +126,11 @@ $elapsed1 = ($t1 - $cfg) / 1000.0
 Gate 'right after configuration: present, licensed, time left near 30 min' ($hp1 -match 'present, licensed, time left' -and $left1 -gt 0 -and [Math]::Abs(($LimitMinutes * 60 - $left1) - $elapsed1) -le 5.0) `
     "time left $left1 s read $elapsed1 s after configuration (expected about $([int]($LimitMinutes * 60 - $elapsed1)) s)"
 Gate 'time left does not rise (counts down)' ((Left-Seconds $hp2) -le $left1) "$left1 s then $(Left-Seconds $hp2) s"
-Gate 'encoder profile high refused (hp_caps 0)' ($pr -match '% Profile high refused: the High profile module offers no tool yet \(hp_caps is 0\)') ($pr.Trim() -replace '\s+', ' ')
+if ($hp1 -match 'tools none \(hp_caps 0\)') {
+    Gate 'encoder profile high refused (hp_caps 0)' ($pr -match '% Profile high refused: the High profile module offers no tool yet \(hp_caps is 0\)') ($pr.Trim() -replace '\s+', ' ')
+} else {
+    Gate 'tools CABAC (hp_caps 1) and encoder profile high accepted' ($hp1 -match 'tools CABAC \(hp_caps 1\)' -and $pr -match 'Profile high, effective at the next picture') ($pr.Trim() -replace '\s+', ' ')
+}
 }
 
 # Step 2: the stream across the expiry.
@@ -136,6 +141,7 @@ for ($w = 0; $w -lt 40; $w++) { $ipw = Run-Cli $spw 'show ip'; if ($ipw -match '
 $spw.Close()
 $args2 = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $PSScriptRoot 'stream_test.ps1'), '-Mode', '1080p30', '-Seconds', "$Seconds", '-Gop', '30', '-Qp', '28',
            '-CcTolPct', '0.01', '-PollSeconds', "$PollSeconds", '-ForcedIdr', '1', '-SkipVlc', '-PsnrStep', "$PsnrStep", '-FilePrefix', $Prefix)
+if ($Profile) { $args2 += @('-Profile', $Profile) }
 if ($HostIp) { $args2 += @('-HostIp', $HostIp) }
 Say "stream_test: $($args2 -join ' ')"
 if (-not $SkipStream) {
@@ -163,7 +169,19 @@ if ($mS.Success -and $mF.Success) {
     Gate "forced IDR picture at $LimitMinutes min +-5 s from configuration" ([Math]::Abs($after - $LimitMinutes * 60) -le 5.0) ("{0:N2} s after configuration, {1:N2} s from {2} s" -f $after, ($after - $LimitMinutes * 60), ($LimitMinutes * 60))
 } else { Gate "forced IDR picture at $LimitMinutes min +-5 s from configuration" $false 'no STREAM_START_EPOCH_MS or FORCED_IDR line in the stream_test transcript' }
 $fsl = [string](@($stLines | Where-Object { $_ -match 'High profile\s+: ' }) | Select-Object -Last 1)
-Gate 'board after the capture: license ended, 1 forced IDR picture' ($fsl -match 'license ended, time left 0 min 0 s, tools none \(hp_caps 0\), profile baseline, 1 forced IDR pictures') "$fsl"
+if ($Profile -eq 'high') {
+    # High profile image (CABAC): the profile command before the stream start counts one forced IDR picture (it coincides with the first IDR picture),
+    # the license end the second.
+    # The profile word of the line is the requested profile (the hp_enable bit): it stays high after the license ended, the encoder then codes Constrained Baseline.
+    Gate 'board after the capture: license ended, 2 forced IDR pictures' ($fsl -match 'license ended, time left 0 min 0 s, tools CABAC \(hp_caps 1\), profile (high|baseline), 2 forced IDR pictures') "$fsl"
+    $profRuns = @($tsText -split "`n" | Where-Object { $_ -match '^PROFILE_RUN ' })
+    $okRuns = ($profRuns.Count -eq 2 -and $profRuns[0] -match 'access_unit=0 .*profile_idc=100 .*entropy_coding_mode=1' -and $profRuns[1] -match 'profile_idc=66 constraint_set1=1 entropy_coding_mode=0')
+    $forcedAu = [regex]::Match($tsText, 'FORCED_IDR access_unit=(\d+)')
+    if ($profRuns.Count -ge 2 -and $forcedAu.Success) { $okRuns = $okRuns -and ($profRuns[1] -match "access_unit=$($forcedAu.Groups[1].Value) ") }
+    Gate 'High before, Constrained Baseline after, the change at the forced IDR picture' $okRuns ($profRuns -join ' | ')
+} else {
+    Gate 'board after the capture: license ended, 1 forced IDR picture' ($fsl -match 'license ended, time left 0 min 0 s, tools none \(hp_caps 0\), profile baseline, 1 forced IDR pictures') "$fsl"
+}
 $dr = @($stLines | Where-Object { $_ -match 'Pictures\s+: \d+ sent, (\d+) dropped' })
 Gate '0 board-side dropped pictures' ($dr.Count -gt 0 -and $dr[0] -match ', 0 dropped') "$($dr -join ' ')"
 $pollFile = Join-Path $Build "${Prefix}_1080p30_poll.txt"

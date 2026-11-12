@@ -10,7 +10,7 @@
  * datagram and returns nonzero; the TS continuity counters make the loss visible. The desktop harness links
  * host_lwip_stub.c, whose version counts the datagrams.
  *
- * Revision: 11-09-2026
+ * Revision: 11-11-2026 (send-time profile)
  */
 #ifndef RTLNET_VIDEO_UDP_H
 #define RTLNET_VIDEO_UDP_H
@@ -28,5 +28,9 @@ int  video_udp_send(const uint8_t *data, uint32_t len);
 
 /* Counters: datagrams accepted, datagrams dropped, retries. */
 void video_udp_counters(uint32_t *sent, uint32_t *dropped, uint32_t *retries);
+
+/* Time spent in video_udp_send, in plat_ticks, since start-up: the copy of the datagram into the pbuf, and everything else (pbuf
+ * allocation, udp_sendto with the netif and the DMA, pbuf release, the retries). Counters that only grow; the caller takes differences. */
+void video_udp_profile(uint64_t *copy_ticks, uint64_t *send_ticks);
 
 #endif /* RTLNET_VIDEO_UDP_H */

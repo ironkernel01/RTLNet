@@ -1199,6 +1199,20 @@ int plat_console_getc(void)
 }
 
 /**
+ * @brief Console transmit counters: the harness writes straight to stdout, so all are zero.
+ * @param out Receives the counters.
+ */
+void plat_console_tx_stats(plat_console_tx_t *out)
+{
+    out->ring_bytes = 0u;
+    out->high_water = 0u;
+    out->irqs = 0u;
+    out->refills = 0u;
+    out->drops = 0u;
+    out->irq_mode = 0u;
+}
+
+/**
  * @brief Milliseconds since plat_init (processor time of the harness).
  * @return Elapsed milliseconds.
  */

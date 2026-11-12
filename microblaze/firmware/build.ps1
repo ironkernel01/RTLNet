@@ -254,13 +254,13 @@ MEMORY
     $sysInc  = @('-isystem', $bspInc, "-specs=$bspSpec")
     # -O2 on the frame path (netif, lwIP glue, TCP echo, lwIP), -Os elsewhere (CLI, drivers).
     $cflags  = $common + @('-g', '-ffunction-sections', '-fdata-sections')
-    $fastSrc = @('rtlnet_lwip_netif', 'rtlnet_lwip', 'rtlnet_tcp_echo', 'rtlnet_tcp_iperf', 'rtlnet_lwiperf', 'rtlnet_offload', 'rtlnet_ddrtest', 'rtlnet_tsmux', 'rtlnet_venc', 'rtlnet_ratectl', 'rtlnet_video_udp')
+    $fastSrc = @('rtlnet_lwip_netif', 'rtlnet_lwip', 'rtlnet_tcp_echo', 'rtlnet_tcp_iperf', 'rtlnet_lwiperf', 'rtlnet_offload', 'rtlnet_ddrtest', 'rtlnet_tsmux', 'rtlnet_picq', 'rtlnet_muxjob', 'rtlnet_venc', 'rtlnet_ratectl', 'rtlnet_video_udp')
     $objs = @()
     $fwSrcs = @(
-        'src/main.c', 'src/rtlnet_platform.c', 'src/rtlnet_board.c', 'src/rtlnet_fmt.c', 'src/rtlnet_netmgr.c',
+        'src/main.c', 'src/rtlnet_platform.c', 'src/rtlnet_txring.c', 'src/rtlnet_board.c', 'src/rtlnet_fmt.c', 'src/rtlnet_netmgr.c',
         'src/rtlnet_cpupath.c', 'src/rtlnet_offload.c', 'src/rtlnet_ddrtest.c', 'src/rtlnet_fbcrc.c', 'src/lwip/rtlnet_lwip.c', 'src/lwip/rtlnet_lwip_netif.c', 'src/lwip/rtlnet_tcp_echo.c',
         'src/lwip/rtlnet_tcp_iperf.c', 'src/lwip/rtlnet_lwiperf.c', 'src/lwip/rtlnet_video_udp.c',
-        'src/video/rtlnet_tsmux.c', 'src/video/rtlnet_venc.c', 'src/video/rtlnet_ratectl.c',
+        'src/video/rtlnet_tsmux.c', 'src/video/rtlnet_picq.c', 'src/video/rtlnet_muxjob.c', 'src/video/rtlnet_venc.c', 'src/video/rtlnet_ratectl.c',
         'cli/menu.c', 'cli/menu_table.c', 'cli/cli_commands.c'
     ) | ForEach-Object { "$Fw/$_" }
     foreach ($s in ($fwSrcs + ($drvSrcs | ForEach-Object { "$Repo/$_" }))) {
@@ -291,7 +291,7 @@ MEMORY
 # board layer against a register model; lwIP replaced by host/host_lwip_stub.c.
 if ($HostHarness -or $Demo) {
     $hsrcs = @('host/main.c', 'host/host_platform.c', 'host/host_lwip_stub.c', 'src/rtlnet_board.c', 'src/rtlnet_fmt.c',
-               'src/rtlnet_netmgr.c', 'src/rtlnet_cpupath.c', 'src/rtlnet_offload.c', 'src/rtlnet_ddrtest.c', 'src/rtlnet_fbcrc.c', 'src/video/rtlnet_tsmux.c', 'src/video/rtlnet_venc.c', 'src/video/rtlnet_ratectl.c', 'cli/menu.c', 'cli/menu_table.c',
+               'src/rtlnet_netmgr.c', 'src/rtlnet_cpupath.c', 'src/rtlnet_offload.c', 'src/rtlnet_ddrtest.c', 'src/rtlnet_fbcrc.c', 'src/video/rtlnet_tsmux.c', 'src/video/rtlnet_picq.c', 'src/video/rtlnet_muxjob.c', 'src/video/rtlnet_venc.c', 'src/video/rtlnet_ratectl.c', 'cli/menu.c', 'cli/menu_table.c',
                'cli/cli_commands.c') |
              ForEach-Object { "$Fw/$_" }
     $exe = Join-Path $Out 'menu.exe'

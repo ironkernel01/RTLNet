@@ -2,7 +2,7 @@
 
 Copyright (C) 2026 IronKernel. All rights reserved.
 
-Revision: 11-10-2026
+Revision: 11-11-2026 (the mux runs apart from the encoder: picture queue, resumable send)
 
 ## 1. Purpose
 
@@ -12,7 +12,9 @@ Two firmware modules in `microblaze/firmware/src/video/` turn the access units o
 | File | Role |
 |---|---|
 | `rtlnet_tsmux.{h,c}` | pure multiplexer: PAT, PMT, PES, PCR, continuity counters, 188-byte packets, seven per datagram; no hardware, no lwIP |
-| `rtlnet_venc.{h,c}` | session: frame-buffer take and release, encoder configuration and start, index-ring reading, access-unit assembly, read pointers, statistics, load figures |
+| `rtlnet_venc.{h,c}` | session: frame-buffer take and release, encoder configuration and start, index-ring reading, the picture queue and the mux service (section 5.2), read pointers, statistics, load figures |
+| `rtlnet_picq.{h,c}` | queue of coded pictures: a descriptor per picture, coding order, the admit gate; no hardware |
+| `rtlnet_muxjob.{h,c}` | resumable send of one queued picture through `tsmux`, a bounded number of bytes per call; no hardware |
 | `src/lwip/rtlnet_video_udp.{h,c}` | one unicast `udp_pcb`; copies a datagram into a pbuf and calls `udp_sendto`; retries for at most 2 ms when lwIP has no pbuf or the transmit DMA is busy |
 
 The path is `gige.md` section 9: the datagram leaves through `netif_linkoutput`, the AXI DMA and `cpu_axis_ethernet_stream`; the
@@ -76,11 +78,46 @@ index ring are 64-byte aligned (offsets 0x1200_0000 and 0x1300_0000, records of 
    picture has frame_num 0 and an idr_pic_id that alternates 0 and 1 per IDR picture; a P picture has `rtlnet_h264_enc_next_frame_num`
    of the previous picture (the driver's wrap rule at 2^4). The padding lines of the slot below the display height (1080 to 1087 at
    1080p) are filled once per slot and mode (section 5.1).
-2. Encoding: poll STATUS; on DONE release the slot, clear DONE, swap the two buffers (`rtlnet_h264_enc_buffers_end`) and mux; on ERR count it and reconfigure at the next picture; a picture that
-   exceeds 500 ms is abandoned.
-3. Mux: per engine read index entries from the read pointer to the picture entry (offset and length of the engine's NAL units of
-   the picture), check the delimiter, feed the access unit through `tsmux_au_data` in chunks of 1 KiB, then write `RING_RPTR` and
-   `IDX_RPTR` of each engine window (`base + 0x100 x e`).
+2. Encoding: poll STATUS; on DONE release the slot, clear DONE, swap the two buffers (`rtlnet_h264_enc_buffers_end`) and queue the picture
+   (step 3); on ERR count it and reconfigure at the next picture; a picture that exceeds 500 ms is abandoned.
+3. Queue (on DONE): per engine read index entries from the scan position to the picture entry (offset and length of the engine's NAL units of
+   the picture), check the delimiter, write a descriptor (section 5.2), run the rate controller on the coded size, push the descriptor. The
+   encoder is free at once: `venc_poll` starts the next picture in the same call when a new frame is ready.
+4. Mux (every `venc_poll` call): send one chunk of the oldest queued picture (section 5.2).
+
+### 5.2 Queue and resumable mux (Phase 2f)
+
+Before Phase 2f the firmware muxed the whole access unit in one blocking call after DONE, so the encoder was idle for the mux time and a
+picture cost T_enc + T_mux. Now the encoder and the mux are independent:
+
+* **Descriptor** (`picq_desc_t`): frame number, picture type, QP written, PTS, the access unit delimiter bytes, the SPS and PPS as they were
+  when the picture was coded (an IDR picture; a later profile change rewrites the live copy, not this one), and for every engine the ring offset
+  and length of the picture, the ring read pointer and the index read pointer that are free once the picture is sent, and the elementary
+  stream size. `muxjob_step` reads everything from it and from the ring, nothing from the live encoder state.
+* **Order**: pictures leave in coding order. The rate controller runs at DONE (the sizes are known there), so its order is the coding order
+  whatever the multiplexer is doing.
+* **Chunks**: each `venc_poll` call, after the DONE and frame checks, sends `MUXJOB_BUDGET` = 5,152 elementary stream bytes (28 packets, four
+  datagrams, about 1.2 ms) of the oldest picture and returns; the main loop (console, lwIP, link monitor) runs between chunks. The datagrams are
+  byte-identical to a one-call send (host test).
+* **Ring space**: the ring read pointers (`RING_RPTR`, `IDX_RPTR` of each engine window, `base + 0x100 x e`) are written when a picture is
+  completely sent, not at DONE; the index scan position (`scan_idx`) runs ahead of the index read pointer by the queued pictures.
+* **Backlog policy**: a picture is queued from DONE until it is sent. When `PICQ_LIMIT` = 3 pictures are queued and a new frame is ready, the
+  frame is skipped: not taken, counted in `dropped pictures` and in its own counter ("frames skipped for the backlog" in `show stream`), and the
+  next picture is an IDR picture (as after any dropped picture). The limit follows the rings: a 1080p picture is at most about 0.5 MB at QP 12, so
+  one engine's share (4 MiB of the 8 MiB ring, 128 of the 256 index records, about 5 records per picture) holds the limit, the picture being coded
+  and the one being sent (5 pictures, 1.3 MiB per engine at the worst case) with room to spare; the encoder's RING_STALL cannot occur. The queue
+  has 8 descriptor slots; a push into a full queue is an error that the limit makes unreachable.
+* **Latency and PCR**: a picture waits at most `PICQ_LIMIT` picture periods in the queue (3 x 33.3 ms = 100 ms) before its datagrams leave, plus
+  the time to send it, so the stream leaves the board up to 100 ms later than with the blocking mux under load, and about 15 ms later than
+  the encoder's DONE in steady state at light load (one chunk per main-loop pass). PTS and PCR stay what they were: the PTS is
+  `90000 + (frame - first_frame) x step`, the PCR is the PTS minus 9000 ticks (100 ms), so the PCR is monotonic in coding order and its
+  lead equals the largest queue delay; a receiver buffering 100 ms or more plays the stream without underflow.
+* **Mode change and errors**: while pictures are queued the rings are not reset. A mode change or an encoder error that leaves the rings
+  to be reset (`cfg_mode` invalid) waits until the queue is drained, then `configure_mode` resets them.
+* **Counters** (`show stream`, cleared with `clear counters`): picture cycle time (begin to begin, minimum, average, maximum), lag at
+  `begin_picture` (now minus the frame's time stamp, relative to the smallest lag seen: the capture path stamps `ui_clk` cycles, and the firmware
+  tick counts the same 90 MHz clock from another origin), the mux time per picture in three parts (ring read and TS build; the copy of each
+  datagram into its pbuf; pbuf allocation, `udp_sendto` with the netif and the DMA, pbuf release), the queue depth now and at the maximum.
 
 ### 5.1 GOP, IDR and P pictures (Phase 2c)
 
@@ -133,3 +170,10 @@ of 0 to 200,000 bytes (sizes around the stuffing cases 164 to 185 and 358 to 361
 independent checker: sync bytes, seven packets per datagram, PIDs, continuity counters per PID, PAT and PMT contents and CRC-32 (bitwise
 reference, check value 0x0376E6E7), PES header, PTS and DTS including a value above 2^32, PCR, random-access flag, stuffing bytes, and the
 reassembled elementary stream. `--neg` damages one continuity counter and passes only when the checker reports it.
+
+`microblaze/firmware/test/picq_host_test.c` (`picq_host_test.ps1`) checks the queue: coding order across 40 rounds of wrap-around, the descriptor
+contents from push to front, the admit gate at `PICQ_LIMIT` with its refusal count, a push into a full queue and a bad descriptor refused; and
+the mux job: three pictures (an IDR picture, a P picture whose engine data wraps the end of the ring share, a P picture ending at the share end)
+sent with budgets of 1, 7, 188, 1,024, 5,152 and 99,999 bytes give the same datagrams as one piece through `tsmux` directly, a large budget sends a
+picture in one call, a bounded budget needs several, and the random-access flag is on the IDR picture only. `--neg` damages a descriptor after the
+push. `txring_host_test.c` (`txring_host_test.ps1`) checks the console transmit ring of `rtlnet_cpu_microblaze.md` section 9.2.

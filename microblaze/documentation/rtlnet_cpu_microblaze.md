@@ -173,7 +173,7 @@ The board top instances `u_cpu` with exactly the section 15.6 ports. A replaceme
 | Layer | Files | Owns |
 |---|---|---|
 | BSP (generated) | `build/ws/.../bsp` | start-up (`crt0`, `crtinit`), vectors, interrupt dispatch, XUartLite, XTmrCtr, XIntc, XAxiDma, `xil_printf` |
-| platform | `src/rtlnet_platform.c/.h` | console on XUartLite (receive ring, bounded transmit wait), time on XTmrCtr (counter 0 free running, counter 1 1 ms interrupt through XIntc), LEDs and heartbeat, soft restart |
+| platform | `src/rtlnet_platform.c/.h`, `src/rtlnet_txring.c/.h` | console on XUartLite (receive ring; transmit ring of 4 KiB filled by `plat_putc` and emptied by the UART interrupt, bounded wait when full), time on XTmrCtr (counter 0 free running, counter 1 1 ms interrupt through XIntc), LEDs and heartbeat, soft restart |
 | board | `src/rtlnet_board.c/.h`, `src/rtlnet_nexys_video_sysregs.h` | system registers, core-header probing |
 | RTLNet drivers | `cores/<core>/driver/*.c`, compiled in place | each core's registers |
 | network manager | `src/rtlnet_netmgr.c/.h` | PHY bring-up, link monitor, DHCP auto-start, addresses, CPU path bring-up, InitLWIP calls |
@@ -196,8 +196,31 @@ its output goes through `plat_console_write` to XUartLite.
 `main`: `plat_init` (UART, timer, INTC, interrupts on), `cli_start` (banner, menu engine, `netmgr_init`),
 then forever: one console character into the line editor, `plat_poll` (heartbeat), `rtlnet_lwip_poll`
 (DMA receive service, `sys_check_timeouts`), `netmgr_poll` (every 250 ms: PHY link, DHCP lease, InitLWIP
-consistency check). Only the 1 ms timer interrupt runs outside the loop; it increments the tick and
-nothing else.
+consistency check). Two interrupts run outside the loop: the 1 ms timer interrupt increments the tick and nothing else; the UART
+interrupt (section 9.2.1) moves console characters between the UART FIFOs and the software rings.
+
+#### 9.2.1 Console transmit on the UART interrupt (Phase 2f)
+
+`plat_putc` used to wait on the 16-character UART FIFO (87 us per character at 115200 baud), so a 1,000-character `show` held the main loop
+for about 87 ms, which cost 2 to 3 pictures of a running stream. Now:
+
+* `plat_putc` puts the character into a 4,096-byte transmit ring (`rtlnet_txring.c`, power-of-two byte ring with free-running head and tail
+  counters) and returns. When no transmit-empty interrupt is due (`g_tx_busy` 0) it fills the FIFO from the ring at once; the UART interrupt
+  (INTC input 9, edge, raised when the transmit FIFO empties and when a character arrives) refills the FIFO from the ring and moves received
+  characters into the receive ring. `XUartLite_EnableIntr` turns the interrupt on at the end of `plat_init`; before that, and when the INTC
+  setup fails, the console is polled as before.
+* Shared state: the transmit ring and the receive ring are touched by the main loop only with interrupts masked (`plat_irq_save` and
+  `plat_irq_restore`, which nest: `csrrci`/`csrsi` on `mstatus.MIE`), and by the interrupt, which runs with interrupts masked, so neither side ever
+  sees a ring half updated. The same rule now covers the receive ring (`plat_console_getc` pulls under the mask).
+* Full ring: the caller waits (no console text is lost) for at most `PLAT_UART_TX_WAIT` polls; while waiting it refills the FIFO itself and pulls
+  received characters, so a late or lost interrupt cannot stall it. Only a wait that times out loses a character: it is counted
+  (`characters lost` in `show stream`, `g_tx_drops`). `plat_poll` refills the FIFO from the main loop when characters wait and the FIFO is empty
+  (counted as `refills by the main loop`), which makes a lost edge harmless.
+* `plat_reload` waits (at most `PLAT_RELOAD_TX_MS` = 500 ms) for the ring and the FIFO to empty, then turns the UART interrupt off before the restart;
+  `plat_init` turns it off first, so a restart never starts with a stale enable.
+* `show stream` prints the `Console TX` line: mode (interrupt driven or polled), ring size, high-water mark, interrupts, main-loop refills,
+  characters lost. Host test: `microblaze/firmware/test/txring_host_test.c` (order, full, drain, wrap of the buffer and of the 32-bit counters,
+  text through a 64-byte ring with a 16-character consumer; `--neg` damages a character). Board results: `rtlnet_nexys_video.md` section 6.17.
 
 ### 9.3 InitPHY()
 
@@ -770,6 +793,7 @@ Details: `boards/nexys_video/documentation/rtlnet_nexys_video.md` sections 6.3 a
 | 10-22-2026 | Offload measurements and defaults (section 9.11): zero-copy receive on, zero-copy transmit off, AXI BRAM budget, throughput and CPU profile tables; netif merged with the word-wise copies of section 9.10 |
 | 10-22-2026 | AXI DMA data realignment engine on MM2S (zero-copy transmit); checksum offload in the firmware (feature discovery, `rtlnet_offload_apply`, receive trailer, zero-copy options, `show offload`, `offload` command, desktop netif test) |
 | 10-22-2026 | Classifier driver integrated: `rtlnet_cpupath.c` on the real driver API (context, `RTLNET_CLS_ACT_*`), boot call `rtlnet_classifier_config_bcast_storm(10, 100)`, MAC mask removed and EtherType entries 0..7 (range pairs) in the CLI, harness register model of the classifier; the sim stub classifier task follows the driver register map |
+| 11-11-2026 | Console transmit on the UART interrupt (section 9.2.1): 4 KiB transmit ring, receive and transmit rings touched with interrupts masked; board results in `rtlnet_nexys_video.md` section 6.17 |
 | 10-22-2026 | TCP throughput tuning: netif TX/RX copies as 32-bit AXI accesses, optional CPU profile (`RTLNET_NETIF_PROFILE`), `TCP_SND_BUF` 24 x MSS, `TCP_WND` 8 x MSS, 32-bit lwIP checksum, memory resized (section 9.10) |
 | 11-09-2026 | Processor changed from the classic MicroBlaze 11.0 to MicroBlaze V (RV32IMC, Zicsr, Zba/Zbb/Zbs, no caches) with `mdm_riscv`; RISC-V toolchain, BSP flags check and linker template; `Xil_ExceptionDisable()` in the platform layer; measurements in `boards/nexys_video/documentation/rtlnet_nexys_video.md` section 6.7 |
 | 11-09-2026 | JTAG UART of the MDM removed (CDC gate passes); address 0x4140_0000 unmapped; `axi_periph` has 6 masters; JTAG load of an ELF with `boards/nexys_video/scripts/jtag_load_elf.ps1` |

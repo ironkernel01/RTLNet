@@ -5,8 +5,8 @@
  *
  * Role: implementation of the contract in rtlnet_venc.h.
  *
- * Revision: 11-10-2026 (macroblock-tiled rebuilt picture, 128-byte index records; phase 2c: GOP, P pictures, two rebuilt buffers;
- *   phase 2d: rate control per picture, no IDR picture on a QP change)
+ * Revision: 11-11-2026 (macroblock-tiled rebuilt picture, 128-byte index records; phase 2c: GOP, P pictures, two rebuilt buffers;
+ *   phase 2d: rate control per picture, no IDR picture on a QP change; phase 2f: picture queue and resumable mux apart from the encoder)
  */
 #include "rtlnet_venc.h"
 
@@ -17,6 +17,8 @@
 #include "rtlnet_framebuf.h"
 #include "rtlnet_h264_enc.h"
 #include "rtlnet_mmio.h"
+#include "rtlnet_muxjob.h"
+#include "rtlnet_picq.h"
 #include "rtlnet_platform.h"
 #include "rtlnet_ratectl.h"
 #include "rtlnet_tsmux.h"
@@ -42,10 +44,9 @@ uint32_t rtlnet_host_mem_read32(uintptr_t addr);
 #define VENC_IDX_ENTRIES  256u             /* 128-byte records: 32 KiB */
 
 #define VENC_PTS_BASE     90000u     /* first PTS: one second */
-#define VENC_PCR_LEAD     9000u      /* PTS minus PCR: 100 ms */
 #define VENC_ENC_TIMEOUT_US  500000u
 #define VENC_LOG2_FN      4u
-#define VENC_CHUNK        1024u      /* bytes per cache invalidate and read */
+#define VENC_MUX_BUDGET   MUXJOB_BUDGET   /* elementary stream bytes the mux sends per venc_poll call (four datagrams) */
 #define VENC_PAD_SLOTS    8u         /* frame-buffer slots whose padding lines are tracked */
 
 typedef enum { ST_IDLE = 0, ST_ENCODING } venc_state_t;
@@ -65,8 +66,13 @@ static struct {
     uint32_t                   first_frame;
     uint32_t                   acct_frame;        /* highest frame number accounted for: encoded, or counted as dropped */
     uint32_t                   pts_step;
-    uint32_t                   ring_rptr[VENC_MAX_ENGINES];
-    uint32_t                   idx_rptr[VENC_MAX_ENGINES];
+    uint32_t                   scan_idx[VENC_MAX_ENGINES];   /* index ring position where the next picture's entries are looked for */
+    picq_t                     q;                 /* pictures coded and not yet sent, in coding order */
+    muxjob_t                   job;               /* the oldest queued picture, when job_active */
+    int                        job_active;
+    uint32_t                   mux_pic_ticks;     /* mux time of the picture being sent */
+    uint32_t                   skip_frame;        /* frame number of the last frame skipped for the backlog */
+    int                        skip_valid;
     uint32_t                   pic_seq;
     rtlnet_h264_enc_buffers_t  bufs;              /* the two rebuilt buffers: cur is written, the other is the reference */
     uint32_t                   gop_pos;           /* pictures coded since the last IDR picture (the IDR counts 1) */
@@ -82,6 +88,23 @@ static struct {
     uint32_t                   win_ts_bytes;
     uint32_t                   win_mux_ticks;
     uint32_t                   win_busy_ticks;
+    /* sequencing measurements (venc_status_t, phase 2f) */
+    uint32_t                   cyc_last_begin;    /* plat_ticks at the previous begin_picture */
+    int                        cyc_have;
+    uint32_t                   cyc_n;             /* pictures started */
+    uint32_t                   cyc_cnt;           /* cycle times counted */
+    uint32_t                   cyc_min, cyc_max;  /* ticks */
+    uint64_t                   cyc_sum;
+    int                        lag_have;          /* lag_off holds the smallest (now - time stamp) seen */
+    int32_t                    lag_off;
+    uint64_t                   lag_sum;
+    uint32_t                   lag_max;
+    uint32_t                   lag_cnt;
+    uint64_t                   mux_chunk_ticks;   /* time in mux (all) */
+    uint64_t                   mux_sink_ticks;    /* part of it inside video_udp_send */
+    uint64_t                   udp_copy0, udp_send0;   /* video_udp_profile values at the last clear */
+    uint32_t                   mux_n;
+    uint32_t                   skipped_backlog;
 } g;
 
 /* The rate controller and its seconds ring (28,800 bytes of .bss in the LMB, see rtlnet_ratectl.h). */
@@ -103,35 +126,30 @@ static void mem_copy(uint8_t *dst, uint32_t off, uint32_t n)
 
 static int sink(void *ctx, const uint8_t *d, uint32_t len)
 {
+    uint32_t t0 = plat_ticks();
+    int rc;
     (void)ctx;
-    return video_udp_send(d, len);
+    rc = video_udp_send(d, len);
+    g.mux_sink_ticks += plat_ticks() - t0;
+    return rc;
 }
 
-/* ring_feed -- append n ring bytes (engine e, ring offset off, wrapping at the share) to the access unit in chunks. */
-static void ring_feed(uint32_t e, uint32_t off, uint32_t n)
+/* mux_map -- muxjob callback: n ring bytes of engine e at offset off of its share, the cache lines invalidated first. */
+static const uint8_t *mux_map(void *ctx, uint32_t e, uint32_t off, uint32_t n)
 {
-    static uint8_t chunk[VENC_CHUNK];
     uint32_t share = VENC_RING_SIZE / g.engines;
-    uint32_t base = VENC_RING_BASE + e * share;
-    while (n != 0u) {
-        uint32_t c = n;
-        if (c > VENC_CHUNK) {
-            c = VENC_CHUNK;
-        }
-        if (off + c > share) {
-            c = share - off;
-        }
+    uint32_t base = VENC_RING_BASE + e * share + off;
+    (void)ctx;
 #ifdef RTLNET_HOST_TEST
-        mem_copy(chunk, base + off, c);
-        tsmux_au_data(&g.mux, chunk, c);
-#else
-        plat_dcache_invalidate_range((uintptr_t)(RTLNET_PLAT_DDR_BASE + base + off), c);
-        tsmux_au_data(&g.mux, (const uint8_t *)(uintptr_t)(RTLNET_PLAT_DDR_BASE + base + off), c);
-        (void)chunk;
-#endif
-        off = (off + c) % share;
-        n -= c;
+    {
+        static uint8_t chunk[MUXJOB_PIECE];
+        mem_copy(chunk, base, n);
+        return chunk;
     }
+#else
+    plat_dcache_invalidate_range((uintptr_t)(RTLNET_PLAT_DDR_BASE + base), n);
+    return (const uint8_t *)(uintptr_t)(RTLNET_PLAT_DDR_BASE + base);
+#endif
 }
 
 void venc_init(void)
@@ -141,6 +159,7 @@ void venc_init(void)
     g.st.gop = VENC_GOP_DEFAULT;
     g.cfg_mode = 0xFFFFFFFFu;
     g.need_idr = 1u;
+    picq_init(&g.q);
     (void)rtlnet_h264_enc_buffers_init(&g.bufs, VENC_RY_BASE, VENC_RU_BASE, VENC_RY_BASE_B, VENC_RU_BASE_B);
     ratectl_init(&g_rc);
     ratectl_set_cqp(&g_rc, VENC_QP_DEFAULT);
@@ -183,6 +202,10 @@ int venc_start(uint32_t ip, uint16_t port)
     g.gop_pos = 0u;
     g.prev_fn = 0u;
     g.idr_id = 0u;
+    picq_flush(&g.q);
+    g.job_active = 0;
+    g.skip_valid = 0;
+    g.cyc_have = 0;
     (void)rtlnet_h264_enc_buffers_init(&g.bufs, VENC_RY_BASE, VENC_RU_BASE, VENC_RY_BASE_B, VENC_RU_BASE_B);
     ratectl_restart(&g_rc);   /* a new stream: the model and the buffer start again (the statistics keep running) */
     g.st.dst_ip = ip;
@@ -202,6 +225,8 @@ void venc_stop(void)
     }
     release_slot();
     g.state = ST_IDLE;
+    picq_flush(&g.q);   /* the pictures queued are abandoned with the stream; the next start resets the rings */
+    g.job_active = 0;
     g.st.running = 0;
     video_udp_close();
 }
@@ -327,8 +352,7 @@ static int configure_mode(uint32_t mode)
     }
     rtlnet_h264_enc_ring_reset(RTLNET_PLAT_H264_BASE);
     for (uint32_t e = 0u; e < g.engines; e++) {
-        g.ring_rptr[e] = 0u;
-        g.idx_rptr[e] = 0u;
+        g.scan_idx[e] = 0u;
     }
     g.cfg_mode = mode;
     g.padded_n = 0u;   /* the padding lines of the slots are filled again for the new geometry */
@@ -447,6 +471,36 @@ static int begin_picture(void)
         g.gop_pos++;
     }
     g.t_start = plat_ticks();
+    g.cyc_n++;
+    if (g.cyc_have) {
+        uint32_t d = g.t_start - g.cyc_last_begin;
+        g.cyc_sum += d;
+        g.cyc_cnt++;
+        if (g.cyc_cnt == 1u || d < g.cyc_min) {
+            g.cyc_min = d;
+        }
+        if (d > g.cyc_max) {
+            g.cyc_max = d;
+        }
+    }
+    g.cyc_last_begin = g.t_start;
+    g.cyc_have = 1;
+    {
+        /* Lag: the frame's time stamp counts ui_clk cycles, plat_ticks counts the same 90 MHz clock from another origin; the smallest
+         * difference seen is taken as zero lag (the firmware was idle and saw the frame at once). */
+        int32_t d = (int32_t)(g.t_start - g.frame.timestamp);
+        uint32_t lag;
+        if (!g.lag_have || d < g.lag_off) {
+            g.lag_off = d;
+            g.lag_have = 1;
+        }
+        lag = (uint32_t)(d - g.lag_off);
+        g.lag_sum += lag;
+        g.lag_cnt++;
+        if (lag > g.lag_max) {
+            g.lag_max = lag;
+        }
+    }
     return 0;
 }
 
@@ -477,28 +531,26 @@ static void hp_after_picture(void)
 }
 
 /*
- * mux_picture -- read both engines' picture entries and send the access unit.
- * Steps: for each engine find the next picture entry in its index ring; check the access unit delimiter at the start of
- * engine 0's data; au_begin; AUD, SPS and PPS, the rest of engine 0, all of the other engines; au_end; advance the
- * ring and index read pointers.
- * Returns 0, or -1 when an index entry is missing or malformed (the rings are then reset).
+ * queue_picture -- on DONE: read the picture entries of every engine and queue the picture for the multiplexer.
+ * Steps: for each engine find the next picture entry in its index ring (from scan_idx); check the access unit delimiter at the start of
+ * engine 0's data; fill the descriptor (frame, type, QP, PTS, ring offsets and lengths, the ring and index positions that are free
+ * once the picture is sent, the delimiter, the SPS and PPS of an IDR picture); rate control sees the size now (the sizes are known at
+ * DONE, so the controller runs in coding order whatever the multiplexer is doing); push the descriptor.
+ * Returns 0, or -1 when an index entry is missing or malformed or the queue refuses (the rings are then reset at the next picture,
+ * after the queue is drained).
  */
-static int mux_picture(void)
+static int queue_picture(void)
 {
-    uint32_t off[VENC_MAX_ENGINES];
-    uint32_t len[VENC_MAX_ENGINES];
+    picq_desc_t d;
     uint32_t idx_share = VENC_IDX_ENTRIES / g.engines;
     uint32_t share = VENC_RING_SIZE / g.engines;
     uint32_t new_idx[VENC_MAX_ENGINES];
-    uint8_t  aud[6];
     uint32_t total = 0u;
-    uint64_t pts;
-    uint32_t t0;
-    uint32_t dt;
+    memset(&d, 0, sizeof(d));
     for (uint32_t e = 0u; e < g.engines; e++) {
         uintptr_t win = RTLNET_PLAT_H264_BASE + 0x100u * e;
         uint32_t wptr = rtlnet_h264_enc_index_wptr(win);
-        uint32_t r = g.idx_rptr[e];
+        uint32_t r = g.scan_idx[e];
         int found = 0;
         while (r != wptr && !found) {
             uint8_t raw[RTLNET_H264_IDX_WORDS * 4u];   /* the entry words at the start of the 128-byte record */
@@ -512,67 +564,55 @@ static int mux_picture(void)
             rtlnet_h264_enc_decode_index_entry(w, &ent);
             r = (r + 1u) % idx_share;
             if (ent.is_picture) {
-                off[e] = ent.offset;
-                len[e] = ent.length;
+                d.off[e] = ent.offset;
+                d.len[e] = ent.length;
                 found = 1;
             }
         }
-        if (!found || off[e] >= share || len[e] > share) {
+        if (!found || d.off[e] >= share || d.len[e] > share) {
             return -1;
         }
         new_idx[e] = r;
     }
-    if (len[0] < 6u) {
+    if (d.len[0] < PICQ_AUD_BYTES) {
         return -1;
     }
-    mem_copy(aud, VENC_RING_BASE + off[0], sizeof(aud));
-    if (aud[0] != 0u || aud[1] != 0u || aud[2] != 0u || aud[3] != 1u || aud[4] != 0x09u) {
+    mem_copy(d.aud, VENC_RING_BASE + d.off[0], PICQ_AUD_BYTES);
+    if (d.aud[0] != 0u || d.aud[1] != 0u || d.aud[2] != 0u || d.aud[3] != 1u || d.aud[4] != 0x09u) {
         return -1;
     }
-    pts = (uint64_t)VENC_PTS_BASE + (uint64_t)(g.frame.frame - g.first_frame) * g.pts_step;
-    t0 = plat_ticks();
-    /* The random access indicator marks IDR pictures only; the PCR stays on every access unit (13818-1: at most 100 ms apart). */
-    tsmux_au_begin(&g.mux, pts, pts - VENC_PCR_LEAD, g.pic_type == RTLNET_H264_PIC_IDR);
-    tsmux_au_data(&g.mux, aud, sizeof(aud));
+    d.engines = g.engines;
+    d.frame = g.frame.frame;
+    d.pic_type = g.pic_type;
+    d.qp = g.st.qp_used;
+    d.pts = (uint64_t)VENC_PTS_BASE + (uint64_t)(g.frame.frame - g.first_frame) * g.pts_step;
+    for (uint32_t e = 0u; e < g.engines; e++) {
+        total += d.len[e];
+        d.ring_end[e] = (d.off[e] + d.len[e]) % share;
+        d.idx_end[e] = new_idx[e];
+    }
     if (g.pic_type == RTLNET_H264_PIC_IDR) {
-        tsmux_au_data(&g.mux, g.sps_pps, (uint32_t)g.sps_len);   /* SPS and PPS in front of every IDR picture */
+        d.sps_len = (uint32_t)g.sps_len;
+        memcpy(d.sps_pps, g.sps_pps, g.sps_len);
+        total += d.sps_len;
     }
-    ring_feed(0u, (off[0] + 6u) % share, len[0] - 6u);
-    for (uint32_t e = 1u; e < g.engines; e++) {
-        ring_feed(e, off[e], len[e]);
-    }
-    tsmux_au_end(&g.mux);
-    dt = plat_ticks() - t0;
-    g.win_mux_ticks += dt;
-    g.st.last_mux_us = dt / RTLNET_PLAT_TICKS_PER_US;
-    if (g.st.last_mux_us > g.st.max_mux_us) {
-        g.st.max_mux_us = g.st.last_mux_us;
+    d.es_bytes = total;
+    d.t_done = plat_ticks();
+    if (picq_push(&g.q, &d) != PICQ_OK) {
+        return -1;
     }
     for (uint32_t e = 0u; e < g.engines; e++) {
-        total += len[e];
-        g.ring_rptr[e] = (off[e] + len[e]) % share;
-        g.idx_rptr[e] = new_idx[e];
-        rtlnet_h264_enc_set_read_pointers(RTLNET_PLAT_H264_BASE + 0x100u * e, g.ring_rptr[e], g.idx_rptr[e]);
+        g.scan_idx[e] = new_idx[e];
     }
-    if (g.pic_type == RTLNET_H264_PIC_IDR) {
-        total += (uint32_t)g.sps_len;
-        g.st.idr_pictures++;
-        g.st.idr_bytes += total;
-        g.st.last_idr = 1u;
-    } else {
-        g.st.p_pictures++;
-        g.st.p_bytes += total;
-        g.st.last_idr = 0u;
-    }
-    g.st.pictures++;
-    g.st.es_bytes += total;
-    g.st.last_picture_bytes = total;
     /* Rate control: the coded size (the entry lengths of every engine, plus the SPS and PPS of an IDR picture), the QP written and
      * the stream time since the previous picture (more than one period after a dropped picture). */
     ratectl_picture_done(&g_rc, g.pic_type == RTLNET_H264_PIC_IDR, g.st.qp_used, total * 8u,
                          g.have_last ? (g.frame.frame - g.st.last_frame) * g.pts_step : g.pts_step);
     g.st.last_frame = g.frame.frame;
     g.have_last = 1;
+    if (picq_count(&g.q) > g.st.backlog_max) {
+        g.st.backlog_max = picq_count(&g.q);
+    }
     return 0;
 }
 
@@ -594,30 +634,135 @@ static void window_update(void)
     }
 }
 
-void venc_poll(void)
+/* mode_of -- the encoder mode of a frame size, 0xFFFFFFFF for an unsupported size. */
+static uint32_t mode_of(uint32_t w, uint32_t h)
+{
+    if (w == 1280u && h == 720u) {
+        return RTLNET_H264_MODE_720P30;
+    }
+    if (w == 1920u && h == 1080u) {
+        return RTLNET_H264_MODE_1080P30;
+    }
+    return 0xFFFFFFFFu;
+}
+
+/*
+ * try_begin -- encoder idle: start the next picture when a new frame is ready.
+ * A frame already coded or already skipped is not taken again. When the rings are to be reset (a mode change, or an error left
+ * cfg_mode invalid) the queue is drained first: the pictures in it point into the rings. When the queue holds PICQ_LIMIT pictures the
+ * frame is skipped: counted as a dropped picture and as a backlog skip, the next picture is an IDR picture, the slot is not taken (so
+ * the encoder cannot stall on a full ring).
+ */
+static void try_begin(void)
 {
     uint32_t t0;
+    uint32_t latest;
+    uint32_t mode;
+    uint32_t wh;
+    if ((rtlnet_reg_read32(RTLNET_PLAT_FB_BASE, RTLNET_FB_REG_STATUS) & RTLNET_FB_STATUS_LATEST_VALID) == 0u) {
+        return;
+    }
+    latest = rtlnet_reg_read32(RTLNET_PLAT_FB_BASE, RTLNET_FB_REG_LATEST_FRAME);
+    if ((g.have_last && latest == g.st.last_frame) || (g.skip_valid && latest == g.skip_frame)) {
+        return;
+    }
+    wh = rtlnet_reg_read32(RTLNET_PLAT_FB_BASE, RTLNET_FB_REG_LATEST_WH);
+    mode = mode_of(wh & 0xFFFFu, wh >> 16);
+    if (picq_count(&g.q) != 0u && (g.cfg_mode == 0xFFFFFFFFu || (mode != 0xFFFFFFFFu && mode != g.cfg_mode))) {
+        return;   /* the mux drains the queue, then the rings are reset */
+    }
+    if (!picq_admit(&g.q, PICQ_LIMIT)) {
+        uint32_t base = (g.acct_frame > g.st.last_frame) ? g.acct_frame : g.st.last_frame;
+        if (g.have_last && latest > base + 1u) {
+            g.st.dropped_pictures += latest - base - 1u;   /* frames lost before this one (the gap is counted once) */
+        }
+        g.st.dropped_pictures++;
+        g.skipped_backlog++;
+        g.acct_frame = latest;
+        g.skip_frame = latest;
+        g.skip_valid = 1;
+        g.need_idr = 1u;
+        return;
+    }
+    t0 = plat_ticks();
+    if (begin_picture() == 0) {
+        g.state = ST_ENCODING;
+    }
+    g.win_busy_ticks += plat_ticks() - t0;
+}
+
+/* mux_finish -- the picture the job sent is complete: free its ring and index space, account for it, remove it from the queue. */
+static void mux_finish(void)
+{
+    const picq_desc_t *d = picq_front(&g.q);
+    if (d == NULL) {
+        return;
+    }
+    for (uint32_t e = 0u; e < d->engines; e++) {
+        rtlnet_h264_enc_set_read_pointers(RTLNET_PLAT_H264_BASE + 0x100u * e, d->ring_end[e], d->idx_end[e]);
+    }
+    g.st.last_mux_us = g.mux_pic_ticks / RTLNET_PLAT_TICKS_PER_US;
+    if (g.st.last_mux_us > g.st.max_mux_us) {
+        g.st.max_mux_us = g.st.last_mux_us;
+    }
+    if (d->pic_type == RTLNET_H264_PIC_IDR) {
+        g.st.idr_pictures++;
+        g.st.idr_bytes += d->es_bytes;
+        g.st.last_idr = 1u;
+    } else {
+        g.st.p_pictures++;
+        g.st.p_bytes += d->es_bytes;
+        g.st.last_idr = 0u;
+    }
+    g.st.pictures++;
+    g.st.es_bytes += d->es_bytes;
+    g.st.last_picture_bytes = d->es_bytes;
+    g.mux_n++;
+    (void)picq_pop(&g.q);
+    g.job_active = 0;
+}
+
+/*
+ * mux_service -- send one chunk (VENC_MUX_BUDGET elementary stream bytes, about four datagrams) of the oldest queued picture.
+ * venc_poll checks the frame and DONE state before every chunk, so the encoder never waits for the multiplexer.
+ */
+static void mux_service(void)
+{
+    uint32_t t0;
+    uint32_t dt;
+    int done;
+    if (!g.job_active) {
+        const picq_desc_t *d = picq_front(&g.q);
+        if (d == NULL) {
+            return;
+        }
+        muxjob_start(&g.job, d, mux_map, NULL, VENC_RING_SIZE / g.engines);
+        g.job_active = 1;
+        g.mux_pic_ticks = 0u;
+    }
+    g.mux_sink_ticks = 0u;
+    t0 = plat_ticks();
+    done = muxjob_step(&g.job, &g.mux, VENC_MUX_BUDGET);
+    dt = plat_ticks() - t0;
+    g.mux_chunk_ticks += (dt - (uint32_t)g.mux_sink_ticks);   /* ring read and TS build: the time outside the sink */
+    g.mux_pic_ticks += dt;
+    g.win_mux_ticks += dt;
+    g.win_busy_ticks += dt;
+    if (done) {
+        mux_finish();
+    }
+}
+
+void venc_poll(void)
+{
     if (!g.st.running) {
         return;
     }
     window_update();
-    if (g.state == ST_IDLE) {
-        uint32_t status = rtlnet_reg_read32(RTLNET_PLAT_FB_BASE, RTLNET_FB_REG_STATUS);
-        if ((status & RTLNET_FB_STATUS_LATEST_VALID) == 0u) {
-            return;
-        }
-        if (g.have_last && rtlnet_reg_read32(RTLNET_PLAT_FB_BASE, RTLNET_FB_REG_LATEST_FRAME) == g.st.last_frame) {
-            return;
-        }
-        t0 = plat_ticks();
-        if (begin_picture() == 0) {
-            g.state = ST_ENCODING;
-        }
-        g.win_busy_ticks += plat_ticks() - t0;
-    } else {
+    if (g.state == ST_ENCODING) {
         uint32_t status = rtlnet_h264_enc_status(RTLNET_PLAT_H264_BASE);
         if ((status & (RTLNET_H264_STATUS_DONE | RTLNET_H264_STATUS_ERR)) != 0u) {
-            t0 = plat_ticks();
+            uint32_t t0 = plat_ticks();
             release_slot();
             if ((status & RTLNET_H264_STATUS_ERR) != 0u) {
                 g.st.errors++;
@@ -628,7 +773,7 @@ void venc_poll(void)
                 rtlnet_h264_enc_clear_status(RTLNET_PLAT_H264_BASE);
                 rtlnet_h264_enc_buffers_end(&g.bufs);   /* the picture just rebuilt is the reference of the next one */
                 hp_after_picture();
-                if (mux_picture() != 0) {
+                if (queue_picture() != 0) {
                     g.st.errors++;
                     g.cfg_mode = 0xFFFFFFFFu;
                 }
@@ -643,6 +788,10 @@ void venc_poll(void)
             g.state = ST_IDLE;
         }
     }
+    if (g.state == ST_IDLE) {
+        try_begin();
+    }
+    mux_service();
 }
 
 void venc_get_status(venc_status_t *out)
@@ -656,6 +805,28 @@ void venc_get_status(venc_status_t *out)
     if (rtlnet_framebuf_read_state(RTLNET_PLAT_FB_BASE, &fs) == RTLNET_FB_OK) {
         out->fb_dropped = fs.dropped;
         out->fb_published = fs.published;
+    }
+    {
+        uint64_t copy_t;
+        uint64_t send_t;
+        uint32_t tpu = RTLNET_PLAT_TICKS_PER_US;
+        video_udp_profile(&copy_t, &send_t);
+        copy_t -= g.udp_copy0;
+        send_t -= g.udp_send0;
+        out->cyc_n = g.cyc_n;
+        out->cyc_min_us = g.cyc_min / tpu;
+        out->cyc_avg_us = (g.cyc_cnt != 0u) ? (uint32_t)(g.cyc_sum / g.cyc_cnt / tpu) : 0u;
+        out->cyc_max_us = g.cyc_max / tpu;
+        out->lag_avg_us = (g.lag_cnt != 0u) ? (uint32_t)(g.lag_sum / g.lag_cnt / tpu) : 0u;
+        out->lag_max_us = g.lag_max / tpu;
+        out->mux_n = g.mux_n;
+        out->mux_ring_ts_us = (g.mux_n != 0u) ? (uint32_t)(g.mux_chunk_ticks / g.mux_n / tpu) : 0u;
+        out->mux_copy_us = (g.mux_n != 0u) ? (uint32_t)(copy_t / g.mux_n / tpu) : 0u;
+        out->mux_send_us = (g.mux_n != 0u) ? (uint32_t)(send_t / g.mux_n / tpu) : 0u;
+        out->backlog = picq_count(&g.q);
+        out->backlog_max = g.st.backlog_max;
+        out->skipped_backlog = g.skipped_backlog;
+        out->backlog_limit = PICQ_LIMIT;
     }
 }
 
@@ -674,4 +845,18 @@ void venc_clear_counters(void)
     tsmux_clear_counters(&g.mux);
     g.win_ts_bytes = 0u;
     ratectl_clear_stats(&g_rc);
+    g.cyc_have = 0;
+    g.cyc_n = 0u;
+    g.cyc_cnt = 0u;
+    g.cyc_min = 0u;
+    g.cyc_max = 0u;
+    g.cyc_sum = 0u;
+    g.lag_sum = 0u;
+    g.lag_cnt = 0u;
+    g.lag_max = 0u;
+    g.mux_chunk_ticks = 0u;
+    g.mux_n = 0u;
+    g.st.backlog_max = picq_count(&g.q);
+    g.skipped_backlog = 0u;
+    video_udp_profile(&g.udp_copy0, &g.udp_send0);
 }

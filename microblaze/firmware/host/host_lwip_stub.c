@@ -281,3 +281,9 @@ void video_udp_counters(uint32_t *sent, uint32_t *dropped, uint32_t *retries)
     *dropped = 0u;
     *retries = 0u;
 }
+
+void video_udp_profile(uint64_t *copy_ticks, uint64_t *send_ticks)
+{
+    *copy_ticks = 0u;
+    *send_ticks = 0u;
+}

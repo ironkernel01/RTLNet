@@ -125,14 +125,50 @@ def unescape(b):
     return bytes(out)
 
 
+_CABAC = False   # entropy_coding_mode_flag of the last PPS seen (a stream that switches profile carries a PPS in front of every IDR picture)
+
+
+def sps_profile(buf):
+    """(profile_idc, constraint flags byte, entropy_coding_mode_flag) from the SPS (NAL 7) and PPS (NAL 8) of an access unit, or None without an SPS."""
+    prof = None
+    cabac = None
+    i = buf.find(b"\x00\x00\x01")
+    while i >= 0 and i + 3 < len(buf):
+        t = buf[i + 3] & 0x1F
+        try:
+            if t == 7:
+                d = unescape(bytes(buf[i + 4: i + 8]))
+                prof = (d[0], d[1])
+            elif t == 8:
+                r = BitReader(unescape(bytes(buf[i + 4: i + 12])))
+                r.ue()
+                r.ue()
+                cabac = r.u(1)
+        except (ValueError, IndexError):
+            pass
+        i = buf.find(b"\x00\x00\x01", i + 3)
+    if prof is None:
+        return None
+    return (prof[0], prof[1], cabac)
+
+
 def slice_qp(buf, log2_fn=4):
     """Slice QP (26 + slice_qp_delta) of the first slice NAL (type 1 or 5) of an access unit, or None.
     Header layout of rtlnet_h264_engine.sv: first_mb ue, slice_type ue, pps_id ue, frame_num u(log2_fn), idr_pic_id ue (IDR),
     P: num_ref_idx_active_override_flag u(1), ref_pic_list_modification_flag_l0 u(1); dec_ref_pic_marking (IDR 2 flags, P 1 flag),
-    slice_qp_delta se."""
+    cabac_init_idc ue (P slice when the PPS has entropy_coding_mode_flag 1), slice_qp_delta se."""
+    global _CABAC
     i = buf.find(b"\x00\x00\x01")
     while i >= 0 and i + 3 < len(buf):
         t = buf[i + 3] & 0x1F
+        if t == 8:
+            try:
+                r = BitReader(unescape(bytes(buf[i + 4: i + 12])))
+                r.ue()
+                r.ue()
+                _CABAC = bool(r.u(1))
+            except (ValueError, IndexError):
+                pass
         if t in (1, 5):
             try:
                 r = BitReader(unescape(bytes(buf[i + 4: i + 40])))
@@ -148,6 +184,8 @@ def slice_qp(buf, log2_fn=4):
                         return None
                     r.u(1)
                     r.u(1)
+                    if _CABAC:
+                        r.ue()
                 return 26 + r.se()
             except (ValueError, IndexError):
                 return None
@@ -182,6 +220,7 @@ def check_ts(path, step, fps, gop=0, target_kbps=0.0, skip_s=2.0, gate10=False, 
     au_bytes = []        # elementary stream bytes of each access unit
     au_nals = []         # NAL unit types of each access unit
     au_qps = []          # slice QP of each access unit
+    au_prof = []         # (profile_idc, constraint flags, entropy_coding_mode_flag) of the SPS and PPS of each access unit, or None
     cur = None           # bytearray of the access unit in progress
     pat_ok = pmt_ok = 0
     video_pid = None
@@ -235,6 +274,7 @@ def check_ts(path, step, fps, gop=0, target_kbps=0.0, skip_s=2.0, gate10=False, 
                 au_bytes.append(len(cur))
                 au_nals.append(nal_types(bytes(cur)))
                 au_qps.append(slice_qp(cur))
+                au_prof.append(sps_profile(bytes(cur)))
             cur = bytearray()
             ra_flags.append(bool((afc & 2) and p[4] >= 1 and (p[5] & 0x40)))
         if (p[1] & 0x40) and (afc & 1):   # PES start
@@ -281,6 +321,7 @@ def check_ts(path, step, fps, gop=0, target_kbps=0.0, skip_s=2.0, gate10=False, 
         au_bytes.append(len(cur))
         au_nals.append(nal_types(bytes(cur)))
         au_qps.append(slice_qp(cur))
+        au_prof.append(sps_profile(bytes(cur)))
     if gop <= 0:
         c.report("random_access", ra_count == len(pts_list), "%d of %d access units flag random access" % (ra_count, len(pts_list)))
     else:
@@ -306,6 +347,12 @@ def check_ts(path, step, fps, gop=0, target_kbps=0.0, skip_s=2.0, gate10=False, 
                 gi += 1
             for (ai, how) in forced_at:
                 print("FORCED_IDR access_unit=%d pts_s=%.3f (%s) nal_types=%s" % (ai, (pts_list[ai] - pts_list[0]) / 90000.0, how, sorted(au_nals[ai])))
+            prev = None
+            for ai, pr in enumerate(au_prof):
+                if pr is not None and pr != prev:
+                    print("PROFILE_RUN access_unit=%d pts_s=%.3f profile_idc=%d constraint_set1=%d entropy_coding_mode=%s" %
+                          (ai, (pts_list[ai] - pts_list[0]) / 90000.0, pr[0], (pr[1] >> 6) & 1, pr[2]))
+                    prev = pr
             c.report("random_access", len(ra_flags) > 0 and ra_flags[0] and len(forced_at) == forced_idr,
                      "%d of %d access units flag random access (IDR), first access unit %s, %d IDR pictures off the GOP %d cadence (expected %d)" %
                      (len(idx), len(ra_flags), "yes" if ra_flags and ra_flags[0] else "no", len(forced_at), gop, forced_idr))
