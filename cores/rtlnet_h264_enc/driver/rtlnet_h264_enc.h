@@ -401,4 +401,13 @@ void rtlnet_h264_enc_read_stats(uintptr_t base, rtlnet_h264_enc_stats_t *out);
  */
 int rtlnet_h264_enc_write_sps_pps(uint8_t *buf, size_t cap, const rtlnet_h264_enc_sps_cfg_t *cfg, size_t *out_len);
 
+/*
+ * The same with the profile of the stream: high 0 writes the Constrained Baseline form above; high != 0 writes the High form that
+ * goes with CABAC pictures of the High profile module (rtlnet_h264_hp): SPS profile_idc 100 with constraint flags 0, chroma_format_idc 1,
+ * bit_depth_luma_minus8 0, bit_depth_chroma_minus8 0, qpprime_y_zero_transform_bypass_flag 0, seq_scaling_matrix_present_flag 0 (the
+ * other SPS fields as above), and a PPS with entropy_coding_mode_flag 1 (the rest as above, no PPS extension: transform_8x8_mode_flag
+ * is 0). Firmware writes the form of the profile in force at the picture the parameter sets precede. Returns 0 or -1 as above.
+ */
+int rtlnet_h264_enc_write_sps_pps_profile(uint8_t *buf, size_t cap, const rtlnet_h264_enc_sps_cfg_t *cfg, int high, size_t *out_len);
+
 #endif /* RTLNET_H264_ENC_H */

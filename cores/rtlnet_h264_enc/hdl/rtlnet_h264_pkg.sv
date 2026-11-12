@@ -23,6 +23,9 @@ package rtlnet_h264_pkg;
   localparam logic [2:0] PK_ALIGN = 3'd3;
   localparam logic [2:0] PK_START = 3'd4;
   localparam logic [2:0] PK_END   = 3'd5;
+  // Only with the packer's ALIGN_ONES parameter (the High profile build): pad with one bits to a byte boundary (the
+  // cabac_alignment_one_bit of clause 7.3.4).
+  localparam logic [2:0] PK_ALIGN1 = 3'd6;
 
   // NAL kind carried with the byte stream: picture delimiter (no index entry) or slice.
   localparam logic       NAL_AUD   = 1'b0;

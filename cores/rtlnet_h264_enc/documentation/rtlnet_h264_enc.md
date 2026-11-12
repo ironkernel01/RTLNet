@@ -1,6 +1,6 @@
 # rtlnet_h264_enc: H.264 encoder core, phases 2b-2 to 2c-2 (Intra16x16, I_PCM fallback, P pictures with integer-pel motion search)
 
-Revision: 11-10-2026 (phase 2c-2: integer-pel motion search, section 16; phase 2c-1: P pictures without motion search, section 15; phase 2b-4: burst-only DDR3 access, section 14)
+Revision: 11-11-2026 (High profile seam, CABAC slice syntax, section 17; phase 2c-2: integer-pel motion search, section 16; phase 2c-1: P pictures without motion search, section 15; phase 2b-4: burst-only DDR3 access, section 14)
 
 ## 1. Purpose and scope
 
@@ -239,7 +239,7 @@ remainder). Simulation assertions in `rtlnet_h264_wr_master` and `rtlnet_h264_en
 | 0x00C | CTRL | RW | bit 0 START (self-clearing), bit 1 RING_RESET (self-clearing), bit 8 IRQ_EN |
 | 0x010 | STATUS | RW | bit 0 BUSY, bit 1 DONE (W1C), bit 2 ERR (W1C), bit 3 RING_STALL (live, any engine) |
 | 0x014 | ERR_CODE | RO | first error since the last ERR clear: 1 config, 2 AXI response, 3 read pointer, 4 start while busy |
-| 0x0C0 | HP_CTRL | RW | HIGH_PROFILE builds, else 0: bit 0 hp_enable (a write of 1 is ignored while hp_caps is 0) |
+| 0x0C0 | HP_CTRL | RW | HIGH_PROFILE builds, else 0: bit 0 hp_enable (a write of 1 is ignored while hp_caps is 0; accepted when the module offers a tool) |
 | 0x0C4 | HP_STATUS | RW | HIGH_PROFILE builds, else 0: [0] module present, [1] licensed, [2] active, [3] enable, [4] PROFILE_CHG (sticky, W1C), [11:8] hp_caps (bit 0 CABAC, bit 1 8x8 transform), [31:16] license seconds left (0xFFFF unlimited) |
 | 0x020 | MB_W | RW | picture width in macroblocks |
 | 0x024 | MB_H | RW | picture height in macroblocks |
@@ -1108,8 +1108,16 @@ in the High profile repository (`H264HighProfile`).
   inputs), a read port of the coefficient bank, picture and slice events, and drives packer commands (`rtlnet_h264_bitpack` command interface),
   status (`hp_present`, `hp_licensed`, `hp_seconds_left`, `hp_caps`, `hp_active`) and a reserved 8x8 transform stream interface. The engine
   multiplexes the entropy path by `hp_active`, which holds for a whole picture. The multiplexer keeps the entropy path at 6 logic levels in
-  the synthesis estimate. With the module's two netlist variants the build adds 187 LUT and 212 FF over the Baseline build (about 50 LUT and 102 FF
-  of them in the demo netlist, none in the full one).
+  the synthesis estimate.
+- Slice events and the slice header. `slice_start` is high while the sequencer writes the first command of a slice header and `slice_end` while it
+  waits in its slice-end state (both levels; the module uses their rising edges). With `hp_active` the sequencer writes the slice header of a P slice
+  with one more bit (`cabac_init_idc` 0, `ue(0)`, behind the reference marking bits) and, in its slice-end state, holds the rbsp trailing bits
+  (`PK_END`) until the module's `mb_busy` has risen and fallen again: the module writes the end of the slice data meanwhile. With `hp_active` 0 and
+  with `HIGH_PROFILE` 0 the sequencer is unchanged.
+- Packer. A new command `PK_ALIGN1` (op 6) pads with one bits to a byte boundary (the `cabac_alignment_one_bit` of the slice data); it exists only when
+  the packer's parameter `ALIGN_ONES` is 1, which the engine sets from `HIGH_PROFILE`. With `ALIGN_ONES` 0 the packer is unchanged.
+- Cost of the seam. Out-of-context synthesis (2 engines, 90 MHz, `xc7a200tsbg484-1`): `HIGH_PROFILE` 0 is identical to the commit before the change
+  (47,083 LUT, 31,071 FF); `HIGH_PROFILE` 1 with the full netlist of the module is 52,150 LUT and 33,643 FF in total (post-synthesis WNS +0.881 ns).
 - `hdl/hp/rtlnet_h264_hp_bb.sv` is the black-box declaration for a synthesis that reads the netlist. `hdl/hp/rtlnet_h264_hp_stub.sv` is the
   simulation and default-build stand-in (`hp_present` 0, `hp_licensed` 0, `hp_caps` 0, idle); `rtlnet_h264_enc.f` lists it,
   `rtlnet_h264_enc_core.f` is the same list without it. RTLNet simulates and builds without the netlist.
@@ -1119,12 +1127,15 @@ in the High profile repository (`H264HighProfile`).
 The engine applies a change of `hp_licensed` or `hp_enable` only at a picture start. A start that sees a change codes an IDR picture (frame_num 0,
 a new `idr_pic_id`, intra macroblocks only) whatever the registers requested, sets `HP_STATUS.PROFILE_CHG` and counts one change pulse. The
 firmware (`rtlnet_venc`) reads and clears the flag after each picture, restarts its GOP at that picture and writes the parameter sets in front of
-it. The stream therefore changes profile at an IDR picture with new parameter sets and keeps running.
+it, in the form of the profile now in force: High (`profile_idc` 100, CABAC) while the module codes the pictures, Constrained Baseline when the
+license has ended or `hp_enable` is 0. The stream therefore changes profile at an IDR picture with new parameter sets and keeps running.
 
 ### 17.3 Registers, driver, CLI
 
 HP_CTRL and HP_STATUS are in section 6. Driver: `rtlnet_h264_enc_hp_status`, `rtlnet_h264_enc_set_profile` (refusals with named codes
-`RTLNET_H264_HP_ERR_*`), `rtlnet_h264_enc_hp_clear_change`. CLI: `encoder profile <baseline|high>` and the `High profile` line of `show encoder`
+`RTLNET_H264_HP_ERR_*`), `rtlnet_h264_enc_hp_clear_change`, `rtlnet_h264_enc_write_sps_pps_profile` (the SPS and PPS in the Constrained Baseline form or, with
+`high`, the High form: `profile_idc` 100, `chroma_format_idc` 1, 8 bit samples, no scaling matrices, `entropy_coding_mode_flag` 1; `rtlnet_h264_enc_write_sps_pps`
+is its Constrained Baseline form). `encoder profile high` is accepted when the netlist offers a tool and the license is on. CLI: `encoder profile <baseline|high>` and the `High profile` line of `show encoder`
 (not present / present, licensed or license ended, time left, tools, profile in use, forced IDR pictures).
 
 ### 17.4 Board build variants
@@ -1142,6 +1153,8 @@ The build stops when the netlist is missing. `build_info.txt` names the variant 
 ### 17.5 Verification in this repository
 
 The default build is covered by the existing regression, `h264_lint.ps1` and `h264_synth.tcl` (the latter with argument 4 = 1 synthesizes the
-seam with the black box). The driver host test covers the new functions (470 checks) and the CLI demo of `microblaze/firmware/build.ps1 -Demo` the
-CLI lines in every state of the seam (462 checks). The benches of the module and of the engine with the module in place (license expiry in the
+seam with the black box). The driver host test covers the new functions and both SPS / PPS forms (613 checks) and the CLI demo of
+`microblaze/firmware/build.ps1 -Demo` the CLI lines in every state of the seam (462 checks). The bench `tb_rtlnet_h264_top` has the defines `TB_HIGH_PROFILE`
+and `TB_HP_ENABLE` (the module in place, `hp_enable` written) and `TB_DUMP_MB` (a text dump of stage B's input and of the clocks per macroblock, for
+reference models of entropy coders); `h264_spspps_tool` takes a last argument `high`. The benches of the module and of the engine with the module in place (license expiry in the
 middle of a stream, forced IDR picture, decoders) are in the High profile repository.

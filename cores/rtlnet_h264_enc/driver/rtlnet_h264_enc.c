@@ -21,6 +21,8 @@
 #define NAL_TYPE_SPS          7u
 #define NAL_TYPE_PPS          8u
 #define PROFILE_BASELINE      66u
+#define PROFILE_HIGH          100u
+#define CHROMA_FORMAT_420     1u
 #define POC_TYPE_NONE         2u
 #define MAX_REF_FRAMES        1u
 #define CROP_UNIT             2u      /* 4:2:0, frame_mbs_only_flag 1: crop units of 2 samples */
@@ -176,14 +178,15 @@ static uint32_t pick_level(uint32_t mbs_per_frame, uint32_t fps, uint32_t mb_w, 
 }
 
 /*
- * rtlnet_h264_enc_write_sps_pps -- see the header
+ * rtlnet_h264_enc_write_sps_pps_profile -- see the header
  * Steps:
  *   1. Validate the request; pick the level.
- *   2. Build the SPS rbsp field by field in the order of clause 7.3.2.1.1 and wrap it as a NAL unit.
- *   3. Build the PPS rbsp (clause 7.3.2.2) and wrap it.
+ *   2. Build the SPS rbsp field by field in the order of clause 7.3.2.1.1 and wrap it as a NAL unit: Constrained Baseline, or High
+ *      (profile_idc 100, chroma_format_idc 1, 8 bit samples, no scaling matrices).
+ *   3. Build the PPS rbsp (clause 7.3.2.2) and wrap it: entropy_coding_mode_flag 0 (CAVLC) or, for High, 1 (CABAC).
  * Returns: 0 or -1.
  */
-int rtlnet_h264_enc_write_sps_pps(uint8_t *buf, size_t cap, const rtlnet_h264_enc_sps_cfg_t *cfg, size_t *out_len)
+int rtlnet_h264_enc_write_sps_pps_profile(uint8_t *buf, size_t cap, const rtlnet_h264_enc_sps_cfg_t *cfg, int high, size_t *out_len)
 {
     bitw_t   w;
     uint32_t mb_w, mb_h, level, i;
@@ -214,13 +217,20 @@ int rtlnet_h264_enc_write_sps_pps(uint8_t *buf, size_t cap, const rtlnet_h264_en
     }
     w.bits = 0u;
     w.overflow = 0;
-    bitw_put(&w, PROFILE_BASELINE, 8u);             /* profile_idc */
+    bitw_put(&w, (high != 0) ? PROFILE_HIGH : PROFILE_BASELINE, 8u);   /* profile_idc */
     bitw_put(&w, 0u, 1u);                           /* constraint_set0_flag */
-    bitw_put(&w, 1u, 1u);                           /* constraint_set1_flag: Constrained Baseline */
+    bitw_put(&w, (high != 0) ? 0u : 1u, 1u);        /* constraint_set1_flag: Constrained Baseline (0 for High) */
     bitw_put(&w, 0u, 2u);                           /* constraint_set2_flag, constraint_set3_flag */
     bitw_put(&w, 0u, 4u);                           /* reserved_zero_4bits */
     bitw_put(&w, level, 8u);                        /* level_idc */
     bitw_ue(&w, 0u);                                /* seq_parameter_set_id */
+    if (high != 0) {
+        bitw_ue(&w, CHROMA_FORMAT_420);             /* chroma_format_idc */
+        bitw_ue(&w, 0u);                            /* bit_depth_luma_minus8 */
+        bitw_ue(&w, 0u);                            /* bit_depth_chroma_minus8 */
+        bitw_put(&w, 0u, 1u);                       /* qpprime_y_zero_transform_bypass_flag */
+        bitw_put(&w, 0u, 1u);                       /* seq_scaling_matrix_present_flag */
+    }
     bitw_ue(&w, cfg->log2_max_frame_num - RTLNET_H264_LOG2_FN_MIN);   /* log2_max_frame_num_minus4 */
     bitw_ue(&w, POC_TYPE_NONE);                     /* pic_order_cnt_type */
     bitw_ue(&w, MAX_REF_FRAMES);                    /* max_num_ref_frames */
@@ -254,7 +264,7 @@ int rtlnet_h264_enc_write_sps_pps(uint8_t *buf, size_t cap, const rtlnet_h264_en
     w.bits = 0u;
     bitw_ue(&w, 0u);                                /* pic_parameter_set_id */
     bitw_ue(&w, 0u);                                /* seq_parameter_set_id */
-    bitw_put(&w, 0u, 1u);                           /* entropy_coding_mode_flag: CAVLC */
+    bitw_put(&w, (high != 0) ? 1u : 0u, 1u);        /* entropy_coding_mode_flag: CAVLC, or CABAC for High */
     bitw_put(&w, 0u, 1u);                           /* bottom_field_pic_order_in_frame_present_flag */
     bitw_ue(&w, 0u);                                /* num_slice_groups_minus1 */
     bitw_ue(&w, 0u);                                /* num_ref_idx_l0_default_active_minus1 */
@@ -277,6 +287,14 @@ int rtlnet_h264_enc_write_sps_pps(uint8_t *buf, size_t cap, const rtlnet_h264_en
     }
     *out_len = n_sps + n_pps;
     return 0;
+}
+
+/*
+ * rtlnet_h264_enc_write_sps_pps -- see the header (Constrained Baseline form of rtlnet_h264_enc_write_sps_pps_profile)
+ */
+int rtlnet_h264_enc_write_sps_pps(uint8_t *buf, size_t cap, const rtlnet_h264_enc_sps_cfg_t *cfg, size_t *out_len)
+{
+    return rtlnet_h264_enc_write_sps_pps_profile(buf, cap, cfg, 0, out_len);
 }
 
 /*

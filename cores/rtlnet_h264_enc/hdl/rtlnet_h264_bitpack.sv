@@ -1,7 +1,8 @@
 // -----------------------------------------------------------------------------
 // File: rtlnet_h264_bitpack.sv
 // Purpose: bit packer of the H.264 encoder: exp-Golomb and fixed-field writers, Annex B start codes,
-//   rbsp trailing bits and emulation prevention, producing a NAL byte stream one byte per clock.
+//   rbsp trailing bits and emulation prevention, producing a NAL byte stream one byte per clock. With the parameter ALIGN_ONES the
+//   command PK_ALIGN1 pads with one bits to a byte boundary (the cabac_alignment_one_bit of the High profile slice data).
 // Overview:
 //   * Command stage: one command per clock (cmd_valid/cmd_ready). FIELD appends cmd_len (1..32)
 //     bits of cmd_val; UE appends ue(v) of cmd_val (0..65534); SE appends se(v) of the signed
@@ -23,7 +24,9 @@
 //   * 11-09-2026: initial version.
 // Clocks: clk (all logic).
 // -----------------------------------------------------------------------------
-module rtlnet_h264_bitpack (
+module rtlnet_h264_bitpack #(
+  parameter bit ALIGN_ONES = 1'b0    // 1: command PK_ALIGN1 pads with one bits to a byte boundary (High profile CABAC); 0: not decoded
+)(
   // Clock and synchronous active-low reset.
   input  logic        clk,
   input  logic        resetn,
@@ -141,6 +144,7 @@ module rtlnet_h264_bitpack (
   logic [6:0]       cnt_n;
   logic [ACC_W-1:0] fld_bits;
   logic             fits;
+  logic [3:0]       pad_n;     // padding bits of PK_ALIGN1 (0..7)
 
   function automatic logic [4:0] floor_log2(input logic [15:0] v);
     logic [4:0] r;
@@ -278,6 +282,8 @@ module rtlnet_h264_bitpack (
         default:                s1_take = 1'b1;
       endcase
     end
+    // With ALIGN_ONES the command PK_ALIGN1 waits like ALIGN (the constant condition leaves the logic of the default build as it was).
+    if (ALIGN_ONES && c_valid && (c_op == PK_ALIGN1)) s1_take = !end_pending;
     cnt_d    = drain ? (cnt - 7'd8) : cnt;
     acc_d    = drain ? (acc << 8) : acc;
     fld_bits = drain ? (c_valsh >> (cnt - 7'd8)) : (c_valsh >> cnt);
@@ -301,6 +307,12 @@ module rtlnet_h264_bitpack (
           cnt_n = cnt_d;
         end
       endcase
+    end
+    // ALIGN1: ones up to the next byte boundary (only with ALIGN_ONES).
+    pad_n = 4'(7'd8 - {4'd0, cnt_d[2:0]}) & 4'd7;
+    if (ALIGN_ONES && s1_take && (c_op == PK_ALIGN1)) begin
+      acc_n = acc_d | (~(64'hFFFF_FFFF_FFFF_FFFF >> pad_n) >> cnt_d);
+      cnt_n = (cnt_d + 7'd7) & 7'h78;
     end
   end
 
