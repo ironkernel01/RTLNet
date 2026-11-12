@@ -84,6 +84,7 @@
 //   * 11-10-2026: phase 2c-2: the inter vector comes from the motion search (mv_in_x / mv_in_y); P_Skip at the exact skip vector.
 //   * 11-12-2026: stage 3: 8x8 transform of inter luma on the High profile seam (parameter T8).
 //   * 11-12-2026: stage 3a: adaptive choice of the transform per macroblock (t8_auto, request beat, S_T8L, o_t8use).
+//   * 11-12-2026: stage 3c: feeder at one beat per clock, rebuild FIFO, one more delay stage (d3, e3) for the ipred's input register.
 // Clocks: clk.
 // -----------------------------------------------------------------------------
 module rtlnet_h264_mb_enc #(
@@ -194,6 +195,9 @@ module rtlnet_h264_mb_enc #(
   // Inter decision: the intra candidate is charged INTRA_BIAS_BITS bits of rate (the larger mb_type and the intra mode fields of
   // a P slice, and a bias towards the reference so that a static scene codes as skip).
   localparam int INTRA_BIAS_BITS = 16;
+
+  // 8x8 transform rebuild (T8 = 1): beats of the rebuilt residual held between the module and the rebuilt RAM's write port (the pointers are 3 bits).
+  localparam int RFD = 8;
 
   // Isolated coefficient elimination: an inter macroblock with at most DROP_LEVELS non-zero levels, all +-1, is coded without residual.
   localparam int DROP_LEVELS = 6;
@@ -313,7 +317,7 @@ module rtlnet_h264_mb_enc #(
   logic [14:0]        rate_q;               // lambda x mvd bits
   logic [7:0]         lam;                  // registered lambda of the slice QP
   logic [31:0]        ref_s1;
-  logic [31:0]        d1_ref, d2_ref, e2_ref;
+  logic [31:0]        d1_ref, d2_ref, d3_ref, e2_ref, e3_ref;
   logic               fq_in_inter, fq_in_full;
   // 8x8 transform (T8): signals of the sub-units below.
   logic               t8_use_q;          // this macroblock sends its luma residual to the 8x8 transform (a register of g_t8, constant 0 with T8 = 0)
@@ -340,6 +344,7 @@ module rtlnet_h264_mb_enc #(
   logic               t8_sat;
   logic [3:0]         t8_nblk;
   logic               t8_src_en;
+  logic               t8_src_hold;       // the feeder's source row waits for the output register: the search stage must not read the port
   logic [SRC_AW-1:0]  t8_src_addr;
   logic               t8_ref_en;
   logic [REF_AW-1:0]  t8_ref_addr;
@@ -368,10 +373,10 @@ module rtlnet_h264_mb_enc #(
   logic [4:0]         s1_b;
   logic [1:0]         s1_r;
   logic               s1_acc;
-  logic               d1_v, d2_v;
-  logic [4:0]         d1_b, d2_b;
-  logic [1:0]         d1_r, d2_r;
-  logic [31:0]        d1_src, d2_src;
+  logic               d1_v, d2_v, d3_v;
+  logic [4:0]         d1_b, d2_b, d3_b;
+  logic [1:0]         d1_r, d2_r, d3_r;
+  logic [31:0]        d1_src, d2_src, d3_src;
   logic [31:0]        s1_src;
 
   // Decoded issue item.
@@ -452,10 +457,13 @@ module rtlnet_h264_mb_enc #(
   logic [4:0]         p3_s1_b;
   logic [1:0]         p3_s1_r;
   logic [6:0]         p3_n;
-  logic               e1_v, e2_v;
-  logic [4:0]         e1_b, e2_b;
-  logic [1:0]         e1_r, e2_r;
-  logic [63:0]        e1_res, e2_res;
+  logic               e1_v, e2_v, e3_v;
+  logic [4:0]         e1_b, e2_b, e3_b;
+  logic [1:0]         e1_r, e2_r, e3_r;
+  logic [63:0]        e1_res, e2_res, e3_res, e4_res;
+  logic               e4_v;
+  logic [4:0]         e4_b;
+  logic [1:0]         e4_r;
   logic [6:0]         wr_cnt;
 
   // Chosen-prediction samples of the current delayed item.
@@ -591,23 +599,24 @@ module rtlnet_h264_mb_enc #(
   assign p_chroma_sel = ip_p_px[32*cm_q +: 32];
 
   // Residual of the delayed item (PASS1): 4 x signed 9 bit.
-  logic [35:0] res_d2;
-  logic [31:0] p_d2_sel;
-  assign p_d2_sel = inter_q ? d2_ref : ((blk_plane(d2_b) == 2'd0) ? p_luma_sel : p_chroma_sel);
+  logic [35:0] res_d3;
+  logic [31:0] p_d3_sel;
+  assign p_d3_sel = inter_q ? d3_ref : ((blk_plane(d3_b) == 2'd0) ? p_luma_sel : p_chroma_sel);
   always_comb begin
     for (int i = 0; i < 4; i++) begin
-      res_d2[9*i +: 9] = 9'(signed'({1'b0, d2_src[8*i +: 8]}) - signed'({1'b0, p_d2_sel[8*i +: 8]}));
+      res_d3[9*i +: 9] = 9'(signed'({1'b0, d3_src[8*i +: 8]}) - signed'({1'b0, p_d3_sel[8*i +: 8]}));
     end
   end
 
   // Reconstructed word of the delayed rebuild item (PASS3): clip(pred + residual).
   logic [31:0] rec_word;
-  logic [31:0] p_e2_sel;
-  assign p_e2_sel = inter_q ? e2_ref : ((blk_plane(e2_b) == 2'd0) ? p_luma_sel : p_chroma_sel);
+  logic [31:0] p_e3_sel;
+  logic [31:0] e4_pred;           // the chosen prediction of the item two stages behind the inverse transform (registered: timing)
+  assign p_e3_sel = inter_q ? e3_ref : ((blk_plane(e3_b) == 2'd0) ? p_luma_sel : p_chroma_sel);
   always_comb begin
     for (int i = 0; i < 4; i++) begin
       logic signed [17:0] v;
-      v = 18'(signed'({1'b0, p_e2_sel[8*i +: 8]})) + 18'(signed'(e2_res[16*i +: 16]));
+      v = 18'(signed'({1'b0, e4_pred[8*i +: 8]})) + 18'(signed'(e4_res[16*i +: 16]));
       if (v < 18'sd0)        rec_word[8*i +: 8] = 8'd0;
       else if (v > 18'sd255) rec_word[8*i +: 8] = 8'd255;
       else                   rec_word[8*i +: 8] = v[7:0];
@@ -617,18 +626,25 @@ module rtlnet_h264_mb_enc #(
   // ---------------------------------------------------------------------------
   // Rebuilt RAM write address and neighbour capture
   // ---------------------------------------------------------------------------
-  logic [REC_AW-1:0] e2_waddr;
-  logic [1:0]        e2_plane;
-  logic [1:0]        e2_seg;
-  logic [3:0]        e2_y;
-  assign e2_plane = blk_plane(e2_b);
-  assign e2_seg   = blk_seg(e2_b);
-  assign e2_y     = blk_y(e2_b, e2_r);
+  logic [REC_AW-1:0] e4_waddr;       // registered with the item (computed one stage earlier, timing)
+  logic [REC_AW-1:0] e3_waddr;
+  logic [1:0]        e3_plane;
+  logic [1:0]        e3_seg;
+  logic [3:0]        e3_y;
+  logic [1:0]        e4_plane;
+  logic [1:0]        e4_seg;
+  logic [3:0]        e4_y;
+  assign e3_plane = blk_plane(e3_b);
+  assign e3_seg   = blk_seg(e3_b);
+  assign e3_y     = blk_y(e3_b, e3_r);
+  assign e4_plane = blk_plane(e4_b);
+  assign e4_seg   = blk_seg(e4_b);
+  assign e4_y     = blk_y(e4_b, e4_r);
   always_comb begin
-    case (e2_plane)
-      2'd0:    e2_waddr = rbase_q + REC_AW'({e2_y, 2'b00} + {2'b00, e2_seg});
-      2'd1:    e2_waddr = rbase_q + REC_AW'(7'd64 + {3'b000, e2_y[2:0], 1'b0} + {6'd0, e2_seg[0]});
-      default: e2_waddr = rbase_q + REC_AW'(7'd80 + {3'b000, e2_y[2:0], 1'b0} + {6'd0, e2_seg[0]});
+    case (e3_plane)
+      2'd0:    e3_waddr = rbase_q + REC_AW'({e3_y, 2'b00} + {2'b00, e3_seg});
+      2'd1:    e3_waddr = rbase_q + REC_AW'(7'd64 + {3'b000, e3_y[2:0], 1'b0} + {6'd0, e3_seg[0]});
+      default: e3_waddr = rbase_q + REC_AW'(7'd80 + {3'b000, e3_y[2:0], 1'b0} + {6'd0, e3_seg[0]});
     endcase
   end
 
@@ -642,8 +658,8 @@ module rtlnet_h264_mb_enc #(
   // PCM copy write: phases 3..6 write quarter pcm_ph - 3 of the captured source word pcm_w.
   assign pcm_wr    = (st == S_PCM) && (pcm_ph >= 3'd3);
   assign pcm_q4    = 2'(pcm_ph - 3'd3);
-  assign reb_we    = e2_v || pcm_wr || (T8 && t8_wr_v);
-  assign reb_waddr = (st == S_PCM) ? pcm_waddr : ((T8 && t8_wr_v) ? t8_wr_addr : e2_waddr);
+  assign reb_we    = e4_v || pcm_wr || (T8 && t8_wr_v);
+  assign reb_waddr = (st == S_PCM) ? pcm_waddr : ((T8 && t8_wr_v) ? t8_wr_addr : e4_waddr);
   assign reb_wdata = (st == S_PCM) ? pcm_data[32*pcm_q4 +: 32] : ((T8 && t8_wr_v) ? t8_wr_data : rec_word);
 
   // Word index of the quarter in the rebuilt layout (and in the coefficient RAM copy read by stage B): luma 4 * y + bx,
@@ -868,26 +884,31 @@ module rtlnet_h264_mb_enc #(
         end
       end
 
-      // Feeder: per beat one source row and one prediction row are read (one clock of latency), the 8 residual samples of the 8x8
-      // block's half are registered and offered on tf_res until taken. Beat n: block n / 8 (raster order of the 8x8 blocks), row n % 8.
-      logic [5:0] fd_cnt;
-      logic [1:0] fd_ph;
+      // Feeder: one beat per clock. A beat's source row and prediction row are read in one clock (data valid the clock after, held until the
+      // next read), the 8 residual samples of the 8x8 block's half are registered and offered on tf_res until taken. A read is issued when the
+      // read data register is free or being taken, so that at most one read is outstanding and the data wait for the output register.
+      // Beat n: block n / 8 (raster order of the 8x8 blocks), row n % 8.
+      logic [5:0] fd_cnt;             // reads issued
+      logic       fd_s1v;               // the read data of the previous clock are present and not yet taken
+      logic       fd_s1gx;
       logic       res_v;
       logic [71:0] res_d;
       logic [3:0] fd_y;
       logic       fd_gx;
       logic       fd_rd;
+      logic       fd_adv;
       assign fd_y   = {fd_cnt[4], fd_cnt[2:0]};
       assign fd_gx  = fd_cnt[3];
-      assign fd_rd  = (st == S_T8S) && !mk_pend && (fd_ph == 2'd0) && (fd_cnt != 6'd32);
+      assign fd_adv = !res_v || tf_res_ready;
+      assign fd_rd  = (st == S_T8S) && !mk_pend && (fd_cnt != 6'd32) && (!fd_s1v || fd_adv);
       assign tf_res_valid = res_v;
       assign tf_res_data  = res_d;
-      assign t8s_done     = (st == S_T8S) && (fd_cnt == 6'd32) && !res_v;
+      assign t8s_done     = (st == S_T8S) && (fd_cnt == 6'd32) && !fd_s1v && !res_v;
 
       always_ff @(posedge clk) begin
         if (!resetn || (st != S_T8S)) begin
           fd_cnt     <= 6'd0;
-          fd_ph      <= 2'd0;
+          fd_s1v       <= 1'b0;
           res_v      <= 1'b0;
           res_last_q <= 1'b0;
         end else if (mk_pend) begin
@@ -900,32 +921,27 @@ module rtlnet_h264_mb_enc #(
             res_last_q <= 1'b0;
           end
         end else begin
-          case (fd_ph)
-            2'd0: if (fd_cnt != 6'd32) fd_ph <= 2'd1;
-            2'd1: begin
-              res_v <= 1'b1;
-              fd_ph <= 2'd2;
-            end
-            default: begin
-              if (res_v && tf_res_ready) begin
-                res_v  <= 1'b0;
-                fd_cnt <= fd_cnt + 6'd1;
-                fd_ph  <= 2'd0;
-              end
-            end
-          endcase
+          if (fd_adv) res_v <= fd_s1v;
+          if (fd_rd) begin
+            fd_cnt <= fd_cnt + 6'd1;
+            fd_s1gx  <= fd_gx;
+          end
+          if (fd_rd)       fd_s1v <= 1'b1;
+          else if (fd_adv) fd_s1v <= 1'b0;
         end
       end
       always_ff @(posedge clk) begin
-        if (fd_ph == 2'd1) begin
+        if (fd_s1v && fd_adv && (st == S_T8S) && !mk_pend) begin
           for (int j = 0; j < 8; j++) begin
-            res_d[9*j +: 9] <= 9'(signed'({1'b0, src_rd_data[8*(8*int'(fd_gx) + j) +: 8]}) - signed'({1'b0, ref_rd_data[8*(8*int'(fd_gx) + j) +: 8]}));
+            res_d[9*j +: 9] <= 9'(signed'({1'b0, src_rd_data[8*(8*int'(fd_s1gx) + j) +: 8]}) - signed'({1'b0, ref_rd_data[8*(8*int'(fd_s1gx) + j) +: 8]}));
           end
         end
       end
 
-      // Rebuild: beats of the rebuilt residual are taken one at a time; the prediction row is read in the clock the beat is taken (data
-      // valid the next clock, held until the next read), prediction plus residual is clipped into two words that are written in two clocks.
+      // Rebuild: the beats of the rebuilt residual are taken into a small FIFO as they come (the module can then free its output array and run
+      // its next block's second pass while this unit writes), one beat at a time leaves the FIFO: the prediction row is read in the clock the
+      // beat leaves (data valid the next clock, held until the next read), prediction plus residual is clipped into two words that are
+      // written in two clocks (the rebuilt RAM's write port is one 4-sample word wide: 2 clocks per beat is the limit of this unit).
       logic [5:0]  rc_cnt;
       logic [5:0]  dn_cnt;
       logic        x1_v;
@@ -942,10 +958,17 @@ module rtlnet_h264_mb_enc #(
       assign r_act        = (st == S_T8R);
       assign d_act        = (st == S_DRN);
       assign rc_y         = {rc_cnt[4], rc_cnt[2:0]};
-      assign tf_rec_ready = (r_act && !x1_v && (rc_cnt != 6'd32)) || (d_act && (dn_cnt != 6'd32));
-      assign r_take       = r_act && tf_rec_valid && tf_rec_ready;
+      logic [71:0] ff_mem [RFD];
+      logic [2:0]  ff_wp, ff_rp;
+      logic [3:0]  ff_n;
+      logic        ff_pop, ff_push;
+      assign tf_rec_ready = (r_act && (ff_n < 4'(RFD))) || (d_act && (dn_cnt != 6'd32));
+      assign ff_push      = r_act && tf_rec_valid && tf_rec_ready;
+      assign ff_pop       = r_act && (ff_n != 4'd0) && !x1_v && (rc_cnt != 6'd32);
+      assign r_take       = ff_pop;
       assign w_free       = !w_v || w_ph;
       assign t8_src_en    = fd_rd;
+      assign t8_src_hold  = fd_s1v && !fd_adv;
       assign t8_src_addr  = sbase_q + SRC_AW'(fd_y);
       assign t8_ref_en    = fd_rd || r_take;
       assign t8_ref_addr  = ref_base + REF_AW'((st == S_T8S) ? fd_y : rc_y);
@@ -964,8 +987,16 @@ module rtlnet_h264_mb_enc #(
           x1_v   <= 1'b0;
           w_v    <= 1'b0;
           w_ph   <= 1'b0;
+          ff_wp  <= 3'd0;
+          ff_rp  <= 3'd0;
+          ff_n   <= 4'd0;
         end else begin
           if (d_act && tf_rec_valid && tf_rec_ready) dn_cnt <= dn_cnt + 6'd1;
+          if (ff_push) begin
+            ff_wp <= ff_wp + 3'd1;
+          end
+          if (ff_pop) ff_rp <= ff_rp + 3'd1;
+          ff_n <= ff_n + 4'(ff_push) - 4'(ff_pop);
           if (r_take) begin
             x1_v   <= 1'b1;
             rc_cnt <= rc_cnt + 6'd1;
@@ -981,8 +1012,9 @@ module rtlnet_h264_mb_enc #(
         end
       end
       always_ff @(posedge clk) begin
+        if (ff_push) ff_mem[ff_wp] <= tf_rec_data;
         if (r_take) begin
-          x1_d  <= tf_rec_data;
+          x1_d  <= ff_mem[ff_rp];
           x1_y  <= rc_y;
           x1_gx <= rc_cnt[3];
         end
@@ -1016,6 +1048,7 @@ module rtlnet_h264_mb_enc #(
       assign t8_sat       = 1'b0;
       assign t8_nblk      = '0;
       assign t8_src_en    = 1'b0;
+      assign t8_src_hold  = 1'b0;
       assign t8_src_addr  = '0;
       assign t8_ref_en    = 1'b0;
       assign t8_ref_addr  = '0;
@@ -1038,7 +1071,7 @@ module rtlnet_h264_mb_enc #(
   // Sequencing
   // ---------------------------------------------------------------------------
   assign busy = (st != S_IDLE);
-  assign src_lock = (st == S_PCM);
+  assign src_lock = (st == S_PCM) || (T8 && t8_src_hold);
 
   always_ff @(posedge clk) begin
     if (!resetn) begin
@@ -1077,7 +1110,9 @@ module rtlnet_h264_mb_enc #(
       mv_ready_seen <= 1'b0;
       d1_ref      <= '0;
       d2_ref      <= '0;
+      d3_ref      <= '0;
       e2_ref      <= '0;
+      e3_ref      <= '0;
       fq_in_inter <= 1'b0;
       fq_in_full  <= 1'b0;
       est_q       <= '0;
@@ -1112,12 +1147,16 @@ module rtlnet_h264_mb_enc #(
       s1_yy       <= '0;
       d1_v        <= 1'b0;
       d2_v        <= 1'b0;
+      d3_v        <= 1'b0;
       d1_b        <= '0;
       d2_b        <= '0;
+      d3_b        <= '0;
       d1_r        <= '0;
       d2_r        <= '0;
+      d3_r        <= '0;
       d1_src      <= '0;
       d2_src      <= '0;
+      d3_src      <= '0;
       fq_in_v     <= 1'b0;
       fq_in_first <= 1'b0;
       fq_in_res   <= '0;
@@ -1151,12 +1190,22 @@ module rtlnet_h264_mb_enc #(
       p3_n        <= '0;
       e1_v        <= 1'b0;
       e2_v        <= 1'b0;
+      e3_v        <= 1'b0;
       e1_b        <= '0;
       e2_b        <= '0;
+      e3_b        <= '0;
       e1_r        <= '0;
       e2_r        <= '0;
+      e3_r        <= '0;
       e1_res      <= '0;
       e2_res      <= '0;
+      e3_res      <= '0;
+      e4_v        <= 1'b0;
+      e4_b        <= '0;
+      e4_r        <= '0;
+      e4_res      <= '0;
+      e4_pred     <= '0;
+      e4_waddr    <= '0;
       wr_cnt      <= '0;
       pcm_rd_en   <= 1'b0;
       pcm_rd_addr <= '0;
@@ -1187,17 +1236,22 @@ module rtlnet_h264_mb_enc #(
       d2_b   <= d1_b;
       d2_r   <= d1_r;
       d2_src <= d1_src;
+      d3_v   <= d2_v;
+      d3_b   <= d2_b;
+      d3_r   <= d2_r;
+      d3_src <= d2_src;
       d1_ref <= ref_s1;
       d2_ref <= d1_ref;
+      d3_ref <= d2_ref;
 
       // Forward transform input register (PASS1).
-      fq_in_v     <= d2_v;
-      fq_in_first <= (d2_r == 2'd0);
-      fq_in_res   <= res_d2;
-      fq_in_tag   <= {3'd0, d2_b};
-      fq_in_qp    <= (d2_b < 5'd16) ? qp_q : qpc_q;
+      fq_in_v     <= d3_v;
+      fq_in_first <= (d3_r == 2'd0);
+      fq_in_res   <= res_d3;
+      fq_in_tag   <= {3'd0, d3_b};
+      fq_in_qp    <= (d3_b < 5'd16) ? qp_q : qpc_q;
       fq_in_inter <= inter_q;
-      fq_in_full  <= inter_q && (d2_b < 5'd16);
+      fq_in_full  <= inter_q && (d3_b < 5'd16);
 
       // Forward transform outputs: DC capture, nonzero flags, DC unit starts.
       if (fq_out_dcv) begin
@@ -1258,21 +1312,32 @@ module rtlnet_h264_mb_enc #(
       e2_r   <= e1_r;
       e2_res <= e1_res;
       e2_ref <= ref_seg(ref_rd_data, blk_plane(e1_b), blk_seg(e1_b), blk_y(e1_b, e1_r)[0]);
+      e3_v   <= e2_v;
+      e3_b   <= e2_b;
+      e3_r   <= e2_r;
+      e3_res <= e2_res;
+      e3_ref <= e2_ref;
+      e4_v     <= e3_v;
+      e4_b     <= e3_b;
+      e4_r     <= e3_r;
+      e4_res   <= e3_res;
+      e4_pred  <= p_e3_sel;
+      e4_waddr <= e3_waddr;
       if (mv_ready) mv_ready_seen <= 1'b1;
-      if (e2_v) begin
+      if (e4_v) begin
         wr_cnt <= wr_cnt + 7'd1;
         // Left column (right column of the macroblock) and bottom row capture.
-        if (e2_plane == 2'd0) begin
-          if (e2_seg == 2'd3) left_y[8*e2_y +: 8] <= rec_word[31:24];
-          if (e2_y[3:2] == 2'd3 && e2_r == 2'd3) bot_y[32*e2_seg +: 32] <= rec_word;
+        if (e4_plane == 2'd0) begin
+          if (e4_seg == 2'd3) left_y[8*e4_y +: 8] <= rec_word[31:24];
+          if (e4_y[3:2] == 2'd3 && e4_r == 2'd3) bot_y[32*e4_seg +: 32] <= rec_word;
         end else begin
-          if (e2_seg[0]) begin
-            if (e2_plane == 2'd1) left_c[8*e2_y[2:0] +: 8]      <= rec_word[31:24];
-            else                  left_c[64 + 8*e2_y[2:0] +: 8] <= rec_word[31:24];
+          if (e4_seg[0]) begin
+            if (e4_plane == 2'd1) left_c[8*e4_y[2:0] +: 8]      <= rec_word[31:24];
+            else                  left_c[64 + 8*e4_y[2:0] +: 8] <= rec_word[31:24];
           end
-          if (e2_y[2] && e2_r == 2'd3) begin
-            if (e2_plane == 2'd1) bot_c[32*e2_seg[0] +: 32]      <= rec_word;
-            else                  bot_c[64 + 32*e2_seg[0] +: 32] <= rec_word;
+          if (e4_y[2] && e4_r == 2'd3) begin
+            if (e4_plane == 2'd1) bot_c[32*e4_seg[0] +: 32]      <= rec_word;
+            else                  bot_c[64 + 32*e4_seg[0] +: 32] <= rec_word;
           end
         end
       end
@@ -1617,5 +1682,44 @@ module rtlnet_h264_mb_enc #(
     if (resetn && (st == S_MD1) && !mv_ready_seen) $error("rtlnet_h264_mb_enc: motion vector context not ready at the inter decision");
   end
   // synthesis translate_on
+
+
+`ifdef MB_PROF
+  // synthesis translate_off
+  // Temporary state profile (stage 3c measurement): clocks per state, averaged per macroblock, by class (0 inter 4x4, 1 inter 8x8, 2 other, 3 inter 4x4 after the module's rejection in auto mode).
+  longint unsigned prof_tot [4][32];
+  longint unsigned prof_mb  [4];
+  int unsigned     prof_cur [32];
+  logic            prof_run;
+  initial begin
+    for (int c = 0; c < 4; c++) begin prof_mb[c] = 0; for (int s = 0; s < 32; s++) prof_tot[c][s] = 0; end
+    for (int s = 0; s < 32; s++) prof_cur[s] = 0;
+    prof_run = 1'b0;
+  end
+  always @(posedge clk) begin
+    if (resetn) begin
+      if ((st == S_IDLE) && start) begin
+        for (int s = 0; s < 32; s++) prof_cur[s] = 0;
+        prof_run = 1'b1;
+      end
+      if (prof_run && (st != S_IDLE)) prof_cur[int'(st)]++;
+      if (prof_run && done) begin
+        automatic int c = inter_q ? ((T8 && t8_use_q) ? 1 : ((T8 && t8_lum_q) ? 3 : 0)) : 2;
+        prof_mb[c]++;
+        for (int s = 0; s < 32; s++) prof_tot[c][s] += prof_cur[s];
+        prof_run = 1'b0;
+      end
+    end
+  end
+  final begin
+    for (int c = 0; c < 4; c++) begin
+      if (prof_mb[c] != 0) begin
+        $display("MBPROF class %0d mbs %0d", c, prof_mb[c]);
+        for (int s = 0; s < 32; s++) if (prof_tot[c][s] != 0) $display("MBPROF   class %0d state %0d avg %0d.%02d", c, s, prof_tot[c][s] / prof_mb[c], (prof_tot[c][s] * 100 / prof_mb[c]) % 100);
+      end
+    end
+  end
+  // synthesis translate_on
+`endif
 
 endmodule

@@ -920,7 +920,7 @@ The pattern generator is not on the failing path. Run 2 (`ExtraTimingOpt`, 1,794
 | CDC | `fifo 10`, `axil_cdc 5`, `gray 6`, `sync 31`, `reset 8` as expected, `rtlnet_cdc: PASS` |
 | utilization | 83,786 LUT (62.62 %), 79,780 FF (29.81 %), 284.5 RAMB tiles (77.95 %), 82 DSP |
 
-Open item (timing): the `u_invq` path `tt_reg` to `hs_reg` (13 logic levels, 9 CARRY4 in one cycle) is the limiter of both engines (the stage is the inverse quantizer feeding the inverse transform). A pipeline stage on that path removes it (RTL change in `rtlnet_h264_mb_enc`; the clock budget per macroblock has room, 484 of 735 clocks at 1080p30); until then every build of this image needs `ExtraTimingOpt`, and a build with another directive can fail by a few hundred picoseconds.
+Closed in the RTL (stage 3c, 11-12-2026; to be confirmed by the next board build): the `u_invq` column transform is now three clocks with one adder per clock (`cores/rtlnet_h264_enc/documentation/rtlnet_h264_enc.md` 17.8), the clock cost is 7 clocks per macroblock for all pipeline stages together. The open item as it stood: the `u_invq` path `tt_reg` to `hs_reg` (13 logic levels, 9 CARRY4 in one cycle) is the limiter of both engines (the stage is the inverse quantizer feeding the inverse transform). A pipeline stage on that path removes it (RTL change in `rtlnet_h264_mb_enc`; the clock budget per macroblock has room, 484 of 735 clocks at 1080p30); until then every build of this image needs `ExtraTimingOpt`, and a build with another directive can fail by a few hundred picoseconds.
 
 Board (release image, JTAG, COM3, lease 192.168.68.79 from `show ip`, PC on Wi-Fi 192.168.68.84; logs in `build/`):
 

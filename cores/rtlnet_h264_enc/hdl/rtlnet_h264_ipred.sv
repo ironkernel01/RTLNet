@@ -10,13 +10,13 @@
 //     three planes (serial multiply-accumulate, one step per clock) and the DC values (luma, and the four 4x4 blocks
 //     of each chroma plane). prep_done pulses at most 24 clocks after nb_load; queries follow after it.
 //   * A query (q_valid) names a plane (0 luma, 1 Cb, 2 Cr), a 4-sample row segment (q_seg, q_y) and carries the four
-//     source samples. Two clocks later p_valid and p_px return the prediction of all four modes for that segment, mode m
+//     source samples. Three clocks later p_valid and p_px return the prediction of all four modes for that segment, mode m
 //     at [32*m +: 32] with the spec mode number of the plane type (luma 0 V, 1 H, 2 DC, 3 Plane; chroma 0 DC, 1 H, 2 V,
 //     3 Plane). The samples of an illegal mode (V without the above MB, H without the left MB, Plane without both) read 0.
 //     Queries may come every clock.
 //   * With q_acc the segment's SAD against q_src is added to the accumulators of the legal modes: luma into sad_y,
 //     Cb and Cr together into sad_c (4 x 18 bits, mode m at [18*m +: 18]; an illegal mode stays 0). The accumulators
-//     are final 4 clocks after the last q_valid; dec_start may be given 3 clocks after the last q_valid (two idle clocks
+//     are final 5 clocks after the last q_valid; dec_start may be given 4 clocks after the last q_valid (three idle clocks
 //     between) or later. dec_done pulses 5 clocks after dec_start.
 //   * Decision: total(m) = SAD(m) + cost(m) over the legal modes, ties go to the first of the order DC, V, H, Plane.
 //     Luma cost DC 0, V 16, H 16, Plane 32; chroma cost DC 0, H 16, V 16, Plane 32. dec_luma_mode / dec_chroma_mode
@@ -30,9 +30,10 @@
 //     (k0 + c*y + b*x) >> 5 with k0 = a + 16 - C*(b + c). H and V sums use the above-left sample at the end of the sum.
 //   * A new nb_load, or a query before prep_done, is not allowed.
 // Language: SystemVerilog-2012.
-// Revision: 11-10-2026
+// Revision: 11-12-2026
 //   * 11-09-2026: initial version.
 //   * 11-10-2026: phase 2c-1: inter SAD accumulators (q_ref) and the total cost of the chosen intra modes.
+//   * 11-12-2026: stage 3c: input register stage for the query (timing); the prediction comes three clocks after the query, not two.
 // Clocks: clk.
 // -----------------------------------------------------------------------------
 module rtlnet_h264_ipred (
@@ -335,8 +336,27 @@ module rtlnet_h264_ipred (
   end
 
   // ---------------------------------------------------------------------------
-  // Query pipeline: stage 1 (plane base value, simple-mode samples), stage 2 (all four modes)
+  // Query pipeline: stage 0 (input registers; stage 3c: the plane selection and the multipliers no longer follow the caller's
+  // late-arriving select signals in the same clock), stage 1 (plane base value, simple-mode samples), stage 2 (all four modes)
   // ---------------------------------------------------------------------------
+  logic        q0_valid, q0_acc;
+  logic [1:0]  q0_plane, q0_seg;
+  logic [3:0]  q0_y;
+  logic [31:0] q0_src, q0_ref;
+  always_ff @(posedge clk) begin
+    if (!resetn) begin
+      q0_valid <= 1'b0; q0_acc <= 1'b0;
+    end else begin
+      q0_valid <= q_valid;
+      q0_acc   <= q_acc;
+    end
+    q0_plane <= q_plane;
+    q0_seg   <= q_seg;
+    q0_y     <= q_y;
+    q0_src   <= q_src;
+    q0_ref   <= q_ref;
+  end
+
   logic        q1_v, q1_acc;
   logic [1:0]  q1_pl;
   logic signed [19:0] q1_t;
@@ -352,18 +372,18 @@ module rtlnet_h264_ipred (
   logic [4:0]  xo;
 
   always_comb begin
-    case (q_plane)
+    case (q0_plane)
       2'd0:    begin sel_b = pb[0]; sel_c = pc[0]; sel_k = pk0[0]; end
       2'd1:    begin sel_b = pb[1]; sel_c = pc[1]; sel_k = pk0[1]; end
       default: begin sel_b = pb[2]; sel_c = pc[2]; sel_k = pk0[2]; end
     endcase
-    xo  = {1'b0, q_seg, 2'b00};
-    pcy = sel_c * $signed({1'b0, q_y});
+    xo  = {1'b0, q0_seg, 2'b00};
+    pcy = sel_c * $signed({1'b0, q0_y});
     pbx = sel_b * $signed(xo);
-    case (q_plane)
-      2'd0:    begin t_seg = top_y[32*q_seg +: 32]; l_byte = left_y[8*q_y +: 8]; dc_byte = dc_y; end
-      2'd1:    begin t_seg = top_c[32*q_seg[0] +: 32]; l_byte = left_c[8*q_y[2:0] +: 8]; dc_byte = dc_c[0][{q_y[2], q_seg[0]}]; end
-      default: begin t_seg = top_c[64 + 32*q_seg[0] +: 32]; l_byte = left_c[64 + 8*q_y[2:0] +: 8]; dc_byte = dc_c[1][{q_y[2], q_seg[0]}]; end
+    case (q0_plane)
+      2'd0:    begin t_seg = top_y[32*q0_seg +: 32]; l_byte = left_y[8*q0_y +: 8]; dc_byte = dc_y; end
+      2'd1:    begin t_seg = top_c[32*q0_seg[0] +: 32]; l_byte = left_c[8*q0_y[2:0] +: 8]; dc_byte = dc_c[0][{q0_y[2], q0_seg[0]}]; end
+      default: begin t_seg = top_c[64 + 32*q0_seg[0] +: 32]; l_byte = left_c[64 + 8*q0_y[2:0] +: 8]; dc_byte = dc_c[1][{q0_y[2], q0_seg[0]}]; end
     endcase
   end
 
@@ -372,14 +392,14 @@ module rtlnet_h264_ipred (
       q1_v <= 1'b0; q1_acc <= 1'b0; q1_pl <= '0; q1_t <= '0; q1_b <= '0;
       q1_top <= '0; q1_src <= '0; q1_ref <= '0; q1_left <= '0; q1_dc <= '0;
     end else begin
-      q1_v   <= q_valid;
-      q1_acc <= q_acc;
-      q1_pl  <= q_plane;
+      q1_v   <= q0_valid;
+      q1_acc <= q0_acc;
+      q1_pl  <= q0_plane;
       q1_t   <= sel_k + 20'(pcy) + 20'(pbx);
       q1_b   <= sel_b;
       q1_top <= t_seg;
-      q1_src <= q_src;
-      q1_ref <= q_ref;
+      q1_src <= q0_src;
+      q1_ref <= q0_ref;
       q1_left <= l_byte;
       q1_dc  <= dc_byte;
     end

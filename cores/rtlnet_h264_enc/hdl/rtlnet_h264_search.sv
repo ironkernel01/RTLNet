@@ -168,6 +168,10 @@ module rtlnet_h264_search #(
 
   assign keep_g = prowbase + ((pc == 7'd0) ? 16'd0 : (16'(pc) - 16'd1));
   assign lim_g  = prowbase + (((8'(pc) + 8'd1) < w_q) ? (16'(pc) + 16'd1) : (16'(w_q) - 16'd1));
+  // lim_g registered (stage 3c, timing: the comparison, the sum and the compare with ld_g in one clock): pc and prowbase change in M_FIN,
+  // the comparison is made in M_WAIT, two clocks later at the earliest.
+  logic [15:0]       lim_q;
+  always_ff @(posedge clk) lim_q <= lim_g;
 
   // ---------------------------------------------------------------------------
   // Window RAMs and the loader
@@ -824,7 +828,7 @@ module rtlnet_h264_search #(
 
         // The columns of the macroblock's window must be loaded.
         M_WAIT: begin
-          if (ld_g > lim_g) st <= M_PREP;
+          if (ld_g > lim_q) st <= M_PREP;
         end
 
         M_PREP: begin

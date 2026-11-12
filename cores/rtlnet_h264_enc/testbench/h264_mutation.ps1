@@ -19,7 +19,7 @@ Overview:
     (15) mb_skip_run off by one (rtlnet_h264_mb_cavlc), (16) the reference chroma tile pointer advancing by the luma tile size
     (rtlnet_h264_engine), (17) P_Skip chosen although luma levels are coded (rtlnet_h264_mb_enc), (18) the intra rounding offset used
     for inter blocks (rtlnet_h264_fwdq: a legal encoder choice a decoder cannot see, only the transform bench catches it),
-    (19) the single-matching-reference rule ignoring neighbour C (rtlnet_h264_mvpred: mvp is always 0 in stage 2c-1, so only the
+    (19) the single-matching-reference rule ignoring neighbour C (rtlnet_h264_mvpred_s2: mvp is always 0 in stage 2c-1, so only the
     mvpred bench catches it). Phase 2c-2: (16) is now the window loader's chroma tile pointer stepping by the luma tile size
     (rtlnet_h264_search); (20) a window column loaded into the wrong slot (a wrong column on every slide), (21) the mvd cost of the search
     without the predictor (an encoder choice a decoder cannot see: the search bench catches it), (22) the chroma interpolation weight
@@ -108,8 +108,8 @@ $Muts = @(
     @{ Name = 'intra rounding offset used for inter blocks'; File = 'rtlnet_h264_fwdq.sv';
        Old = "(q1_inter ? (32'(f_of(q1_q6)) >> 1) : 32'(f_of(q1_q6)))"; New = "32'(f_of(q1_q6))";
        Checks = @(@{ Kind = 'bench'; Bench = 'tb_rtlnet_h264_xform'; Fl = 'cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_xform.f' }) },
-    @{ Name = 'single matching reference index: neighbour C ignored'; File = 'rtlnet_h264_mvpred.sv';
-       Old = "mvp_x = ra ? ax : (rb ? bx : cx);"; New = "mvp_x = ra ? ax : (rb ? bx : ax);";
+    @{ Name = 'single matching reference index: neighbour C ignored'; File = 'rtlnet_h264_mvpred_s2.sv';
+       Old = "one_v = ra ? a : (rb ? b : c);"; New = "one_v = ra ? a : (rb ? b : a);";
        Checks = @(@{ Kind = 'bench'; Bench = 'tb_rtlnet_h264_mvpred'; Fl = 'cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_mvpred.f' }) },
     @{ Name = 'window column loaded into the wrong slot'; File = 'rtlnet_h264_search.sv';
        Old = "slot_q   <= ld_g[1:0];"; New = "slot_q   <= ld_g[1:0] + 2'd1;";

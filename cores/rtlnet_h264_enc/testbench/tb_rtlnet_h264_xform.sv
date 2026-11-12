@@ -10,7 +10,7 @@
 //     block, DC position 0), W00, tag and the fixed latency of 8 clocks are checked; blocks run back to back and with
 //     random gaps; qp and tag change on the non-first rows to show that they are sampled with the first row only.
 //   * invq: random level blocks with a random scaled DC for all QP 0..51 and a mixed-QP stream; residuals compared with
-//     the reference decoder process (tag and latency 8 checked).
+//     the reference decoder process (tag and latency 10 checked; 8 before stage 3c).
 //   * Chain: per QP a luma macroblock (16 blocks, fwdq, dcq_luma, invq) and both chroma planes (4 blocks each, QPc from the
 //     package function, checked against a bench table, fwdq, dcq_chroma, invq): levels, DC levels, scaled DC values and
 //     residuals compared with the reference chain.
@@ -488,7 +488,7 @@ module tb_rtlnet_h264_xform;
       for (int p = 0; p < 16; p++) d[p] = ilv[b][p];
       ref_inv(d, idc[b], qs[b], r);
       tb_check(ig_rows[b] == 4, $sformatf("%s block %0d: %0d output rows", what, b, ig_rows[b]));
-      tb_check(ig_lat[b] == 8, $sformatf("%s block %0d: latency %0d", what, b, ig_lat[b]));
+      tb_check(ig_lat[b] == 10, $sformatf("%s block %0d: latency %0d", what, b, ig_lat[b]));
       for (int p = 0; p < 16; p++)
         tb_check(ig_res[b][p] == r[p], $sformatf("%s block %0d qp %0d pos %0d: residual %0d, expected %0d", what, b, qs[b], p, ig_res[b][p], r[p]));
     end
@@ -667,7 +667,7 @@ module tb_rtlnet_h264_xform;
       ref_dc_chroma_q(wc, qp, lc);
       ref_dc_chroma_dec(lc, qp, dcc);
       run_dcc(qp, wv4);
-      tb_check(dc_lat == 7, $sformatf("%s dcq_chroma latency %0d", what, dc_lat));
+      tb_check(dc_lat == 9, $sformatf("%s dcq_chroma latency %0d", what, dc_lat));
       for (int i = 0; i < 4; i++) begin
         tb_check(int'($signed(dcc_lvl[12*i +: 12])) == lc[i], $sformatf("%s dcq_chroma qpc %0d level %0d: %0d, expected %0d", what, qp, i, int'($signed(dcc_lvl[12*i +: 12])), lc[i]));
         tb_check(int'($signed(dcc_dc[20*i +: 20])) == dcc[i], $sformatf("%s dcq_chroma qpc %0d dcC %0d: %0d, expected %0d", what, qp, i, int'($signed(dcc_dc[20*i +: 20])), dcc[i]));

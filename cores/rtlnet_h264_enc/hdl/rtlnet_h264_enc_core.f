@@ -15,6 +15,9 @@ cores/rtlnet_h264_enc/hdl/rtlnet_h264_dcq_luma.sv
 cores/rtlnet_h264_enc/hdl/rtlnet_h264_dcq_chroma.sv
 cores/rtlnet_h264_enc/hdl/rtlnet_h264_ipred.sv
 cores/rtlnet_h264_enc/hdl/rtlnet_h264_mvpred.sv
+cores/rtlnet_h264_enc/hdl/rtlnet_h264_mvpred_s1.sv
+cores/rtlnet_h264_enc/hdl/rtlnet_h264_mvpred_s2.sv
+cores/rtlnet_h264_enc/hdl/rtlnet_h264_mvpred_s3.sv
 cores/rtlnet_h264_enc/hdl/rtlnet_h264_mvctx.sv
 cores/rtlnet_h264_enc/hdl/rtlnet_h264_search.sv
 cores/rtlnet_h264_enc/hdl/rtlnet_h264_mb_enc.sv

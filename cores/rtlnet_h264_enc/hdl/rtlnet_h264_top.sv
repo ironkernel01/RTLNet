@@ -248,7 +248,9 @@ module rtlnet_h264_top #(
   // not a multiple of NUM_ENGINES gives 0, which an engine rejects at start), and owns an equal share of the ring and
   // of the index ring.
   logic [7:0]  rows_c;
-  logic [7:0]  band_first [NUM_ENGINES];
+  logic [7:0]  band_first_w [NUM_ENGINES];
+  logic [7:0]  band_rows_w  [NUM_ENGINES];
+  logic [7:0]  band_first [NUM_ENGINES];     // the bands registered (stage 3c, timing: the division and the engine's multiplier in one clock)
   logic [7:0]  band_rows  [NUM_ENGINES];
   logic [7:0]  eng_slices_w;
   logic [7:0]  slice_base [NUM_ENGINES];
@@ -261,11 +263,19 @@ module rtlnet_h264_top #(
     ring_size_e   = cfg_ring_size / 32'(NUM_ENGINES);
     idx_entries_e = cfg_idx_entries / 32'(NUM_ENGINES);
     for (int k = 0; k < NUM_ENGINES; k++) begin
-      band_first[k] = 8'(k * int'(rows_c));
-      if ((k * int'(rows_c)) >= int'(cfg_mb_h)) band_rows[k] = 8'd0;
-      else if (k < NUM_ENGINES - 1)             band_rows[k] = rows_c;
-      else                                      band_rows[k] = 8'(int'(cfg_mb_h) - k * int'(rows_c));
+      band_first_w[k] = 8'(k * int'(rows_c));
+      if ((k * int'(rows_c)) >= int'(cfg_mb_h)) band_rows_w[k] = 8'd0;
+      else if (k < NUM_ENGINES - 1)             band_rows_w[k] = rows_c;
+      else                                      band_rows_w[k] = 8'(int'(cfg_mb_h) - k * int'(rows_c));
       slice_base[k] = 8'(k * int'(eng_slices_w));
+    end
+  end
+
+  // The registers are written long before the start command (separate AXI-Lite writes), so the one clock of lag is not visible.
+  always_ff @(posedge enc_clk) begin
+    for (int k = 0; k < NUM_ENGINES; k++) begin
+      band_first[k] <= band_first_w[k];
+      band_rows[k]  <= band_rows_w[k];
     end
   end
 

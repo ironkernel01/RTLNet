@@ -14,10 +14,11 @@
 //   * Widths: W 16 bits signed in, Yc 18 bits signed (|Yc| <= 16320), product plus 2f 31 bits, level 12 bits signed, f 14 bits
 //     signed, product with 16V 24 bits signed, shifted value 32 bits signed, dcC 20 bits signed.
 //   * qpc is sampled at start. nz is high when any level is non-zero. Outputs are valid and held from done until the
-//     next start. Latency: done 7 clocks after start (start at clock t, done high at t + 7).
+//     next start. Latency: done 9 clocks after start (start at clock t, done high at t + 9).
 // Language: SystemVerilog-2012.
-// Revision: 11-09-2026
+// Revision: 11-12-2026
 //   * 11-09-2026: initial version.
+//   * 11-12-2026: stage 3c: the inverse transform of the levels, the product with 16V, the shift and the saturation in separate clocks (timing: the DSP block's input and output got logic and long routes); latency 7 -> 9.
 // Clocks: clk.
 // -----------------------------------------------------------------------------
 module rtlnet_h264_dcq_chroma (
@@ -82,16 +83,19 @@ module rtlnet_h264_dcq_chroma (
     return r;
   endfunction
 
-  // Sequence: S0 idle, S1 Yc and abs, S2 product, S3 level, S4 inverse transform and 16V, S5 shift, then done.
-  localparam logic [2:0] S_IDLE = 3'd0;
-  localparam logic [2:0] S_1    = 3'd1;
-  localparam logic [2:0] S_2    = 3'd2;
-  localparam logic [2:0] S_3    = 3'd3;
-  localparam logic [2:0] S_4    = 3'd4;
-  localparam logic [2:0] S_5    = 3'd5;
-  localparam logic [2:0] S_6    = 3'd6;
+  // Sequence: S0 idle, S1 Yc and abs, S2 product, S3 shift by 16 + qpc/6, S4 clamp and sign (the levels), S5 inverse 2x2 transform of the
+  // levels, S6 product with 16V (DSP block with registered input and output), S7 shift, S8 saturation, then done.
+  localparam logic [3:0] S_IDLE = 4'd0;
+  localparam logic [3:0] S_1    = 4'd1;
+  localparam logic [3:0] S_2    = 4'd2;
+  localparam logic [3:0] S_3    = 4'd3;
+  localparam logic [3:0] S_4    = 4'd4;
+  localparam logic [3:0] S_5    = 4'd5;
+  localparam logic [3:0] S_6    = 4'd6;
+  localparam logic [3:0] S_7    = 4'd7;
+  localparam logic [3:0] S_8    = 4'd8;
 
-  logic [2:0]  st;
+  logic [3:0]  st;
   logic [2:0]  qm;
   logic [3:0]  q6;
   logic        inter_q;
@@ -104,11 +108,15 @@ module rtlnet_h264_dcq_chroma (
   logic signed [11:0] lv [4];
   logic signed [11:0] lv_n [4];
   logic [31:0] sh [4];
+  logic [31:0] sh_r [4];
+  logic [31:0] sh_c [4];
   logic signed [13:0] fq [4];
+  logic signed [13:0] fq_r [4];
   logic signed [23:0] pq [4];
   logic signed [23:0] pq_n [4];
   logic signed [31:0] sx [4];
   logic signed [31:0] sy [4];
+  logic signed [31:0] sy_r [4];
   logic signed [19:0] dcr [4];
 
   always_comb begin
@@ -118,15 +126,16 @@ module rtlnet_h264_dcq_chroma (
     y[3] = 18'(w[0]) - 18'(w[1]) - 18'(w[2]) + 18'(w[3]);
     for (int c = 0; c < 4; c++) begin
       sh[c] = a2_sum[c] >> (5'd16 + {1'b0, q6});
-      if (sh[c] > 32'd2047) sh[c] = 32'd2047;
-      lv_n[c] = a2_sgn[c] ? -12'(sh[c][10:0]) : 12'(sh[c][10:0]);
+      sh_c[c] = sh_r[c];
+      if (sh_c[c] > 32'd2047) sh_c[c] = 32'd2047;
+      lv_n[c] = a2_sgn[c] ? -12'(sh_c[c][10:0]) : 12'(sh_c[c][10:0]);
     end
     fq[0] = 14'(lv[0]) + 14'(lv[1]) + 14'(lv[2]) + 14'(lv[3]);
     fq[1] = 14'(lv[0]) - 14'(lv[1]) + 14'(lv[2]) - 14'(lv[3]);
     fq[2] = 14'(lv[0]) + 14'(lv[1]) - 14'(lv[2]) - 14'(lv[3]);
     fq[3] = 14'(lv[0]) - 14'(lv[1]) - 14'(lv[2]) + 14'(lv[3]);
     for (int c = 0; c < 4; c++) begin
-      pq_n[c] = 24'(fq[c]) * signed'({1'b0, ls00(qm)});
+      pq_n[c] = 24'(fq_r[c]) * signed'({1'b0, ls00(qm)});
       sx[c]   = 32'(pq[c]) <<< q6;
       sy[c]   = sx[c] >>> 5;
     end
@@ -146,6 +155,8 @@ module rtlnet_h264_dcq_chroma (
         S_3:    st <= S_4;
         S_4:    st <= S_5;
         S_5:    st <= S_6;
+        S_6:    st <= S_7;
+        S_7:    st <= S_8;
         default: begin
           st   <= S_IDLE;
           busy <= 1'b0;
@@ -175,17 +186,26 @@ module rtlnet_h264_dcq_chroma (
       end
     end
     if (st == S_3) begin
+      for (int c = 0; c < 4; c++) sh_r[c] <= sh[c];
+    end
+    if (st == S_4) begin
       for (int c = 0; c < 4; c++) lv[c] <= lv_n[c];
       nz <= (lv_n[0] != 0) || (lv_n[1] != 0) || (lv_n[2] != 0) || (lv_n[3] != 0);
     end
-    if (st == S_4) begin
+    if (st == S_5) begin
+      for (int c = 0; c < 4; c++) fq_r[c] <= fq[c];
+    end
+    if (st == S_6) begin
       for (int c = 0; c < 4; c++) pq[c] <= pq_n[c];
     end
-    if (st == S_5) begin
+    if (st == S_7) begin
+      for (int c = 0; c < 4; c++) sy_r[c] <= sy[c];
+    end
+    if (st == S_8) begin
       for (int c = 0; c < 4; c++) begin
-        if (sy[c] > 32'sd524287)       dcr[c] <= 20'sd524287;
-        else if (sy[c] < -32'sd524288) dcr[c] <= -20'sd524288;
-        else                           dcr[c] <= 20'(sy[c]);
+        if (sy_r[c] > 32'sd524287)       dcr[c] <= 20'sd524287;
+        else if (sy_r[c] < -32'sd524288) dcr[c] <= -20'sd524288;
+        else                             dcr[c] <= 20'(sy_r[c]);
       end
     end
   end
