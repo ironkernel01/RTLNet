@@ -5,7 +5,7 @@
  *
  * Role: the harness (h264_harness.ps1) prepends this tool's output to the encoder's Annex B stream, so the
  * SPS and PPS decoded by JM, OpenH264 and FFmpeg are the bytes rtlnet_h264_enc_write_sps_pps() produces.
- * Usage: h264_spspps_tool <width> <height> <display_width> <display_height> <fps> <log2_max_frame_num> <out file> [high]
+ * Usage: h264_spspps_tool <width> <height> <display_width> <display_height> <fps> <log2_max_frame_num> <out file> [high [t8]]
  *        h264_spspps_tool mode <0 = 720p30 | 1 = 1080p30> <log2_max_frame_num> <out file>   (sizes from the driver's mode table)
  * Exit codes: 0 written, 2 bad arguments, 1 the driver rejected the request or the file could not be written.
  *
@@ -44,11 +44,16 @@ int main(int argc, char **argv)
     size_t  len = 0u;
     FILE   *f;
     int     high = 0;
+    int     t8   = 0;
 
     const char *outname;
 
-    /* An optional last argument "high" selects the High profile form of the parameter sets. */
-    if ((argc > 1) && (strcmp(argv[argc - 1], "high") == 0)) {
+    /* Optional last arguments "high" or "high t8" select the High profile form of the parameter sets (t8: transform_8x8_mode_flag 1). */
+    if ((argc > 2) && (strcmp(argv[argc - 1], "t8") == 0) && (strcmp(argv[argc - 2], "high") == 0)) {
+        high = 1;
+        t8   = 1;
+        argc -= 2;
+    } else if ((argc > 1) && (strcmp(argv[argc - 1], "high") == 0)) {
         high = 1;
         argc--;
     }
@@ -78,8 +83,8 @@ int main(int argc, char **argv)
         fprintf(stderr, "usage: h264_spspps_tool w h display_w display_h fps log2_max_frame_num outfile | mode m log2 outfile\n");
         return 2;
     }
-    if (rtlnet_h264_enc_write_sps_pps_profile(buf, sizeof(buf), &cfg, high, &len) != 0) {
-        fprintf(stderr, "h264_spspps_tool: rtlnet_h264_enc_write_sps_pps_profile rejected the request\n");
+    if (rtlnet_h264_enc_write_sps_pps_tools(buf, sizeof(buf), &cfg, high, t8, &len) != 0) {
+        fprintf(stderr, "h264_spspps_tool: rtlnet_h264_enc_write_sps_pps_tools rejected the request\n");
         return 1;
     }
     f = fopen(outname, "wb");

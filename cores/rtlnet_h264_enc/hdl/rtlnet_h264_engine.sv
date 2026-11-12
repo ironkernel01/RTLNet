@@ -131,6 +131,7 @@ module rtlnet_h264_engine #(
   // (the picture in progress is coded by the module); hp_chg pulses one clock when a picture start applies a changed hp_licensed or
   // hp_enable (that picture is a forced IDR picture).
   input  logic              hp_enable,
+  input  logic              hp_t8_enable,      // 8x8 transform of inter macroblocks (applied with the picture start, like hp_enable)
   output logic              hp_present,
   output logic              hp_licensed,
   output logic [15:0]       hp_seconds_left,
@@ -353,6 +354,9 @@ module rtlnet_h264_engine #(
   logic              bi_inter [2];
   logic              bi_skip [2];
   logic [3:0]        bi_cbp4 [2];
+  /* verilator lint_off UNUSEDSIGNAL */   // the 8x8 transform signals are used only with HIGH_PROFILE = 1
+  logic              bi_t8sub [2];
+  /* verilator lint_on UNUSEDSIGNAL */
   logic signed [15:0] bi_mvdx [2];
   logic signed [15:0] bi_mvdy [2];
   logic [7:0]        bi_x [2];
@@ -385,6 +389,19 @@ module rtlnet_h264_engine #(
   // Macroblock coder wires: stage A, stage B (CAVLC), the I_PCM coder, the rebuilt-picture writer.
   logic              a_busy;
   logic              a_done;
+  // 8x8 transform of inter luma (HIGH_PROFILE = 1): the module's picture flag, the stream between stage A and the module.
+  /* verilator lint_off UNUSEDSIGNAL */   // used only with HIGH_PROFILE = 1
+  logic              a_t8sub;
+  logic              t8_req;
+  logic              tf_res_v;
+  logic              tf_res_r;
+  logic [71:0]       tf_res_d;
+  logic              tf_rec_v;
+  logic              tf_rec_r;
+  logic [71:0]       tf_rec_d;
+  logic              tf_sum_v;
+  logic [127:0]      tf_sum_d;
+  /* verilator lint_on UNUSEDSIGNAL */
   logic [1:0]        a_i16;
   logic [1:0]        a_cm;
   logic [1:0]        a_cbpc;
@@ -578,6 +595,8 @@ module rtlnet_h264_engine #(
 
       logic              hp_lic_q;        // hp_licensed and hp_enable applied at the last picture start
       logic              hp_en_q;
+      logic              hp_t8_q;         // the 8x8 transform (enable bit, licensed, caps) applied at the last picture start
+      logic              hp_t8_now;
       logic              hp_changed;
       logic              last_was_idr;    // the last coded picture was an IDR picture with idr_pic_id last_idr_id
       logic [15:0]       last_idr_id;
@@ -592,17 +611,23 @@ module rtlnet_h264_engine #(
       logic [2:0]        h_op;
       logic [31:0]       h_val;
       logic [5:0]        h_len;
-      // Transform seam outputs: not used by the engine yet.
+      // Transform seam outputs not used by the engine: the last flags of the streams.
       /* verilator lint_off UNUSEDSIGNAL */
-      logic              tf_req_u;
-      logic              tf_res_ready_u;
-      logic              tf_rec_valid_u;
-      logic [71:0]       tf_rec_data_u;
       logic              tf_rec_last_u;
-      logic              tf_lvl_valid_u;
-      logic [127:0]      tf_lvl_data_u;
       logic              tf_lvl_last_u;
+      logic [101:0]      tf_sum_hi_u;
       /* verilator lint_on UNUSEDSIGNAL */
+      assign tf_sum_hi_u = tf_sum_d[127:26];
+
+      // The stage B descriptor flag: this macroblock submitted its luma residual to the module.
+      always_ff @(posedge clk) begin
+        if (!resetn) begin
+          bi_t8sub[0] <= 1'b0;
+          bi_t8sub[1] <= 1'b0;
+        end else if (a_done) begin
+          bi_t8sub[ab] <= a_t8sub;
+        end
+      end
 
       assign hp_pic_start = (st == E_IDLE) && start && cfg_ok_q;
 
@@ -615,7 +640,8 @@ module rtlnet_h264_engine #(
       end
       assign hp_hold  = hp_act && (st == E_SLEND) && !(hp_seen_busy && !h_busy);
       assign hp_cab_p = hp_act && e_p;
-      assign hp_changed = (hp_licensed != hp_lic_q) || (hp_enable != hp_en_q);
+      assign hp_t8_now  = hp_enable && hp_licensed && hp_t8_enable && hp_caps[1];
+      assign hp_changed = (hp_licensed != hp_lic_q) || (hp_enable != hp_en_q) || (hp_t8_now != hp_t8_q);
 
       // Applied state of the license and the enable bit, the picture's values (the registers', or those of a forced IDR picture:
       // IDR, not P, frame_num 0, an idr_pic_id one above the last IDR picture's), the last IDR picture's id. The picture's values
@@ -624,6 +650,7 @@ module rtlnet_h264_engine #(
         if (!resetn) begin
           hp_lic_q     <= hp_licensed;
           hp_en_q      <= hp_enable;
+          hp_t8_q      <= 1'b0;
           hp_chg       <= 1'b0;
           last_was_idr <= 1'b0;
           last_idr_id  <= '0;
@@ -637,6 +664,7 @@ module rtlnet_h264_engine #(
             hp_chg       <= hp_changed;
             hp_lic_q     <= hp_licensed;
             hp_en_q      <= hp_enable;
+            hp_t8_q      <= hp_t8_now;
             e_idr        <= cfg_idr || hp_changed;
             e_p          <= cfg_p && !hp_changed;
             e_frame_num  <= hp_changed ? 16'd0 : cfg_frame_num;
@@ -653,19 +681,19 @@ module rtlnet_h264_engine #(
       // engine yet: tied off.
       rtlnet_h264_hp u_hp (
         .clk(clk), .resetn(resetn),
-        .hp_enable(hp_enable), .hp_present(hp_present), .hp_licensed(hp_licensed), .hp_seconds_left(hp_seconds_left),
+        .hp_enable(hp_enable), .hp_t8_enable(hp_t8_enable), .hp_present(hp_present), .hp_licensed(hp_licensed), .hp_seconds_left(hp_seconds_left),
         .hp_caps(hp_caps), .hp_active(hp_act),
         .pic_start(hp_pic_start), .pic_done(done), .slice_start(st == E_H0), .slice_end(st == E_SLEND),
         .mb_start(b_go && hp_act), .mb_x(bi_x[bb]), .av_top(bi_avt[bb]), .av_left(bi_avl[bb]), .pcm(bi_pcm[bb]),
         .i16_mode(bi_mode[bb]), .cbp_chroma(bi_cbpc[bb]), .cbp_luma(bi_cbpl[bb]), .chroma_mode(bi_cm[bb]),
         .cbase(10'(cof_base_b)), .p_slice(e_p), .skip(bi_skip[bb]), .inter(bi_inter[bb]), .cbp_luma4(bi_cbp4[bb]),
-        .mvd_x(bi_mvdx[bb]), .mvd_y(bi_mvdy[bb]), .qp(cfg_qp),
+        .t8_sub(bi_t8sub[bb]), .mvd_x(bi_mvdx[bb]), .mvd_y(bi_mvdy[bb]), .qp(cfg_qp),
         .mb_skip_run(h_skip_run), .mb_busy(h_busy), .mb_done(h_done),
         .cram_rd_en(h_rd_en), .cram_rd_addr(h_raddr), .cram_rd_data(cofb_rdata),
         .cmd_valid(h_valid), .cmd_ready(pk_in_ready), .cmd_op(h_op), .cmd_val(h_val), .cmd_len(h_len),
-        .tf_req(tf_req_u), .tf_res_valid(1'b0), .tf_res_ready(tf_res_ready_u), .tf_res_data(72'd0), .tf_res_last(1'b0),
-        .tf_rec_valid(tf_rec_valid_u), .tf_rec_ready(1'b0), .tf_rec_data(tf_rec_data_u), .tf_rec_last(tf_rec_last_u),
-        .tf_lvl_valid(tf_lvl_valid_u), .tf_lvl_ready(1'b0), .tf_lvl_data(tf_lvl_data_u), .tf_lvl_last(tf_lvl_last_u)
+        .tf_req(t8_req), .tf_res_valid(tf_res_v), .tf_res_ready(tf_res_r), .tf_res_data(tf_res_d), .tf_res_last(1'b0),
+        .tf_rec_valid(tf_rec_v), .tf_rec_ready(tf_rec_r), .tf_rec_data(tf_rec_d), .tf_rec_last(tf_rec_last_u),
+        .tf_lvl_valid(tf_sum_v), .tf_lvl_ready(1'b1), .tf_lvl_data(tf_sum_d), .tf_lvl_last(tf_lvl_last_u)
       );
 
       assign b_busy       = hp_act ? h_busy : c_busy;
@@ -688,6 +716,14 @@ module rtlnet_h264_engine #(
       assign hp_chg          = 1'b0;
       assign hp_hold         = 1'b0;
       assign hp_cab_p        = 1'b0;
+      assign t8_req          = 1'b0;
+      assign tf_res_r        = 1'b0;
+      assign tf_rec_v        = 1'b0;
+      assign tf_rec_d        = 72'd0;
+      assign tf_sum_v        = 1'b0;
+      assign tf_sum_d        = 128'd0;
+      assign bi_t8sub[0]     = 1'b0;
+      assign bi_t8sub[1]     = 1'b0;
       assign e_idr           = cfg_idr;
       assign e_p             = cfg_p;
       assign e_frame_num     = cfg_frame_num;
@@ -705,7 +741,7 @@ module rtlnet_h264_engine #(
       // hp_enable is not used without the module.
       /* verilator lint_off UNUSEDSIGNAL */
       logic unused_hp;
-      assign unused_hp = hp_enable;
+      assign unused_hp = hp_enable | hp_t8_enable;
       /* verilator lint_on UNUSEDSIGNAL */
     end
   endgenerate
@@ -1180,7 +1216,7 @@ module rtlnet_h264_engine #(
 
   rtlnet_h264_mb_enc #(
     .MAX_MB_W(MAX_MB_W), .LINE_KB(LINE_KB), .RAM_STYLE(RAM_STYLE), .SRC_AW(RAM_AW), .REC_AW(REC_AW), .CRAM_AW(CRAM_AW),
-    .REF_AW(REF_AW), .MV_LINE_KB(MV_LINE_KB)
+    .REF_AW(REF_AW), .MV_LINE_KB(MV_LINE_KB), .T8(HIGH_PROFILE)
   ) u_mb_enc (
     .clk(clk), .resetn(resetn),
     .start(a_go), .pcm_mode(cfg_mb_pcm), .p_pic(e_p), .mb_x(a_x), .av_top(!a_first_row), .av_left(a_x != 8'd0),
@@ -1190,6 +1226,8 @@ module rtlnet_h264_engine #(
     .busy(a_busy), .done(a_done),
     .o_i16_mode(a_i16), .o_chroma_mode(a_cm), .o_cbp_chroma(a_cbpc), .o_cbp_luma(a_cbpl), .o_pcm(a_pcm),
     .o_inter(a_inter), .o_skip(a_skip), .o_cbp4(a_cbp4), .o_mvd_x(a_mvdx), .o_mvd_y(a_mvdy),
+    .t8_en(t8_req), .o_t8sub(a_t8sub), .tf_res_valid(tf_res_v), .tf_res_ready(tf_res_r), .tf_res_data(tf_res_d),
+    .tf_rec_valid(tf_rec_v), .tf_rec_ready(tf_rec_r), .tf_rec_data(tf_rec_d), .tf_sum_valid(tf_sum_v), .tf_sum_data(tf_sum_d[25:0]),
     .ref_rd_en(a_ref_en), .ref_rd_addr(a_ref_addr), .ref_rd_data(a_ref_data),
     .src_rd_en(a_src_en), .src_rd_addr(a_src_addr), .src_rd_data(src_rd_data),
     .reb_we(reb_we), .reb_waddr(reb_waddr), .reb_wdata(reb_wdata),

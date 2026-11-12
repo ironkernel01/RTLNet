@@ -871,6 +871,38 @@ static void demo_video(void)
     demo_type("show encoder\r");
     demo_check(demo_has("  High profile    : present, licensed, time left 10 min 0 s, tools CABAC (hp_caps 1), profile high, 0 forced IDR pictures"),
                "show encoder: High profile line, CABAC offered, profile high");
+    /* Stage 3: the 8x8 transform request (HP_CTRL bit 1), refused while the module offers no transform. */
+    host_capture_clear();
+    demo_type("encoder transform8x8 on\r");
+    demo_check(demo_has("% Transform8x8 on refused: the High profile module offers no 8x8 transform (hp_caps bit 1 is 0)") && host_model_h264_hp_ctrl_t8() == 0u,
+               "encoder transform8x8 on: refused with hp_caps bit 1 clear, nothing written");
+    host_capture_clear();
+    demo_type("show encoder\r");
+    demo_check(demo_has("  Transform 8x8   : not offered (hp_caps bit 1 is 0)"), "show encoder: Transform 8x8 line, not offered");
+    host_model_h264_hp(1u, 1u, RTLNET_H264_HP_CAP_CABAC | RTLNET_H264_HP_CAP_TRANSFORM8X8, 600u);   /* stage 3: CABAC and the 8x8 transform */
+    host_capture_clear();
+    demo_type("encoder transform8x8 on\r");
+    demo_check(demo_has("Transform8x8 on, effective at the next picture in the High profile") && host_model_h264_hp_ctrl_t8() == 1u,
+               "encoder transform8x8 on: accepted, HP_CTRL bit 1 set");
+    host_capture_clear();
+    demo_type("show encoder\r");
+    demo_check(demo_has("  High profile    : present, licensed, time left 10 min 0 s, tools CABAC 8x8-transform (hp_caps 3), profile high, 0 forced IDR pictures") &&
+               demo_has("  Transform 8x8   : on, in force (inter macroblocks use the 8x8 transform)"),
+               "show encoder: Transform 8x8 line, on and in force");
+    host_capture_clear();
+    demo_type("encoder transform8x8 off\r");
+    demo_check(demo_has("Transform8x8 off (4x4 transform), effective at the next picture") && host_model_h264_hp_ctrl_t8() == 0u && host_model_h264_hp_ctrl() == 1u,
+               "encoder transform8x8 off: HP_CTRL bit 1 cleared, hp_enable kept");
+    host_capture_clear();
+    demo_type("show encoder\r");
+    demo_check(demo_has("  Transform 8x8   : off, not in force (4x4 transform)"), "show encoder: Transform 8x8 line, off");
+    host_capture_clear();
+    demo_type("encoder transform8x8 maybe\r");
+    demo_check(demo_has("state (on or off)"), "encoder transform8x8: bad word rejected");
+    host_capture_clear();
+    demo_type("encoder transform8x8 on\r");
+    demo_check(host_model_h264_hp_ctrl_t8() == 1u, "encoder transform8x8 on again");
+    host_model_h264_hp(1u, 1u, RTLNET_H264_HP_CAP_CABAC, 600u);   /* back to the CABAC-only module for the checks below */
     host_model_h264_hp(1u, 0u, RTLNET_H264_HP_CAP_CABAC, 0u);
     host_capture_clear();
     demo_type("encoder profile high\r");

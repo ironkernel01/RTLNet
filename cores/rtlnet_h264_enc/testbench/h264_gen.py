@@ -40,6 +40,7 @@ Revision: 11-10-2026
   * 11-10-2026: phase 2c-2: panh / panv / pand / bounce / objs sequences.
 """
 import argparse
+import os
 import math
 import re
 import sys
@@ -453,6 +454,8 @@ def main():
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--out", default="")
     ap.add_argument("--expmv", default="")
+    ap.add_argument("--bpat", type=int, default=-1, help="board test pattern 0..4 (bars, scroll, box, noise band, all) of rtlnet_csi2_rx: pictures k = 0..count-1")
+    ap.add_argument("--bspeed", type=int, default=8, help="speed of the board test pattern, -32..32")
     a = ap.parse_args()
     if a.expmv:
         pv = pan_vector(a.expmv)
@@ -463,6 +466,16 @@ def main():
     w, h = a.w, a.h
     if w % 16 or h % 16 or (w * 2) % 32:
         raise SystemExit("w and h must be multiples of 16 (macroblock), line stride a multiple of 32")
+    if a.bpat >= 0:
+        # The moving test patterns of the board (boards/nexys_video/scripts/pattern_model.py, byte for byte the generator of rtlnet_csi2_rx).
+        here = os.path.dirname(os.path.abspath(__file__))
+        sys.path.insert(0, os.path.normpath(os.path.join(here, "..", "..", "..", "boards", "nexys_video", "scripts")))
+        import pattern_model as pm
+        for n in range(a.count):
+            yp, cbp, crp = pm.frame_planes((w, h), a.bpat, a.bspeed, n)
+            write_picture("%s%d" % (a.out, n), w, h, [bytes(r) for r in yp], [bytes(r) for r in cbp], [bytes(r) for r in crp])
+        print("wrote", a.count, "pictures of the board pattern", a.bpat, "speed", a.bspeed, "at", a.out)
+        return 0
     if a.seq:
         for n, (ys, us, vs) in enumerate(make_sequence(a.seq, w, h, a.count)):
             write_picture("%s%d" % (a.out, n), w, h, ys, us, vs)

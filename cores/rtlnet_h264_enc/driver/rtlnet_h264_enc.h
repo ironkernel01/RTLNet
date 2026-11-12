@@ -100,7 +100,8 @@
 #define RTLNET_H264_REG_RD_CYC           0x0A8u   /* RO, clocks the read DMA was busy */
 #define RTLNET_H264_REG_PK_CYC           0x0ACu   /* RO, clocks the macroblock coder was busy */
 #define RTLNET_H264_REG_WR_CYC           0x0B0u   /* RO, clocks the write master was busy */
-#define RTLNET_H264_REG_HP_CTRL          0x0C0u   /* [0] hp_enable (settable only while hp_caps is not 0), HIGH_PROFILE builds */
+#define RTLNET_H264_REG_HP_CTRL          0x0C0u   /* [0] hp_enable (settable only while hp_caps is not 0), [1] hp_t8_enable (8x8 transform of inter macroblocks, settable
+                                                     only while hp_caps bit 1 is set), HIGH_PROFILE builds */
 #define RTLNET_H264_REG_HP_STATUS        0x0C4u   /* HIGH_PROFILE builds, see RTLNET_H264_HP_STATUS_* */
 
 /* CTRL bits. */
@@ -121,6 +122,7 @@
 #define RTLNET_H264_HP_STATUS_ENABLED    (1u << 3)    /* hp_enable */
 #define RTLNET_H264_HP_STATUS_CHG        (1u << 4)    /* PROFILE_CHG: a picture start applied a changed license or enable and was coded as a
                                                        * forced IDR picture; sticky, write 1 to clear */
+#define RTLNET_H264_HP_STATUS_T8ENABLED  (1u << 5)    /* hp_t8_enable */
 #define RTLNET_H264_HP_STATUS_CAPS_SHIFT 8u           /* [11:8] hp_caps */
 #define RTLNET_H264_HP_STATUS_CAPS_MASK  0xFu
 #define RTLNET_H264_HP_STATUS_SEC_SHIFT  16u          /* [31:16] license seconds left, 0xFFFF unlimited */
@@ -133,6 +135,7 @@
 #define RTLNET_H264_HP_ERR_NO_CAPS       (-3)   /* the High profile module offers no tool (hp_caps is 0): stage 1 of the module */
 #define RTLNET_H264_HP_ERR_NOT_LICENSED  (-4)   /* the license has ended */
 #define RTLNET_H264_HP_ERR_NO_MODULE     (-5)   /* the seam is built but the module is the simulation stub (not present) */
+#define RTLNET_H264_HP_ERR_NO_T8         (-6)   /* the module offers no 8x8 transform (hp_caps bit 1 is 0) */
 
 /* ERR_CODE values (hdl/rtlnet_h264_pkg.sv ERR_*). */
 #define RTLNET_H264_ERR_NONE             0u
@@ -213,6 +216,7 @@ typedef struct {
     uint32_t licensed;
     uint32_t active;
     uint32_t enabled;
+    uint32_t t8_enabled;     /* hp_t8_enable: the 8x8 transform of inter macroblocks is requested */
     uint32_t profile_chg;
     uint32_t caps;           /* RTLNET_H264_HP_CAP_* */
     uint32_t seconds_left;   /* 0xFFFF unlimited */
@@ -312,6 +316,12 @@ int rtlnet_h264_enc_hp_status(uintptr_t base, rtlnet_h264_enc_hp_t *out);
  * coded as an IDR picture: the caller writes new parameter sets for the profile in force. */
 int rtlnet_h264_enc_set_profile(uintptr_t base, int high);
 
+/* Request the 8x8 transform of inter macroblocks (on != 0, HP_CTRL bit 1 = 1) or the 4x4 transform (0); hp_enable (bit 0) is kept. On is refused,
+ * with nothing written, by a named error checked in this order: RTLNET_H264_HP_ERR_NO_SEAM, _NO_MODULE (the stub), _NO_T8 (hp_caps bit 1 is 0).
+ * Off is always accepted (0 without a seam). Effective at the next picture start while the profile is High; that picture is coded as an IDR
+ * picture and the caller writes new parameter sets (rtlnet_h264_enc_write_sps_pps_tools with the 8x8 transform in force). */
+int rtlnet_h264_enc_set_transform8x8(uintptr_t base, int on);
+
 /* Clear PROFILE_CHG (write 1) and return 1 when it was set, 0 when it was not (-1 on a build without the seam). */
 int rtlnet_h264_enc_hp_clear_change(uintptr_t base);
 
@@ -409,5 +419,11 @@ int rtlnet_h264_enc_write_sps_pps(uint8_t *buf, size_t cap, const rtlnet_h264_en
  * is 0). Firmware writes the form of the profile in force at the picture the parameter sets precede. Returns 0 or -1 as above.
  */
 int rtlnet_h264_enc_write_sps_pps_profile(uint8_t *buf, size_t cap, const rtlnet_h264_enc_sps_cfg_t *cfg, int high, size_t *out_len);
+
+/*
+ * The same with the tools in force: t8 != 0 (with high) adds the PPS extension: transform_8x8_mode_flag 1, pic_scaling_matrix_present_flag 0,
+ * second_chroma_qp_index_offset se(0); the SPS stays High (profile_idc 100). t8 is ignored without high. Returns 0 or -1 as above.
+ */
+int rtlnet_h264_enc_write_sps_pps_tools(uint8_t *buf, size_t cap, const rtlnet_h264_enc_sps_cfg_t *cfg, int high, int t8, size_t *out_len);
 
 #endif /* RTLNET_H264_ENC_H */

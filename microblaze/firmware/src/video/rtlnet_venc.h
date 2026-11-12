@@ -143,4 +143,15 @@ void venc_get_status(venc_status_t *out);
 /* Clear the counters (the stream keeps running). */
 void venc_clear_counters(void);
 
+/*
+ * 8x8 transform of inter macroblocks (High profile module with hp_caps bit 1). rtlnet_venc_set_transform8x8: request it (on != 0, the default) or the
+ * 4x4 transform; returns the driver's result (0, or RTLNET_H264_HP_ERR_NO_SEAM / _NO_MODULE / _NO_T8 for on). The change takes effect at the next
+ * picture start while the profile is High: that picture is a forced IDR picture and the parameter sets are rewritten (PPS transform_8x8_mode_flag).
+ * rtlnet_venc_transform8x8_wanted: the request. rtlnet_venc_transform8x8_in_force: 1 when the pictures use the transform now (High profile in
+ * force, requested, offered).
+ */
+int rtlnet_venc_set_transform8x8(int on);
+int rtlnet_venc_transform8x8_wanted(void);
+int rtlnet_venc_transform8x8_in_force(void);
+
 #endif /* RTLNET_VENC_H */

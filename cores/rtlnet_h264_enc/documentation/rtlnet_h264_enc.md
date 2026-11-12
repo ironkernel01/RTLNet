@@ -239,8 +239,8 @@ remainder). Simulation assertions in `rtlnet_h264_wr_master` and `rtlnet_h264_en
 | 0x00C | CTRL | RW | bit 0 START (self-clearing), bit 1 RING_RESET (self-clearing), bit 8 IRQ_EN |
 | 0x010 | STATUS | RW | bit 0 BUSY, bit 1 DONE (W1C), bit 2 ERR (W1C), bit 3 RING_STALL (live, any engine) |
 | 0x014 | ERR_CODE | RO | first error since the last ERR clear: 1 config, 2 AXI response, 3 read pointer, 4 start while busy |
-| 0x0C0 | HP_CTRL | RW | HIGH_PROFILE builds, else 0: bit 0 hp_enable (a write of 1 is ignored while hp_caps is 0; accepted when the module offers a tool) |
-| 0x0C4 | HP_STATUS | RW | HIGH_PROFILE builds, else 0: [0] module present, [1] licensed, [2] active, [3] enable, [4] PROFILE_CHG (sticky, W1C), [11:8] hp_caps (bit 0 CABAC, bit 1 8x8 transform), [31:16] license seconds left (0xFFFF unlimited) |
+| 0x0C0 | HP_CTRL | RW | HIGH_PROFILE builds, else 0: bit 0 hp_enable (a write of 1 is ignored while hp_caps is 0; accepted when the module offers a tool), bit 1 hp_t8_enable (the 8x8 transform of inter macroblocks; a write of 1 is ignored while hp_caps bit 1 is 0) |
+| 0x0C4 | HP_STATUS | RW | HIGH_PROFILE builds, else 0: [0] module present, [1] licensed, [2] active, [3] enable, [4] PROFILE_CHG (sticky, W1C), [5] 8x8 transform enable, [11:8] hp_caps (bit 0 CABAC, bit 1 8x8 transform), [31:16] license seconds left (0xFFFF unlimited) |
 | 0x020 | MB_W | RW | picture width in macroblocks |
 | 0x024 | MB_H | RW | picture height in macroblocks |
 | 0x028 | SLICES | RW | slices per picture, a multiple of NUM_ENGINES |
@@ -1106,7 +1106,7 @@ in the High profile repository (`H264HighProfile`).
   after the change, with the same post-synthesis WNS (+0.881 ns) and the same worst path into the packer command register (6 logic levels).
 - With 1 each engine instances `rtlnet_h264_hp` as a black box. The module takes the macroblock descriptor of stage B (`rtlnet_h264_mb_cavlc`
   inputs), a read port of the coefficient bank, picture and slice events, and drives packer commands (`rtlnet_h264_bitpack` command interface),
-  status (`hp_present`, `hp_licensed`, `hp_seconds_left`, `hp_caps`, `hp_active`) and a reserved 8x8 transform stream interface. The engine
+  status (`hp_present`, `hp_licensed`, `hp_seconds_left`, `hp_caps`, `hp_active`) and, since stage 3, the 8x8 transform streams (section 17.6). The engine
   multiplexes the entropy path by `hp_active`, which holds for a whole picture. The multiplexer keeps the entropy path at 6 logic levels in
   the synthesis estimate.
 - Slice events and the slice header. `slice_start` is high while the sequencer writes the first command of a slice header and `slice_end` while it
@@ -1150,11 +1150,36 @@ is its Constrained Baseline form). `encoder profile high` is accepted when the n
 
 The build stops when the netlist is missing. `build_info.txt` names the variant and the netlist's `netlist_info.txt`.
 
+### 17.6 The 8x8 transform of inter luma (stage 3, 11-12-2026)
+
+With `hp_caps` bit 1 (the stage 3 netlist), `hp_t8_enable` (HP_CTRL bit 1) and the High profile in force, the luma residual of an inter macroblock (P_L0_16x16)
+is coded by the module with the 8x8 transform: `transform_size_8x8_flag` 1 and ctxBlockCat 5 blocks, the PPS with `transform_8x8_mode_flag` 1 (the SPS stays High, 100). Chroma, Intra16x16 and I_PCM keep the 4x4
+transform and their syntax. The decision is not per macroblock: every inter macroblock with luma residual uses it while it is on. The encoder's deblocking filter is off, so no filter edge depends on the flag.
+
+- Ports of `rtlnet_h264_hp` (the stub and the black box carry them): inputs `hp_t8_enable` (the register bit) and `t8_sub` (the stage B descriptor: this macroblock submitted its luma residual); the reserved streams are used:
+  `tf_req` (out) is high from `pic_start` to `pic_done` while the picture's inter macroblocks use the transform; `tf_res` (engine to module) carries the luma residual of the macroblock, four 8x8 blocks in raster order of the 8x8 groups, 8 beats per block,
+  one row of eight signed 9-bit samples per beat; `tf_lvl` (module to engine, one beat per macroblock, valid for one clock) is the summary of the quantised levels: `[3:0]` coded 8x8 blocks, `[19:4]` the level cost sum of the size
+  estimate, `[20]` a level of magnitude above one, `[21]` a level clamped at +-2047, `[25:22]` non-empty blocks; `tf_rec` (module to engine) is the rebuilt residual (quantiser, dequantiser and inverse transform of clause 8.5.13), same layout as `tf_res`,
+  streamed once `tf_rec_ready` has been seen high after the summary. The levels stay in the module.
+- Engine. `rtlnet_h264_mb_enc` has the parameter `T8` (= `HIGH_PROFILE`; with 0 none of it exists). Where the inter candidate wins in a picture with `tf_req`, state S_T8S sends the residual (a source row and a prediction row are read per beat), PASS1 runs the
+  chroma blocks only, the summary replaces the luma terms of the coded block pattern, the size estimate, the I_PCM fallback and the isolated coefficient elimination, S_T8R takes the rebuilt residual and writes the luma words (prediction plus residual, clipped, zero residual for a
+  dropped macroblock) into the rebuilt RAM, then PASS3 rebuilds the chroma blocks; S_DRN discards the stream when the macroblock falls back to I_PCM. A macroblock that submitted its residual sets `t8_sub` in its stage B descriptor.
+  The clocks per macroblock of stage A grow by about 120 on smooth content with every macroblock inter and coded (381 to 502 clocks, the residual transfer of 32 beats, the wait for the summary and the luma rebuild; the luma rows leave PASS1 and PASS3 in return); the budget of 1080p30 on two engines is 735 clocks per macroblock and the P pictures of the test patterns and sequences take 502 to 575 (maximum 622 of a picture), so it holds.
+- Forced IDR picture. The engine compares the applied state of the 8x8 transform (enable bit, `hp_enable`, license, `hp_caps` bit 1) with the registers at a picture start; a change forces an IDR picture like a change of the profile (17.2), and the firmware writes the parameter sets of the tools
+  in force (`rtlnet_h264_enc_write_sps_pps_tools`).
+- `HIGH_PROFILE` 0 is unchanged: out-of-context synthesis of two engines (90 MHz, `xc7a200tsbg484-1`) gives 47,083 LUT, 31,071 FF, 34 RAMB36, 6 RAMB18 and 76 DSP with a utilization report identical to the commit before stage 3 (8943cab), the same post-synthesis WNS (+0.881 ns) and the same entropy path; everything of the 8x8 transform in `rtlnet_h264_mb_enc` (parameter `T8`) and the stage B flag are generated only with `HIGH_PROFILE` 1. With 1 and the stage 3 netlists: 65,684 LUT, 46,677 FF, 188 DSP (full), WNS +0.881 ns (the stage A path of stage 1, unchanged), entropy path +5.085 ns at 6 logic levels.
+- Driver: `rtlnet_h264_enc_set_transform8x8(base, on)` (HP_CTRL bit 1 with bit 0 kept; `on` is refused, with nothing written, by `RTLNET_H264_HP_ERR_NO_SEAM`, `_NO_MODULE` or the new `_NO_T8` (hp_caps bit 1 is 0)),
+  `rtlnet_h264_enc_write_sps_pps_tools(buf, cap, cfg, high, t8, &len)` (the PPS gains `transform_8x8_mode_flag` 1, `pic_scaling_matrix_present_flag` 0 and `second_chroma_qp_index_offset` se(0) when `high` and `t8`),
+  `rtlnet_h264_enc_hp_t.t8_enabled`; `rtlnet_h264_enc_set_profile` keeps bit 1. Firmware (`rtlnet_venc`): `rtlnet_venc_set_transform8x8`, the request is on by default and applied in `configure_mode`; the parameter sets are written in the form in force.
+  CLI: `encoder transform8x8 <on|off>` (named refusals as for `encoder profile`) and the `Transform 8x8` line of `show encoder` (not offered / on or off, in force or not).
+- Bench support: `tb_rtlnet_h264_top` has the define `TB_HP_T8` (HP_CTRL 3), the plusarg `+HPCTL=<digits>` (HP_CTRL before each picture), `TB_DUMP_MB` lines `R` (the residual beats of a macroblock that submits it) and the submission flag of the `M` line, `TB_DUMP_TOK` (the binarisation's tokens);
+  `h264_gen.py --bpat P --bspeed S` writes the board's moving test patterns (`boards/nexys_video/scripts/pattern_model.py`); `h264_spspps_tool` takes `high t8`.
+
 ### 17.5 Verification in this repository
 
 The default build is covered by the existing regression, `h264_lint.ps1` and `h264_synth.tcl` (the latter with argument 4 = 1 synthesizes the
-seam with the black box). The driver host test covers the new functions and both SPS / PPS forms (613 checks) and the CLI demo of
-`microblaze/firmware/build.ps1 -Demo` the CLI lines in every state of the seam (462 checks). The bench `tb_rtlnet_h264_top` has the defines `TB_HIGH_PROFILE`
+seam with the black box). The driver host test covers the new functions and both SPS / PPS forms (635 checks with the stage 3 functions) and the CLI demo of
+`microblaze/firmware/build.ps1 -Demo` the CLI lines in every state of the seam (470 checks). The bench `tb_rtlnet_h264_top` has the defines `TB_HIGH_PROFILE`
 and `TB_HP_ENABLE` (the module in place, `hp_enable` written) and `TB_DUMP_MB` (a text dump of stage B's input and of the clocks per macroblock, for
 reference models of entropy coders); `h264_spspps_tool` takes a last argument `high`. The benches of the module and of the engine with the module in place (license expiry in the
 middle of a stream, forced IDR picture, decoders) are in the High profile repository.
