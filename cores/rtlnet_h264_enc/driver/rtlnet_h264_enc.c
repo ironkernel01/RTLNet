@@ -668,6 +668,7 @@ static void hp_decode(uint32_t v, rtlnet_h264_enc_hp_t *out)
     out->active       = ((v & RTLNET_H264_HP_STATUS_ACTIVE) != 0u) ? 1u : 0u;
     out->enabled      = ((v & RTLNET_H264_HP_STATUS_ENABLED) != 0u) ? 1u : 0u;
     out->t8_enabled   = ((v & RTLNET_H264_HP_STATUS_T8ENABLED) != 0u) ? 1u : 0u;
+    out->t8_auto      = ((v & RTLNET_H264_HP_STATUS_T8AUTO) != 0u) ? 1u : 0u;
     out->profile_chg  = ((v & RTLNET_H264_HP_STATUS_CHG) != 0u) ? 1u : 0u;
     out->caps         = (v >> RTLNET_H264_HP_STATUS_CAPS_SHIFT) & RTLNET_H264_HP_STATUS_CAPS_MASK;
     out->seconds_left = v >> RTLNET_H264_HP_STATUS_SEC_SHIFT;
@@ -708,7 +709,7 @@ int rtlnet_h264_enc_set_profile(uintptr_t base, int high)
         return high ? RTLNET_H264_HP_ERR_NO_SEAM : 0;
     }
     if (!high) {
-        rtlnet_reg_write32(base, RTLNET_H264_REG_HP_CTRL, rtlnet_reg_read32(base, RTLNET_H264_REG_HP_CTRL) & 2u);   /* hp_enable 0, t8 request kept */
+        rtlnet_reg_write32(base, RTLNET_H264_REG_HP_CTRL, rtlnet_reg_read32(base, RTLNET_H264_REG_HP_CTRL) & 6u);   /* hp_enable 0, t8 request kept */
         return 0;
     }
     hp_decode(rtlnet_reg_read32(base, RTLNET_H264_REG_HP_STATUS), &hp);
@@ -721,22 +722,22 @@ int rtlnet_h264_enc_set_profile(uintptr_t base, int high)
     if (hp.licensed == 0u) {
         return RTLNET_H264_HP_ERR_NOT_LICENSED;
     }
-    rtlnet_reg_write32(base, RTLNET_H264_REG_HP_CTRL, 1u | (rtlnet_reg_read32(base, RTLNET_H264_REG_HP_CTRL) & 2u));
+    rtlnet_reg_write32(base, RTLNET_H264_REG_HP_CTRL, 1u | (rtlnet_reg_read32(base, RTLNET_H264_REG_HP_CTRL) & 6u));
     return 0;
 }
 
 /*
  * rtlnet_h264_enc_set_transform8x8 -- see the header
  */
-int rtlnet_h264_enc_set_transform8x8(uintptr_t base, int on)
+int rtlnet_h264_enc_set_transform8x8(uintptr_t base, int mode)
 {
     rtlnet_h264_enc_hp_t hp;
     uint32_t             ctrl;
     if (!hp_seam_present(base)) {
-        return on ? RTLNET_H264_HP_ERR_NO_SEAM : 0;
+        return (mode != 0) ? RTLNET_H264_HP_ERR_NO_SEAM : 0;
     }
     ctrl = rtlnet_reg_read32(base, RTLNET_H264_REG_HP_CTRL);
-    if (!on) {
+    if (mode == 0) {
         rtlnet_reg_write32(base, RTLNET_H264_REG_HP_CTRL, ctrl & 1u);
         return 0;
     }
@@ -747,7 +748,28 @@ int rtlnet_h264_enc_set_transform8x8(uintptr_t base, int on)
     if ((hp.caps & RTLNET_H264_HP_CAP_TRANSFORM8X8) == 0u) {
         return RTLNET_H264_HP_ERR_NO_T8;
     }
-    rtlnet_reg_write32(base, RTLNET_H264_REG_HP_CTRL, (ctrl & 1u) | 2u);
+    if ((mode == RTLNET_H264_T8_AUTO) && ((hp.caps & RTLNET_H264_HP_CAP_ADAPTIVE) == 0u)) {
+        return RTLNET_H264_HP_ERR_NO_AUTO;
+    }
+    rtlnet_reg_write32(base, RTLNET_H264_REG_HP_CTRL, (ctrl & 1u) | ((mode == RTLNET_H264_T8_AUTO) ? 6u : 2u));
+    return 0;
+}
+
+/*
+ * rtlnet_h264_enc_t8_counts -- see the header
+ */
+int rtlnet_h264_enc_t8_counts(uintptr_t base, uint32_t *n8, uint32_t *n4)
+{
+    uint32_t v;
+    if ((n8 == NULL) || (n4 == NULL)) {
+        return -1;
+    }
+    if (!hp_seam_present(base)) {
+        return RTLNET_H264_HP_ERR_NO_SEAM;
+    }
+    v   = rtlnet_reg_read32(base, RTLNET_H264_REG_HP_T8COUNT);
+    *n8 = v & 0xFFFFu;
+    *n4 = v >> 16;
     return 0;
 }
 

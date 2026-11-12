@@ -898,10 +898,47 @@ static void demo_video(void)
     demo_check(demo_has("  Transform 8x8   : off, not in force (4x4 transform)"), "show encoder: Transform 8x8 line, off");
     host_capture_clear();
     demo_type("encoder transform8x8 maybe\r");
-    demo_check(demo_has("state (on or off)"), "encoder transform8x8: bad word rejected");
+    demo_check(demo_has("state (on, off or auto)"), "encoder transform8x8: bad word rejected");
     host_capture_clear();
     demo_type("encoder transform8x8 on\r");
-    demo_check(host_model_h264_hp_ctrl_t8() == 1u, "encoder transform8x8 on again");
+    demo_check(host_model_h264_hp_ctrl_t8() == 1u && host_model_h264_hp_ctrl_auto() == 0u, "encoder transform8x8 on again");
+    /* Stage 3a: the adaptive choice, the macroblock counts of the last picture in show encoder. */
+    host_model_h264_hp(1u, 1u, RTLNET_H264_HP_CAP_CABAC | RTLNET_H264_HP_CAP_TRANSFORM8X8, 600u);   /* a netlist with bits 0 and 1 only: auto refused */
+    host_capture_clear();
+    demo_type("encoder transform8x8 auto\r");
+    demo_check(demo_has("% Transform8x8 auto refused: the High profile module offers no adaptive transform choice (hp_caps bit 2 is 0)") && host_model_h264_hp_ctrl_auto() == 0u,
+               "encoder transform8x8 auto: refused with hp_caps bit 2 clear");
+    host_model_h264_hp(1u, 1u, RTLNET_H264_HP_CAP_CABAC | RTLNET_H264_HP_CAP_TRANSFORM8X8 | RTLNET_H264_HP_CAP_ADAPTIVE, 600u);
+    host_model_h264_t8_counts(321u, 45u);
+    host_capture_clear();
+    demo_type("show encoder\r");
+    demo_check(demo_has("  Transform 8x8   : on, in force (inter macroblocks use the 8x8 transform)") && demo_has("  Transform MBs   : last picture 8x8 321, 4x4 45"),
+               "show encoder: Transform 8x8 on, macroblock counts");
+    host_capture_clear();
+    demo_type("encoder transform8x8 auto\r");
+    demo_check(demo_has("Transform8x8 auto, effective at the next picture in the High profile") && host_model_h264_hp_ctrl_t8() == 1u &&
+               host_model_h264_hp_ctrl_auto() == 1u && host_model_h264_hp_ctrl() == 1u, "encoder transform8x8 auto: accepted, HP_CTRL bits 1 and 2 set, hp_enable kept");
+    host_model_h264_t8_counts(100u, 200u);
+    host_capture_clear();
+    demo_type("show encoder\r");
+    demo_check(demo_has("  Transform 8x8   : auto, in force (the module chooses the 4x4 or the 8x8 transform per macroblock)") &&
+               demo_has("  Transform MBs   : last picture 8x8 100, 4x4 200"), "show encoder: Transform 8x8 auto, macroblock counts");
+    host_capture_clear();
+    demo_type("encoder transform8x8 off\r");
+    demo_check(demo_has("Transform8x8 off (4x4 transform), effective at the next picture") && host_model_h264_hp_ctrl_t8() == 0u && host_model_h264_hp_ctrl_auto() == 0u,
+               "encoder transform8x8 off after auto: bits 1 and 2 cleared");
+    host_capture_clear();
+    demo_type("show encoder\r");
+    demo_check(demo_has("  Transform 8x8   : off, not in force (4x4 transform)") && !demo_has("  Transform MBs   :"), "show encoder: Transform 8x8 off, no macroblock counts");
+    host_model_h264_hp(1u, 1u, RTLNET_H264_HP_CAP_CABAC, 600u);
+    host_capture_clear();
+    demo_type("encoder transform8x8 auto\r");
+    demo_check(demo_has("% Transform8x8 auto refused: the High profile module offers no 8x8 transform (hp_caps bit 1 is 0)") && host_model_h264_hp_ctrl_auto() == 0u,
+               "encoder transform8x8 auto: refused with hp_caps bit 1 clear");
+    host_model_h264_hp(1u, 1u, RTLNET_H264_HP_CAP_CABAC | RTLNET_H264_HP_CAP_TRANSFORM8X8 | RTLNET_H264_HP_CAP_ADAPTIVE, 600u);
+    host_capture_clear();
+    demo_type("encoder transform8x8 on\r");
+    demo_check(host_model_h264_hp_ctrl_t8() == 1u, "encoder transform8x8 on, last");
     host_model_h264_hp(1u, 1u, RTLNET_H264_HP_CAP_CABAC, 600u);   /* back to the CABAC-only module for the checks below */
     host_model_h264_hp(1u, 0u, RTLNET_H264_HP_CAP_CABAC, 0u);
     host_capture_clear();

@@ -187,6 +187,11 @@ module rtlnet_h264_top #(
   // caps; licensed and caps are the AND over the engines, active the OR, the change pulse the OR).
   logic                      hp_enable;
   logic                      hp_t8_enable;
+  logic                      hp_t8_auto;
+  logic [NUM_ENGINES*16-1:0] eng_t8_n8;
+  logic [NUM_ENGINES*16-1:0] eng_t8_n4;
+  logic [15:0]               hp_t8_n8;
+  logic [15:0]               hp_t8_n4;
   logic [NUM_ENGINES-1:0]    eng_hp_present;
   logic [NUM_ENGINES-1:0]    eng_hp_licensed;
   // The status register shows engine 0's seconds left (the engines' timers run alike).
@@ -197,6 +202,15 @@ module rtlnet_h264_top #(
   logic [NUM_ENGINES-1:0]    eng_hp_active;
   logic [NUM_ENGINES-1:0]    eng_hp_chg;
   logic [3:0]                hp_caps_all;
+
+  always_comb begin
+    hp_t8_n8 = 16'd0;
+    hp_t8_n4 = 16'd0;
+    for (int k = 0; k < NUM_ENGINES; k++) begin
+      hp_t8_n8 = hp_t8_n8 + eng_t8_n8[k*16 +: 16];
+      hp_t8_n4 = hp_t8_n4 + eng_t8_n4[k*16 +: 16];
+    end
+  end
 
   always_comb begin
     hp_caps_all = 4'hF;
@@ -234,7 +248,9 @@ module rtlnet_h264_top #(
   // not a multiple of NUM_ENGINES gives 0, which an engine rejects at start), and owns an equal share of the ring and
   // of the index ring.
   logic [7:0]  rows_c;
-  logic [7:0]  band_first [NUM_ENGINES];
+  logic [7:0]  band_first_w [NUM_ENGINES];
+  logic [7:0]  band_rows_w  [NUM_ENGINES];
+  logic [7:0]  band_first [NUM_ENGINES];     // the bands registered (stage 3c, timing: the division and the engine's multiplier in one clock)
   logic [7:0]  band_rows  [NUM_ENGINES];
   logic [7:0]  eng_slices_w;
   logic [7:0]  slice_base [NUM_ENGINES];
@@ -247,11 +263,19 @@ module rtlnet_h264_top #(
     ring_size_e   = cfg_ring_size / 32'(NUM_ENGINES);
     idx_entries_e = cfg_idx_entries / 32'(NUM_ENGINES);
     for (int k = 0; k < NUM_ENGINES; k++) begin
-      band_first[k] = 8'(k * int'(rows_c));
-      if ((k * int'(rows_c)) >= int'(cfg_mb_h)) band_rows[k] = 8'd0;
-      else if (k < NUM_ENGINES - 1)             band_rows[k] = rows_c;
-      else                                      band_rows[k] = 8'(int'(cfg_mb_h) - k * int'(rows_c));
+      band_first_w[k] = 8'(k * int'(rows_c));
+      if ((k * int'(rows_c)) >= int'(cfg_mb_h)) band_rows_w[k] = 8'd0;
+      else if (k < NUM_ENGINES - 1)             band_rows_w[k] = rows_c;
+      else                                      band_rows_w[k] = 8'(int'(cfg_mb_h) - k * int'(rows_c));
       slice_base[k] = 8'(k * int'(eng_slices_w));
+    end
+  end
+
+  // The registers are written long before the start command (separate AXI-Lite writes), so the one clock of lag is not visible.
+  always_ff @(posedge enc_clk) begin
+    for (int k = 0; k < NUM_ENGINES; k++) begin
+      band_first[k] <= band_first_w[k];
+      band_rows[k]  <= band_rows_w[k];
     end
   end
 
@@ -313,7 +337,7 @@ module rtlnet_h264_top #(
     .cfg_ring_base(cfg_ring_base), .cfg_ring_size(cfg_ring_size), .cfg_idx_base(cfg_idx_base),
     .cfg_idx_entries(cfg_idx_entries),
     .rptr_wr(rptr_wr), .rptr_val(rptr_val), .idx_rptr_wr(idx_rptr_wr), .idx_rptr_val(idx_rptr_val),
-    .hp_enable(hp_enable), .hp_t8_enable(hp_t8_enable), .hp_present(&eng_hp_present), .hp_licensed(&eng_hp_licensed), .hp_active(|eng_hp_active),
+    .hp_enable(hp_enable), .hp_t8_enable(hp_t8_enable), .hp_t8_auto(hp_t8_auto), .hp_t8_n8(hp_t8_n8), .hp_t8_n4(hp_t8_n4), .hp_present(&eng_hp_present), .hp_licensed(&eng_hp_licensed), .hp_active(|eng_hp_active),
     .hp_caps(hp_caps_all), .hp_seconds_left(eng_hp_seconds[15:0]), .hp_chg(|eng_hp_chg),
     .busy(busy_all), .done(done_all), .slice_pulse(|eng_slice),
     .err_cfg(|eng_err_cfg), .err_axi(|eng_err_axi), .err_rptr(|eng_err_rp), .err_busy(|eng_err_bsy),
@@ -333,7 +357,8 @@ module rtlnet_h264_top #(
         .HIGH_PROFILE(HIGH_PROFILE)
       ) u_engine (
         .clk(enc_clk), .resetn(enc_resetn),
-        .hp_enable(hp_enable), .hp_t8_enable(hp_t8_enable), .hp_present(eng_hp_present[e]), .hp_licensed(eng_hp_licensed[e]),
+        .hp_enable(hp_enable), .hp_t8_enable(hp_t8_enable), .hp_t8_auto(hp_t8_auto), .hp_t8_n8(eng_t8_n8[e*16 +: 16]), .hp_t8_n4(eng_t8_n4[e*16 +: 16]),
+        .hp_present(eng_hp_present[e]), .hp_licensed(eng_hp_licensed[e]),
         .hp_seconds_left(eng_hp_seconds[e*16 +: 16]), .hp_caps(eng_hp_caps[e*4 +: 4]), .hp_active(eng_hp_active[e]),
         .hp_chg(eng_hp_chg[e]),
         .start(start), .busy(eng_busy[e]), .done(eng_done[e]), .err_cfg(eng_err_cfg[e]), .err_axi(eng_err_axi[e]),

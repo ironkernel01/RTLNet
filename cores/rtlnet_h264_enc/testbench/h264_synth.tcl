@@ -14,6 +14,7 @@
 #   * 11-09-2026: initial version; 100 MHz default, NUM_ENGINES argument, WNS < 0 fails.
 #   * 11-09-2026: default period 11.111 ns (enc_clk 90 MHz of the Phase 2b-3 board).
 #   * 11-11-2026: HIGH_PROFILE argument (black-boxed rtlnet_h264_hp).
+#   * 11-12-2026: stage 3c: *_paths.rpt (the worst path of each endpoint with a slack below 3 ns, at most 400).
 # -----------------------------------------------------------------------------
 set repo [file normalize [file join [file dirname [info script]] ".." ".." ".."]]
 set part [expr {[llength $argv] > 0 ? [lindex $argv 0] : "xc7a200tsbg484-1"}]
@@ -57,6 +58,7 @@ set crit [get_msg_config -count -severity {CRITICAL WARNING}]
 report_utilization -file [file join [pwd] "rtlnet_h264_top_${tag}_utilization.rpt"]
 report_utilization
 report_timing_summary -delay_type max -max_paths 40 -file [file join [pwd] "rtlnet_h264_top_${tag}_timing.rpt"]
+report_timing -delay_type max -nworst 1 -max_paths 400 -slack_lesser_than 3.0 -file [file join [pwd] "rtlnet_h264_top_${tag}_paths.rpt"]
 set p [lindex [get_timing_paths -max_paths 1 -nworst 1 -setup] 0]
 set wns [get_property SLACK $p]
 puts "h264_synth: NUM_ENGINES $engines, HIGH_PROFILE $hp, enc_clk period $period ns, post-synthesis WNS $wns ns (worst path [get_property STARTPOINT_PIN $p] -> [get_property ENDPOINT_PIN $p])"

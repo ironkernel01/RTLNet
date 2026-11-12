@@ -22,12 +22,16 @@
 //     register HP_CTRL (0x0C0) holds hp_enable (bit 0, writable only while hp_caps is not 0) and hp_t8_enable (bit 1, the 8x8 transform of inter
 //     macroblocks, writable only while hp_caps bit 1 is set) and HP_STATUS (0x0C4) reads present
 //     [0], licensed [1], active [2], enable [3], PROFILE_CHG [4] (sticky, set when a picture start applied a changed license or enable
-//     and forced an IDR picture, write 1 to clear), caps [11:8] (bit 0 CABAC, bit 1 8x8 transform), seconds left [31:16]
-//     (0xFFFF unlimited); bit 5 reads the 8x8 transform enable bit. With HIGH_PROFILE = 0 both registers read 0 and the logic is that of the Constrained Baseline encoder.
+//     and forced an IDR picture, write 1 to clear), caps [11:8] (bit 0 CABAC, bit 1 8x8 transform, bit 2 adaptive transform choice), seconds left [31:16]
+//     (0xFFFF unlimited); bit 5 reads the 8x8 transform enable bit and bit 6 the adaptive choice bit (HP_CTRL bit 2, writable only while hp_caps bit 2 is set: with the 8x8 transform enabled, the
+//     module chooses the 4x4 or the 8x8 transform per macroblock; clear: the 8x8 transform on every inter macroblock). HP_T8_COUNT (0x0C8, read only):
+//     [15:0] macroblocks of the last picture coded with the 8x8 transform, [31:16] with the 4x4 transform (inter macroblocks with luma residual;
+//     all engines added). With HIGH_PROFILE = 0 both registers read 0 and the logic is that of the Constrained Baseline encoder.
 // Language: SystemVerilog-2012.
 // Revision: 11-11-2026
 //   * 11-11-2026: High profile seam: CAPS bit 20, HP_CTRL, HP_STATUS.
 //   * 11-12-2026: HP_CTRL bit 1 and HP_STATUS bit 5 (8x8 transform enable).
+//   * 11-12-2026: HP_CTRL bit 2 and HP_STATUS bit 6 (adaptive transform choice), HP_T8_COUNT.
 //   * 11-09-2026: initial version.
 //   * 11-10-2026: tiled rebuilt picture: RY_BASE and RU_BASE are the luma and chroma tile bases, the stride registers and
 //     RV_BASE are reserved; index records are 128 bytes.
@@ -90,6 +94,9 @@ module rtlnet_h264_enc_regs #(
   // applied a changed license or enable (sets PROFILE_CHG).
   output logic        hp_enable,
   output logic        hp_t8_enable,
+  output logic        hp_t8_auto,
+  input  logic [15:0] hp_t8_n8,
+  input  logic [15:0] hp_t8_n4,
   input  logic        hp_present,
   input  logic        hp_licensed,
   input  logic        hp_active,
@@ -170,6 +177,7 @@ module rtlnet_h264_enc_regs #(
   localparam logic [11:0] REG_WR_CYC      = 12'h0B0;
   localparam logic [11:0] REG_HP_CTRL     = 12'h0C0;   // [0] hp_enable, [1] hp_t8_enable (High profile seam builds)
   localparam logic [11:0] REG_HP_STATUS   = 12'h0C4;   // see the header
+  localparam logic [11:0] REG_HP_T8CNT    = 12'h0C8;   // [15:0] macroblocks of the last picture with the 8x8 transform, [31:16] with the 4x4 transform
 
   localparam int CTRL_START_BIT      = 0;
   localparam int CTRL_RING_RESET_BIT = 1;
@@ -184,6 +192,7 @@ module rtlnet_h264_enc_regs #(
   localparam int HP_STATUS_ENABLE_BIT   = 3;
   localparam int HP_STATUS_CHG_BIT      = 4;
   localparam int HP_STATUS_T8_BIT       = 5;
+  localparam int HP_STATUS_AUTO_BIT     = 6;
 
   localparam logic [31:0] CORE_ID      = id4("H", "2", "6", "4");
   localparam logic [31:0] CORE_VERSION = 32'h1110_2C02;   // 11-10, phase 2c-2 (motion search; the register map is that of 2c-1)
@@ -231,6 +240,7 @@ module rtlnet_h264_enc_regs #(
         hp_status_word[HP_STATUS_ENABLE_BIT]    = hp_enable;
         hp_status_word[HP_STATUS_CHG_BIT]       = chg_flag;
         hp_status_word[HP_STATUS_T8_BIT]        = hp_t8_enable;
+        hp_status_word[HP_STATUS_AUTO_BIT]      = hp_t8_auto;
         hp_status_word[11:8]                    = hp_caps;
         hp_status_word[31:16]                   = hp_seconds_left;
       end
@@ -240,12 +250,14 @@ module rtlnet_h264_enc_regs #(
         if (!resetn) begin
           hp_enable    <= 1'b0;
           hp_t8_enable <= 1'b0;
+          hp_t8_auto   <= 1'b0;
           chg_flag     <= 1'b0;
         end else begin
           if (hp_chg) chg_flag <= 1'b1;
           if (reg_wr_en && (reg_wr_addr == REG_HP_CTRL)) begin
             hp_enable    <= reg_wr_data[0] && (|hp_caps);
             hp_t8_enable <= reg_wr_data[1] && hp_caps[1];
+            hp_t8_auto   <= reg_wr_data[2] && reg_wr_data[1] && hp_caps[1] && hp_caps[2];
           end
           if (reg_wr_en && (reg_wr_addr == REG_HP_STATUS) && reg_wr_data[HP_STATUS_CHG_BIT] && !hp_chg) chg_flag <= 1'b0;
         end
@@ -254,10 +266,11 @@ module rtlnet_h264_enc_regs #(
       assign hp_status_word = '0;
       assign hp_enable      = 1'b0;
       assign hp_t8_enable   = 1'b0;
+      assign hp_t8_auto     = 1'b0;
 
       /* verilator lint_off UNUSEDSIGNAL */
       logic unused_hp;
-      assign unused_hp = &{1'b0, hp_present, hp_licensed, hp_active, hp_caps, hp_seconds_left, hp_chg};
+      assign unused_hp = &{1'b0, hp_present, hp_licensed, hp_active, hp_caps, hp_seconds_left, hp_chg, hp_t8_n8, hp_t8_n4};
       /* verilator lint_on UNUSEDSIGNAL */
     end
   endgenerate
@@ -465,7 +478,8 @@ module rtlnet_h264_enc_regs #(
         REG_RD_CYC:      reg_rd_data <= st_rd_cyc[31:0];
         REG_PK_CYC:      reg_rd_data <= st_pk_cyc[31:0];
         REG_WR_CYC:      reg_rd_data <= st_wr_cyc[31:0];
-        REG_HP_CTRL:     reg_rd_data <= {30'd0, hp_t8_enable, hp_enable};
+        REG_HP_CTRL:     reg_rd_data <= {29'd0, hp_t8_auto, hp_t8_enable, hp_enable};
+        REG_HP_T8CNT:    reg_rd_data <= HIGH_PROFILE ? {hp_t8_n4, hp_t8_n8} : 32'd0;
         REG_HP_STATUS:   reg_rd_data <= hp_status_word;
         default:         reg_rd_data <= '0;
       endcase

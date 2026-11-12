@@ -100,6 +100,9 @@ static uint32_t  g_h264_hp_caps;
 static uint32_t  g_h264_hp_seconds;
 static uint32_t  g_h264_hp_enable;
 static uint32_t  g_h264_hp_t8;
+static uint32_t  g_h264_hp_auto;
+static uint32_t  g_h264_t8_n8;
+static uint32_t  g_h264_t8_n4;
 static uint32_t  g_h264_hp_chg;
 static uint32_t host_h264_read(uint32_t off);
 static void     host_h264_write(uint32_t off, uint32_t value);
@@ -1023,6 +1026,9 @@ void host_model_h264_set(int on, int seam)
     g_h264_hp_seconds  = RTLNET_H264_HP_SECONDS_UNLIMITED;
     g_h264_hp_enable   = 0u;
     g_h264_hp_t8       = 0u;
+    g_h264_hp_auto     = 0u;
+    g_h264_t8_n8       = 0u;
+    g_h264_t8_n4       = 0u;
     g_h264_hp_chg      = 0u;
 }
 
@@ -1061,6 +1067,27 @@ uint32_t host_model_h264_hp_ctrl_t8(void)
 }
 
 /**
+ * @brief H.264 encoder model: HP_CTRL bit 2 (hp_t8_auto) as the last write set it (set only with bit 1 and while hp_caps bit 1 is set).
+ * @return 1 or 0.
+ */
+uint32_t host_model_h264_hp_ctrl_auto(void)
+{
+    return g_h264_hp_auto;
+}
+
+/**
+ * @brief H.264 encoder model: the macroblock counts HP_T8_COUNT reports (the last picture, 8x8 and 4x4 transform).
+ * @param n8 Macroblocks coded with the 8x8 transform.
+ * @param n4 Macroblocks coded with the 4x4 transform.
+ * @return None.
+ */
+void host_model_h264_t8_counts(uint32_t n8, uint32_t n4)
+{
+    g_h264_t8_n8 = n8;
+    g_h264_t8_n4 = n4;
+}
+
+/**
  * @brief H.264 encoder register read model.
  * @param off Register offset.
  * @return ID, VERSION, CAPS (1 engine window of 2: 120 x 68 macroblocks, bit 20 per host_model_h264_set), the High profile
@@ -1073,14 +1100,15 @@ static uint32_t host_h264_read(uint32_t off)
     case RTLNET_REG_VERSION:          return RTLNET_H264_VERSION_VALUE;
     case RTLNET_REG_CAPS:             return 120u | (68u << RTLNET_H264_CAPS_MB_H_SHIFT) | (2u << RTLNET_H264_CAPS_ENG_SHIFT) |
                                              (g_h264_seam ? RTLNET_H264_CAPS_HP_SEAM : 0u);
-    case RTLNET_H264_REG_HP_CTRL:     return g_h264_seam ? (g_h264_hp_enable | (g_h264_hp_t8 << 1)) : 0u;
+    case RTLNET_H264_REG_HP_CTRL:     return g_h264_seam ? (g_h264_hp_enable | (g_h264_hp_t8 << 1) | (g_h264_hp_auto << 2)) : 0u;
+    case RTLNET_H264_REG_HP_T8COUNT:  return g_h264_seam ? ((g_h264_t8_n8 & 0xFFFFu) | (g_h264_t8_n4 << 16)) : 0u;
     case RTLNET_H264_REG_HP_STATUS:
         if (!g_h264_seam) {
             return 0u;
         }
         return (g_h264_hp_present ? RTLNET_H264_HP_STATUS_PRESENT : 0u) | (g_h264_hp_licensed ? RTLNET_H264_HP_STATUS_LICENSED : 0u) |
                (g_h264_hp_enable ? RTLNET_H264_HP_STATUS_ENABLED : 0u) | (g_h264_hp_t8 ? RTLNET_H264_HP_STATUS_T8ENABLED : 0u) |
-               (g_h264_hp_chg ? RTLNET_H264_HP_STATUS_CHG : 0u) |
+               (g_h264_hp_auto ? RTLNET_H264_HP_STATUS_T8AUTO : 0u) | (g_h264_hp_chg ? RTLNET_H264_HP_STATUS_CHG : 0u) |
                (g_h264_hp_caps << RTLNET_H264_HP_STATUS_CAPS_SHIFT) | (g_h264_hp_seconds << RTLNET_H264_HP_STATUS_SEC_SHIFT);
     default:                          return 0u;
     }
@@ -1098,6 +1126,7 @@ static void host_h264_write(uint32_t off, uint32_t value)
     if (off == RTLNET_H264_REG_HP_CTRL && g_h264_seam) {
         g_h264_hp_enable = ((value & 1u) != 0u && g_h264_hp_caps != 0u) ? 1u : 0u;
         g_h264_hp_t8     = ((value & 2u) != 0u && (g_h264_hp_caps & RTLNET_H264_HP_CAP_TRANSFORM8X8) != 0u) ? 1u : 0u;
+        g_h264_hp_auto   = ((value & 6u) == 6u && (g_h264_hp_caps & RTLNET_H264_HP_CAP_TRANSFORM8X8) != 0u && (g_h264_hp_caps & RTLNET_H264_HP_CAP_ADAPTIVE) != 0u) ? 1u : 0u;
     } else if (off == RTLNET_H264_REG_HP_STATUS && g_h264_seam && (value & RTLNET_H264_HP_STATUS_CHG) != 0u) {
         g_h264_hp_chg = 0u;
     }

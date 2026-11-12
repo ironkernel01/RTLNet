@@ -321,8 +321,8 @@ static int profile_in_force(void)
     return ((hp.present != 0u) && (hp.licensed != 0u) && (hp.enabled != 0u) && ((hp.caps & RTLNET_H264_HP_CAP_CABAC) != 0u)) ? 1 : 0;
 }
 
-/* The 8x8 transform of inter macroblocks: requested by the user (default on), and in force while the High profile is. */
-static uint32_t g_t8_pref = 1u;
+/* The transform of inter macroblocks: requested by the user (RTLNET_H264_T8_OFF / _ON / _AUTO, default auto), and in force while the High profile is. */
+static uint32_t g_t8_pref = (uint32_t)RTLNET_H264_T8_AUTO;
 
 /*
  * t8_in_force -- 1 when the pictures use the 8x8 transform: the High profile is in force, the request bit is set and the module offers the
@@ -340,10 +340,21 @@ static int t8_in_force(void)
 /*
  * rtlnet_venc_set_transform8x8 -- see the header
  */
-int rtlnet_venc_set_transform8x8(int on)
+int rtlnet_venc_set_transform8x8(int mode)
 {
-    g_t8_pref = (on != 0) ? 1u : 0u;
-    return rtlnet_h264_enc_set_transform8x8(RTLNET_PLAT_H264_BASE, on);
+    int rc = rtlnet_h264_enc_set_transform8x8(RTLNET_PLAT_H264_BASE, (mode == RTLNET_H264_T8_AUTO) ? RTLNET_H264_T8_AUTO : ((mode != 0) ? 1 : 0));
+    if (rc == 0) {
+        g_t8_pref = (mode == RTLNET_H264_T8_AUTO) ? (uint32_t)RTLNET_H264_T8_AUTO : ((mode != 0) ? 1u : 0u);
+    }
+    return rc;
+}
+
+/*
+ * rtlnet_venc_transform8x8_counts -- see the header
+ */
+int rtlnet_venc_transform8x8_counts(uint32_t *n8, uint32_t *n4)
+{
+    return rtlnet_h264_enc_t8_counts(RTLNET_PLAT_H264_BASE, n8, n4);
 }
 
 /*
@@ -370,8 +381,11 @@ static int configure_mode(uint32_t mode)
 {
     rtlnet_h264_enc_cfg_t cfg;
     rtlnet_h264_enc_mode_t m;
-    /* The 8x8 transform request is applied before the parameter sets are written (default on; the module ignores it without hp_caps bit 1). */
-    (void)rtlnet_h264_enc_set_transform8x8(RTLNET_PLAT_H264_BASE, (int)g_t8_pref);
+    /* The transform request is applied before the parameter sets are written (default auto; the module ignores it without hp_caps bit 1). */
+    if (rtlnet_h264_enc_set_transform8x8(RTLNET_PLAT_H264_BASE, (int)g_t8_pref) == RTLNET_H264_HP_ERR_NO_AUTO) {
+        /* The netlist has no adaptive choice (hp_caps bit 2): the default degrades to the 8x8 transform on every inter macroblock. */
+        (void)rtlnet_h264_enc_set_transform8x8(RTLNET_PLAT_H264_BASE, RTLNET_H264_T8_ON);
+    }
     if (rtlnet_h264_enc_get_mode(mode, &m) != 0 || rtlnet_h264_enc_set_mode(RTLNET_PLAT_H264_BASE, mode, &g.sps_cfg) != 0 ||
         rtlnet_h264_enc_write_sps_pps_tools(g.sps_pps, sizeof(g.sps_pps), &g.sps_cfg, profile_in_force(), t8_in_force(), &g.sps_len) != 0) {
         return -1;

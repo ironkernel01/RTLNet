@@ -7,8 +7,8 @@
 //     position rules), H, V, Plane (xCF = yCF = 0); sums use p[-1,-1] where the clauses do.
 //   * Each case loads random or corner-case neighbours with one of the four availability combinations, waits for
 //     prep_done (at most 24 clocks), then issues every (plane, segment, row) query back to back, one per clock, and
-//     checks p_valid exactly two clocks later and all four modes' samples (an illegal mode reads 0). The SAD
-//     accumulators are compared 4 clocks after the last query, the decision 4 clocks after dec_start (given 3 clocks
+//     checks p_valid exactly three clocks later and all four modes' samples (an illegal mode reads 0). The SAD
+//     accumulators are compared 5 clocks after the last query, the decision 4 clocks after dec_start (given 4 clocks
 //     after the last query) against the reference argmin (cost and tie order of the module header).
 //   * Inter candidate (phase 2c-1): every query also carries four random reference samples (q_ref); the accumulators sad_iy and
 //     sad_ic (SAD of source against reference over luma, and over Cb plus Cr) are compared with the reference sums, and
@@ -257,21 +257,23 @@ module tb_rtlnet_h264_ipred;
   endfunction
 
   // ---------------------------------------------------------------------------
-  // Query driver with the two-clock expectation pipeline
+  // Query driver with the three-clock expectation pipeline (stage 3c: the query has an input register)
   // ---------------------------------------------------------------------------
-  bit           e_v [2];
-  logic [127:0] e_px [2];
+  bit           e_v [3];
+  logic [127:0] e_px [3];
   int           qcount;
   int           pxfail;
 
   task automatic tick(input bit v, input int plane, input int seg, input int y, input bit acc);
     @(negedge clk);
-    // Outputs now belong to the query driven two negedges ago.
-    tb_check(p_valid === e_v[1], "p_valid exactly two clocks after q_valid");
-    if (e_v[1] && (p_px !== e_px[1])) begin
-      if (pxfail == 0) tb_error($sformatf("pred mismatch got %032x exp %032x", p_px, e_px[1]));
+    // Outputs now belong to the query driven three negedges ago.
+    tb_check(p_valid === e_v[2], "p_valid exactly three clocks after q_valid");
+    if (e_v[2] && (p_px !== e_px[2])) begin
+      if (pxfail == 0) tb_error($sformatf("pred mismatch got %032x exp %032x", p_px, e_px[2]));
       pxfail++;
     end
+    e_v[2]  = e_v[1];
+    e_px[2] = e_px[1];
     e_v[1]  = e_v[0];
     e_px[1] = e_px[0];
     e_v[0]  = v;
@@ -354,7 +356,7 @@ module tb_rtlnet_h264_ipred;
 
   initial begin
     resetn = 1'b0;
-    e_v[0] = 1'b0; e_v[1] = 1'b0; e_px[0] = '0; e_px[1] = '0;
+    e_v[0] = 1'b0; e_v[1] = 1'b0; e_v[2] = 1'b0; e_px[0] = '0; e_px[1] = '0; e_px[2] = '0;
     qcount = 0;
     pxfail = 0;
     for (int i = 0; i < 8; i++) seen[i] = 0;
@@ -446,13 +448,14 @@ module tb_rtlnet_h264_ipred;
           end
         end
       end
-      // The last query was driven at the previous negedge; two idle clocks, dec_start on the third.
+      // The last query was driven at the previous negedge; three idle clocks, dec_start on the fourth.
+      tick(1'b0, 0, 0, 0, 1'b0);
       tick(1'b0, 0, 0, 0, 1'b0);
       tick(1'b0, 0, 0, 0, 1'b0);
       tick(1'b0, 0, 0, 0, 1'b0);
       dec_start = 1'b1;
       tick(1'b0, 0, 0, 0, 1'b0);
-      // Accumulators are final here (4 clocks after the last query).
+      // Accumulators are final here (5 clocks after the last query).
       for (int m = 0; m < 4; m++) begin
         tb_check(longint'(sad_y[18*m +: 18]) == rsad_y[m], $sformatf("case %0d sad_y[%0d] %0d expected %0d", cs, m, sad_y[18*m +: 18], rsad_y[m]));
         tb_check(longint'(sad_c[18*m +: 18]) == rsad_c[m], $sformatf("case %0d sad_c[%0d] %0d expected %0d", cs, m, sad_c[18*m +: 18], rsad_c[m]));

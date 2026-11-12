@@ -11,17 +11,19 @@
 //     the others and in_dc is ignored.
 //     Stage 2: left shift by qp/6 (not applied to the DC). Stage 3: row transform e0 = d0 + d2, e1 = d0 - d2,
 //     e2 = (d1 >> 1) - d3, e3 = d1 + (d3 >> 1); f0 = e0 + e3, f1 = e1 + e2, f2 = e1 - e2, f3 = e0 - e3 (arithmetic shifts).
-//     Stage 4: the same on the columns, then (h + 32) >> 6, saturated to 16 bits signed. Stage 5: row output register.
+//     Stage 4: the same on the columns in three clocks (first butterfly, second butterfly, then (h + 32) >> 6 saturated to 16 bits signed;
+//     the + 32 is added in the first butterfly). Stage 5: row output register.
 //   * qp, in_dc and in_tag are sampled with the block's first row; the qp of a block applies to the whole block, so
 //     blocks of different qp may follow each other back to back.
 //   * Widths: level 12 bits signed, d 26 bits signed (|d| <= 2047 * 29 * 256), row and column stages 28 and 30 bits signed,
 //     DC 20 bits signed, residual 16 bits signed (saturated).
 //   * Cadence: four consecutive rows per block, the next block may follow on the next clock. No stall. Latency: out_row 0
-//     appears 8 clocks after in_first (in_first at clock t, out_valid first high at t + 8), then rows 1..3.
+//     appears 10 clocks after in_first (in_first at clock t, out_valid first high at t + 10), then rows 1..3.
 // Language: SystemVerilog-2012.
-// Revision: 11-10-2026
+// Revision: 11-12-2026
 //   * 11-09-2026: initial version.
 //   * 11-10-2026: phase 2c-1: in_full (DC position dequantized like the AC positions) for inter luma blocks.
+//   * 11-12-2026: stage 3c: the column transform in three clocks (timing: 13 logic levels, 9 CARRY4 in one clock); latency 8 -> 10.
 // Clocks: clk.
 // -----------------------------------------------------------------------------
 module rtlnet_h264_invq (
@@ -185,34 +187,45 @@ module rtlnet_h264_invq (
   end
 
   // ---------------------------------------------------------------------------
-  // Stage 4: column transform, rounding and saturation into H
+  // Stage 4a: column transform, first butterfly into CE (the rounding offset 32 is added here: ce0 and ce1 carry it into h0..h3)
+  // Stage 4b: column transform, second butterfly into HH
+  // Stage 4c: shift by 6 and saturation into H
+  // (one adder per stage: the 30 bit carry chains no longer follow each other in one clock)
   // ---------------------------------------------------------------------------
   logic signed [29:0] ce0 [4];
   logic signed [29:0] ce1 [4];
   logic signed [29:0] ce2 [4];
   logic signed [29:0] ce3 [4];
+  logic signed [29:0] cr0 [4];
+  logic signed [29:0] cr1 [4];
+  logic signed [29:0] cr2 [4];
+  logic signed [29:0] cr3 [4];
   logic signed [29:0] hh  [4][4];
+  logic signed [29:0] hr  [4][4];
   logic signed [29:0] rr  [4][4];
   logic signed [15:0] hs  [4][4];
   logic signed [15:0] hn  [4][4];
   logic [7:0]  h_tag;
+  logic [7:0]  c_tag;
+  logic        t_load4;
+  logic        t_load5;
   logic        orun;
   logic [1:0]  orow;
 
   always_comb begin
     for (int c = 0; c < 4; c++) begin
-      ce0[c] = 30'(tt[0][c]) + 30'(tt[2][c]);
-      ce1[c] = 30'(tt[0][c]) - 30'(tt[2][c]);
+      ce0[c] = 30'(tt[0][c]) + 30'(tt[2][c]) + 30'sd32;
+      ce1[c] = 30'(tt[0][c]) - 30'(tt[2][c]) + 30'sd32;
       ce2[c] = (30'(tt[1][c]) >>> 1) - 30'(tt[3][c]);
       ce3[c] = 30'(tt[1][c]) + (30'(tt[3][c]) >>> 1);
-      hh[0][c] = ce0[c] + ce3[c];
-      hh[1][c] = ce1[c] + ce2[c];
-      hh[2][c] = ce1[c] - ce2[c];
-      hh[3][c] = ce0[c] - ce3[c];
+      hh[0][c] = cr0[c] + cr3[c];
+      hh[1][c] = cr1[c] + cr2[c];
+      hh[2][c] = cr1[c] - cr2[c];
+      hh[3][c] = cr0[c] - cr3[c];
     end
     for (int r = 0; r < 4; r++) begin
       for (int c = 0; c < 4; c++) begin
-        rr[r][c] = (hh[r][c] + 30'sd32) >>> 6;
+        rr[r][c] = hr[r][c] >>> 6;
         if (rr[r][c] > 30'sd32767)       hn[r][c] = 16'sd32767;
         else if (rr[r][c] < -30'sd32767) hn[r][c] = -16'sd32767;
         else                             hn[r][c] = 16'(rr[r][c]);
@@ -221,9 +234,31 @@ module rtlnet_h264_invq (
   end
 
   always_ff @(posedge clk) begin
+    if (!resetn) begin
+      t_load4 <= 1'b0;
+      t_load5 <= 1'b0;
+    end else begin
+      t_load4 <= t_load3;
+      t_load5 <= t_load4;
+    end
+  end
+
+  always_ff @(posedge clk) begin
     if (t_load3) begin
+      for (int c = 0; c < 4; c++) begin
+        cr0[c] <= ce0[c];
+        cr1[c] <= ce1[c];
+        cr2[c] <= ce2[c];
+        cr3[c] <= ce3[c];
+      end
+      c_tag <= t_tag;
+    end
+    if (t_load4) begin
+      for (int r = 0; r < 4; r++) for (int c = 0; c < 4; c++) hr[r][c] <= hh[r][c];
+    end
+    if (t_load5) begin
       for (int r = 0; r < 4; r++) for (int c = 0; c < 4; c++) hs[r][c] <= hn[r][c];
-      h_tag <= t_tag;
+      h_tag <= c_tag;
     end
   end
 
@@ -231,7 +266,7 @@ module rtlnet_h264_invq (
     if (!resetn) begin
       orun <= 1'b0;
       orow <= 2'd0;
-    end else if (t_load3) begin
+    end else if (t_load5) begin
       orun <= 1'b1;
       orow <= 2'd0;
     end else if (orun) begin

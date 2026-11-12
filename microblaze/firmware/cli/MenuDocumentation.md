@@ -263,7 +263,7 @@ token counts; exec commands are also accepted in priv.
 | 40 | cli_encoder_buffer | priv | `ENCODER BUFFER [MS]` | MS | — | 3 | 3 | — | Rate control virtual buffer in ms of the target rate, 100..2000 (default 500) |
 | 41 | cli_encoder_qprange | priv | `ENCODER QPRANGE [MIN] [MAX]` | MIN, MAX | — | 4 | 4 | — | Rate control QP range, 12 <= MIN <= MAX <= 51 (default 12 51) |
 | 42 | cli_encoder_profile | priv | `ENCODER PROFILE [PROFILE]` | PROFILE | — | 3 | 3 | — | Stream profile: baseline (Constrained Baseline, default) or high (High profile tools, needs the High profile netlist) |
-| 43 | cli_encoder_transform8x8 | priv | `ENCODER TRANSFORM8X8 [STATE]` | STATE | — | 3 | 3 | — | 8x8 transform of inter macroblocks, on (default) or off; used in the High profile when the netlist offers it |
+| 43 | cli_encoder_transform8x8 | priv | `ENCODER TRANSFORM8X8 [STATE]` | STATE | — | 3 | 3 | — | Transform of inter macroblocks: auto (default, the module chooses per macroblock), on (8x8 always) or off (4x4); used in the High profile when the netlist offers it |
 | 44 | cli_debug_read | priv | `DEBUG READ [ADDR]` | ADDR | — | 3 | 3 | — | Read a 32-bit word (hex 0x... or decimal address) |
 | 45 | cli_debug_write | priv | `DEBUG WRITE [ADDR] [VALUE]` | ADDR, VALUE | — | 4 | 4 | — | Write a 32-bit word |
 | 46 | cli_phy_read | priv | `PHY READ [REG]` | REG | — | 3 | 3 | — | Read a PHY register (0..31) over MDIO |

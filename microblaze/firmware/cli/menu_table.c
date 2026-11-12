@@ -46,6 +46,7 @@
  *  11-10-2026  MenuBuilder AI / Steve Spano    Rate control (Phase 2d): encoder bitrate|buffer|qprange, show encoder history, camera pattern, rate-control lines in show stream and show encoder
  *  11-11-2026  MenuBuilder AI / Steve Spano    High profile seam: encoder profile baseline|high, High profile line in show encoder
  *  11-12-2026  MenuBuilder AI / Steve Spano    8x8 transform (High profile stage 3): encoder transform8x8 on|off, Transform 8x8 line in show encoder
+ *  11-12-2026  MenuBuilder AI / Steve Spano    Adaptive transform (High profile stage 3a): encoder transform8x8 on|off|auto (default auto), macroblock counts in show encoder
  * ===========================================================================
  */
 #include "menu.h"
@@ -149,7 +150,7 @@ const MenuCommandDef g_menu_commands[] = {
     { "cli_encoder_profile", MENU_MODE_PRIV, "ENCODER PROFILE [PROFILE]",
       "Stream profile: baseline (Constrained Baseline, default) or high (High profile tools, needs the High profile netlist)", cli_encoder_profile, MENU_MODE_NONE },
     { "cli_encoder_transform8x8", MENU_MODE_PRIV, "ENCODER TRANSFORM8X8 [STATE]",
-      "8x8 transform of inter macroblocks, on (default) or off; used in the High profile when the netlist offers it", cli_encoder_transform8x8, MENU_MODE_NONE },
+      "Transform of inter macroblocks: auto (default, the module chooses per macroblock), on (8x8 always) or off (4x4); used in the High profile when the netlist offers it", cli_encoder_transform8x8, MENU_MODE_NONE },
     { "cli_debug_read", MENU_MODE_PRIV, "DEBUG READ [ADDR]",
       "Read a 32-bit word (hex 0x... or decimal address)", cli_debug_read, MENU_MODE_NONE },
     { "cli_debug_write", MENU_MODE_PRIV, "DEBUG WRITE [ADDR] [VALUE]",
