@@ -61,3 +61,12 @@ tb_rtlnet_h264_cinterp  cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_cinterp.f
 tb_rtlnet_h264_sad16    cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_sad16.f    sim=verilator
 tb_rtlnet_h264_sad16    cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_sad16.f    neg  plusargs=INJECT_FAILURE  expectfail  sim=verilator
 h264_harness_m          script:cores/rtlnet_h264_enc/testbench/h264_harness_par.ps1 -Config m_* -Jobs 4 -Prefix p2c2 -NoPng
+# Interrupt (11-12-2026): tb_rtlnet_h264_regs drives the events of the register file directly (HIGH_PROFILE 0 and 1) and checks the interrupt registers, the irq level and the unchanged polled STATUS;
+# the neg entries are the +INJECT_FAILURE negative controls. The harness entry runs the encoder bench with the picture end taken from the irq output (-Irq: IRQ_ENABLE, CTRL.IRQ_EN)
+# and requires the same decoded streams as the polled runs. The driver test (h264_driver_test) covers the interrupt functions of the register driver, the control layer in both notification
+# modes against a functional core model (with its negative control) and the rate controller.
+tb_rtlnet_h264_regs  cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_regs.f
+tb_rtlnet_h264_regs  cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_regs.f  neg  plusargs=INJECT_FAILURE  expectfail
+tb_rtlnet_h264_regs  cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_regs.f  hp  defines=TB_HP
+tb_rtlnet_h264_regs  cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_regs.f  hp_neg  defines=TB_HP  plusargs=INJECT_FAILURE  expectfail
+h264_harness_irq     script:cores/rtlnet_h264_enc/testbench/h264_harness.ps1 -Irq -Config qcif_s1,qcif_e2_s4,p_qcif_pan_q28,p_qcif_pan_e2_s2_q28

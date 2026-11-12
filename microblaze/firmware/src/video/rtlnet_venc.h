@@ -37,13 +37,19 @@
  *
  * This header holds the contract; rtlnet_venc.c holds the per-function commentary.
  *
- * Revision: 11-10-2026 (GOP, P pictures; rate control)
+ * Interrupt mode (the default, venc_set_notify): the encoder's interrupt (INTC input RTLNET_CPU_IRQ_H264) runs the picture turnaround in the driver's
+ * service and the callbacks of rtlnet_venc.c: it queues the picture, runs rate control, picks the QP and starts the next picture when a frame is ready,
+ * so the encoder is not idle until the main loop comes round. Polled mode is the earlier behaviour (venc_poll reads STATUS). Both modes use the same
+ * driver result and the same callbacks. See rtlnet_ts_mux.md section 5.3.
+ *
+ * Revision: 11-12-2026 (GOP, P pictures; rate control; interrupt mode)
  */
 #ifndef RTLNET_VENC_H
 #define RTLNET_VENC_H
 
 #include <stdint.h>   /* uint32_t, uint16_t */
 
+#include "rtlnet_h264_enc_ctl.h"
 #include "rtlnet_ratectl.h"
 
 #define VENC_QP_DEFAULT     28u
@@ -57,6 +63,10 @@
 #define VENC_ERR_UDP        (-2)   /* the UDP socket could not be opened */
 #define VENC_ERR_BUSY       (-3)   /* a stream is already running */
 #define VENC_ERR_ARG        (-4)
+
+/* Notification modes (the driver's RTLNET_H264_NOTIFY_*): how the end of a picture reaches the firmware. */
+#define VENC_NOTIFY_POLLED     RTLNET_H264_NOTIFY_POLLED      /* venc_poll reads STATUS; the core's interrupts stay disabled */
+#define VENC_NOTIFY_INTERRUPT  RTLNET_H264_NOTIFY_INTERRUPT   /* the encoder interrupt does the picture turnaround and starts the next picture (default) */
 
 typedef struct {
     int      running;
@@ -105,6 +115,23 @@ typedef struct {
     uint32_t backlog_max;
     uint32_t skipped_backlog;   /* frames skipped on purpose because the mux backlog was at its limit (a subset of dropped_pictures) */
     uint32_t backlog_limit;     /* the limit */
+    /* Notification mode and interrupt measurements (cleared with the stream statistics). */
+    uint32_t notify_wanted;     /* requested mode (VENC_NOTIFY_*) */
+    uint32_t notify_mode;       /* mode in force while a stream runs; the requested mode otherwise */
+    uint32_t irq_capable;       /* the core has the interrupt registers (valid once a stream started) */
+    uint32_t irq_attached;      /* the handler is connected on the INTC (INTC input RTLNET_CPU_IRQ_H264) */
+    uint32_t irqs;              /* interrupts that carried an enabled event */
+    uint32_t irq_spurious;      /* interrupts with no enabled event pending */
+    uint32_t irq_src[RTLNET_H264_CTL_SRC_COUNT];   /* events per source: picture done, error, ring stall, profile change, license lost, start */
+    uint32_t isr_n;             /* handler runs */
+    uint32_t isr_last_us;       /* duration of the last run, microseconds */
+    uint32_t isr_max_us;        /* longest run */
+    uint32_t irq_started;       /* pictures the handler started */
+    uint32_t irq_parked;        /* starts the handler left for the main loop (mode change, padding lines) */
+    uint32_t main_started;      /* pictures the main loop started */
+    uint32_t ring_stall_events; /* ring stall events the main loop took from the driver */
+    uint32_t license_lost_events;
+    uint32_t last_err_code;     /* ERR_CODE of the last encoder error */
 } venc_status_t;
 
 /* Reset the session state (not running, QP 28). Called once at start-up. */
@@ -134,7 +161,18 @@ int venc_set_qp_range(uint32_t qp_min, uint32_t qp_max);
 void venc_get_ratectl(ratectl_stats_t *out);
 int venc_history(uint32_t age, ratectl_sec_t *out);
 
-/* Main-loop service: start the next picture, finish a running one, mux and send. Does nothing when stopped. */
+/* Select how the end of a picture reaches the firmware: VENC_NOTIFY_INTERRUPT (the default) or VENC_NOTIFY_POLLED; VENC_ERR_ARG for another value.
+ * Effective at once when no picture is in flight, otherwise at the next idle point of venc_poll; at the next stream start when none runs. A core
+ * without the interrupt registers (or a platform without the interrupt controller) keeps the polled mode without an error: venc_get_status reports
+ * the mode in force (notify_mode) next to the one requested. */
+int venc_set_notify(uint32_t mode);
+
+/* Interrupt self-test: force a ring stall event in the core (IRQ_FORCE) and wait up to 20 ms for the handler to count it. VENC_OK when it did,
+ * VENC_ERR_CORE when no interrupt arrived (the event is counted as a ring stall), VENC_ERR_ARG when no stream runs in interrupt mode. */
+int venc_irq_selftest(void);
+
+/* Main-loop service: finish a picture in polled mode, start the next picture when the handler has not (a frame that arrived late, a start left
+ * pending, an error), mux and send. Does nothing when stopped. */
 void venc_poll(void);
 
 /* Copy out the session status and counters. */
@@ -144,9 +182,9 @@ void venc_get_status(venc_status_t *out);
 void venc_clear_counters(void);
 
 /*
- * Transform of inter macroblocks (High profile module with hp_caps bit 1). rtlnet_venc_set_transform8x8: RTLNET_H264_T8_OFF (0, the 4x4 transform),
- * RTLNET_H264_T8_ON (1, the 8x8 transform on every inter macroblock) or RTLNET_H264_T8_AUTO (2, the default: the module chooses per macroblock);
- * returns the driver's result (0, or RTLNET_H264_HP_ERR_NO_SEAM / _NO_MODULE / _NO_T8 for on and auto, _NO_AUTO for auto without hp_caps bit 2; the default auto degrades to on without bit 2). The change takes effect at the next
+ * Transform of inter macroblocks (High profile module with hp_caps bit 1). rtlnet_venc_set_transform8x8: RTLNET_H264_CTL_T8_OFF (0, the 4x4 transform),
+ * RTLNET_H264_CTL_T8_ON (1, the 8x8 transform on every inter macroblock) or RTLNET_H264_CTL_T8_AUTO (2, the default: the module chooses per macroblock);
+ * returns the driver's result (0, or RTLNET_H264_CTL_HP_ERR_NO_SEAM / _NO_MODULE / _NO_T8 for on and auto, _NO_AUTO for auto without hp_caps bit 2; the default auto degrades to on without bit 2). The change takes effect at the next
  * picture start while the profile is High: between off and on or auto that picture is a forced IDR picture and the parameter sets are rewritten
  * (PPS transform_8x8_mode_flag); between on and auto nothing else changes.
  * rtlnet_venc_transform8x8_wanted: the request (0, 1 or 2). rtlnet_venc_transform8x8_in_force: 1 when the pictures use the transform now (High

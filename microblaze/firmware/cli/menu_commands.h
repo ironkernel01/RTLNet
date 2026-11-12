@@ -71,6 +71,8 @@ int cli_encoder_bitrate(const MenuCommandContext *ctx);
 int cli_encoder_buffer(const MenuCommandContext *ctx);
 int cli_encoder_qprange(const MenuCommandContext *ctx);
 int cli_encoder_profile(const MenuCommandContext *ctx);
+int cli_encoder_notify(const MenuCommandContext *ctx);
+int cli_encoder_irqtest(const MenuCommandContext *ctx);
 int cli_encoder_transform8x8(const MenuCommandContext *ctx);
 int cli_debug_read(const MenuCommandContext *ctx);
 int cli_debug_write(const MenuCommandContext *ctx);

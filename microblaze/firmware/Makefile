@@ -23,7 +23,7 @@ DRV_SRCS := $(wildcard ../../cores/rtlnet_eth_mac/driver/*.c ../../cores/rtlnet_
             ../../cores/rtlnet_udp_echo/driver/*.c ../../cores/rtlnet_classifier/driver/*.c \
             ../../cores/rtlnet_tcp_offload/driver/*.c ../../cores/rtlnet_axi_arbiter/driver/*.c \
             ../../cores/rtlnet_csi2_rx/driver/*.c ../../cores/rtlnet_vdma_s2mm/driver/*.c ../../cores/rtlnet_framebuf/driver/*.c ../../cores/rtlnet_h264_enc/driver/*.c)
-HOST_SRCS := host/main.c host/host_platform.c host/host_lwip_stub.c src/rtlnet_board.c src/rtlnet_fmt.c \
+HOST_SRCS := host/main.c host/host_platform.c host/host_h264_model.c host/host_lwip_stub.c src/rtlnet_board.c src/rtlnet_fmt.c \
              src/rtlnet_netmgr.c src/rtlnet_cpupath.c src/rtlnet_offload.c src/rtlnet_ddrtest.c src/rtlnet_fbcrc.c src/video/rtlnet_tsmux.c src/video/rtlnet_picq.c src/video/rtlnet_muxjob.c src/video/rtlnet_venc.c cli/menu.c cli/menu_table.c cli/cli_commands.c $(DRV_SRCS)
 TARGET   := build/menu.exe
 

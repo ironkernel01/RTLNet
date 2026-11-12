@@ -23,6 +23,10 @@
  * wait (bounded by PLAT_UART_TX_WAIT polls of the FIFO, which the main loop refills itself); only a wait that times out loses a character,
  * and it is counted (plat_console_tx_stats, drops). Until the interrupt is running (plat_init, a failed INTC setup) the console is polled.
  *
+ * Peripheral interrupts of the application: plat_irq_attach connects a handler on an INTC input (RTLNET_CPU_IRQ_*) and plat_irq_enable
+ * unmasks or masks that input; the encoder's handler (INTC input RTLNET_CPU_IRQ_H264) uses them. A handler runs with the CPU interrupts
+ * masked (no nesting), so it must be short; plat_irq_save and plat_irq_restore give the main loop a critical section against it.
+ *
  * Failure policy: a BSP driver that does not initialize (status other than
  * XST_SUCCESS) is reported on the console with the API name and code once the
  * UART is up; the firmware then continues without that service (polled time
@@ -92,7 +96,7 @@ static void plat_tick_isr(void *ref, u8 counter)
  * plat_irq_save -- mask interrupts and return the previous state (nesting safe).
  * Returns: the mstatus value before the change, for plat_irq_restore.
  */
-static uint32_t plat_irq_save(void)
+uint32_t plat_irq_save(void)
 {
     uint32_t s;
     __asm__ volatile ("csrrci %0, mstatus, 8" : "=r"(s) : : "memory");
@@ -100,10 +104,35 @@ static uint32_t plat_irq_save(void)
 }
 
 /* plat_irq_restore -- unmask interrupts when plat_irq_save found them unmasked. */
-static void plat_irq_restore(uint32_t s)
+void plat_irq_restore(uint32_t s)
 {
     if ((s & PLAT_MSTATUS_MIE) != 0u) {
         __asm__ volatile ("csrsi mstatus, 8" : : : "memory");
+    }
+}
+
+/*
+ * plat_irq_attach -- connect a handler on an INTC input; the input stays masked until plat_irq_enable.
+ * Returns: 0 on success, -1 when the interrupt controller is not running or the connect failed.
+ */
+int plat_irq_attach(unsigned input, void (*handler)(void *), void *ref)
+{
+    if (!g_tick_irq || (input >= RTLNET_CPU_IRQ_COUNT) || (handler == NULL)) {
+        return -1;
+    }
+    return (XIntc_Connect(&g_intc, (u8)input, (XInterruptHandler)handler, ref) == XST_SUCCESS) ? 0 : -1;
+}
+
+/* plat_irq_enable -- unmask (on != 0) or mask an INTC input. */
+void plat_irq_enable(unsigned input, int on)
+{
+    if (!g_tick_irq || (input >= RTLNET_CPU_IRQ_COUNT)) {
+        return;
+    }
+    if (on != 0) {
+        XIntc_Enable(&g_intc, (u8)input);
+    } else {
+        XIntc_Disable(&g_intc, (u8)input);
     }
 }
 

@@ -53,7 +53,7 @@
 #include "rtlnet_axi_arbiter.h"
 #include "rtlnet_csi2_rx.h"
 #include "rtlnet_framebuf.h"
-#include "rtlnet_h264_enc.h"
+#include "host_h264_model.h"
 #include "rtlnet_vdma_s2mm.h"
 #include "rtlnet_classifier.h"
 #include "rtlnet_ddrtest.h"
@@ -77,6 +77,7 @@ static size_t    g_capture_len;
 static int       g_echo = 1;
 static uint32_t  g_leds;
 static uint32_t  g_scratch;
+static uint32_t  g_reg_acc;                   /* register accesses of the firmware (reads and writes, all windows) */
 static uintptr_t g_core_base[HOST_MAX_CORES];
 static uint32_t  g_core_id[HOST_MAX_CORES];
 static uintptr_t g_word_addr[HOST_MAX_WORDS];
@@ -92,20 +93,6 @@ static uint32_t  g_cls_mem[HOST_CLS_WORDS];   /* every other register word as wr
 #define HOST_DDR_PAGES       (RTLNET_PLAT_DDR_SIZE / HOST_DDR_PAGE_BYTES)
 #define HOST_ARB_CAPS        0x02081102u   /* 2 masters, 16-byte beat, ID_W 1, 8 outstanding, high-priority mask 2 */
 static int       g_ddr_arb_on;
-static int       g_h264_on;          /* H.264 encoder model present */
-static int       g_h264_seam;        /* CAPS bit 20 */
-static uint32_t  g_h264_hp_present;
-static uint32_t  g_h264_hp_licensed;
-static uint32_t  g_h264_hp_caps;
-static uint32_t  g_h264_hp_seconds;
-static uint32_t  g_h264_hp_enable;
-static uint32_t  g_h264_hp_t8;
-static uint32_t  g_h264_hp_auto;
-static uint32_t  g_h264_t8_n8;
-static uint32_t  g_h264_t8_n4;
-static uint32_t  g_h264_hp_chg;
-static uint32_t host_h264_read(uint32_t off);
-static void     host_h264_write(uint32_t off, uint32_t value);
 static int       g_ddr_cal;
 static unsigned  g_ddr_alias;
 static uint32_t  g_ddr_and = 0xFFFFFFFFu;
@@ -963,6 +950,8 @@ static uint32_t host_sysreg_read(uint32_t off)
  */
 uint32_t rtlnet_host_reg_read32(uintptr_t addr)
 {
+    g_reg_acc++;
+    host_h264_on_access();   /* the encoder model runs while the firmware works (host_model_h264_timing) */
     if (g_cls_on && addr >= RTLNET_PLAT_CLS_BASE && addr < RTLNET_PLAT_CLS_BASE + RTLNET_CLS_WINDOW_BYTES) {
         return host_cls_read((uint32_t)(addr - RTLNET_PLAT_CLS_BASE));
     }
@@ -981,7 +970,7 @@ uint32_t rtlnet_host_reg_read32(uintptr_t addr)
     if (g_ddr_arb_on && addr >= RTLNET_PLAT_ARB_BASE && addr < RTLNET_PLAT_ARB_BASE + 0x1000u) {
         return host_arb_read((uint32_t)(addr - RTLNET_PLAT_ARB_BASE));
     }
-    if (g_h264_on && addr >= RTLNET_PLAT_H264_BASE && addr < RTLNET_PLAT_H264_BASE + 0x1000u) {
+    if (host_h264_active() && addr >= RTLNET_PLAT_H264_BASE && addr < RTLNET_PLAT_H264_BASE + 0x1000u) {
         return host_h264_read((uint32_t)(addr - RTLNET_PLAT_H264_BASE));
     }
     if (g_wrap_on == 1 && addr == RTLNET_PLAT_PROT_BASE + 0x008u) {
@@ -1011,128 +1000,6 @@ uint32_t rtlnet_host_reg_read32(uintptr_t addr)
 }
 
 /**
- * @brief H.264 encoder model: switch it on or off, with or without the High profile seam.
- * @param on   1 = the core answers.
- * @param seam 1 = CAPS bit 20 (HIGH_PROFILE build).
- * @return None. The High profile state resets: the module present, licensed, hp_caps 0, unlimited.
- */
-void host_model_h264_set(int on, int seam)
-{
-    g_h264_on          = on;
-    g_h264_seam        = seam;
-    g_h264_hp_present  = 1u;
-    g_h264_hp_licensed = 1u;
-    g_h264_hp_caps     = 0u;
-    g_h264_hp_seconds  = RTLNET_H264_HP_SECONDS_UNLIMITED;
-    g_h264_hp_enable   = 0u;
-    g_h264_hp_t8       = 0u;
-    g_h264_hp_auto     = 0u;
-    g_h264_t8_n8       = 0u;
-    g_h264_t8_n4       = 0u;
-    g_h264_hp_chg      = 0u;
-}
-
-/**
- * @brief H.264 encoder model: the High profile status.
- * @param present  1 = the netlist, 0 = the simulation stub.
- * @param licensed 1 = High profile coding allowed.
- * @param caps     hp_caps.
- * @param seconds  License seconds left (0xFFFF unlimited).
- * @return None.
- */
-void host_model_h264_hp(uint32_t present, uint32_t licensed, uint32_t caps, uint32_t seconds)
-{
-    g_h264_hp_present  = present;
-    g_h264_hp_licensed = licensed;
-    g_h264_hp_caps     = caps;
-    g_h264_hp_seconds  = seconds;
-}
-
-/**
- * @brief H.264 encoder model: the value of HP_CTRL (hp_enable).
- * @return hp_enable as the last write set it.
- */
-uint32_t host_model_h264_hp_ctrl(void)
-{
-    return g_h264_hp_enable;
-}
-
-/**
- * @brief H.264 encoder model: HP_CTRL bit 1 (hp_t8_enable) as the last write set it (set only while hp_caps bit 1 is set).
- * @return 1 or 0.
- */
-uint32_t host_model_h264_hp_ctrl_t8(void)
-{
-    return g_h264_hp_t8;
-}
-
-/**
- * @brief H.264 encoder model: HP_CTRL bit 2 (hp_t8_auto) as the last write set it (set only with bit 1 and while hp_caps bit 1 is set).
- * @return 1 or 0.
- */
-uint32_t host_model_h264_hp_ctrl_auto(void)
-{
-    return g_h264_hp_auto;
-}
-
-/**
- * @brief H.264 encoder model: the macroblock counts HP_T8_COUNT reports (the last picture, 8x8 and 4x4 transform).
- * @param n8 Macroblocks coded with the 8x8 transform.
- * @param n4 Macroblocks coded with the 4x4 transform.
- * @return None.
- */
-void host_model_h264_t8_counts(uint32_t n8, uint32_t n4)
-{
-    g_h264_t8_n8 = n8;
-    g_h264_t8_n4 = n4;
-}
-
-/**
- * @brief H.264 encoder register read model.
- * @param off Register offset.
- * @return ID, VERSION, CAPS (1 engine window of 2: 120 x 68 macroblocks, bit 20 per host_model_h264_set), the High profile
- *         registers; every other register reads 0.
- */
-static uint32_t host_h264_read(uint32_t off)
-{
-    switch (off) {
-    case RTLNET_REG_ID:               return RTLNET_H264_ID_VALUE;
-    case RTLNET_REG_VERSION:          return RTLNET_H264_VERSION_VALUE;
-    case RTLNET_REG_CAPS:             return 120u | (68u << RTLNET_H264_CAPS_MB_H_SHIFT) | (2u << RTLNET_H264_CAPS_ENG_SHIFT) |
-                                             (g_h264_seam ? RTLNET_H264_CAPS_HP_SEAM : 0u);
-    case RTLNET_H264_REG_HP_CTRL:     return g_h264_seam ? (g_h264_hp_enable | (g_h264_hp_t8 << 1) | (g_h264_hp_auto << 2)) : 0u;
-    case RTLNET_H264_REG_HP_T8COUNT:  return g_h264_seam ? ((g_h264_t8_n8 & 0xFFFFu) | (g_h264_t8_n4 << 16)) : 0u;
-    case RTLNET_H264_REG_HP_STATUS:
-        if (!g_h264_seam) {
-            return 0u;
-        }
-        return (g_h264_hp_present ? RTLNET_H264_HP_STATUS_PRESENT : 0u) | (g_h264_hp_licensed ? RTLNET_H264_HP_STATUS_LICENSED : 0u) |
-               (g_h264_hp_enable ? RTLNET_H264_HP_STATUS_ENABLED : 0u) | (g_h264_hp_t8 ? RTLNET_H264_HP_STATUS_T8ENABLED : 0u) |
-               (g_h264_hp_auto ? RTLNET_H264_HP_STATUS_T8AUTO : 0u) | (g_h264_hp_chg ? RTLNET_H264_HP_STATUS_CHG : 0u) |
-               (g_h264_hp_caps << RTLNET_H264_HP_STATUS_CAPS_SHIFT) | (g_h264_hp_seconds << RTLNET_H264_HP_STATUS_SEC_SHIFT);
-    default:                          return 0u;
-    }
-}
-
-/**
- * @brief H.264 encoder register write model: HP_CTRL (enable only while hp_caps is not 0, like the register block) and HP_STATUS
- *        (write 1 to PROFILE_CHG clears it).
- * @param off   Register offset.
- * @param value Value.
- * @return None.
- */
-static void host_h264_write(uint32_t off, uint32_t value)
-{
-    if (off == RTLNET_H264_REG_HP_CTRL && g_h264_seam) {
-        g_h264_hp_enable = ((value & 1u) != 0u && g_h264_hp_caps != 0u) ? 1u : 0u;
-        g_h264_hp_t8     = ((value & 2u) != 0u && (g_h264_hp_caps & RTLNET_H264_HP_CAP_TRANSFORM8X8) != 0u) ? 1u : 0u;
-        g_h264_hp_auto   = ((value & 6u) == 6u && (g_h264_hp_caps & RTLNET_H264_HP_CAP_TRANSFORM8X8) != 0u && (g_h264_hp_caps & RTLNET_H264_HP_CAP_ADAPTIVE) != 0u) ? 1u : 0u;
-    } else if (off == RTLNET_H264_REG_HP_STATUS && g_h264_seam && (value & RTLNET_H264_HP_STATUS_CHG) != 0u) {
-        g_h264_hp_chg = 0u;
-    }
-}
-
-/**
  * @brief rtlnet_mmio.h host hook: 32-bit write.
  * @param addr  Byte address.
  * @param value Value.
@@ -1141,6 +1008,8 @@ static void host_h264_write(uint32_t off, uint32_t value)
  */
 void rtlnet_host_reg_write32(uintptr_t addr, uint32_t value)
 {
+    g_reg_acc++;
+    host_h264_on_access();
     if (g_cls_on && addr >= RTLNET_PLAT_CLS_BASE && addr < RTLNET_PLAT_CLS_BASE + RTLNET_CLS_WINDOW_BYTES) {
         host_cls_write((uint32_t)(addr - RTLNET_PLAT_CLS_BASE), value);
         return;
@@ -1165,7 +1034,7 @@ void rtlnet_host_reg_write32(uintptr_t addr, uint32_t value)
         host_arb_write((uint32_t)(addr - RTLNET_PLAT_ARB_BASE), value);
         return;
     }
-    if (g_h264_on && addr >= RTLNET_PLAT_H264_BASE && addr < RTLNET_PLAT_H264_BASE + 0x1000u) {
+    if (host_h264_active() && addr >= RTLNET_PLAT_H264_BASE && addr < RTLNET_PLAT_H264_BASE + 0x1000u) {
         host_h264_write((uint32_t)(addr - RTLNET_PLAT_H264_BASE), value);
         return;
     }
@@ -1202,6 +1071,179 @@ void rtlnet_host_spin(uint32_t loops)
     (void)loops;
 }
 
+/* Interrupt controller model: handlers per INTC input, the enable mask, the input lines the models drive, and the CPU interrupt mask (a critical
+ * section, or a handler running). A handler is called when its input is enabled, its line is high and the CPU interrupts are not masked: from
+ * host_irq_deliver (called when a model changes a line, and when plat_irq_restore unmasks), so the code under test sees the interrupt between
+ * any two register accesses, never inside a critical section. */
+static void   (*g_irq_handler[RTLNET_CPU_IRQ_COUNT])(void *);
+static void    *g_irq_ref[RTLNET_CPU_IRQ_COUNT];
+static uint32_t g_irq_enabled;
+static uint32_t g_irq_lines;
+static int      g_irq_masked;
+static int      g_irq_in_deliver;
+static uint32_t g_irq_delivered;
+static uint32_t g_irq_acc_total;      /* register accesses made inside handler calls */
+static uint32_t g_irq_acc_max;        /* the most in one handler call */
+
+/**
+ * @brief Mask the CPU interrupts (nesting safe).
+ * @return 8 when they were unmasked (the RISC-V mstatus.MIE bit), 0 when already masked; for plat_irq_restore.
+ */
+uint32_t plat_irq_save(void)
+{
+    uint32_t prev = g_irq_masked ? 0u : 8u;
+    g_irq_masked = 1;
+    return prev;
+}
+
+/**
+ * @brief Return to the state plat_irq_save found; unmasking delivers a pending interrupt.
+ * @param state Value from plat_irq_save.
+ * @return None.
+ */
+void plat_irq_restore(uint32_t state)
+{
+    if ((state & 8u) != 0u) {
+        g_irq_masked = 0;
+        host_irq_deliver();
+    }
+}
+
+/**
+ * @brief Connect a handler on an INTC input; the input stays masked.
+ * @param input   INTC input.
+ * @param handler Handler.
+ * @param ref     Argument of the handler.
+ * @return 0, or -1 for an input out of range.
+ */
+int plat_irq_attach(unsigned input, void (*handler)(void *), void *ref)
+{
+    if (input >= RTLNET_CPU_IRQ_COUNT || handler == NULL) {
+        return -1;
+    }
+    g_irq_handler[input] = handler;
+    g_irq_ref[input] = ref;
+    return 0;
+}
+
+/**
+ * @brief Unmask or mask an INTC input.
+ * @param input INTC input.
+ * @param on    1 unmask, 0 mask.
+ * @return None.
+ */
+void plat_irq_enable(unsigned input, int on)
+{
+    if (input >= RTLNET_CPU_IRQ_COUNT) {
+        return;
+    }
+    if (on != 0) {
+        g_irq_enabled |= 1u << input;
+        host_irq_deliver();
+    } else {
+        g_irq_enabled &= ~(1u << input);
+    }
+}
+
+/**
+ * @brief A model drives an input line.
+ * @param input INTC input.
+ * @param level 1 high, 0 low.
+ * @return None.
+ */
+void host_irq_set_line(unsigned input, uint32_t level)
+{
+    if (input >= RTLNET_CPU_IRQ_COUNT) {
+        return;
+    }
+    if (level != 0u) {
+        g_irq_lines |= 1u << input;
+    } else {
+        g_irq_lines &= ~(1u << input);
+    }
+}
+
+/**
+ * @brief Call the handlers of the inputs that are high and enabled while the CPU interrupts are unmasked (level sensitive: a handler that leaves
+ *        the line high is called again, at most 8 times per call).
+ * @return None.
+ */
+void host_irq_deliver(void)
+{
+    if (g_irq_in_deliver) {
+        return;
+    }
+    g_irq_in_deliver = 1;
+    for (int n = 0; n < 8 && !g_irq_masked; n++) {
+        unsigned in = RTLNET_CPU_IRQ_COUNT;
+        for (unsigned i = 0; i < RTLNET_CPU_IRQ_COUNT; i++) {
+            if (((g_irq_lines & g_irq_enabled) & (1u << i)) != 0u && g_irq_handler[i] != NULL) {
+                in = i;
+                break;
+            }
+        }
+        if (in == RTLNET_CPU_IRQ_COUNT) {
+            break;
+        }
+        g_irq_masked = 1;      /* the trap masks the CPU interrupts while the handler runs */
+        g_irq_delivered++;
+        {
+            uint32_t a0 = g_reg_acc;
+            g_irq_handler[in](g_irq_ref[in]);
+            a0 = g_reg_acc - a0;
+            g_irq_acc_total += a0;
+            if (a0 > g_irq_acc_max) {
+                g_irq_acc_max = a0;
+            }
+        }
+        g_irq_masked = 0;
+    }
+    g_irq_in_deliver = 0;
+}
+
+/**
+ * @brief Handler calls made so far.
+ * @return Count.
+ */
+uint32_t host_irq_delivered(void)
+{
+    return g_irq_delivered;
+}
+
+/**
+ * @brief Register accesses made inside interrupt handler calls.
+ * @param calls Receives the handler calls.
+ * @param total Receives the accesses summed over the calls.
+ * @param max   Receives the most accesses in one call.
+ * @return None.
+ */
+void host_irq_access_stats(uint32_t *calls, uint32_t *total, uint32_t *max)
+{
+    *calls = g_irq_delivered;
+    *total = g_irq_acc_total;
+    *max = g_irq_acc_max;
+}
+
+/**
+ * @brief Write bytes into the DDR3 model without counting an arbiter access (the encoder model's DMA writes).
+ * @param ddr_off Byte offset in the DDR3 window.
+ * @param data    Bytes.
+ * @param n       Count.
+ * @return None.
+ */
+void host_ddr_poke(uint32_t ddr_off, const uint8_t *data, uint32_t n)
+{
+    for (uint32_t i = 0u; i < n; i++) {
+        uintptr_t a = (uintptr_t)(RTLNET_PLAT_DDR_BASE + ((ddr_off + i) & ~3u));
+        uint32_t *pg = host_ddr_page(a, 1);
+        if (pg != NULL) {
+            uint32_t sh = 8u * ((ddr_off + i) & 3u);
+            uint32_t *w = &pg[host_ddr_word(a)];
+            *w = (*w & ~(0xFFu << sh)) | ((uint32_t)data[i] << sh);
+        }
+    }
+}
+
 /**
  * @brief Platform start: time origin, LEDs cleared.
  * @return None.
@@ -1210,6 +1252,10 @@ void plat_init(void)
 {
     g_t0 = clock();
     g_leds = 0u;
+    memset(g_irq_handler, 0, sizeof(g_irq_handler));
+    memset(g_irq_ref, 0, sizeof(g_irq_ref));
+    g_irq_enabled = 0u;
+    g_irq_masked = 0;
 }
 
 /**

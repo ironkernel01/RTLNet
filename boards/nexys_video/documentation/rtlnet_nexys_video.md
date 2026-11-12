@@ -907,7 +907,7 @@ Note: `show encoder` prints the register-map date of VERSION 0x11102C02 as `11-1
 
 ### 6.14 Phase 2d board step (11-11-2026)
 
-Change: firmware rate control (`microblaze/documentation/rtlnet_ratectl.md`: `encoder bitrate <kbps>`, `encoder buffer <ms>`, `encoder qprange <min> <max>`, `show encoder history <n>` with the per-second ring), the moving test patterns of `rtlnet_csi2_rx`
+Change: firmware rate control (`cores/rtlnet_h264_enc/documentation/rtlnet_ratectl.md`: `encoder bitrate <kbps>`, `encoder buffer <ms>`, `encoder qprange <min> <max>`, `show encoder history <n>` with the per-second ring), the moving test patterns of `rtlnet_csi2_rx`
 (`camera pattern <bars|scroll|box|noise|all> <speed>`; static bars stay the reset default), and the dropped-picture gap counted once (`acct_frame` in `rtlnet_venc.c`). Encoder VERSION is unchanged (0x11102C02, no encoder RTL change in this step).
 
 Build (`build.ps1 -Network`, git cb094b18 plus the uncommitted Phase 2d firmware, tool 2026.1). **The Phase 2d image is built with `RTLNET_PLACE_DIRECTIVE=ExtraTimingOpt`.** The default placer directive (Explore) no longer closes timing:
@@ -1363,6 +1363,15 @@ At QP 40 and 32 the 8x8 transform streams without a drop; at QP 28 as well (a fu
 **Demo image (`hp_demo`, 30-minute license): not on the board, the expiry test with the 8x8 transform is open.** Three runs of `build.ps1 -Network -HighProfile demo -Tag hp_demo -Image` did not close timing (about 1.6 to 2 hours each): `AltSpreadLogic_high` post-route WNS -0.243 ns (73 failing endpoints; 24 of the worst in the public encoder's dequantiser `u_mb_enc/u_invq` (`tt_reg` to `hs_reg`) and the chroma DC quantiser `u_dcq_cr`, the rest MicroBlaze V and the arbiter), `SpreadLogic_high` -0.813 ns (103 endpoints), `AltSpreadLogic_medium` **-0.031 ns with 2 failing endpoints** (MicroBlaze V core to the LMB RAM, -0.031 ns, 8 levels; `u_h264/g_engine[0].u_engine/u_rd_dma/arvalid_reg` to `u_arb/rd_pend_reg[3][1]/D`, -0.003 ns, 16 levels); WHS +0.008 to +0.017 ns in all. No failing path is inside the netlist; the failing paths are in the public encoder, MicroBlaze V and the arbiter. The directories are kept (`build/hp_demo_run1_altspreadlogic_high`, `_run2_spreadlogic_high`, `_run3_altspreadlogic_medium`, each with its reports). The demo image of 6.18 (CABAC, `build/hp_demo_cabac`) is the last demo image run; the licence-end test for the stage 3 netlist (High with 8x8 before, Constrained Baseline after, one forced IDR picture at 1,800 s) waits for pipeline stages in the public dequantiser and the module's inverse transform.
 
 Open items: the clocks per macroblock are snapshots of one picture (not averaged); no `net_test`, `tcp_test` or 10-minute soak was run on the 8x8 images; the 720p sweep points were not repeated; the adaptive 4x4 / 8x8 decision (section 9.9 of the private document) is the next step and not part of this image.
+### 6.20 Encoder interrupt (11-12-2026, board step open)
+
+Change: the `irq` output of `u_h264` (`rtlnet_h264_top`, level on `ui_clk`) drives the CPU interrupt input `irq[1]` (`cpu_irq = {6'd0, h264_irq, mdio_irq}` in both the network and
+the CPU-only build), INTC input 1 (`RTLNET_CPU_IRQ_H264`). The block design is unchanged (`irq[7:0]` already reaches INTC inputs 0..7, level). The core (VERSION 0x11122C03,
+`rtlnet_h264_enc.md` section 18) raises the interrupt for picture done, error, ring stall, profile change and license lost; the firmware connects the handler on that
+input and runs the encoder in interrupt mode by default (`encoder notify interrupt|polled`, `rtlnet_ts_mux.md` section 5.3). Status: simulation, host tests and the synthesis of the core are done
+(`rtlnet_h264_enc.md` section 18.5); no bitstream was built and the board was not used for this change. The encoder VERSION reads 0x11122C03 (`cli_test.ps1` and the board bench expect it). The board step is: build with the unchanged `build.ps1`, load the firmware,
+`stream h264 ...`, `encoder irqtest` (must pass), `show stream` (interrupts per source, handler time, pictures started by the handler), `encoder notify polled` and back (the stream
+continues), `stream_test.ps1` in both modes, and the handler time and the cycle time against the polled figures of section 6.17.
 
 ## 7. Network integration (done 10-22-2026) and what remains
 
@@ -1377,7 +1386,7 @@ Open:
    tap 12 (balanced +0.22 / +0.24 ns).
 3. The `ev_*` pulse outputs of the MAC, the protocol wrapper and the classifier (`ev_pass`, `ev_drop`) are unconnected
    (LED or interrupt use).
-4. Interrupts (PHY INTB through `rtlnet_mdio` irq[0], DMA) are wired but the firmware polls.
+4. Interrupts: the PHY INTB through `rtlnet_mdio` irq[0] and the DMA are wired but the firmware polls; the H.264 encoder interrupt (irq[1], section 6.20) is used.
 5. The CPU-path classifier is configured as a whole by the firmware (`hw_sync`): a CLI change drops CPU-bound frames
    for about 100 us. The 0x44A2_0000 main-ingress classifier window stays a stub.
 6. The LED behaviour of the RTL8211E (LINK steady, ACT blink) is configured and read back but was not observed.
@@ -1400,6 +1409,7 @@ Open:
 | 11-09-2026 | Phase 1 (section 6.10): video cores `u_csi2`, `u_s2mm`, `u_fb` on decoder slaves 7 to 9, arbiter with two masters, CDC expectation `axil_cdc 9` (network) and `4` (CPU-only), firmware video commands and the Phase 1 gate |
 | 11-10-2026 | Wide cache bus (512-bit cache buses, 32 KiB caches, AXI BRAM 64 KiB): build and board results in section 6.12 |
 | 11-12-2026 | Section 6.19: the 8x8 transform on the board (stage 3 netlist: build `hp_full` closes with `AltSpreadLogic_high`, stream matrix Baseline / CABAC 4x4 / CABAC 8x8, mid-stream switches, throughput limit; `hp_demo` did not close in three runs, expiry test open) |
+| 11-12-2026 | Section 6.20: the encoder interrupt wired to the CPU interrupt input irq[1] (INTC input 1); the firmware runs the encoder in interrupt mode by default; board step open |
 | 11-11-2026 | Section 6.18: CABAC on the board (hp_full and hp_demo images placed and routed, stream matrix CABAC against CAVLC, profile switch, 30-minute license end) |
 | 11-11-2026 | Section 6.17: stream throughput, the mux runs apart from the encoder (picture queue, resumable mux, console transmit on the UART interrupt); sweep before and after, knee at about 33 Mb/s |
 | 11-11-2026 | Section 6.15: High profile demo netlist image (`build.ps1 -HighProfile demo -Tag hp_demo -Image`), license timer test; section 6.16: start QP of the rate control (board before and after) |

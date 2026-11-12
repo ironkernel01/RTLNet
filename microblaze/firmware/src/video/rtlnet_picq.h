@@ -12,8 +12,15 @@
  * skips the input frame (counted as a dropped picture with its own cause); a push into a full queue is an error that the limit makes
  * unreachable (PICQ_LIMIT is below PICQ_SLOTS). The module has no hardware access and no static state; the host test
  * microblaze/firmware/test/picq_host_test.c runs it.
+ * Concurrency (single producer, single consumer): the queue is safe between a producer that runs in an interrupt handler (picq_push, picq_admit)
+ * and a consumer in the main loop (picq_front, picq_pop, picq_count) without masking interrupts: the write index wr changes only in picq_push and the
+ * read index rd only in picq_pop, both are free-running counters, and the descriptor is complete before wr advances. The consumer's pop can only lower
+ * the count the producer sees, so the producer's admit decision is at worst late, never wrong in the unsafe direction. picq_flush, picq_init and
+ * picq_clear_counters touch both sides: call them with the producer quiescent (interrupts masked or the stream stopped).
+ * Counter ownership: pushed and max_count by the producer, popped by the consumer, refused by the caller of picq_admit.
  *
- * Revision: 11-11-2026
+ * Revision: 11-12-2026
+ *   * 11-12-2026: single producer / single consumer indices (the interrupt-driven encoder pushes from its handler).
  */
 #ifndef RTLNET_PICQ_H
 #define RTLNET_PICQ_H
@@ -49,11 +56,11 @@ typedef struct {
 
 typedef struct {
     picq_desc_t d[PICQ_SLOTS];
-    uint32_t    head;                    /* index of the oldest descriptor */
-    uint32_t    count;                   /* descriptors queued */
-    uint32_t    max_count;               /* highest count seen */
-    uint32_t    pushed;
-    uint32_t    popped;
+    volatile uint32_t rd;                /* free-running read index (consumer): the oldest descriptor is d[rd % PICQ_SLOTS] */
+    volatile uint32_t wr;                /* free-running write index (producer); descriptors queued = wr - rd */
+    uint32_t    max_count;               /* highest count seen (producer) */
+    uint32_t    pushed;                  /* producer */
+    uint32_t    popped;                  /* consumer */
     uint32_t    refused;                 /* picq_admit refusals */
 } picq_t;
 

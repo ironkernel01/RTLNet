@@ -33,7 +33,7 @@ install is committed.
 | console | in `uart_rxd`, out `uart_txd` | USB-UART bridge, 115200 8N1; `uart_rxd` is asynchronous, idle high |
 | register master | `m_axi_aw*`, `m_axi_w*`, `m_axi_b*`, `m_axi_ar*`, `m_axi_r*` | AXI4-Lite master, 32-bit address and data, full processor addresses (0x44A0_0000..0x44AF_FFFF), into `rtlnet_axil_decoder`; one transaction at a time |
 | DDR3 master | `m_axi_ddr_*` | AXI4 master, 128-bit data, 32-bit address (`0x8000_0000`..`0x9FFF_FFFF`), no ID signals, on `clk` (`cpu_clk`) with `resetn`; the 32 to 128-bit width conversion is in the SmartConnect `sc_ddr`; the board top carries the port to the memory controller clock (`ui_clk`) through `rtlnet_axi_cdc` (`u_ddr_cdc`) |
-| interrupts | in `irq[7:0]` | level, active high, synchronous to `clk`; INTC inputs 0..7 |
+| interrupts | in `irq[7:0]` | level, active high, synchronous to `clk`; INTC inputs 0..7; the board top drives irq[0] (MDIO) and irq[1] (the H.264 encoder) |
 | frames to the network | out `m_axis_eth_tdata[63:0]`, `m_axis_eth_tkeep[7:0]`, `m_axis_eth_tvalid`, `m_axis_eth_tlast`; in `m_axis_eth_tready` | AXI DMA MM2S, RTLNet stream (architecture 4), complete Ethernet frames without FCS; to the protocol wrapper's `s_axis_cpu_eth_*` |
 | frames from the network | in `s_axis_eth_tdata[63:0]`, `s_axis_eth_tkeep[7:0]`, `s_axis_eth_tvalid`, `s_axis_eth_tlast`; out `s_axis_eth_tready` | AXI DMA S2MM, frames no protocol leaf claims, from the wrapper's `m_axis_cpu_eth_*` |
 
@@ -79,7 +79,18 @@ block RAM; no firmware section is placed in DDR3, which the `ddr test` memory te
 | 0x8000_0000 | 512 MiB | `M_AXI_DDR` (DDR3 through the 8 KiB instruction cache and the 8 KiB write-back data cache, 64-byte lines; only this window is cacheable; decoded by `sc_ddr`, carried to `ui_clk` by `rtlnet_axi_cdc`, served by `rtlnet_axi_arbiter` and `rtlnet_ddr`) |
 | 0xC000_0000 | 64 KiB | AXI BRAM: DMA frame buffers (MicroBlaze data side and both DMA channels) |
 
-Interrupt inputs: 0..7 = `irq[7:0]`, 8 = timer, 9 = UART, 10 = DMA MM2S, 11 = DMA S2MM. Reset vector 0x0 (`C_BASE_VECTORS`); exceptions and
+Interrupt inputs: 0..7 = `irq[7:0]`, 8 = timer, 9 = UART, 10 = DMA MM2S, 11 = DMA S2MM:
+
+| INTC input | Source | Kind | Handler |
+|---|---|---|---|
+| 0 | `irq[0]`: `rtlnet_mdio` | level | not connected in the firmware (the MDIO driver polls) |
+| 1 | `irq[1]`: `rtlnet_h264_enc` (`rtlnet_h264_top` `irq`, `RTLNET_CPU_IRQ_H264`) | level | `venc_isr` of `rtlnet_venc.c`, connected by `plat_irq_attach` in `venc_init`, unmasked by `plat_irq_enable` while a stream runs in interrupt mode (section 9.2.2) |
+| 2..7 | `irq[2]`..`irq[7]` | level | free |
+| 8 | AXI Timer, counter 1 (1 ms tick) | level | `XTmrCtr_InterruptHandler` |
+| 9 | UART Lite | edge | `plat_uart_isr` (section 9.2.1) |
+| 10, 11 | AXI DMA MM2S, S2MM | level | wired, unused |
+
+The board top is the only place that drives `irq[7:0]`: `cpu_irq = {6'd0, h264_irq, mdio_irq}` (`rtlnet_nexys_video_top.sv`), all on `ui_clk`, the CPU clock. Reset vector 0x0 (`C_BASE_VECTORS`); exceptions and
 interrupts enter through `mtvec`, which the BSP start-up code sets. The single
 definition for software is `driver/rtlnet_cpu_microblaze.h`; the BSP's generated `xparameters.h` carries the
 same base addresses. Its `XPAR_FABRIC_*` interrupt numbers count the `irq_concat` *ports* (timer 1, DMA 3/4)
@@ -221,6 +232,20 @@ for about 87 ms, which cost 2 to 3 pictures of a running stream. Now:
 * `show stream` prints the `Console TX` line: mode (interrupt driven or polled), ring size, high-water mark, interrupts, main-loop refills,
   characters lost. Host test: `microblaze/firmware/test/txring_host_test.c` (order, full, drain, wrap of the buffer and of the 32-bit counters,
   text through a 64-byte ring with a 16-character consumer; `--neg` damages a character). Board results: `rtlnet_nexys_video.md` section 6.17.
+
+#### 9.2.2 Peripheral interrupts of the application: `plat_irq_*` and the encoder (11-12-2026)
+
+* `plat_irq_attach(input, handler, ref)` connects a handler on an INTC input (`XIntc_Connect`; the input stays masked), `plat_irq_enable(input, on)` unmasks or masks it
+  (`XIntc_Enable` / `XIntc_Disable`), `plat_irq_save` / `plat_irq_restore` (now public, nesting safe) are the critical section against every handler. A handler runs with the
+  CPU interrupts masked (the trap clears `mstatus.MIE`), so handlers do not nest and must stay short.
+* The encoder handler `venc_isr` (INTC input 1) runs the driver's `rtlnet_h264_ctl_irq_service()`, which acknowledges the core's IRQ_STATUS, counts the event and, at picture
+  done, collects the picture and calls the firmware's callbacks (queue the picture, rate control, start the next picture). It does not print, send or mux. The core's
+  `irq` is a level: the handler acknowledges the bits it read, so the line falls when no enabled event is pending. Contexts, shared items and their protection:
+  `rtlnet_ts_mux.md` section 5.3; core registers: `rtlnet_h264_enc.md` section 18.
+* `plat_init` leaves INTC input 1 masked; `venc_start` unmasks it (interrupt mode) and `venc_stop` masks it and disables the core's interrupts first. A soft restart that
+  finds the core's global enable still set is harmless: the INTC input is masked until the next stream start, which acknowledges the stale events.
+* Host harness: `host/host_platform.c` models the controller (handlers, the enable mask, the input lines, the CPU mask) and delivers a handler call when an input is
+  unmasked, its line is high and the interrupts are unmasked, also when `plat_irq_restore` unmasks; `host/host_h264_model.c` models the core with its interrupt registers.
 
 ### 9.3 InitPHY()
 
@@ -793,6 +818,7 @@ Details: `boards/nexys_video/documentation/rtlnet_nexys_video.md` sections 6.3 a
 | 10-22-2026 | Offload measurements and defaults (section 9.11): zero-copy receive on, zero-copy transmit off, AXI BRAM budget, throughput and CPU profile tables; netif merged with the word-wise copies of section 9.10 |
 | 10-22-2026 | AXI DMA data realignment engine on MM2S (zero-copy transmit); checksum offload in the firmware (feature discovery, `rtlnet_offload_apply`, receive trailer, zero-copy options, `show offload`, `offload` command, desktop netif test) |
 | 10-22-2026 | Classifier driver integrated: `rtlnet_cpupath.c` on the real driver API (context, `RTLNET_CLS_ACT_*`), boot call `rtlnet_classifier_config_bcast_storm(10, 100)`, MAC mask removed and EtherType entries 0..7 (range pairs) in the CLI, harness register model of the classifier; the sim stub classifier task follows the driver register map |
+| 11-12-2026 | Encoder interrupt on INTC input 1 (`RTLNET_CPU_IRQ_H264`, section 9.2.2): `plat_irq_attach`, `plat_irq_enable`, public `plat_irq_save` / `plat_irq_restore`; the board top drives irq[1] |
 | 11-11-2026 | Console transmit on the UART interrupt (section 9.2.1): 4 KiB transmit ring, receive and transmit rings touched with interrupts masked; board results in `rtlnet_nexys_video.md` section 6.17 |
 | 10-22-2026 | TCP throughput tuning: netif TX/RX copies as 32-bit AXI accesses, optional CPU profile (`RTLNET_NETIF_PROFILE`), `TCP_SND_BUF` 24 x MSS, `TCP_WND` 8 x MSS, 32-bit lwIP checksum, memory resized (section 9.10) |
 | 11-09-2026 | Processor changed from the classic MicroBlaze 11.0 to MicroBlaze V (RV32IMC, Zicsr, Zba/Zbb/Zbs, no caches) with `mdm_riscv`; RISC-V toolchain, BSP flags check and linker template; `Xil_ExceptionDisable()` in the platform layer; measurements in `boards/nexys_video/documentation/rtlnet_nexys_video.md` section 6.7 |

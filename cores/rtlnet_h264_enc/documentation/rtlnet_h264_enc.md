@@ -216,7 +216,7 @@ parameters, so one build codes both video modes.
 | Clocks and resets | `enc_clk`, `enc_resetn` (synchronous, active low); `s_axi_aclk`, `s_axi_aresetn` |
 | AXI4-Lite slave, `s_axi_aclk` | `s_axi_aw*`, `w*`, `b*`, `ar*`, `r*`, 12-bit address (4 KiB window), 32-bit data |
 | AXI4 masters, `enc_clk` | `m_axi_aw*`, `w*`, `b*`, `ar*`, `r*` as packed vectors, engine e at `[e*W +: W]`, arbiter style; 128-bit data, ADDR_W 32, ID_W 4 |
-| Interrupt | `irq`, level on `enc_clk`: `CTRL.IRQ_EN` and (`STATUS.DONE` or `STATUS.ERR`) |
+| Interrupt | `irq`, level on `enc_clk`: `CTRL.IRQ_EN` and an enabled `IRQ_STATUS` bit (picture done, error, ring stall, profile change, license lost, picture start; section 18) |
 
 In P pictures the AR channel also carries the search window reads (AXI ID 1; the input strips use ID 0): per macroblock one column of reference tiles,
 a 16-beat luma tile burst and an 8-beat chroma tile burst for each of the rows r - 1, r, r + 1 that exist, from addresses that are multiples of 256 and 128 (section 16.2). Every burst is INCR, size 16 bytes (full width), at most 16 beats, and never crosses 4 KiB (`rtlnet_axi_arbiter` rejects
@@ -234,14 +234,17 @@ remainder). Simulation assertions in `rtlnet_h264_wr_master` and `rtlnet_h264_en
 | Offset | Name | Access | Meaning |
 |---|---|---|---|
 | 0x000 | ID | RO | "H264" = 0x48323634 |
-| 0x004 | VERSION | RO | 0x11102C02 (11-10-2026, phase 2c-2: motion search, no register change; 0x11102C01 was phase 2c-1: P pictures; 0x11102026 the tiled rebuilt picture with 128-byte index records) |
-| 0x008 | CAPS | RO | [7:0] MAX_MB_W, [15:8] MAX_MB_H, [19:16] NUM_ENGINES, [20] HP_SEAM (HIGH_PROFILE build) |
-| 0x00C | CTRL | RW | bit 0 START (self-clearing), bit 1 RING_RESET (self-clearing), bit 8 IRQ_EN |
+| 0x004 | VERSION | RO | 0x11122C03 (11-12-2026: the interrupt registers; 0x11102C02 (11-10-2026, phase 2c-2: motion search, no register change; 0x11102C01 was phase 2c-1: P pictures; 0x11102026 the tiled rebuilt picture with 128-byte index records, all of them without the interrupt registers) |
+| 0x008 | CAPS | RO | [7:0] MAX_MB_W, [15:8] MAX_MB_H, [19:16] NUM_ENGINES, [20] HP_SEAM (HIGH_PROFILE build), [21] IRQ (the interrupt registers exist), [31:24] mask of the implemented interrupt sources |
+| 0x00C | CTRL | RW | bit 0 START (self-clearing), bit 1 RING_RESET (self-clearing), bit 8 IRQ_EN (the global interrupt enable, reset 0) |
 | 0x010 | STATUS | RW | bit 0 BUSY, bit 1 DONE (W1C), bit 2 ERR (W1C), bit 3 RING_STALL (live, any engine) |
 | 0x014 | ERR_CODE | RO | first error since the last ERR clear: 1 config, 2 AXI response, 3 read pointer, 4 start while busy |
 | 0x0C0 | HP_CTRL | RW | HIGH_PROFILE builds, else 0: bit 0 hp_enable (a write of 1 is ignored while hp_caps is 0; accepted when the module offers a tool), bit 1 hp_t8_enable (the 8x8 transform of inter macroblocks; a write of 1 is ignored while hp_caps bit 1 is 0), bit 2 hp_t8_auto (with bit 1: the module chooses the 4x4 or the 8x8 transform per macroblock, 17.7; a write of 1 is ignored without bit 1 or while hp_caps bit 2 is 0) |
 | 0x0C4 | HP_STATUS | RW | HIGH_PROFILE builds, else 0: [0] module present, [1] licensed, [2] active, [3] enable, [4] PROFILE_CHG (sticky, W1C), [5] 8x8 transform enable, [6] adaptive choice (hp_t8_auto), [11:8] hp_caps (bit 0 CABAC, bit 1 8x8 transform, bit 2 adaptive choice), [31:16] license seconds left (0xFFFF unlimited) |
 | 0x0C8 | HP_T8_COUNT | RO | HIGH_PROFILE builds, else 0: [15:0] macroblocks of the last picture coded with the 8x8 transform, [31:16] with the 4x4 transform (inter macroblocks with a coded luma block, the engines added) |
+| 0x0D0 | IRQ_STATUS | RW | sticky interrupt event bits, write 1 to clear (section 18) |
+| 0x0D4 | IRQ_ENABLE | RW | one enable bit per interrupt source, reset 0 |
+| 0x0D8 | IRQ_FORCE | WO | a written 1 sets the status bit (self-test) |
 | 0x020 | MB_W | RW | picture width in macroblocks |
 | 0x024 | MB_H | RW | picture height in macroblocks |
 | 0x028 | SLICES | RW | slices per picture, a multiple of NUM_ENGINES |
@@ -400,6 +403,10 @@ default; 1 = 1080p30: writes MB_W, MB_H, fills the SPS parameters), `band_rows` 
 `testbench/test_rtlnet_h264_enc_driver.c` checks the register writes against a register model (including the QP clamp at 5, 12
 and 51) and checks the SPS and PPS bytes with an independent bit reader (fields, emulation prevention, level, cropping,
 rejections), including the 720p30 and 1080p30 modes and the bands (23/22 and 34/34).
+
+Since 11-12-2026 the driver folder also holds the control layer `rtlnet_h264_enc_ctl.{h,c}` (the code firmware calls: session, notification mode, picture start and
+turnaround, High profile controls, console view; section 18.4) and the H.264 rate controller `rtlnet_ratectl.{h,c}` (`rtlnet_ratectl.md`), with their host tests
+`testbench/test_rtlnet_h264_enc_ctl.c` and `testbench/test_rtlnet_ratectl.c`. Firmware outside the driver folder includes no register definition and makes no register access to this core.
 
 ## 10. Verification flow (Verilator)
 
@@ -1239,3 +1246,129 @@ seam with the black box). The driver host test covers the new functions and both
 and `TB_HP_ENABLE` (the module in place, `hp_enable` written) and `TB_DUMP_MB` (a text dump of stage B's input and of the clocks per macroblock, for
 reference models of entropy coders); `h264_spspps_tool` takes a last argument `high`. The benches of the module and of the engine with the module in place (license expiry in the
 middle of a stream, forced IDR picture, decoders) are in the High profile repository.
+
+## 18. Interrupt (11-12-2026)
+
+The core raises one interrupt output, `irq` (level, active high, synchronous to `enc_clk`), so that firmware starts the next picture without waiting for its
+main loop to poll. The polled method works unchanged: STATUS, its flags and every other register behave as before, and the core is silent after reset.
+
+### 18.1 Registers and sources
+
+`irq = CTRL.IRQ_EN and (IRQ_STATUS and IRQ_ENABLE is not 0)`. `CTRL.IRQ_EN` (bit 8 of CTRL, reset 0) is the global enable; IRQ_ENABLE (reset 0) has one
+enable bit per source. IRQ_STATUS holds one sticky bit per source and reads the same whether the source is enabled or not, so polled software can use it too.
+
+| Offset | Name | Access | Meaning |
+|---|---|---|---|
+| 0x0D0 | IRQ_STATUS | RW | sticky event bits, write 1 to clear (a written 0 changes nothing); bits [7:6] reserved, read 0 |
+| 0x0D4 | IRQ_ENABLE | RW | one enable bit per source (reset 0); bits of sources the build lacks read 0 |
+| 0x0D8 | IRQ_FORCE | WO | a written 1 sets the status bit (software self-test of the interrupt path, bench); reads 0; bits of sources the build lacks are ignored |
+
+| Bit | Source | Event (one clock) |
+|---|---|---|
+| 0 | PIC_DONE | the picture is complete (every engine done): the `done` pulse that also sets STATUS.DONE and increments PIC_COUNT |
+| 1 | ERR | an error pulse (`err_cfg`, `err_axi`, `err_rptr`, `err_busy`): the event that sets STATUS.ERR |
+| 2 | RING_STALL | rising edge of the ring-full stall of any engine (one event per stall, not one per clock) |
+| 3 | PROFILE_CHG | a picture start applied a changed license or enable and forced an IDR picture (`hp_chg`, the event that sets HP_STATUS.PROFILE_CHG); HIGH_PROFILE builds, else 0 |
+| 4 | LICENSE_LOST | `hp_licensed` fell (the demo time ended); HIGH_PROFILE builds, else 0 |
+| 5 | PIC_START | a start accepted while idle (`start` and not `busy`); a start while busy is the ERR source (ERR_CODE 4) instead |
+
+CAPS bit 21 reads 1 when these registers exist and CAPS [31:24] is the mask of the implemented sources (0x3F with `HIGH_PROFILE = 1`, 0x27 with 0).
+VERSION is 0x11122C03; software detects the capability from CAPS bit 21 together with that VERSION (the driver does, `caps.irq`) and keeps the polled method
+on a core that reads 0x11102C02.
+
+Clear rules. An event sets its bit; a write of 1 clears it. An event in the same clock as a clear of its bit keeps the bit set (the event wins, so no event is
+lost between the read and the acknowledge). IRQ_FORCE and a clear of the same bit cannot meet (one register write per clock). The legacy flags of STATUS
+(DONE, ERR, with ERR_CODE) are separate from IRQ_STATUS: clearing one does not clear the other, and STATUS.DONE and STATUS.ERR keep their own rule (an event in
+the clock of the clear keeps the flag).
+
+### 18.2 Timing
+
+An event that is high in clock n sets its IRQ_STATUS bit, which reads 1 from clock n + 1; `irq` is the combinational AND-OR of the registered bits `CTRL.IRQ_EN`, IRQ_STATUS and
+IRQ_ENABLE, so it rises in clock n + 1 when the source and the global enable are on, one clock after the event. A register write strobe in clock m (a clear of IRQ_STATUS, a
+write of IRQ_ENABLE or of CTRL) takes effect from clock m + 1, and `irq` falls in that clock when no enabled bit is left. `irq` is a level: it stays high while any enabled bit
+is pending, whatever the number of events behind it. It is a registered-state function of 8 + 8 + 1 flip-flops, in the same clock domain as the register file, so there is no clock-domain
+crossing and no extra pipeline stage.
+
+### 18.3 Software sequences
+
+Interrupt mode (the driver does this):
+1. Probe: CAPS bit 21 and VERSION 0x11122C03. Acknowledge IRQ_STATUS (write 0xFF), write IRQ_ENABLE (PIC_DONE, ERR, RING_STALL, PROFILE_CHG, LICENSE_LOST; PIC_START
+   stays off), set `CTRL.IRQ_EN`, unmask the interrupt controller input.
+2. In the handler: read IRQ_STATUS; write the bits read back (acknowledge; an event that arrived in between stays set and interrupts again); then act on
+   them: on PIC_DONE read the index entries and the QP, clear STATUS.DONE, collect the picture, start the next picture; on ERR read ERR_CODE and clear STATUS.ERR.
+   ERR wins when both are set.
+3. A picture start writes the configuration, PIC_CFG, FRAME_NUM, IDR_PIC_ID and then CTRL with START and `IRQ_EN` kept (read-modify-write of CTRL in the start
+   functions of the driver).
+
+Polled mode: leave `CTRL.IRQ_EN` and IRQ_ENABLE at 0 (the reset state). Poll STATUS for DONE or ERR as before (`rtlnet_h264_enc_wait_done`,
+`rtlnet_h264_ctl_poll`); IRQ_STATUS still collects the events and can be read, with nothing enabled the output stays low. Switching modes is done while no picture
+is in flight: acknowledge IRQ_STATUS, then write IRQ_ENABLE and `CTRL.IRQ_EN`.
+
+### 18.4 Driver
+
+Low level, `driver/rtlnet_h264_enc.{h,c}`: `probe` (`caps.irq`, `caps.irq_sources`, `caps.version`; VERSION 0x11102C02 still probes), `irq_capable`, `irq_set_enable`,
+`irq_get_enable`, `irq_global`, `irq_status`, `irq_ack`, `irq_force`; the three start functions and `ring_reset` keep `CTRL.IRQ_EN`.
+
+Control layer, `driver/rtlnet_h264_enc_ctl.{h,c}`, the only interface firmware uses (it includes no register definition): `init` stores the base address, the memory
+layout and the callbacks, `open` probes and applies the notification mode, `set_notify` selects `RTLNET_H264_NOTIFY_INTERRUPT` (the default) or
+`RTLNET_H264_NOTIFY_POLLED` and returns the mode in force (the interrupt mode degrades to polled on a core without the registers, without an error),
+`set_mode` / `start_picture` (the start sequence in one call: configuration with the picture's QP and input, buffer bases, START), `release` (read pointers),
+the High profile controls and the console view (`debug`). A completed picture reaches the application through two callbacks, whichever mode is in force:
+`picture_done` receives `rtlnet_h264_ctl_picture_t` (validity, per engine the ring offset, length, the read-pointer targets, the sum of the sizes, the QP written, the
+requested type, whether the encoder coded a forced IDR picture instead, the delimiter bytes) and `picture_error` the ERR_CODE. `read_mem` is the application's way to
+read DDR3 (index records, the delimiter) with the cache lines invalidated; the driver has no dependency on the cache, lwIP, the multiplexer or the console.
+
+* `rtlnet_h264_ctl_irq_service()` is the handler body: it reads and acknowledges IRQ_STATUS, counts the events per source, and dispatches (error first, then
+  picture done; profile change sets the forced-IDR note, ring stall and license lost are counted for the main loop, `take_events` reports them). It does nothing
+  when the interrupt mode is not in force. Its cost on a picture done is the IRQ_STATUS read and acknowledge, the STATUS clear, one index-pointer read per engine and the index records between two pictures: all bounded, no
+  waiting. Counted on the host model of the core, a handler run that does only this (and the firmware's slot release, queue and rate control) makes 9 register accesses; a run that also starts the next picture
+  (configuration, QP read, buffer bases, START) makes 47 on average and 50 at most.
+* `rtlnet_h264_ctl_poll()` is the polled counterpart: it reads STATUS and on DONE or ERR runs the same turnaround and callbacks. It returns -1 while the interrupt
+  mode is in force.
+* Calling contexts: `irq_service` from the interrupt handler only; `poll` from the main loop in polled mode; `start_picture` and `set_mode` from the one context that
+  owns the idle encoder (the handler at picture done, or the main loop while no picture is in flight); `release`, `irq_stats` and `take_events` from the main loop at
+  any time (single-writer counters, no read-modify-write of shared state). The driver masks no interrupts itself.
+
+### 18.5 Verification and results
+
+**Register file bench** `testbench/tb_rtlnet_h264_regs.sv` (Active-HDL; the register file with the events driven directly; `HIGH_PROFILE` 0 and 1 by the define `TB_HP`; regression entries
+`base`, `hp`, and `neg`, `hp_neg` with `+INJECT_FAILURE`). It checks: the reset state (silent, VERSION, CAPS bit 21 and the source mask); each source sets exactly its own bit; a masked source sets
+the status bit and not `irq`; the global enable; write-1-to-clear; an event in the clock of its clear keeps the bit (picture done, error, ring stall edge); IRQ_FORCE sets implemented bits
+only; `irq` is a level that falls only when no enabled bit is pending; the ring stall is an edge source (one event per stall); `hp_licensed` falling (a rising edge is no event);
+a start while busy is no PIC_START event; the polled STATUS behaviour (DONE, ERR, ERR_CODE, BUSY, RING_STALL, the CTRL readback, an event in the clock of a STATUS clear) and its independence from
+IRQ_STATUS. Result: PASS with 84 checks (`HIGH_PROFILE` 0) and 86 checks (1); the `+INJECT_FAILURE` runs fail as required. Ten mutated copies of the register file are negative controls and
+every one fails the bench: the clear wins over a same-clock event (`m1`), `irq` ignores IRQ_ENABLE (`m2`), `irq` ignores the global enable (`m3`), a write of 1 does not clear (`m4`), IRQ_FORCE sets reserved
+bits (`m5`), the ring stall counts every clock (`m6`), a start while busy is an event (`m7`), a clear of IRQ_STATUS also clears STATUS.DONE (`m8`), `hp_licensed` rising is an event (`m9`, `HIGH_PROFILE` 1),
+IRQ_ENABLE keeps reserved bits (`m10`).
+
+**Encoder bench** `tb_rtlnet_h264_top` (Verilator, decoder harness): the bench checks CAPS bit 21, the source mask, VERSION and the reset state of the interrupt registers; in the polled flow `irq` stays low through
+every picture, IRQ_STATUS.PIC_DONE is set and readable at DONE and cleared by a write of 1, and STATUS.DONE stays independent; with `h264_harness.ps1 -Irq` the bench enables PIC_DONE and ERR and
+`CTRL.IRQ_EN`, waits for the `irq` output, reads IRQ_STATUS, acknowledges it and checks that the level falls. Stream check at QCIF (`qcif_s1`, `qcif_e2_s4`, `p_qcif_pan_q28`, `p_qcif_pan_e2_s2_q28`): the stream
+(`o_stream.hex`) and the rebuilt picture are byte-identical between the RTL before this change (commit d2b521f), the new RTL in the polled flow and the new RTL in the interrupt flow; JM, OpenH264 and FFmpeg decode
+all twelve runs identical to the rebuilt picture. The interrupt flow is `h264_harness_irq` in `testbench/regression.txt`.
+
+**Driver tests** (`testbench/h264_driver_test.ps1`, host gcc): the register driver `test_rtlnet_h264_enc_driver.c` 674 checks (the interrupt functions, VERSION 0x11102C02 probing with `caps.irq` 0, the refusals on a core without the
+registers, the start functions keeping `CTRL.IRQ_EN`); the control layer `test_rtlnet_h264_enc_ctl.c` 85 checks against a functional core model (both modes give the same result for the same picture, the acknowledge, per-source counts, error
+over done, an invalid entry, forced IDR with the rewritten parameter sets, buffer alternation, `release`, the switch between modes, the older core) with its negative control (`-DINJECT_FAILURE` must report `CTL TEST FAIL`); the rate
+controller `test_rtlnet_ratectl.c` 15 gates.
+
+**Firmware host tests** (`microblaze/firmware/test/venc_irq_host_test.ps1`, the session `rtlnet_venc.c` against the harness models, both modes): 181 checks; the demo `build.ps1 -Demo` 486 checks. The two modes send byte-identical datagrams
+for a constant QP, rate control, a profile change with a forced IDR picture, an encoder error and a switch of the mode in mid-stream; a core without the interrupt registers degrades to polled and no interrupt register is touched; in the
+pipelined runs the model completes a picture between any two register accesses of the firmware, every frame is a sent or a dropped picture, and the transport stream is demultiplexed and every access unit is compared with the picture the model wrote (bytes
+and PTS).
+
+**Out-of-context synthesis** (`h264_synth.tcl`, `xc7a200tsbg484-1`, `enc_clk` 90 MHz, 2 engines, `HIGH_PROFILE` 0): see section 18.6.
+
+### 18.6 Out-of-context synthesis (11-12-2026)
+
+`h264_synth.tcl`, `xc7a200tsbg484-1`, `enc_clk` 11.111 ns (90 MHz), `NUM_ENGINES` 2, post-synthesis estimate (no placement), Vivado 2026.1; 0 critical warnings, PASS.
+
+| Build | LUT | FF | RAMB36 | RAMB18 | DSP | WNS |
+|---|---|---|---|---|---|---|
+| before the interrupt registers, `HIGH_PROFILE` 0 | 47 083 | 31 071 | 34 | 6 | 76 | +0.881 ns |
+| with the interrupt registers, `HIGH_PROFILE` 0 | 47 084 | 31 080 | 34 | 6 | 76 | +0.881 ns |
+| with the interrupt registers, `HIGH_PROFILE` 1 (black-boxed module) | 49 268 | 31 891 | 34 | 6 | 76 | +0.881 ns |
+
+The interrupt controller costs 1 LUT and 9 flip-flops (`IRQ_STATUS` and `IRQ_ENABLE` of the 4 sources of the baseline build, the ring stall edge register, the read-mux terms and CAPS bits, with the
+unused status bits trimmed); no RAM or DSP. The worst path is unchanged (`u_regs/cfg_mb_h_reg[5]` to the `me_left` register of engine 1, +0.881 ns). The `HIGH_PROFILE` 1 run has no earlier figure in this document for the
+same tool version; it is listed for the record.

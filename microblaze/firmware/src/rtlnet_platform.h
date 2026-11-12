@@ -141,6 +141,16 @@ void     plat_led_set(unsigned index, int on);
 uint32_t plat_led_state(void);
 void     plat_reload(void);
 
+/* Interrupts. plat_irq_save masks the CPU interrupts and returns the previous state, plat_irq_restore returns to it (nesting safe): a critical
+ * section against interrupt handlers, to be kept to a few register accesses. plat_irq_attach connects a handler (it receives ref) on an INTC input
+ * (RTLNET_CPU_IRQ_*; the input stays masked), plat_irq_enable unmasks (on != 0) or masks it; attach returns 0, or -1 when the interrupt controller is
+ * not running. A handler runs with the CPU interrupts masked and must be short. The harness models the controller: a handler is called when its input
+ * is unmasked, the line is high and the interrupts are not masked. */
+uint32_t plat_irq_save(void);
+void     plat_irq_restore(uint32_t state);
+int      plat_irq_attach(unsigned input, void (*handler)(void *ref), void *ref);
+void     plat_irq_enable(unsigned input, int on);
+
 /* Console transmit counters: the target sends through a 4 KiB ring and the UART interrupt (rtlnet_cpu_microblaze.md); the harness reports
  * a zero ring. irq_mode is 1 while the interrupt runs; drops counts characters lost to a full ring whose wait timed out. */
 typedef struct {
