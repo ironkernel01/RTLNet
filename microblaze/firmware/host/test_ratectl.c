@@ -10,7 +10,8 @@
  * 720p30 300 kb/s, each with GOP 30 and GOP 1. Prints one INFO line per run and one PASS or FAIL line per gate; the last line is
  * "RATECTL_TEST: PASS" or "RATECTL_TEST: FAIL" and the exit code follows it.
  *
- * Revision: 11-10-2026 (initial, Phase 2d)
+ * Revision: 11-11-2026 (start-up gates: start QP, first-second picture size, convergence of a hard and an easy source)
+ * 11-10-2026 (initial, Phase 2d)
  */
 #include <math.h>
 #include <stdarg.h>
@@ -105,6 +106,69 @@ static void run(const case_t *c, uint32_t gop, seq_t seq, double ratio, uint32_t
         uint32_t qp = ratectl_pick(&g_rc, is_idr, gop);
         double b = cxp * mult(seq, i) * pow(2.0, (QP_REF - (double)qp) / 6.0) * (is_idr ? ratio : 1.0) * (1.0 + noise());
         uint32_t bits = (uint32_t)(b < 64.0 ? 64.0 : b);
+        pos = is_idr ? 1u : pos + 1u;
+        g_run.bits[i] = bits;
+        g_run.qp[i] = qp;
+        g_run.idr[i] = (uint8_t)is_idr;
+        ratectl_picture_done(&g_rc, is_idr, qp, bits, PERIOD90);
+    }
+}
+
+/* Measured sources of the board (rtlnet_nexys_video.md section 6.14, 1080p30, rate against constant QP). The synthetic model above falls
+ * 2^(-QP/6); the real encoder falls far more slowly, so the start-up gates use the measured points, log-linear between them.
+ *   HARD  = pattern `all` 4: every picture costs about the same (kbit per picture: QP 16 1554, 24 1096, 32 793, 40 533, 48 281, 51 210), I = P.
+ *   EASY  = pattern `box` 24: an I picture costs 305 / 177 / 158 / 140 / 130 kbit at QP 16 / 24 / 32 / 40 / 48 (128 at 51), a P picture 250 bit. */
+typedef enum { SRC_HARD, SRC_EASY } src_t;
+static const double g_tab_qp[6] = { 16.0, 24.0, 32.0, 40.0, 48.0, 51.0 };
+static const double g_hard_kb[6] = { 1554.0, 1096.0, 793.0, 533.0, 281.0, 210.0 };
+static const double g_easy_kb[6] = { 305.0, 177.0, 158.0, 140.0, 130.0, 128.0 };
+
+/**
+ * @brief Log-linear interpolation of a measured table.
+ * @param kb Table of kbit at g_tab_qp.
+ * @param qp QP.
+ * @return Bits.
+ */
+static double tab_bits(const double *kb, uint32_t qp)
+{
+    double q = (double)qp;
+    uint32_t i = 0u;
+    if (q <= g_tab_qp[0]) {
+        return kb[0] * 1000.0;
+    }
+    while (i < 4u && q > g_tab_qp[i + 1u]) {
+        i++;
+    }
+    return exp(log(kb[i] * 1000.0) + (log(kb[i + 1u] * 1000.0) - log(kb[i] * 1000.0)) * (q - g_tab_qp[i]) / (g_tab_qp[i + 1u] - g_tab_qp[i]));
+}
+
+/**
+ * @brief Run the controller against a measured source as venc does (IDR first and every gop pictures), noise within +-10 %.
+ * @param c Case.
+ * @param gop GOP length.
+ * @param src Source.
+ * @return None (g_run holds the pictures; g_rc the controller).
+ */
+static void run_src(const case_t *c, uint32_t gop, src_t src)
+{
+    uint32_t pos = 0u;
+    ratectl_init(&g_rc);
+    (void)ratectl_set_target(&g_rc, c->kbps);
+    ratectl_set_stream(&g_rc, c->width * c->height, PERIOD90);
+    ratectl_restart(&g_rc);
+    ratectl_clear_stats(&g_rc);
+    for (uint32_t i = 0u; i < N_PICS; i++) {
+        int is_idr = (i == 0u) || (pos >= gop);
+        uint32_t qp = ratectl_pick(&g_rc, is_idr, gop);
+        double b;
+        uint32_t bits;
+        if (src == SRC_HARD) {
+            b = tab_bits(g_hard_kb, qp);
+        } else {
+            b = is_idr ? tab_bits(g_easy_kb, qp) : 250.0;
+        }
+        b *= 1.0 + noise();
+        bits = (uint32_t)(b < 64.0 ? 64.0 : b);
         pos = is_idr ? 1u : pos + 1u;
         g_run.bits[i] = bits;
         g_run.qp[i] = qp;
@@ -411,6 +475,115 @@ int main(void)
              "history ring: %u records of %u bytes (%u bytes), 3700 s wrap correctly, oldest kept is second 100",
              (unsigned)RATECTL_HISTORY_SECONDS, (unsigned)sizeof(ratectl_sec_t),
              (unsigned)(RATECTL_HISTORY_SECONDS * sizeof(ratectl_sec_t)));
+    }
+
+    /* Start-up (Phase 2e): the first picture of a stream is coded at qp_max - 3; the first second must fit the output path; a hard and an
+     * easy source converge within 2 s. The 1080p30 output path carries about 15 Mb/s (section 6.14): 500,000 bit = 62,500 B per picture. */
+    {
+        static const case_t su_cases[] = {
+            { "1080p30 all 8000 kb/s GOP 30", 1920u, 1080u, 8000u },
+            { "1080p30 all 10000 kb/s GOP 1", 1920u, 1080u, 10000u },
+            { "1080p30 box 160 kb/s GOP 30", 1920u, 1080u, 160u },
+        };
+        static const uint32_t su_gop[3] = { 30u, 1u, 30u };
+        static const src_t su_src[3] = { SRC_HARD, SRC_HARD, SRC_EASY };
+        const uint32_t limit_bits = 15000000u / FPS;   /* 500,000 bit per picture */
+        uint32_t big_worst = 0u;
+        uint32_t first_qp_bad = 0u;
+        uint32_t conv_bad = 0u;
+        double conv_worst = 0.0;
+        char big_where[96] = "";
+        char conv_where[96] = "";
+        for (uint32_t k = 0u; k < 3u; k++) {
+            uint32_t big = 0u;
+            uint32_t q_min_2s = 99u;
+            double w1;
+            run_src(&su_cases[k], su_gop[k], su_src[k]);
+            for (uint32_t i = 0u; i < FPS; i++) {
+                if (g_run.bits[i] > big) {
+                    big = g_run.bits[i];
+                }
+            }
+            if (g_run.qp[0] != 48u) {
+                first_qp_bad++;
+            }
+            for (uint32_t i = 0u; i < 2u * FPS; i++) {
+                if (g_run.qp[i] < q_min_2s) {
+                    q_min_2s = g_run.qp[i];
+                }
+            }
+            /* converged within 2 s: the second second (pictures 30..59) within +-10 % of the target, and the QP at 2 s within 4 of the mean QP of
+             * seconds 10 to 30 (the steady state). The worst window of the whole run after 1 s is reported (INFO), not gated: the steady state of
+             * the easy source is limited by IDR pictures larger than the 500 ms buffer (section 9 of rtlnet_ratectl.md). */
+            {
+                uint64_t sb = 0u;
+                uint64_t qs = 0u;
+                double qsteady;
+                double dq;
+                for (uint32_t i = FPS; i < 2u * FPS; i++) {
+                    sb += g_run.bits[i];
+                }
+                for (uint32_t i = 10u * FPS; i < 30u * FPS; i++) {
+                    qs += g_run.qp[i];
+                }
+                qsteady = (double)qs / (double)(20u * FPS);
+                dq = fabs((double)g_run.qp[2u * FPS] - qsteady);
+                w1 = fabs((double)sb / ((double)su_cases[k].kbps * 1000.0) - 1.0) * 100.0;
+                printf("INFO:   second second %.2f %% from the target, QP at 2 s %u, steady-state QP %.2f (difference %.2f), worst 1 s window after 1 s %.2f %%\n",
+                       w1, (unsigned)g_run.qp[2u * FPS], qsteady, dq, worst_window(&su_cases[k], FPS, FPS, 0u));
+                if (dq > 4.0) {
+                    conv_bad++;
+                }
+            }
+            printf("INFO: start-up %-30s first QP %u, pictures 1..4 at %u %u %u %u, lowest QP in the first 2 s %u, largest picture of the first second %u B, "
+                   "worst 1 s window from 1 s on %.2f %%, QP avg %u.%02u\n",
+                   su_cases[k].name, (unsigned)g_run.qp[0], (unsigned)g_run.qp[1], (unsigned)g_run.qp[2], (unsigned)g_run.qp[3],
+                   (unsigned)g_run.qp[4], (unsigned)q_min_2s, (unsigned)(big / 8u), w1, (unsigned)(g_rc.qp_sum * 100u / g_rc.pictures / 100u),
+                   (unsigned)(g_rc.qp_sum * 100u / g_rc.pictures % 100u));
+            {
+                printf("INFO:   seconds 0..11 (kb in the second, QP of the first picture of the second):");
+                for (uint32_t sec = 0u; sec < 12u; sec++) {
+                    uint64_t sb = 0u;
+                    for (uint32_t i = sec * FPS; i < (sec + 1u) * FPS; i++) {
+                        sb += g_run.bits[i];
+                    }
+                    printf(" %u/%u", (unsigned)(sb / 1000u), (unsigned)g_run.qp[sec * FPS]);
+                }
+                printf("\n");
+            }
+            if (big > big_worst) {
+                big_worst = big;
+                snprintf(big_where, sizeof(big_where), "%s", su_cases[k].name);
+            }
+            if (w1 > conv_worst) {
+                conv_worst = w1;
+                snprintf(conv_where, sizeof(conv_where), "%s", su_cases[k].name);
+            }
+            if (w1 > 10.0) {
+                conv_bad++;
+            }
+        }
+        gate(first_qp_bad == 0u, "start QP: the first picture of every run is at qp_max - 3 = 48 (%u runs off)", (unsigned)first_qp_bad);
+        gate(big_worst <= limit_bits, "no picture of the first second above %u B (15 Mb/s at 30 pictures per s): largest %u B (%s)",
+             (unsigned)(limit_bits / 8u), (unsigned)(big_worst / 8u), big_where);
+        gate(conv_bad == 0u, "start-up convergence within 2 s (hard and easy source): the second second within +-10 %% and the QP at 2 s within 4 of the steady state; worst second-second error %.2f %% (%s)",
+             conv_worst, conv_where);
+        /* the start QP follows the range */
+        {
+            uint32_t a;
+            uint32_t b;
+            ratectl_init(&g_rc);
+            (void)ratectl_set_target(&g_rc, 1000u);
+            (void)ratectl_set_qp_range(&g_rc, 12u, 40u);
+            ratectl_restart(&g_rc);
+            a = ratectl_pick(&g_rc, 1, 30u);
+            ratectl_init(&g_rc);
+            (void)ratectl_set_target(&g_rc, 1000u);
+            (void)ratectl_set_qp_range(&g_rc, 40u, 42u);
+            ratectl_restart(&g_rc);
+            b = ratectl_pick(&g_rc, 1, 30u);
+            gate(a == 37u && b == 40u, "start QP follows the range: 12..40 gives %u (37), 40..42 gives %u (the range minimum 40)", (unsigned)a, (unsigned)b);
+        }
     }
 
     gate(w1_worst <= 10.0, "1 s windows within +-10 %% of the target after the first 2 s (constant motion: 6 cases at IDR 6x, 12 more at 4x and 8x): worst %.2f %% (%s)",

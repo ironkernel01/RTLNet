@@ -2,7 +2,7 @@
 
 Copyright (C) 2026 IronKernel. All rights reserved.
 
-Revision: 11-11-2026
+Revision: 11-11-2026 (start QP, Phase 2e)
 
 ## 1. Purpose
 
@@ -36,9 +36,13 @@ The size of a picture of type t at QP q is `2^(K_t - q/6)` bits: one QP step is 
 * P picture done: `K_p += (K_obs - K_p) / 2`; the I model follows by a quarter of that step (`K_i += dK_p / 4`), so a scene change moves the
   estimate of the next IDR picture although IDR pictures are rare.
 * IDR picture done: `K_i += 3/4 (K_obs - K_i)`.
-* The first picture of a stream and every change of mode or frame period start from the target bits per pixel: initial QP
-  `14 - 6 log2(bits per pixel)` (0.036 bit/pixel at 720p30 and 1000 kb/s gives QP 43), K_p such that a GOP of one I picture (6 x P) and
-  GOP - 1 P pictures averages the budget, K_i = K_p + log2 6.
+* **Start QP.** The first picture of a stream, of a mode or frame-period change, and of a target change is coded at the start QP `qp_max - 3`, clipped to the configured
+  range (48 with the default range 12 to 51; the range minimum when the range is narrower than 3). The step limit of 2 per picture does not apply to that picture; from the
+  second picture on the controller descends from it by its normal step (at most 2 per picture) while the buffer shows room. K_p starts such that a GOP of one I picture (6 x P) and
+  GOP - 1 P pictures averages the budget at the start QP, K_i = K_p + log2 6; the first pictures correct both. The bits-per-pixel rule of Phase 2d (initial QP
+  `14 - 6 log2(bits per pixel)`, which gave QP 32 for 1080p30 pattern `all` at 8,000 kb/s where about 48 is needed) is removed. A first picture that is too large costs a burst of
+  100 kB or more at the output path of the board (about 15 Mb/s at 1080p30, 62,500 B per picture), a first picture that is too small costs only a few pictures of lower quality:
+  the start is on the cheap side.
 
 `log2` and `2^x` are computed in Q8 by bit-wise squaring (eight constants), the sums in 64 bit.
 
@@ -134,6 +138,11 @@ the moderate complexity), constant moderate motion (equilibrium QP 34), a 3 s no
 (0.5 to 3 x and back over 60 s). Cases: 720p30 at 1000 kb/s, 1080p30 at 2000 kb/s, 720p30 at 300 kb/s, each with GOP 30 and GOP 1: 30 runs, 18 more for the IDR ratios,
 plus a saturation run (40 x complexity at 300 kb/s), a constant QP run and a ring-wrap run (3700 s).
 
+Start-up gates (Phase 2e, 15 gates in all): the sources are the measured sizes of the board (`rtlnet_nexys_video.md` section 6.14, 1080p30), log-linear between the points: a hard source (`all` 4: 1,554 / 1,096 / 793 / 533 / 281 / 210 kbit per picture at QP 16 / 24 / 32 / 40 / 48 / 51, I = P) and an
+easy source (`box` 24: IDR 305 / 177 / 158 / 140 / 130 / 128 kbit, P picture 250 bit); runs 1080p30 `all` 8,000 kb/s GOP 30, `all` 10,000 kb/s GOP 1 and `box` 160 kb/s GOP 30. Gates: the first picture of every run is at `qp_max - 3` = 48; no picture of the first second above
+62,500 B (the 15 Mb/s the output path sustains at 1080p30, divided by 30 pictures per second; the host model's largest is 49,074 B); the second second within +-10 % of the target and the QP at 2 s within 4 of the mean QP of seconds 10 to 30; the start QP follows the range
+(12..40 gives 37, 40..42 gives the minimum 40). The worst 1 s window of the whole easy-source run after the first second is printed (INFO, not gated; 33 % in the model: its IDR pictures are larger than the 500 ms buffer, and the board shows the same limit, section 9).
+
 The burst and the cut start half a second after an IDR picture: an event that coincides with the IDR picture is a single picture of 18 to 24 times the average and overflows the 500 ms buffer
 at any QP the +-2 limit allows; it is run as an informational line, not gated.
 
@@ -179,11 +188,29 @@ of 1080p `all` is 6.3 to about 14 Mb/s because the output path drops pictures ab
 
 The QP changes by at most 2 per picture in all eight runs (1,799 to 1,801 pictures parsed). What the host test did not show:
 
-* The first picture's QP (section 2.2, bits per pixel) is far too low for detailed content: at 1080p30 `all` and 8,000 kb/s it starts at QP 32 against about 48 needed, the first pictures are 100 kB, the buffer fills to 64 % and the board drops one picture
-  (the output path limit is about 15 Mb/s); 3 overflows are counted below QP max. The QP reaches the steady state in about 2 s.
+* The first picture's QP (the bits-per-pixel rule of Phase 2d) was far too low for detailed content: at 1080p30 `all` and 8,000 kb/s it started at QP 32 against about 48 needed, the first pictures were 100 kB, the buffer filled to 64 % and the board dropped one picture
+  (the output path limit is about 15 Mb/s); 3 overflows were counted below QP max. Fixed in Phase 2e by the start QP `qp_max - 3` (below).
 * Content whose P pictures are tiny (`box`) leaves the controller little authority: QP 20 to 51, 42 overflows and 27 underflows at 160 kb/s, with the mean 1.8 % above the target and the 10 s windows within 4.3 %. The start-up converges in about 5 s (seconds 2 to 4 at -16 % and -7 %).
 * The rate of the `scroll` pattern has a minimum near QP 40 (299 kb/s at 720p, 479 kb/s at 1080p) and rises above it, so the loop "higher QP, lower rate" has the wrong sign there; a target below the minimum starts at QP 51 and stays pinned (the 330 kb/s run).
-* Proposed, not done: a start QP from the measured size of the first picture (or a configured start QP) and a limit on the QP excursion when the P pictures are at their floor size.
+* Proposed for `box` and `scroll`, not done: derive `K_p` from the first observed IDR picture (`K_i - log2 6`) instead of the bits-per-picture guess, a QP step of 4 during the first two seconds, and a limit on the QP excursion when the P pictures are at their floor size.
 
 One-hour soak (1080p30 `all` 4, GOP 30, 8,000 kb/s, 3,600 s, `rtlnet_nexys_video.md` section 6.14): mean 8,000.0 kb/s, every 10 s window within 0.7 % and every 1 s window within 4.3 % (the second after the start-up; later at most 0.54 %), QP 32 to 51 (average 48.68),
 QP step at most 2 in 108,000 pictures, overflow 3 (start-up only), underflow 0, 1 picture dropped at the start-up and 0 UDP drops. The size model is within the feedback's reach for this content over the whole hour: the average QP of minutes 1 to 10 and of the last 10 minutes is 48.65 in both.
+
+## 10. Start QP on the board (Phase 2e, 11-11-2026)
+
+Rule: section 2.2 (first picture after a stream start, a mode change or a target change at `qp_max - 3`, 48 with the default range). Default image rebuilt with the firmware only; `RATECTL_TEST: PASS (15 gates)`, firmware host demo `menu_demo checks=462` `TEST PASS`,
+`CLI_TEST: PASS 83/83` on the board. 60 s runs of `stream_test.ps1` with FFmpeg and JM decode as in section 9 (logs `boards/nexys_video/build/phase2e_*`); the full before and after table with the dropped pictures and the largest picture of the first second is in
+`rtlnet_nexys_video.md` section 6.16.
+
+| Run | Target | Mean | Worst 1 s | Worst 10 s | QP min / avg / max | Dropped | Result (before: section 9) |
+|---|---|---|---|---|---|---|---|
+| 1080p `all` 4, GOP 30 | 8,000 kb/s | 8,000.1 | 0.67 % | 0.07 % | 48 / 48.66 / 49 | 0 | PASS 17/17 (before: 4.19 %, 1 dropped, QP 32..51) |
+| 1080p `all` 4, GOP 1 | 10,000 kb/s | 10,000.1 | 0.44 % | 0.04 % | 47 / 47.87 / 48 | 0 | PASS 17/17 (before: 2.77 %, 1 dropped) |
+| 720p `all` 4, GOP 30 | 12,000 kb/s | 12,004.3 | 1.70 % | 0.30 % | 36 / 37.43 / 48 | 0 | PASS 17/17 (regression) |
+| 1080p `box` 24, GOP 30 | 160 kb/s | 163.6 | 19.41 % | 4.53 % | 20 / 29.73 / 51 | 0 | FAIL, 49 overflows, 17 underflows (before: 16.25 %, 42 and 27) |
+| 720p `scroll` -7, GOP 30 | 330 kb/s | 341.4 | 18.43 % (1,338 windows waived) | none | 41 / 50.27 / 51 | 0 | FAIL, QP pinned at 51, 44 overflows (before: 15.76 %) |
+| 10-minute soak, 1080p `all` 4, GOP 30 | 8,000 kb/s | 8,000.0 | 0.72 % | 0.09 % | 47 / 48.68 / 49 | 0 | PASS 19/19, 0 overflows |
+
+The first picture of the detailed patterns is 41 to 52 kB (before: 100 kB or more), under the 62,500 B the 1080p30 output path carries per picture; the dropped picture and the three overflows below QP max of the first second are gone, and the QP stays within 47 to 49 for
+the hour-long steady state of `all`. The start-up of `box` is not better (third second at -19.4 %, convergence about 6 s) and `scroll` still pins at QP 51; they are not tuned (proposal in section 9).

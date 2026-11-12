@@ -16,6 +16,7 @@ Role: two independent checks that need no decoder library.
        --waive a,b,c lists stream seconds (from the first PTS) whose windows are excluded (the encoder at the top of the QP range). "QP min= avg= max="
        --cc-tol-pct P lets the continuity check pass with up to P percent of the packets in error (a Wi-Fi link; default 0). "QP min= avg= max="
        is the slice QP of every picture parsed from the slice headers; --max-qp-step N gates the largest step between pictures ("CHECK qp_steps").
+       --forced-idr N (High profile demo netlist): exactly N IDR pictures lie off the GOP cadence (the forced IDR picture at a license end); each is printed as "FORCED_IDR" with its position.
   psnr <file.yuv> <width> <height> [--floor 30] [--max-frames 24] [--pattern <0..4> --speed <n> [--k-first-max 64] [--step 1]]
        Reads decoded yuv420p frames one at a time (ffmpeg -pix_fmt yuv420p -f rawvideo; --max-frames 0 checks every frame), builds the expected 4:2:0 bar frame from the same
        eight 75 percent bars as rtlnet_csi2_rx (BT.709 limited range values of gige.md section 5.4; vertical bars of width/8
@@ -154,7 +155,7 @@ def slice_qp(buf, log2_fn=4):
     return None
 
 
-def check_ts(path, step, fps, gop=0, target_kbps=0.0, skip_s=2.0, gate10=False, waive=None, max_qp_step=0, cc_tol_pct=0.0):
+def check_ts(path, step, fps, gop=0, target_kbps=0.0, skip_s=2.0, gate10=False, waive=None, max_qp_step=0, cc_tol_pct=0.0, forced_idr=-1):
     c = Checker()
     data = open(path, "rb").read()
     # Align on the first sync byte that repeats every 188 bytes three times.
@@ -290,9 +291,28 @@ def check_ts(path, step, fps, gop=0, target_kbps=0.0, skip_s=2.0, gate10=False, 
         else:
             gaps = [b - a for a, b in zip(idx, idx[1:])]
         bad_gaps = [g for g in gaps if g != gop]
-        c.report("random_access", len(ra_flags) > 0 and ra_flags[0] and not bad_gaps,
-                 "%d of %d access units flag random access (IDR), first access unit %s, %d gaps of %d, %d different %s" %
-                 (len(idx), len(ra_flags), "yes" if ra_flags and ra_flags[0] else "no", len(gaps) - len(bad_gaps), gop, len(bad_gaps), sorted(set(bad_gaps))[:6]))
+        if forced_idr >= 0:
+            # License change (High profile demo netlist): the encoder forces an IDR picture off the GOP cadence. Either the cadence restarts after it
+            # (one short gap) or it stays on the old grid (two gaps that add up to the GOP). Each forced IDR picture is reported with its position.
+            forced_at = []
+            gi = 0
+            while gi < len(gaps):
+                if gaps[gi] != gop:
+                    if gi + 1 < len(gaps) and gaps[gi] + gaps[gi + 1] == gop:
+                        forced_at.append((idx[gi + 1], "grid kept: gaps %d + %d" % (gaps[gi], gaps[gi + 1])))
+                        gi += 2
+                        continue
+                    forced_at.append((idx[gi + 1], "cadence restarted: gap %d" % gaps[gi]))
+                gi += 1
+            for (ai, how) in forced_at:
+                print("FORCED_IDR access_unit=%d pts_s=%.3f (%s) nal_types=%s" % (ai, (pts_list[ai] - pts_list[0]) / 90000.0, how, sorted(au_nals[ai])))
+            c.report("random_access", len(ra_flags) > 0 and ra_flags[0] and len(forced_at) == forced_idr,
+                     "%d of %d access units flag random access (IDR), first access unit %s, %d IDR pictures off the GOP %d cadence (expected %d)" %
+                     (len(idx), len(ra_flags), "yes" if ra_flags and ra_flags[0] else "no", len(forced_at), gop, forced_idr))
+        else:
+          c.report("random_access", len(ra_flags) > 0 and ra_flags[0] and not bad_gaps,
+                   "%d of %d access units flag random access (IDR), first access unit %s, %d gaps of %d, %d different %s" %
+                   (len(idx), len(ra_flags), "yes" if ra_flags and ra_flags[0] else "no", len(gaps) - len(bad_gaps), gop, len(bad_gaps), sorted(set(bad_gaps))[:6]))
         mism = 0
         for i, (f, n) in enumerate(zip(ra_flags, au_nals)):
             if tol and i in dmg:
@@ -301,6 +321,8 @@ def check_ts(path, step, fps, gop=0, target_kbps=0.0, skip_s=2.0, gate10=False, 
             if idr != f or (idr and not (7 in n and 8 in n)) or (not idr and (7 in n or 8 in n or 1 not in n)):
                 mism += 1
         c.report("nal_types", len(au_nals) > 0 and mism == 0, "%d access units: IDR (NAL 5 with SPS 7 and PPS 8) exactly where the indicator is set, P (NAL 1) elsewhere; %d mismatches" % (len(au_nals), mism))
+        nfirst = int(round(fps))
+        print("FIRST_SECOND_MAX_AU %d bytes (largest of the first %d access units, the first IDR picture included)" % (max(au_bytes[:nfirst]) if au_bytes else 0, nfirst))
         for label, want in (("idr", True), ("p", False)):
             sz = [b for b, f in zip(au_bytes, ra_flags) if f == want]
             if sz:
@@ -705,7 +727,8 @@ def main(argv):
         waive = set(int(x) for x in argv[argv.index("--waive") + 1].split(",") if x) if "--waive" in argv else set()
         mqs = int(argv[argv.index("--max-qp-step") + 1]) if "--max-qp-step" in argv else 0
         cct = float(argv[argv.index("--cc-tol-pct") + 1]) if "--cc-tol-pct" in argv else 0.0
-        return 1 if check_ts(argv[1], step, fps, gop, tgt, skip_s, "--gate10" in argv, waive, mqs, cct) else 0
+        fidr = int(argv[argv.index("--forced-idr") + 1]) if "--forced-idr" in argv else -1
+        return 1 if check_ts(argv[1], step, fps, gop, tgt, skip_s, "--gate10" in argv, waive, mqs, cct, fidr) else 0
     if len(argv) >= 4 and argv[0] == "psnr":
         floor = float(argv[argv.index("--floor") + 1]) if "--floor" in argv else 30.0
         if "--pattern" in argv:

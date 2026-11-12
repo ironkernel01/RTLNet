@@ -12,7 +12,8 @@
 #   * Every output line starts with "rtlnet_program:".
 # Usage: vivado -mode batch -source program.tcl -tclargs <bitfile>
 #   Normally through boards/nexys_video/scripts/program.ps1.
-# Revision: 10-22-2026
+# Revision: 11-11-2026
+#   * 11-11-2026: prints the host time at which program_hw_devices returned (the configuration instant of the license-timer test).
 #   * 10-22-2026: initial version.
 # -----------------------------------------------------------------------------
 if {[llength $argv] < 1} { puts "rtlnet_program: usage: -tclargs <bitfile>"; exit 2 }
@@ -53,6 +54,8 @@ if {[catch {program_hw_devices $dev} err]} {
   puts "rtlnet_program: ERROR program_hw_devices: $err"
   exit 3
 }
+set t_done [clock milliseconds]
+puts "rtlnet_program: configured at [clock format [expr {$t_done / 1000}] -format {%Y-%m-%d %H:%M:%S}].[format %03d [expr {$t_done % 1000}]] (epoch ms $t_done, program_hw_devices returned)"
 refresh_hw_device -quiet $dev
 set done [get_property -quiet REGISTER.CONFIG_STATUS.BIT14_DONE_PIN $dev]
 puts "rtlnet_program: programmed in [expr {([clock milliseconds] - $t0) / 1000.0}] s, DONE pin '$done'"

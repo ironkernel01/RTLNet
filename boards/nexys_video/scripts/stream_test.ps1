@@ -38,13 +38,17 @@ Overview:
     -CcTolPct P: continuity errors up to P percent of the packets pass (Wi-Fi; the default 0 is strict). -Jm: the stream is also decoded
     with the JM ldecod (clean, as many frames as access units, same pictures as FFmpeg when -PsnrStep is 1). The decode step also fails on
     any FFmpeg error message. A "RUN_SUMMARY" line gives target, measured rate, worst windows, QP and PSNR of each mode.
+  * -PollSeconds <n>: during the capture read show encoder every n s (every 5 s near a license end; each read of show encoder blocks the firmware for 2 to 3 pictures, so a polled capture has dropped pictures: the license test of hp_expiry_test.ps1 does not poll) into <prefix>_<mode>_poll.txt (High profile license timer test).
+  * -ForcedIdr <n>: exactly n IDR pictures off the GOP cadence are expected (the forced IDR picture at the license end of the High profile demo netlist).
   * -InputTs <file>: check an existing capture offline (no board, no capture).
   * The transcript is boards/nexys_video/build/phase2c_gop<N>_stream_transcript.txt. The last line is
     "STREAM_TEST: PASS <n>/<n>" or "STREAM_TEST: FAIL <failed>/<n>"; exit code 0 only on PASS.
 Usage:
   powershell -NoProfile -ExecutionPolicy Bypass -File boards/nexys_video/scripts/stream_test.ps1 [-Mode both] [-Seconds 60]
     [-Port COM3] [-UdpPort 5004] [-HostIp <PC address>] [-Qp 28] [-Gop 30] [-Pattern all -Speed 4] [-Bitrate 2000 [-BufferMs 500]] [-Tag <name>] [-SkipVlc] [-NoBoard] [-InputTs <file> -Width 1280 -Height 720]
-Revision: 11-10-2026
+Revision: 11-11-2026
+  * 11-11-2026: -PollSeconds (show encoder read during the capture).
+  * 11-11-2026: -FilePrefix (file prefix of the logs, for example phase2e_rc1).
   * 11-09-2026: initial version.
   * 11-10-2026: Phase 2c: -Gop (encoder gop), file prefix phase2c_gop<N>, GOP and NAL checks in the TS parser, every decoded frame
     checked, IDR and P sizes, clocks per macroblock and TS-mux load in the board line.
@@ -80,7 +84,10 @@ param(
     [ValidateSet('', 'low', 'high')][string]$Saturate = '',
     [switch]$Gate10,
     [switch]$NoPing,
-    [switch]$Jm
+    [switch]$Jm,
+    [string]$FilePrefix = '',
+    [int]$PollSeconds = 0,
+    [int]$ForcedIdr = -1
 )
 $ErrorActionPreference = 'Stop'
 $Repo  = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..')).Path
@@ -93,6 +100,7 @@ $py = Resolve-RtlnetPython
 $Check = Join-Path $PSScriptRoot 'stream_check.py'
 $Prefix = "phase2c_gop$Gop"
 if ($Tag) { $Prefix = "phase2d_$Tag" }
+if ($FilePrefix) { $Prefix = $FilePrefix }
 $PatNum = @{ 'bars' = 0; 'scroll' = 1; 'box' = 2; 'noise' = 3; 'all' = 4 }
 if (-not $PSBoundParameters.ContainsKey('PsnrFloor') -and $Pattern) { $PsnrFloor = 0.0 }
 $script:waive = ''
@@ -232,6 +240,7 @@ function Test-Capture([string]$tag, [string]$ts, [int]$w, [int]$h, [double]$fps)
     }
     $o = Join-Path $Build ($name + '_ts.txt')
     $tsArgs = @('-I', $Check, 'ts', $ts, '--fps', "$fps", '--gop', "$Gop", '--cc-tol-pct', "$CcTolPct")
+    if ($ForcedIdr -ge 0) { $tsArgs += @('--forced-idr', "$ForcedIdr") }
     if ($Bitrate -gt 0) {
         $tsArgs += @('--target-kbps', "$Bitrate", '--skip-s', '2', '--max-qp-step', '2')
         if ($script:waive) { $tsArgs += @('--waive', $script:waive) }
@@ -411,8 +420,32 @@ try {
         $pr = Invoke-Cli $sp "camera pattern $patName $Speed"
         Add-Result "$m pattern set" ($pr -match "Test pattern $patName, speed $Speed") ($pr.Trim() -replace '\s+', ' ')
         [void](Invoke-Cli $sp 'clear counters')
+        $tA = [int64]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()
         $r = Invoke-Cli $sp "stream h264 $HostIp $UdpPort"
+        $tB = [int64]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()
+        Say "STREAM_START_EPOCH_MS $tA $tB (host time before and after the stream start command)"
         Add-Result "$m stream start" ($r -match 'Streaming H.264') ($r.Trim() -replace '\s+', ' ')
+        if ($PollSeconds -gt 0) {
+            # License-timer test: read "show encoder" every -PollSeconds s while the capture runs (every 5 s while 90 s or less are left and for 40 s after
+            # the end), one line per read with the host time, into <prefix>_poll.txt.
+            $pollLog = Join-Path $Build "${Prefix}_${m}_poll.txt"
+            Set-Content -LiteralPath $pollLog -Value "# host_time epoch_ms | High profile line of show encoder | picture counters" -Encoding ascii
+            $deadline = (Get-Date).AddSeconds($Seconds + 40)
+            $wait = 5.0
+            $endedAt = $null
+            while ((Get-Date) -lt $deadline) {
+                if ($capObj.Join([int]($wait * 1000))) { break }
+                $tp = Get-Date
+                $epoch = [int64]([DateTimeOffset]$tp).ToUnixTimeMilliseconds()
+                $pr2 = Invoke-Cli $sp 'show encoder'
+                $hpl = Get-Field $pr2 'High profile\s+: ([^\r\n]*)'
+                $pl = Get-Field $pr2 'Pictures\s+: ([^\r\n]*)'
+                Add-Content -LiteralPath $pollLog -Value ("{0:yyyy-MM-dd HH:mm:ss.fff} {1} | {2} | {3}" -f $tp, $epoch, $hpl, $pl) -Encoding ascii
+                $wait = [double]$PollSeconds
+                if ($hpl -match 'time left (\d+) min (\d+) s') { if ([int]$Matches[1] * 60 + [int]$Matches[2] -le 90) { $wait = 5.0 } }
+                if ($hpl -match 'license ended') { if ($null -eq $endedAt) { $endedAt = $tp }; if (($tp - $endedAt).TotalSeconds -lt 40) { $wait = 5.0 } }
+            }
+        }
         if (-not $capObj.Join(($Seconds + 40) * 1000)) { $capObj.Abort(); [void]$capObj.Join(5000) }
         $cap = [pscustomobject]@{ Datagrams = $capObj.Datagrams; Bytes = $capObj.Bytes; Seconds = $capObj.Seconds; Odd = $capObj.Odd }
         $rxErr = (Get-UdpRxErrors) - $rx0

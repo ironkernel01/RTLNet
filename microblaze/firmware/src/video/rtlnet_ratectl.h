@@ -35,6 +35,7 @@
 #define RATECTL_BUFFER_MS_MAX     2000u
 #define RATECTL_KBPS_MAX          100000u
 #define RATECTL_QP_STEP_MAX       2u      /* largest QP change from one picture to the next */
+#define RATECTL_START_QP_BACKOFF  3u      /* the first picture of a stream is coded at qp_max - 3 (within the range) */
 #define RATECTL_FILL_SETPOINT_PCT 30u     /* buffer fill the controller steers to */
 #define RATECTL_HISTORY_SECONDS   3600u
 #define RATECTL_TICKS_PER_S       90000u  /* the 90 kHz stream time base of the PTS */

@@ -6,7 +6,8 @@
  * Role: implementation of the contract in rtlnet_ratectl.h. Fixed point only: log2 and 2^x in Q8 by bit-wise squaring (no tables
  * beyond eight constants), 64-bit integer arithmetic for the sums.
  *
- * Revision: 11-10-2026 (initial, Phase 2d)
+ * Revision: 11-11-2026 (start QP: qp_max - 3, no bits-per-pixel rule)
+ * 11-10-2026 (initial, Phase 2d)
  */
 #include "rtlnet_ratectl.h"
 
@@ -129,7 +130,7 @@ void ratectl_init(ratectl_t *rc)
 
 int ratectl_set_target(ratectl_t *rc, uint32_t kbps)
 {
-    int64_t old_size = buffer_bits(rc);
+    uint32_t old_kbps = rc->target_kbps;
     if (kbps > RATECTL_KBPS_MAX) {
         return -1;
     }
@@ -137,10 +138,12 @@ int ratectl_set_target(ratectl_t *rc, uint32_t kbps)
     if (kbps == 0u) {
         rc->have_model = 0;
         rc->fill = 0;
-    } else if (rc->have_model && old_size > 0) {
-        rc->fill = (rc->fill * buffer_bits(rc)) / old_size;   /* keep the fill fraction */
-    } else {
+    } else if (kbps != old_kbps || !rc->have_model) {
+        /* a new target starts again: the next picture is coded at the start QP (model_init), the QP step limit does not apply to it */
         rc->have_model = 0;
+        rc->have_prev = 0;
+        rc->qerr = 0;
+        rc->fill = 0;
     }
     return 0;
 }
@@ -195,7 +198,18 @@ void ratectl_set_stream(ratectl_t *rc, uint32_t pixels, uint32_t period90)
 }
 
 /**
- * @brief Set the model from the target bits per pixel (first picture of a stream) and the buffer to its set point.
+ * @brief Start QP of a stream: RATECTL_START_QP_BACKOFF below the QP maximum, within the range.
+ * @param rc Controller.
+ * @return The QP of the first picture after a stream start, a mode change or a target change.
+ */
+static uint32_t start_qp(const ratectl_t *rc)
+{
+    uint32_t q = (rc->qp_max > RATECTL_START_QP_BACKOFF) ? rc->qp_max - RATECTL_START_QP_BACKOFF : 0u;
+    return (q < rc->qp_min) ? rc->qp_min : q;
+}
+
+/**
+ * @brief Set the size model for the start QP (first picture of a stream) and the buffer to its set point.
  * @param rc Controller.
  * @param gop IDR period.
  * @return None.
@@ -203,24 +217,12 @@ void ratectl_set_stream(ratectl_t *rc, uint32_t pixels, uint32_t period90)
 static void model_init(ratectl_t *rc, uint32_t gop)
 {
     uint64_t bpp = bits_per_pic(rc);
-    int32_t lb;
-    int32_t q_q8;
-    uint32_t q;
+    uint32_t q = start_qp(rc);
     int32_t kp;
     if (bpp == 0u) {
         bpp = 1u;
     }
-    /* initial QP = 14 - 6 log2(bits per pixel): 0.036 bit/pixel (720p30, 1000 kb/s) gives QP 43 */
-    lb = log2_q8(bpp << 8) - log2_q8((uint64_t)rc->pixels << 8);
-    q_q8 = 14 * 256 - 6 * lb;
-    q = (q_q8 < 0) ? 0u : (uint32_t)((q_q8 + 128) >> 8);
-    if (q < rc->qp_min) {
-        q = rc->qp_min;
-    }
-    if (q > rc->qp_max) {
-        q = rc->qp_max;
-    }
-    /* P size at QP q such that a GOP of one I (6 x P) and gop - 1 P pictures averages the budget */
+    /* P size at QP q (the start QP) such that a GOP of one I (6 x P) and gop - 1 P pictures averages the budget */
     kp = log2_q8(bpp << 8) - 2048 + log2_q8((uint64_t)gop << 8) - 2048 - (log2_q8((uint64_t)(gop + RC_RATIO_I0 - 1u) << 8) - 2048) +
          qp_div6_q8(q);
     rc->k_p = k_clamp(kp);
@@ -256,7 +258,11 @@ uint32_t ratectl_pick(ratectl_t *rc, int is_idr, uint32_t gop)
         gop = 1u;
     }
     if (!rc->have_model) {
+        /* first picture after a stream start, a mode change or a target change: the conservative start QP; the controller
+         * descends from it by its normal step while the buffer shows room */
         model_init(rc, gop);
+        rc->qerr = 0;
+        return start_qp(rc);
     }
     bpp = bits_per_pic(rc);
     size = buffer_bits(rc);

@@ -22,14 +22,18 @@ Overview:
     code (the Vivado gate codes are listed in build_bitstream.tcl).
 Usage:
   powershell -NoProfile -ExecutionPolicy Bypass -File boards/nexys_video/scripts/build.ps1 `
-    [-Network] [-SkipFirmware] [-Program] [-Test] [-Port COM3] [-Tag <name>] [-HighProfile none|full|demo]
+    [-Network] [-SkipFirmware] [-Program] [-Test] [-Port COM3] [-Tag <name>] [-Image] [-HighProfile none|full|demo]
   * -Tag <name>: variant gate build. Only the bitstream step runs, with every output (log, reports, hardware
     bitstream, MMI, XSA, build_info.txt) in build/<name>/; the network image build/rtlnet_nexys_video.{bit,mmi,xsa}
     and the firmware build are untouched. Example: -Tag cpu (the cpu-only variant, no -Network).
+  * -Image (with -Tag): the tagged build also builds the firmware on the BSP of the tagged XSA and merges it into the tagged bitstream, giving
+    build/<name>/rtlnet_nexys_video.bit (program it with program.ps1 -Bit). The default image in build/ is still not touched. Example:
+    -Network -HighProfile demo -Tag hp_demo -Image.
   * -HighProfile <none|full|demo> (default none): none is the flow above, unchanged. full or demo builds rtlnet_h264_top with HIGH_PROFILE 1 and
     the netlist of that variant from the High profile repository (H264HighProfile\netlist\<variant>, found through $env:H264_HIGHPROFILE_ROOT or
     next to this repository); the build refuses to start when the netlist is missing.
 Revision: 11-11-2026
+  * 11-11-2026: -Image (tagged build with firmware and merge).
   * 11-11-2026: -HighProfile.
   * 11-09-2026: -Program and -Test take the machine-wide board lock first (rtlnet_board_lock.ps1).
   * 10-22-2026: initial version.
@@ -40,6 +44,7 @@ Revision: 11-11-2026
 param(
     [switch]$Network,
     [switch]$SkipFirmware,
+    [switch]$Image,
     [switch]$Program,
     [switch]$Test,
     [string]$Port = 'COM3',
@@ -79,7 +84,8 @@ if ($HighProfile -ne 'none') {
     $tclArgs = "network,$net$hpArgs"
 }
 if ($Tag) {
-    if ($Program -or $Test) { Write-Output 'RTLNET_BUILD: FAIL -Tag builds are not programmed (no firmware merge)'; exit 99 }
+    if (($Program -or $Test) -and -not $Image) { Write-Output 'RTLNET_BUILD: FAIL -Tag builds are not programmed (no firmware merge; use -Image, then program.ps1 -Bit)'; exit 99 }
+    if (($Program -or $Test) -and $Image) { Write-Output 'RTLNET_BUILD: FAIL -Tag -Image builds are programmed with program.ps1 -Bit build/<tag>/rtlnet_nexys_video.bit'; exit 99 }
     $Build = Join-Path $Build $Tag
     New-Item -ItemType Directory -Force -Path $Build | Out-Null
     $tclArgs = "network,$net,tag,$Tag$hpArgs"
@@ -90,6 +96,16 @@ Step 'bitstream' {
 }
 Get-Content -LiteralPath (Join-Path $Build 'build_bitstream.log') | Where-Object { $_ -match '^(rtlnet_build|rtlnet_cdc):' } |
     ForEach-Object { Write-Output "  $_" }
+if ($Tag -and $Image) {
+    Step 'firmware' { powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Repo 'microblaze\firmware\build.ps1') -Demo `
+        -Xsa (Join-Path $Build 'rtlnet_nexys_video.xsa') }
+    Step 'merge' { powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'merge_elf.ps1') `
+        -Mmi (Join-Path $Build 'rtlnet_nexys_video.mmi') -Bit (Join-Path $Build 'rtlnet_nexys_video_hw.bit') -Out (Join-Path $Build 'rtlnet_nexys_video.bit') }
+    Write-Output '--- build_info.txt'
+    Get-Content -LiteralPath (Join-Path $Build 'build_info.txt') | ForEach-Object { Write-Output "  $_" }
+    Write-Output "RTLNET_BUILD: PASS $(Join-Path $Build 'rtlnet_nexys_video.bit') (tag $Tag, firmware merged)"
+    exit 0
+}
 if ($Tag) {
     Write-Output '--- build_info.txt'
     Get-Content -LiteralPath (Join-Path $Build 'build_info.txt') | ForEach-Object { Write-Output "  $_" }

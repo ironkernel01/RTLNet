@@ -1020,6 +1020,94 @@ Findings from the rate-control runs (the controller `rtlnet_ratectl.c` is not ch
 Soak verdict: the rate control holds the rate for an hour (every 10 s window within 0.7 %, every 1 s window within 4.3 %), the board counts 0 UDP drops and 0 errors, and the transport on Wi-Fi loses 1 access unit in 108,000. The "0 board-side drops" gate fails by one picture dropped at the start of the stream (finding 2);
 the PSNR minimum is the picture damaged by the lost access unit.
 
+### 6.15 High profile demo netlist on the board (11-11-2026)
+
+Change: stage 1 of the High profile extension (`rtlnet_h264_enc.md` section 17) on the board. The image is built with `build.ps1 -Network -HighProfile demo -Tag hp_demo -Image` (the demo netlist of the High profile repository:
+a 30-minute license timer and the status registers; `hp_caps` is 0, so the stream is Constrained Baseline before and after the license ends), with `RTLNET_PLACE_DIRECTIVE=ExtraTimingOpt`, into `build/hp_demo/`. The committed default image
+in `build/` is not touched by it. `-Image` is new: a tagged build runs the firmware build on the BSP of the tagged XSA and merges the firmware into the tagged bitstream (`build/hp_demo/rtlnet_nexys_video.bit`); without `-Image` a tagged
+build stops after the bitstream as before. The tagged image is programmed with `program.ps1 -Bit`.
+
+Build (git 12aa397 plus the uncommitted Phase 2e firmware, tool 2026.1, 2,282 s, first run, log `build/phase2e_hp_demo_build_run1.txt`, `build/hp_demo/build_bitstream.log`, `build/hp_demo/build_info.txt`):
+
+| Gate | Value |
+|---|---|
+| timing | WNS +0.118 ns, WHS +0.017 ns, WPWS +0.131 ns, 0 failing endpoints (default image of 6.14: +0.044 / +0.016 / +0.131) |
+| worst setup path | `u_h264/g_engine[1].u_engine/u_search/win_busy_reg` to `u_arb/rd_pend_reg[0][1]/CE`, 10.6 ns data path of 11.111 ns, 70 % routing; the `u_invq` path of 6.14 is not the limiter in this run |
+| CDC | `fifo 10`, `axil_cdc 5`, `gray 6`, `sync 31`, `reset 8` as expected, `rtlnet_cdc: PASS` |
+| methodology | no unwaived finding (`build/hp_demo/reports/post_route_methodology.rpt`) |
+| utilization | 83,803 LUT (62.63 %), 79,923 FF (29.87 %), 284.5 RAMB tiles (77.95 %), 82 DSP; the default image has 83,786 LUT, 79,780 FF (the netlists and the seam add 17 LUT and 143 FF) |
+
+One run closes timing with `ExtraTimingOpt`; no second directive and no encoder RTL change was needed. A build with another directive is not tried.
+
+Flow fixes found by this first end-to-end run of `-HighProfile`: the netlist read and the generic worked without a change in `build_bitstream.tcl`. The flow needed `-Image` (a tagged build had no firmware and no merge step, so a High profile image could not be
+programmed); the first `-Image` run failed in the firmware step on a path typo of the new code (fixed; the firmware and merge steps were then run by hand on the finished bitstream, `build/phase2e_hp_demo_fw.txt`). Other tooling added:
+`program.tcl` prints the host time at which the configuration finished (the reference of the timer test), `cli_test.ps1` checks the High profile line of `show encoder` and `encoder profile` for both images (default: "not present (this build has no High profile seam)";
+demo: "present, licensed, time left ..., tools none (hp_caps 0), profile baseline, ... forced IDR pictures", `encoder profile high` refused), `stream_test.ps1` gains `-FilePrefix`, `-PollSeconds`, `-ForcedIdr` and logs the host time of the stream start,
+`stream_check.py ts` gains `--forced-idr N` and the line `FIRST_SECOND_MAX_AU`, and `hp_expiry_test.ps1` runs the whole license test.
+
+Board (JTAG, COM3, lease 192.168.68.79, PC on Wi-Fi 192.168.68.84; logs in `build/`):
+
+| Step | Result | Log |
+|---|---|---|
+| `phase1_gate` (demo image) | `PHASE1_GATE: PASS 19/19` | `phase2e_hp_phase1_gate.txt` |
+| `cli_test` (demo image) | `CLI_TEST: PASS 83/83` (the default image: 83/83 as well) | `phase2e_hp_cli_test.txt`, `phase2e_default_cli_test.txt` |
+| right after configuration | present, licensed, time left 29 min 59 s read 1.1 s after configuration; `encoder profile high` refused ("the High profile module offers no tool yet (hp_caps is 0)") | `phase2e_hp_expiry_pre.txt` |
+
+License test (`hp_expiry_test.ps1`; configured at 17:27:57.002 host time, `phase2e_hp_expiry_run_part1.txt`, `phase2e_hp_expiry_run_part2.txt`, transcripts `phase2e_hp_expiry_stream.txt`, `phase2e_hp_expiry_1080p30_ts.txt`; `HP_EXPIRY_TEST: PASS`):
+1080p30, static bars, QP 28, GOP 30, `-CcTolPct 0.01`, one capture of 1,980 s that starts 18.1 s after configuration and crosses the license end; `STREAM_TEST: PASS 11/11`.
+
+| Gate | Value |
+|---|---|
+| expiry time | the forced IDR picture, the first picture started after the license ended, is at 1,799.75 s after configuration (30 min = 1,800 s, difference -0.25 s; PTS 1,780.700 s plus the 29 access units cut at the head of the capture, plus the host time of the stream start command) |
+| time left counts down to 0 | a first, separate run that polled `show encoder` every 180 s: ten reads of the licensed state each give an expiry 1,799.66 to 1,800.52 s after configuration (read time plus time left); the last read, 3 s before the end, reads "0 min 3 s", the next, 5 s later, "license ended" (`build/phase2e_run1_polled/`) |
+| after the end | `show encoder`: "present, license ended, time left 0 min 0 s, tools none (hp_caps 0), profile baseline, 1 forced IDR pictures" |
+| forced IDR picture | exactly 1 IDR picture off the GOP 30 cadence (access unit 53,420, 21 pictures after the previous IDR picture, then the cadence continues from it), NAL types 5, 7 (SPS), 8 (PPS), 9; `random_access` and `nal_types` pass over all 59,372 access units |
+| board | 59,404 pictures sent, 0 dropped, 0 UDP drops, 0 errors; TS-mux load 0.6 %; 489 and 489 clocks per macroblock |
+| transport and decode | 1 access unit lost on the Wi-Fi leg (3 continuity errors in 267,218 packets, within the 0.01 % limit; the board counted 0 drops), the first IDR picture of the capture lost at the head (HEADTRIM cut 29 access units); FFmpeg decodes the whole capture with 0 error lines; PSNR of 3,959 decoded pictures (every 15th) at least 51.14 dB; ffprobe: h264 Constrained Baseline 1920x1080 |
+| `stream stop` then `stream h264` again | still "license ended" |
+| `reload` (firmware restart) | still "license ended" (the forced IDR count restarts at 0 in the new firmware; the status stays) |
+| reprogramming the FPGA | "present, licensed, time left 29 min 59 s": the license is back |
+
+Finding (polling cost): every `show encoder` read during a capture makes the firmware drop 2 to 3 pictures (the UART output of the command blocks the main loop for about 100 ms; the poll log of the first run: 185 pictures dropped by 77 reads, each followed by an IDR picture), so the
+license test does not poll the CLI during the capture and takes the expiry time from the stream itself. The same effect is visible in any long run that reads the CLI.
+
+### 6.16 Start QP of the rate control (11-11-2026)
+
+Change (firmware only, no RTL change, default image): with constant bit rate on, the first picture after a stream start, a mode change or a target change is coded at the start QP `qp_max - 3` (48 with the default range 12..51); the controller then
+descends by its normal step (at most 2 per picture) while the buffer shows room. The bits-per-pixel start rule of Phase 2d is removed (`rtlnet_ratectl.md` section 2.2). Constant QP mode is unchanged. The firmware is rebuilt with `microblaze/firmware/build.ps1`
+and merged into the default image (`merge_elf.ps1`), programmed over JTAG (`phase2e_default_program.txt`).
+
+Host (`microblaze/firmware/build/ratectl_test.log`): `RATECTL_TEST: PASS (15 gates, 0 failed)`, the 11 gates of Phase 2d unchanged and four new ones: the first picture is at QP 48 in every start-up run; no picture of the first second of
+1080p30 pattern `all` (8,000 kb/s GOP 30, 10,000 kb/s GOP 1) is above 62,500 B (the 15 Mb/s the output path sustains at 1080p30, section 6.14, divided by 30 pictures per second; the largest is 49,074 B at 10,000 kb/s GOP 1);
+the second second of a hard source (the measured sizes of `all`) and of an easy source (`box`-like: IDR 130 to 305 kbit, P 250 bit) are within +-10 % of the target with the QP at 2 s within 4 of the steady state (worst 1.94 %, easy source: QP 30 at 2 s against 26.96 steady);
+the start QP follows the range (12..40 gives 37, 40..42 gives 40). The firmware host demo passes (`menu_demo checks=462`, `TEST PASS`). The easy source of the host model is optimistic: on the board `box` needs about 6 s (below).
+
+Board (default image, `phase2e_default_cli_test.txt`: `CLI_TEST: PASS 83/83`; runs of `stream_test.ps1 -Seconds 60 -Jm -CcTolPct 0.01 -FilePrefix phase2e_<run>` as in 6.14, logs `phase2e_stream_<run>.txt`, `phase2e_<run>_*`). The "before" column is section 6.14.
+"First second" is the largest access unit of the first 30 pictures of the capture (the first IDR picture) and, for the rows where 6.14 did not record it, the bits of the first second from the board history.
+
+| Run | Target | Mean (PC) | Worst 1 s (PC) | Worst 10 s (PC) | QP min / avg / max | Dropped | Largest picture, first second | Result |
+|---|---|---|---|---|---|---|---|---|
+| rc1 1080p `all` 4, GOP 30, before | 8,000 kb/s | 7,994 | 4.19 % | 0.67 % | 32 / 48.7 / 51 | 1 | 100 kB or more (9.55 Mbit in the first second) | FAIL |
+| rc1 after | 8,000 kb/s | 8,000.1 | 0.67 % | 0.07 % | 48 / 48.66 / 49 | 0 | 41,294 B | PASS 17/17 |
+| rc6 1080p `all` 4, GOP 1, before | 10,000 kb/s | 9,995 | 2.77 % | 0.43 % | 30 / 47.9 / 51 | 1 | 11.28 Mbit in the first second | FAIL |
+| rc6 after | 10,000 kb/s | 10,000.1 | 0.44 % | 0.04 % | 47 / 47.87 / 48 | 0 | 45,829 B | PASS 17/17 |
+| rc3 720p `all` 4, GOP 30, before | 12,000 kb/s | 11,996 | 2.64 % | 0.37 % | 21 / 37.4 / 40 | 0 | 13.29 Mbit in the first second | PASS |
+| rc3 after | 12,000 kb/s | 12,004.3 | 1.70 % | 0.30 % | 36 / 37.43 / 48 | 0 | 51,972 B | PASS 17/17 |
+| rc2 1080p `box` 24, GOP 30, before | 160 kb/s | 162.8 | 16.25 % | 4.34 % | 20 / 30.7 / 51 | 0 | 8,357 B | FAIL (42 overflows, 27 underflows) |
+| rc2 after | 160 kb/s | 163.6 | 19.41 % | 4.53 % | 20 / 29.73 / 51 | 0 | 8,352 B | FAIL (49 overflows, 17 underflows) |
+| rc5 720p `scroll` -7, GOP 30, before | 330 kb/s | 328 | 15.76 % (1,248 windows waived) | 0.57 % | 44 / 50.4 / 51 | 0 | 3,864 B | FAIL |
+| rc5 after | 330 kb/s | 341.4 (board 325) | 18.43 % (1,338 windows waived) | no window | 41 / 50.27 / 51 | 0 | 3,905 B | FAIL (44 overflows, all at QP 51) |
+| soak, 10 min, 1080p `all` 4, GOP 30 (the one-hour soak of 6.14 is not rerun) | 8,000 kb/s | 8,000.0 | 0.72 % | 0.09 % | 47 / 48.68 / 49 | 0 | 40,943 B | PASS 19/19, 0 dropped pictures, 0 overflows |
+
+The first-second sizes of rc1, rc6 and rc3 are well below the 62,500 B limit at 1080p now (rc3 is 720p, whose output path carries more); the picture the board dropped in the first second of rc1 and rc6 is gone, and so are the three overflows below QP max of rc1.
+rc1, rc6 and rc3 and the soak pass every gate, including FFmpeg and JM decode (JM decodes every access unit and is identical to FFmpeg in rc1, rc6, rc3 and rc2; in the soak the JM output is not compared). The QP step between pictures is at most 2 in all runs (at most 1 in rc1, rc6 and the soak). QP and rate of the three patterns
+follow the sweep of 6.14: the average QP of rc1 and of the soak equals the hour-long value of 6.14 (48.68).
+
+`box` 160 kb/s: the start-up is not better. The first second is coded at QP 45 on average (QP 48 before), the second at 45.8 and 38.3, the third second is 128.9 kb/s (-19.4 %; before -16 %), and the rate is within +-10 % from the fourth second on; the QP reaches 28 to 35
+after about 6 s, as before. The size model, not the step limit of 2, sets the pace there (the P pictures are 31 B and carry no information about the IDR size at a lower QP). The 1 s gate fails on that third second.
+`scroll` 330 kb/s: the QP pins at 51 for most of the run as before (44 overflows, all at QP max; 14.7 % worst second of the board history). Neither case is tuned further.
+Proposed, not done: after the first IDR picture seeds `K_i`, derive `K_p` from it (`K_i - log2 6`) instead of from the bits-per-picture guess, and let the QP step reach 4 during the first two seconds; both need a host model of `box` that matches the board (the table of the host gate is optimistic).
+
 ## 7. Network integration (done 10-22-2026) and what remains
 
 Integrated: `u_mac`, `u_mdio`, `u_protocol` (every leaf, the CPU network path and its classifier), `u_echo` under
@@ -1055,3 +1143,4 @@ Open:
 | 11-09-2026 | Phase 0 stage 2: `C_PC_WIDTH` 32, `build.ps1 -Tag` variant builds, `jtag_load_elf` with calibration wait, download check and `-Image`, DDR3 image (`build.ps1 -Ddr`); CPU-only counts `fifo 5 axil_cdc 1 gray 0` built and passing; results and the open arbiter finding in section 6.9 |
 | 11-09-2026 | Phase 1 (section 6.10): video cores `u_csi2`, `u_s2mm`, `u_fb` on decoder slaves 7 to 9, arbiter with two masters, CDC expectation `axil_cdc 9` (network) and `4` (CPU-only), firmware video commands and the Phase 1 gate |
 | 11-10-2026 | Wide cache bus (512-bit cache buses, 32 KiB caches, AXI BRAM 64 KiB): build and board results in section 6.12 |
+| 11-11-2026 | Section 6.15: High profile demo netlist image (`build.ps1 -HighProfile demo -Tag hp_demo -Image`), license timer test; section 6.16: start QP of the rate control (board before and after) |
