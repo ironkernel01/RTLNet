@@ -51,6 +51,8 @@ Usage:
   powershell -NoProfile -ExecutionPolicy Bypass -File boards/nexys_video/scripts/stream_test.ps1 [-Mode both] [-Seconds 60]
     [-Port COM3] [-UdpPort 5004] [-HostIp <PC address>] [-Qp 28] [-Gop 30] [-Pattern all -Speed 4] [-Bitrate 2000 [-BufferMs 500]] [-Tag <name>] [-SkipVlc] [-NoBoard] [-InputTs <file> -Width 1280 -Height 720]
 Revision: 11-11-2026
+  * 11-12-2026: -Transform8x8 on|off ("encoder transform8x8" before the stream starts; the full High profile image with the 8x8 transform) and -SwitchTransform8x8
+    (the capture starts with the 8x8 transform on, "encoder transform8x8 off" is sent one third into the capture and "on" at two thirds; use -ForcedIdr 2 and -Profile high).
   * 11-11-2026: -PollSeconds (show encoder read during the capture).
   * 11-11-2026: -FilePrefix (file prefix of the logs, for example phase2e_rc1).
   * 11-09-2026: initial version.
@@ -94,7 +96,9 @@ param(
     [switch]$PollStream,
     [int]$ForcedIdr = -1,
     [ValidateSet('', 'baseline', 'high')][string]$Profile = '',
-    [switch]$SwitchProfile
+    [switch]$SwitchProfile,
+    [ValidateSet('', 'on', 'off')][string]$Transform8x8 = '',
+    [switch]$SwitchTransform8x8
 )
 $ErrorActionPreference = 'Stop'
 $Repo  = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..')).Path
@@ -434,6 +438,11 @@ try {
             $pfr = Invoke-Cli $sp "encoder profile $pfWanted"
             Add-Result "$m encoder profile $pfWanted" ($pfr -match "Profile $pfWanted") ($pfr.Trim() -replace '\s+', ' ')
         }
+        $t8Wanted = $(if ($SwitchTransform8x8) { 'on' } else { $Transform8x8 })
+        if ($t8Wanted) {
+            $t8r = Invoke-Cli $sp "encoder transform8x8 $t8Wanted"
+            Add-Result "$m encoder transform8x8 $t8Wanted" ($t8r -match "Transform8x8 $t8Wanted") ($t8r.Trim() -replace '\s+', ' ')
+        }
         $tA = [int64]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()
         $r = Invoke-Cli $sp "stream h264 $HostIp $UdpPort"
         $tB = [int64]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()
@@ -473,6 +482,15 @@ try {
             $pfr = Invoke-Cli $sp 'encoder profile baseline'
             Add-Result "$m profile switch to baseline" ($pfr -match 'Profile baseline') ($pfr.Trim() -replace '\s+', ' ')
         }
+        if ($SwitchTransform8x8) {
+            # 8x8 transform switch in mid-stream: off at one third, on at two thirds of the capture.
+            [void]$capObj.Join([int]($Seconds * 1000 / 3))
+            $t8r = Invoke-Cli $sp 'encoder transform8x8 off'
+            Add-Result "$m transform8x8 switch to off" ($t8r -match 'Transform8x8 off') ($t8r.Trim() -replace '\s+', ' ')
+            [void]$capObj.Join([int]($Seconds * 1000 / 3))
+            $t8r = Invoke-Cli $sp 'encoder transform8x8 on'
+            Add-Result "$m transform8x8 switch to on" ($t8r -match 'Transform8x8 on') ($t8r.Trim() -replace '\s+', ' ')
+        }
         if (-not $capObj.Join(($Seconds + 40) * 1000)) { $capObj.Abort(); [void]$capObj.Join(5000) }
         $cap = [pscustomobject]@{ Datagrams = $capObj.Datagrams; Bytes = $capObj.Bytes; Seconds = $capObj.Seconds; Odd = $capObj.Odd }
         $rxErr = (Get-UdpRxErrors) - $rx0
@@ -483,6 +501,7 @@ try {
         if ($sd -notmatch 'Master 3') { Start-Sleep -Milliseconds 700; [void]$sp.ReadExisting(); $sd = Invoke-Cli $sp 'show ddr' }   # the previous command's late prompt can end the read early
         [void](Invoke-Cli $sp 'stream stop')
         if ($Profile -or $SwitchProfile) { [void](Invoke-Cli $sp 'encoder profile baseline') }   # leave the board in the default profile
+        if ($Transform8x8 -or $SwitchTransform8x8) { [void](Invoke-Cli $sp 'encoder transform8x8 on') }   # and with the default transform request
         $histN = [Math]::Min(3600, $Seconds + 15)
         $sh = Invoke-Cli $sp "show encoder history $histN" 120000
         Set-Content -LiteralPath (Join-Path $Build "${Prefix}_${m}_history.txt") -Value ($sh -replace "`r", '') -Encoding ascii

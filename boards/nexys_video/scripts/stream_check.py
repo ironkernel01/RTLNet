@@ -129,9 +129,11 @@ _CABAC = False   # entropy_coding_mode_flag of the last PPS seen (a stream that 
 
 
 def sps_profile(buf):
-    """(profile_idc, constraint flags byte, entropy_coding_mode_flag) from the SPS (NAL 7) and PPS (NAL 8) of an access unit, or None without an SPS."""
+    """(profile_idc, constraint flags byte, entropy_coding_mode_flag, transform_8x8_mode_flag) from the SPS (NAL 7) and PPS (NAL 8) of an access unit, or None without an SPS.
+    transform_8x8_mode_flag is 0 when the PPS has no extension fields (the PPS of Constrained Baseline and of High profile with the 4x4 transform)."""
     prof = None
     cabac = None
+    t8 = None
     i = buf.find(b"\x00\x00\x01")
     while i >= 0 and i + 3 < len(buf):
         t = buf[i + 3] & 0x1F
@@ -140,16 +142,35 @@ def sps_profile(buf):
                 d = unescape(bytes(buf[i + 4: i + 8]))
                 prof = (d[0], d[1])
             elif t == 8:
-                r = BitReader(unescape(bytes(buf[i + 4: i + 12])))
+                j = buf.find(b"\x00\x00\x01", i + 3)
+                pps = unescape(bytes(buf[i + 4: (j if j >= 0 else len(buf))])).rstrip(b"\x00")
+                r = BitReader(pps)
                 r.ue()
                 r.ue()
                 cabac = r.u(1)
+                r.u(1)                       # bottom_field_pic_order_in_frame_present_flag
+                if r.ue() != 0:              # num_slice_groups_minus1
+                    raise ValueError("slice groups")
+                r.ue()
+                r.ue()                       # num_ref_idx_l0 / l1_default_active_minus1
+                r.u(1)
+                r.u(2)                       # weighted_pred_flag, weighted_bipred_idc
+                r.se()
+                r.se()
+                r.se()                       # pic_init_qp, pic_init_qs, chroma_qp_index_offset
+                r.u(1)
+                r.u(1)
+                r.u(1)                       # deblocking_filter_control_present, constrained_intra_pred, redundant_pic_cnt_present
+                stop = len(pps) * 8 - 1
+                while not (pps[stop >> 3] >> (7 - (stop & 7))) & 1:
+                    stop -= 1                # the rbsp_stop_one_bit
+                t8 = r.u(1) if r.pos < stop else 0
         except (ValueError, IndexError):
             pass
         i = buf.find(b"\x00\x00\x01", i + 3)
     if prof is None:
         return None
-    return (prof[0], prof[1], cabac)
+    return (prof[0], prof[1], cabac, t8)
 
 
 def slice_qp(buf, log2_fn=4):
@@ -220,7 +241,7 @@ def check_ts(path, step, fps, gop=0, target_kbps=0.0, skip_s=2.0, gate10=False, 
     au_bytes = []        # elementary stream bytes of each access unit
     au_nals = []         # NAL unit types of each access unit
     au_qps = []          # slice QP of each access unit
-    au_prof = []         # (profile_idc, constraint flags, entropy_coding_mode_flag) of the SPS and PPS of each access unit, or None
+    au_prof = []         # (profile_idc, constraint flags, entropy_coding_mode_flag, transform_8x8_mode_flag) of the SPS and PPS of each access unit, or None
     cur = None           # bytearray of the access unit in progress
     pat_ok = pmt_ok = 0
     video_pid = None
@@ -350,8 +371,8 @@ def check_ts(path, step, fps, gop=0, target_kbps=0.0, skip_s=2.0, gate10=False, 
             prev = None
             for ai, pr in enumerate(au_prof):
                 if pr is not None and pr != prev:
-                    print("PROFILE_RUN access_unit=%d pts_s=%.3f profile_idc=%d constraint_set1=%d entropy_coding_mode=%s" %
-                          (ai, (pts_list[ai] - pts_list[0]) / 90000.0, pr[0], (pr[1] >> 6) & 1, pr[2]))
+                    print("PROFILE_RUN access_unit=%d pts_s=%.3f profile_idc=%d constraint_set1=%d entropy_coding_mode=%s transform_8x8_mode=%s" %
+                          (ai, (pts_list[ai] - pts_list[0]) / 90000.0, pr[0], (pr[1] >> 6) & 1, pr[2], pr[3]))
                     prev = pr
             c.report("random_access", len(ra_flags) > 0 and ra_flags[0] and len(forced_at) == forced_idr,
                      "%d of %d access units flag random access (IDR), first access unit %s, %d IDR pictures off the GOP %d cadence (expected %d)" %
