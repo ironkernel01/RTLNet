@@ -74,6 +74,7 @@ int         host_model_video_fw_holds(void);
 void        host_model_h264_set(int on, int seam);
 void        host_model_h264_hp(uint32_t present, uint32_t licensed, uint32_t caps, uint32_t seconds);
 uint32_t    host_model_h264_hp_ctrl(void);
+uint32_t    host_model_h264_hp_ctrl_t8(void);
 void        host_model_txo_set(int present, uint32_t caps);
 void        host_model_txo_idle_after(uint32_t reads);
 void        host_model_txo_stuck(uint32_t mask);

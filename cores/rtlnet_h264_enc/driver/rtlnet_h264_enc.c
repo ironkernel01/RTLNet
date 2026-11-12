@@ -178,7 +178,7 @@ static uint32_t pick_level(uint32_t mbs_per_frame, uint32_t fps, uint32_t mb_w, 
 }
 
 /*
- * rtlnet_h264_enc_write_sps_pps_profile -- see the header
+ * rtlnet_h264_enc_write_sps_pps_tools -- see the header
  * Steps:
  *   1. Validate the request; pick the level.
  *   2. Build the SPS rbsp field by field in the order of clause 7.3.2.1.1 and wrap it as a NAL unit: Constrained Baseline, or High
@@ -186,7 +186,7 @@ static uint32_t pick_level(uint32_t mbs_per_frame, uint32_t fps, uint32_t mb_w, 
  *   3. Build the PPS rbsp (clause 7.3.2.2) and wrap it: entropy_coding_mode_flag 0 (CAVLC) or, for High, 1 (CABAC).
  * Returns: 0 or -1.
  */
-int rtlnet_h264_enc_write_sps_pps_profile(uint8_t *buf, size_t cap, const rtlnet_h264_enc_sps_cfg_t *cfg, int high, size_t *out_len)
+int rtlnet_h264_enc_write_sps_pps_tools(uint8_t *buf, size_t cap, const rtlnet_h264_enc_sps_cfg_t *cfg, int high, int t8, size_t *out_len)
 {
     bitw_t   w;
     uint32_t mb_w, mb_h, level, i;
@@ -277,6 +277,11 @@ int rtlnet_h264_enc_write_sps_pps_profile(uint8_t *buf, size_t cap, const rtlnet
     bitw_put(&w, 1u, 1u);                           /* deblocking_filter_control_present_flag */
     bitw_put(&w, 0u, 1u);                           /* constrained_intra_pred_flag */
     bitw_put(&w, 0u, 1u);                           /* redundant_pic_cnt_present_flag */
+    if ((high != 0) && (t8 != 0)) {
+        bitw_put(&w, 1u, 1u);                       /* transform_8x8_mode_flag */
+        bitw_put(&w, 0u, 1u);                       /* pic_scaling_matrix_present_flag */
+        bitw_ue(&w, 0u);                            /* second_chroma_qp_index_offset as se(0) */
+    }
     bitw_trailing(&w);
     if (w.overflow != 0) {
         return -1;
@@ -287,6 +292,14 @@ int rtlnet_h264_enc_write_sps_pps_profile(uint8_t *buf, size_t cap, const rtlnet
     }
     *out_len = n_sps + n_pps;
     return 0;
+}
+
+/*
+ * rtlnet_h264_enc_write_sps_pps_profile -- see the header (the tools form with the 4x4 transform)
+ */
+int rtlnet_h264_enc_write_sps_pps_profile(uint8_t *buf, size_t cap, const rtlnet_h264_enc_sps_cfg_t *cfg, int high, size_t *out_len)
+{
+    return rtlnet_h264_enc_write_sps_pps_tools(buf, cap, cfg, high, 0, out_len);
 }
 
 /*
@@ -654,6 +667,7 @@ static void hp_decode(uint32_t v, rtlnet_h264_enc_hp_t *out)
     out->licensed     = ((v & RTLNET_H264_HP_STATUS_LICENSED) != 0u) ? 1u : 0u;
     out->active       = ((v & RTLNET_H264_HP_STATUS_ACTIVE) != 0u) ? 1u : 0u;
     out->enabled      = ((v & RTLNET_H264_HP_STATUS_ENABLED) != 0u) ? 1u : 0u;
+    out->t8_enabled   = ((v & RTLNET_H264_HP_STATUS_T8ENABLED) != 0u) ? 1u : 0u;
     out->profile_chg  = ((v & RTLNET_H264_HP_STATUS_CHG) != 0u) ? 1u : 0u;
     out->caps         = (v >> RTLNET_H264_HP_STATUS_CAPS_SHIFT) & RTLNET_H264_HP_STATUS_CAPS_MASK;
     out->seconds_left = v >> RTLNET_H264_HP_STATUS_SEC_SHIFT;
@@ -694,7 +708,7 @@ int rtlnet_h264_enc_set_profile(uintptr_t base, int high)
         return high ? RTLNET_H264_HP_ERR_NO_SEAM : 0;
     }
     if (!high) {
-        rtlnet_reg_write32(base, RTLNET_H264_REG_HP_CTRL, 0u);
+        rtlnet_reg_write32(base, RTLNET_H264_REG_HP_CTRL, rtlnet_reg_read32(base, RTLNET_H264_REG_HP_CTRL) & 2u);   /* hp_enable 0, t8 request kept */
         return 0;
     }
     hp_decode(rtlnet_reg_read32(base, RTLNET_H264_REG_HP_STATUS), &hp);
@@ -707,7 +721,33 @@ int rtlnet_h264_enc_set_profile(uintptr_t base, int high)
     if (hp.licensed == 0u) {
         return RTLNET_H264_HP_ERR_NOT_LICENSED;
     }
-    rtlnet_reg_write32(base, RTLNET_H264_REG_HP_CTRL, 1u);
+    rtlnet_reg_write32(base, RTLNET_H264_REG_HP_CTRL, 1u | (rtlnet_reg_read32(base, RTLNET_H264_REG_HP_CTRL) & 2u));
+    return 0;
+}
+
+/*
+ * rtlnet_h264_enc_set_transform8x8 -- see the header
+ */
+int rtlnet_h264_enc_set_transform8x8(uintptr_t base, int on)
+{
+    rtlnet_h264_enc_hp_t hp;
+    uint32_t             ctrl;
+    if (!hp_seam_present(base)) {
+        return on ? RTLNET_H264_HP_ERR_NO_SEAM : 0;
+    }
+    ctrl = rtlnet_reg_read32(base, RTLNET_H264_REG_HP_CTRL);
+    if (!on) {
+        rtlnet_reg_write32(base, RTLNET_H264_REG_HP_CTRL, ctrl & 1u);
+        return 0;
+    }
+    hp_decode(rtlnet_reg_read32(base, RTLNET_H264_REG_HP_STATUS), &hp);
+    if (hp.present == 0u) {
+        return RTLNET_H264_HP_ERR_NO_MODULE;
+    }
+    if ((hp.caps & RTLNET_H264_HP_CAP_TRANSFORM8X8) == 0u) {
+        return RTLNET_H264_HP_ERR_NO_T8;
+    }
+    rtlnet_reg_write32(base, RTLNET_H264_REG_HP_CTRL, (ctrl & 1u) | 2u);
     return 0;
 }
 

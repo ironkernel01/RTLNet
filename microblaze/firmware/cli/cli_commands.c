@@ -54,6 +54,7 @@
  *  11-09-2026  MenuBuilder AI / Steve Spano    Video (Phase 1): show camera, show framebuffer, camera mode|source|rate, framebuffer crc
  *  11-10-2026  MenuBuilder AI / Steve Spano    H.264 P pictures (Phase 2c): encoder gop, GOP and IDR/P counts in show stream and show encoder; show ddr cache line
  *  11-11-2026  MenuBuilder AI / Steve Spano    High profile seam: encoder profile baseline|high, High profile line in show encoder
+ *  11-12-2026  MenuBuilder AI / Steve Spano    8x8 transform (High profile stage 3): encoder transform8x8 on|off, Transform 8x8 line in show encoder
  * ===========================================================================
  */
 #include "cli_commands.h"
@@ -3723,6 +3724,69 @@ int cli_encoder_profile(const MenuCommandContext *ctx)
 }
 
 /**
+ * @brief ENCODER TRANSFORM8X8 [STATE]: request the 8x8 transform of inter macroblocks (on, the default) or the 4x4 transform (off).
+ * @param ctx argv[0] = on or off.
+ * @return 0, or -1 for a bad word, an absent core or a refused request (named reason). Takes effect at the next picture while the profile is high:
+ *         that picture is an IDR picture with new parameter sets.
+ */
+int cli_encoder_transform8x8(const MenuCommandContext *ctx)
+{
+    int on;
+    int rc;
+    if (cli_word_is(ctx->argv[0], "on")) {
+        on = 1;
+    } else if (cli_word_is(ctx->argv[0], "off")) {
+        on = 0;
+    } else {
+        return cli_bad_value("state (on or off)", ctx->argv[0]);
+    }
+    if (!cli_core_check(&g_core_h264)) {
+        return -1;
+    }
+    rc = rtlnet_venc_set_transform8x8(on);
+    if (rc == RTLNET_H264_HP_ERR_NO_SEAM) {
+        fmt_printf("%% Transform8x8 on refused: this build has no High profile seam (CAPS HP_SEAM 0)\n");
+        return -1;
+    }
+    if (rc == RTLNET_H264_HP_ERR_NO_MODULE) {
+        fmt_printf("%% Transform8x8 on refused: the High profile netlist is not in this build (simulation stub)\n");
+        return -1;
+    }
+    if (rc == RTLNET_H264_HP_ERR_NO_T8) {
+        fmt_printf("%% Transform8x8 on refused: the High profile module offers no 8x8 transform (hp_caps bit 1 is 0)\n");
+        return -1;
+    }
+    if (rc != 0) {
+        fmt_printf("%% Transform8x8 change failed (code %d)\n", rc);
+        return -1;
+    }
+    if (on) {
+        fmt_printf("Transform8x8 on, effective at the next picture in the High profile (an IDR picture with new parameter sets starts it)\n");
+    } else {
+        fmt_printf("Transform8x8 off (4x4 transform), effective at the next picture\n");
+    }
+    return 0;
+}
+
+/**
+ * @brief The Transform 8x8 line of SHOW ENCODER.
+ * @return None.
+ */
+static void cli_print_transform8x8(void)
+{
+    rtlnet_h264_enc_hp_t hp;
+    if ((rtlnet_h264_enc_hp_status(RTLNET_PLAT_H264_BASE, &hp) != 0) || (hp.present == 0u)) {
+        return;
+    }
+    if ((hp.caps & RTLNET_H264_HP_CAP_TRANSFORM8X8) == 0u) {
+        fmt_printf("  Transform 8x8   : not offered (hp_caps bit 1 is 0)\n");
+        return;
+    }
+    fmt_printf("  Transform 8x8   : %s, %s\n", rtlnet_venc_transform8x8_wanted() ? "on" : "off",
+               rtlnet_venc_transform8x8_in_force() ? "in force (inter macroblocks use the 8x8 transform)" : "not in force (4x4 transform)");
+}
+
+/**
  * @brief The High profile line of SHOW ENCODER.
  * @param forced IDR pictures the encoder forced because the license or the profile changed.
  * @return None.
@@ -3984,6 +4048,7 @@ int cli_show_encoder(const MenuCommandContext *ctx)
                (unsigned)s.gop, s.last_idr ? "IDR" : "P");
     cli_print_ratectl();
     cli_print_high_profile(s.hp_forced_idr);
+    cli_print_transform8x8();
     fmt_printf("  Pictures        : %u coded (PIC_COUNT), %u slices\n",
                (unsigned)board_debug_read32(RTLNET_PLAT_H264_BASE + RTLNET_H264_REG_PIC_COUNT),
                (unsigned)board_debug_read32(RTLNET_PLAT_H264_BASE + RTLNET_H264_REG_SLICE_COUNT));

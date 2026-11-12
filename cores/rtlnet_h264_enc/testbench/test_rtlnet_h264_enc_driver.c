@@ -480,6 +480,69 @@ int main(void)
         check(rtlnet_h264_enc_hp_clear_change(TEST_BASE) == 0, "clear_change with the flag clear");
     }
 
+    /* Stage 3: the 8x8 transform request (HP_CTRL bit 1), its named errors, the profile functions keeping the bit, the PPS extension. */
+    {
+        rtlnet_h264_enc_hp_t hp;
+        rtlnet_h264_enc_sps_cfg_t sps3;
+        uint8_t  buf4[RTLNET_H264_SPS_PPS_MAX_BYTES];
+        uint8_t  buf8[RTLNET_H264_SPS_PPS_MAX_BYTES];
+        size_t   len4 = 0u;
+        size_t   len8 = 0u;
+        size_t   k;
+
+        g_reg[RTLNET_REG_CAPS / 4u] = MODEL_CAPS;
+        check(rtlnet_h264_enc_set_transform8x8(TEST_BASE, 1) == RTLNET_H264_HP_ERR_NO_SEAM, "transform8x8 on without the seam refused");
+        check(rtlnet_h264_enc_set_transform8x8(TEST_BASE, 0) == 0, "transform8x8 off without the seam is a no-op");
+        g_reg[RTLNET_REG_CAPS / 4u] = MODEL_CAPS | RTLNET_H264_CAPS_HP_SEAM;
+        g_reg[RTLNET_H264_REG_HP_STATUS / 4u] = 0u;
+        check(rtlnet_h264_enc_set_transform8x8(TEST_BASE, 1) == RTLNET_H264_HP_ERR_NO_MODULE, "transform8x8 on with the stub refused");
+        g_reg[RTLNET_H264_REG_HP_STATUS / 4u] = RTLNET_H264_HP_STATUS_PRESENT | RTLNET_H264_HP_STATUS_LICENSED | (RTLNET_H264_HP_CAP_CABAC << 8);
+        g_reg[RTLNET_H264_REG_HP_CTRL / 4u] = 0xA5u;
+        check(rtlnet_h264_enc_set_transform8x8(TEST_BASE, 1) == RTLNET_H264_HP_ERR_NO_T8, "transform8x8 on refused: hp_caps bit 1 is 0");
+        check(g_reg[RTLNET_H264_REG_HP_CTRL / 4u] == 0xA5u, "a refused transform8x8 request writes nothing");
+        g_reg[RTLNET_H264_REG_HP_STATUS / 4u] = RTLNET_H264_HP_STATUS_PRESENT | RTLNET_H264_HP_STATUS_LICENSED |
+                                                ((RTLNET_H264_HP_CAP_CABAC | RTLNET_H264_HP_CAP_TRANSFORM8X8) << 8) | RTLNET_H264_HP_STATUS_T8ENABLED;
+        check((rtlnet_h264_enc_hp_status(TEST_BASE, &hp) == 0) && (hp.caps == 3u) && (hp.t8_enabled == 1u), "hp_status decode, CABAC and 8x8, t8 enabled");
+        g_reg[RTLNET_H264_REG_HP_CTRL / 4u] = 0u;
+        check(rtlnet_h264_enc_set_transform8x8(TEST_BASE, 1) == 0, "transform8x8 on accepted with hp_caps bit 1");
+        check(g_reg[RTLNET_H264_REG_HP_CTRL / 4u] == 2u, "HP_CTRL bit 1 written, hp_enable kept clear");
+        check(rtlnet_h264_enc_set_profile(TEST_BASE, 1) == 0 && g_reg[RTLNET_H264_REG_HP_CTRL / 4u] == 3u, "profile high keeps the transform8x8 request");
+        check(rtlnet_h264_enc_set_transform8x8(TEST_BASE, 0) == 0 && g_reg[RTLNET_H264_REG_HP_CTRL / 4u] == 1u, "transform8x8 off keeps hp_enable");
+        check(rtlnet_h264_enc_set_transform8x8(TEST_BASE, 1) == 0 && g_reg[RTLNET_H264_REG_HP_CTRL / 4u] == 3u, "transform8x8 on keeps hp_enable");
+        check(rtlnet_h264_enc_set_profile(TEST_BASE, 0) == 0 && g_reg[RTLNET_H264_REG_HP_CTRL / 4u] == 2u, "profile baseline keeps the transform8x8 request");
+        /* The parameter sets with the 8x8 transform: the same SPS, the PPS gains transform_8x8_mode_flag 1, pic_scaling_matrix_present_flag 0,
+         * second_chroma_qp_index_offset se(0): three bits, so the PPS is as long or one byte longer. */
+        sps3.width = 176u; sps3.height = 144u; sps3.display_width = 176u; sps3.display_height = 144u; sps3.fps = 30u; sps3.log2_max_frame_num = 4u;
+        check(rtlnet_h264_enc_write_sps_pps_tools(buf4, sizeof(buf4), &sps3, 1, 0, &len4) == 0, "write_sps_pps_tools High, 4x4 transform");
+        check(rtlnet_h264_enc_write_sps_pps_tools(buf8, sizeof(buf8), &sps3, 1, 1, &len8) == 0, "write_sps_pps_tools High, 8x8 transform");
+        {
+            uint8_t  bufp[RTLNET_H264_SPS_PPS_MAX_BYTES];
+            size_t   lenp = 0u;
+            check((rtlnet_h264_enc_write_sps_pps_profile(bufp, sizeof(bufp), &sps3, 1, &lenp) == 0) && (lenp == len4), "write_sps_pps_profile is the 4x4 form");
+            for (k = 0u; (k < lenp) && (bufp[k] == buf4[k]); k++) { }
+            check(k == lenp, "write_sps_pps_profile bytes equal tools(t8 0)");
+        }
+        check((len8 >= len4) && (len8 <= len4 + 1u), "PPS with the extension is at most one byte longer");
+        {
+            size_t i;
+            size_t sps_end = 0u;
+            size_t d = 0u;
+            for (i = 4u; i + 4u < len4; i++) {          /* the PPS start code: the second 00 00 00 01 (or 00 00 01) */
+                if ((buf4[i] == 0u) && (buf4[i + 1u] == 0u) && ((buf4[i + 2u] == 1u) || ((buf4[i + 2u] == 0u) && (buf4[i + 3u] == 1u)))) {
+                    sps_end = i;
+                    break;
+                }
+            }
+            check(sps_end > 0u, "PPS start code found");
+            for (i = 0u; i < sps_end; i++) { if (buf4[i] != buf8[i]) { d++; } }
+            check(d == 0u, "the SPS is identical with and without the 8x8 transform");
+            check(rtlnet_h264_enc_write_sps_pps_tools(buf8, sizeof(buf8), &sps3, 0, 1, &len8) == 0, "write_sps_pps_tools Baseline ignores t8");
+            check(rtlnet_h264_enc_write_sps_pps(buf4, sizeof(buf4), &sps3, &len4) == 0 && len4 == len8, "Baseline form with t8 requested equals the plain Baseline form");
+            for (i = 0u; (i < len4) && (buf4[i] == buf8[i]); i++) { }
+            check(i == len4, "Baseline bytes equal");
+        }
+    }
+
     if (g_fails == 0) {
         printf("DRIVER TEST PASS: rtlnet_h264_enc checks=%d\n", g_checks);
         return 0;

@@ -62,11 +62,20 @@
 //       The estimate of the fallback (CHK) excludes the luma DC unit for an inter macroblock; a macroblock above the limit is
 //       coded as I_PCM like an intra one. rtlnet_h264_mvctx keeps the vectors of the neighbours (mvp for P_L0_16x16, the skip
 //       vector) and is updated at the end of every macroblock of a P picture (intra and I_PCM macroblocks count as intra).
+//   * 8x8 transform (T8 = 1, High profile seam, stage 3): when the picture's inter macroblocks use the 8x8 transform (t8_en) and the inter
+//       candidate wins, the luma residual (source minus the prediction at the vector) goes to rtlnet_h264_hp on the tf_res stream instead of
+//       through rtlnet_h264_fwdq: state S_T8S sends the 4 blocks of 8 rows (a source row and a prediction row are read per beat), PASS1 then runs
+//       the chroma blocks only. The module answers on tf_sum (once, after the 4th block: non-zero mask, size estimate terms) with the coded
+//       luma 8x8 pattern; the estimate, the I_PCM fallback and the isolated coefficient elimination use it with the chroma values. S_T8R takes
+//       the rebuilt residual back (tf_rec) and writes the luma words (prediction plus residual, clipped, zero residual when the macroblock was
+//       dropped) into the rebuilt RAM, then PASS3 rebuilds the chroma blocks; S_DRN takes and discards it when the macroblock falls back to I_PCM.
+//       o_t8sub tells stage B (and the module) that the luma residual was submitted. With T8 = 0 nothing of this exists.
 // Language: SystemVerilog-2012.
-// Revision: 11-10-2026
+// Revision: 11-12-2026
 //   * 11-09-2026: initial version; per-macroblock I_PCM fallback.
 //   * 11-10-2026: phase 2c-1: P pictures (inter candidate, skip, inter residual and rebuild, motion vector context).
 //   * 11-10-2026: phase 2c-2: the inter vector comes from the motion search (mv_in_x / mv_in_y); P_Skip at the exact skip vector.
+//   * 11-12-2026: stage 3: 8x8 transform of inter luma on the High profile seam (parameter T8).
 // Clocks: clk.
 // -----------------------------------------------------------------------------
 module rtlnet_h264_mb_enc #(
@@ -77,7 +86,8 @@ module rtlnet_h264_mb_enc #(
   parameter int    REC_AW     = 8,
   parameter int    CRAM_AW    = 8,
   parameter int    REF_AW     = 6,
-  parameter int    MV_LINE_KB = 1
+  parameter int    MV_LINE_KB = 1,
+  parameter bit    T8         = 1'b0     // 1: the 8x8 transform of inter macroblocks on the tf_* streams (HIGH_PROFILE builds)
 )(
   // Clock and synchronous active-low reset.
   input  logic                clk,
@@ -116,6 +126,22 @@ module rtlnet_h264_mb_enc #(
   output logic [3:0]          o_cbp4,
   output logic signed [15:0]  o_mvd_x,
   output logic signed [15:0]  o_mvd_y,
+
+  // 8x8 transform seam (T8 = 1; tie t8_en, tf_res_ready, tf_rec_valid, tf_rec_data, tf_sum_valid and tf_sum_data to 0 with T8 = 0).
+  // t8_en: the picture's inter macroblocks use the 8x8 transform. o_t8sub: this macroblock submitted its luma residual (valid with done).
+  // tf_res: 4 blocks x 8 beats, one row of 8 signed 9-bit residual samples per beat; tf_rec: the rebuilt residual in the same form;
+  // tf_sum: one beat per submitted macroblock: [3:0] non-zero 8x8 blocks, [19:4] level cost sum, [20] a level above 1, [21] a clamped level,
+  // [25:22] number of non-empty blocks.
+  input  logic                t8_en,
+  output logic                o_t8sub,
+  output logic                tf_res_valid,
+  input  logic                tf_res_ready,
+  output logic [71:0]         tf_res_data,
+  input  logic                tf_rec_valid,
+  output logic                tf_rec_ready,
+  input  logic [71:0]         tf_rec_data,
+  input  logic                tf_sum_valid,
+  input  logic [25:0]         tf_sum_data,
 
   // Prediction buffer read port (the motion search's prediction of this macroblock): ref_rd_data is valid the clock after ref_rd_en.
   output logic                ref_rd_en,
@@ -181,6 +207,9 @@ module rtlnet_h264_mb_enc #(
   localparam logic [4:0] S_CHK5  = 5'd17;
   localparam logic [4:0] S_MD1   = 5'd18;
   localparam logic [4:0] S_MD2   = 5'd19;
+  localparam logic [4:0] S_T8S   = 5'd20;   // 8x8 transform: send the luma residual
+  localparam logic [4:0] S_T8R   = 5'd21;   // 8x8 transform: rebuild the luma
+  localparam logic [4:0] S_DRN   = 5'd22;   // 8x8 transform: discard the rebuilt residual (I_PCM fallback)
 
   generate
     if ((2 * MAX_MB_W) > (1 << LINE_AW)) begin : g_line_small
@@ -273,6 +302,41 @@ module rtlnet_h264_mb_enc #(
   logic [31:0]        ref_s1;
   logic [31:0]        d1_ref, d2_ref, e2_ref;
   logic               fq_in_inter, fq_in_full;
+  // 8x8 transform (T8): signals of the sub-units below.
+  logic               t8_use_q;          // this macroblock sends its luma residual to the 8x8 transform (a register of g_t8, constant 0 with T8 = 0)
+  /* verilator lint_off UNUSEDSIGNAL */   // used by g_t8 only
+  logic               t8_use_clr;        // the macroblock starts: clear it
+  logic               t8_use_set;        // the inter candidate won in a picture with the 8x8 transform: set it (and o_t8sub)
+  assign t8_use_clr = (st == S_IDLE) && start;
+  assign t8_use_set = (st == S_MD2) && t8_en && (cost_in <= cost_ia);
+  /* verilator lint_on UNUSEDSIGNAL */
+  logic               t8s_done;
+  logic               t8r_done;
+  logic               drn_done;
+  logic               t8_sum_seen;
+  logic [3:0]         t8_nz4;
+  logic [15:0]        t8_cost;
+  logic               t8_big;
+  logic               t8_sat;
+  logic [3:0]         t8_nblk;
+  logic               t8_src_en;
+  logic [SRC_AW-1:0]  t8_src_addr;
+  logic               t8_ref_en;
+  logic [REF_AW-1:0]  t8_ref_addr;
+  logic               t8_wr_v;
+  logic [REC_AW-1:0]  t8_wr_addr;
+  logic [31:0]        t8_wr_data;
+  logic [3:0]         t8_wr_y;
+  logic [1:0]         t8_wr_bx;
+  // The summary's terms for the macroblock's decisions (0 when the macroblock does not use the 8x8 transform).
+  logic [15:0]        t8_cost_g;
+  logic [15:0]        t8_nb4_g;
+  logic               t8_sat_g;
+  logic               t8_big_g;
+  assign t8_cost_g = (T8 && t8_use_q) ? t8_cost : 16'd0;
+  assign t8_nb4_g  = (T8 && t8_use_q) ? {10'd0, t8_nblk, 2'b00} : 16'd0;
+  assign t8_sat_g  = T8 && t8_use_q && t8_sat;
+  assign t8_big_g  = T8 && t8_use_q && t8_big;
   logic               iq_in_full;
   logic               mv_upd;
   logic signed [13:0] mv_upd_x, mv_upd_y;
@@ -419,8 +483,8 @@ module rtlnet_h264_mb_enc #(
 
   // Reference read: the item of the issue phases (SAD, PASS1) at the same time as the source read, or the item leaving the
   // inverse transform (PASS3) of an inter macroblock.
-  assign ref_rd_en   = (iss_run && p_pic) || (sel_p3 && iq_out_v && inter_q);
-  assign ref_rd_addr = ref_base + (iss_run ? ref_word(it_plane, it_y) : ref_word(iq_out_pl, iq_out_yy));
+  assign ref_rd_en   = (iss_run && p_pic) || (sel_p3 && iq_out_v && inter_q) || (T8 && t8_ref_en);
+  assign ref_rd_addr = (T8 && t8_ref_en) ? t8_ref_addr : (ref_base + (iss_run ? ref_word(it_plane, it_y) : ref_word(iq_out_pl, iq_out_yy)));
   assign ref_s1      = ref_seg(ref_rd_data, s1_pl, s1_sg, s1_yy[0]);
 
   // Level cost estimate in bits: 0 for a zero level, else a table by the bit length of |level| (1 .. 12).
@@ -476,8 +540,8 @@ module rtlnet_h264_mb_enc #(
   // Source read: issue phases (SAD, PASS1) and the PCM copy.
   logic              pcm_rd_en;
   logic [SRC_AW-1:0] pcm_rd_addr;
-  assign src_rd_en   = iss_run || pcm_rd_en;
-  assign src_rd_addr = iss_run ? it_addr : pcm_rd_addr;
+  assign src_rd_en   = iss_run || pcm_rd_en || (T8 && t8_src_en);
+  assign src_rd_addr = iss_run ? it_addr : ((T8 && t8_src_en) ? t8_src_addr : pcm_rd_addr);
 
   assign s1_src = seg_bytes(src_rd_data, s1_b);
 
@@ -556,9 +620,9 @@ module rtlnet_h264_mb_enc #(
   // PCM copy write: phases 3..6 write quarter pcm_ph - 3 of the captured source word pcm_w.
   assign pcm_wr    = (st == S_PCM) && (pcm_ph >= 3'd3);
   assign pcm_q4    = 2'(pcm_ph - 3'd3);
-  assign reb_we    = e2_v || pcm_wr;
-  assign reb_waddr = (st == S_PCM) ? pcm_waddr : e2_waddr;
-  assign reb_wdata = (st == S_PCM) ? pcm_data[32*pcm_q4 +: 32] : rec_word;
+  assign reb_we    = e2_v || pcm_wr || (T8 && t8_wr_v);
+  assign reb_waddr = (st == S_PCM) ? pcm_waddr : ((T8 && t8_wr_v) ? t8_wr_addr : e2_waddr);
+  assign reb_wdata = (st == S_PCM) ? pcm_data[32*pcm_q4 +: 32] : ((T8 && t8_wr_v) ? t8_wr_data : rec_word);
 
   // Word index of the quarter in the rebuilt layout (and in the coefficient RAM copy read by stage B): luma 4 * y + bx,
   // Cb 64 + 2 * y + bx, Cr 80 + 2 * y + bx; the index order is the I_PCM sample order of the stream.
@@ -685,7 +749,7 @@ module rtlnet_h264_mb_enc #(
 
   assign iq_in_v     = p3_s1_v;
   assign iq_in_first = (p3_s1_r == 2'd0);
-  assign nz8_e       = drop_q ? 4'd0 : nz8;
+  assign nz8_e       = drop_q ? 4'd0 : ((T8 && t8_use_q) ? (nz8 | t8_nz4) : nz8);
   assign iq_in_lvl   = drop_q ? 48'd0 : cof_rdata;
   assign iq_in_tag   = {3'd0, p3_s1_b};
   assign iq_in_full  = inter_q && (p3_s1_b < 5'd16);
@@ -719,6 +783,201 @@ module rtlnet_h264_mb_enc #(
       endcase
     end
   end
+
+  // ---------------------------------------------------------------------------
+  // 8x8 transform sub-units (T8 = 1): residual feeder (S_T8S), summary capture, rebuild of the luma (S_T8R), discard (S_DRN)
+  // ---------------------------------------------------------------------------
+  generate
+    if (T8) begin : g_t8
+      // The decision of the macroblock (set in S_MD2, cleared at the start of the next macroblock) and the flag for stage B.
+      always_ff @(posedge clk) begin
+        if (!resetn) begin
+          t8_use_q <= 1'b0;
+          o_t8sub  <= 1'b0;
+        end else begin
+          if (t8_use_clr) begin
+            t8_use_q <= 1'b0;
+            o_t8sub  <= 1'b0;
+          end
+          if (t8_use_set) begin
+            t8_use_q <= 1'b1;
+            o_t8sub  <= 1'b1;
+          end
+        end
+      end
+
+      // Summary of the module (one beat per submitted macroblock; cleared at the macroblock's start).
+      always_ff @(posedge clk) begin
+        if (!resetn) begin
+          t8_sum_seen <= 1'b0;
+          t8_nz4      <= '0;
+          t8_cost     <= '0;
+          t8_big      <= 1'b0;
+          t8_sat      <= 1'b0;
+          t8_nblk     <= '0;
+        end else begin
+          if ((st == S_IDLE) && start) t8_sum_seen <= 1'b0;
+          if (tf_sum_valid) begin
+            t8_sum_seen <= 1'b1;
+            t8_nz4      <= tf_sum_data[3:0];
+            t8_cost     <= tf_sum_data[19:4];
+            t8_big      <= tf_sum_data[20];
+            t8_sat      <= tf_sum_data[21];
+            t8_nblk     <= tf_sum_data[25:22];
+          end
+        end
+      end
+
+      // Feeder: per beat one source row and one prediction row are read (one clock of latency), the 8 residual samples of the 8x8
+      // block's half are registered and offered on tf_res until taken. Beat n: block n / 8 (raster order of the 8x8 blocks), row n % 8.
+      logic [5:0] fd_cnt;
+      logic [1:0] fd_ph;
+      logic       res_v;
+      logic [71:0] res_d;
+      logic [3:0] fd_y;
+      logic       fd_gx;
+      logic       fd_rd;
+      assign fd_y   = {fd_cnt[4], fd_cnt[2:0]};
+      assign fd_gx  = fd_cnt[3];
+      assign fd_rd  = (st == S_T8S) && (fd_ph == 2'd0) && (fd_cnt != 6'd32);
+      assign tf_res_valid = res_v;
+      assign tf_res_data  = res_d;
+      assign t8s_done     = (st == S_T8S) && (fd_cnt == 6'd32) && !res_v;
+
+      always_ff @(posedge clk) begin
+        if (!resetn || (st != S_T8S)) begin
+          fd_cnt <= 6'd0;
+          fd_ph  <= 2'd0;
+          res_v  <= 1'b0;
+        end else begin
+          case (fd_ph)
+            2'd0: if (fd_cnt != 6'd32) fd_ph <= 2'd1;
+            2'd1: begin
+              res_v <= 1'b1;
+              fd_ph <= 2'd2;
+            end
+            default: begin
+              if (res_v && tf_res_ready) begin
+                res_v  <= 1'b0;
+                fd_cnt <= fd_cnt + 6'd1;
+                fd_ph  <= 2'd0;
+              end
+            end
+          endcase
+        end
+      end
+      always_ff @(posedge clk) begin
+        if (fd_ph == 2'd1) begin
+          for (int j = 0; j < 8; j++) begin
+            res_d[9*j +: 9] <= 9'(signed'({1'b0, src_rd_data[8*(8*int'(fd_gx) + j) +: 8]}) - signed'({1'b0, ref_rd_data[8*(8*int'(fd_gx) + j) +: 8]}));
+          end
+        end
+      end
+
+      // Rebuild: beats of the rebuilt residual are taken one at a time; the prediction row is read in the clock the beat is taken (data
+      // valid the next clock, held until the next read), prediction plus residual is clipped into two words that are written in two clocks.
+      logic [5:0]  rc_cnt;
+      logic [5:0]  dn_cnt;
+      logic        x1_v;
+      logic [71:0] x1_d;
+      logic [3:0]  x1_y;
+      logic        x1_gx;
+      logic        w_v;
+      logic        w_ph;
+      logic [3:0]  w_y;
+      logic        w_gx;
+      logic [63:0] w_data;
+      logic        r_act, d_act, r_take, w_free;
+      logic [3:0]  rc_y;
+      assign r_act        = (st == S_T8R);
+      assign d_act        = (st == S_DRN);
+      assign rc_y         = {rc_cnt[4], rc_cnt[2:0]};
+      assign tf_rec_ready = (r_act && !x1_v && (rc_cnt != 6'd32)) || (d_act && (dn_cnt != 6'd32));
+      assign r_take       = r_act && tf_rec_valid && tf_rec_ready;
+      assign w_free       = !w_v || w_ph;
+      assign t8_src_en    = fd_rd;
+      assign t8_src_addr  = sbase_q + SRC_AW'(fd_y);
+      assign t8_ref_en    = fd_rd || r_take;
+      assign t8_ref_addr  = ref_base + REF_AW'((st == S_T8S) ? fd_y : rc_y);
+      assign t8r_done     = r_act && (rc_cnt == 6'd32) && !x1_v && !w_v;
+      assign drn_done     = d_act && (dn_cnt == 6'd32);
+      assign t8_wr_v      = w_v;
+      assign t8_wr_y      = w_y;
+      assign t8_wr_bx     = {w_gx, w_ph};
+      assign t8_wr_addr   = rbase_q + REC_AW'({w_y, 2'b00}) + REC_AW'({w_gx, w_ph});
+      assign t8_wr_data   = w_data[32*w_ph +: 32];
+
+      always_ff @(posedge clk) begin
+        if (!resetn || !(r_act || d_act)) begin
+          rc_cnt <= 6'd0;
+          dn_cnt <= 6'd0;
+          x1_v   <= 1'b0;
+          w_v    <= 1'b0;
+          w_ph   <= 1'b0;
+        end else begin
+          if (d_act && tf_rec_valid && tf_rec_ready) dn_cnt <= dn_cnt + 6'd1;
+          if (r_take) begin
+            x1_v   <= 1'b1;
+            rc_cnt <= rc_cnt + 6'd1;
+          end
+          if (x1_v && w_free) begin
+            x1_v <= 1'b0;
+            w_v  <= 1'b1;
+            w_ph <= 1'b0;
+          end else if (w_v) begin
+            if (w_ph) w_v <= 1'b0;
+            else      w_ph <= 1'b1;
+          end
+        end
+      end
+      always_ff @(posedge clk) begin
+        if (r_take) begin
+          x1_d  <= tf_rec_data;
+          x1_y  <= rc_y;
+          x1_gx <= rc_cnt[3];
+        end
+        if (x1_v && w_free) begin
+          w_y  <= x1_y;
+          w_gx <= x1_gx;
+          for (int j = 0; j < 8; j++) begin
+            logic signed [17:0] v;
+            v = 18'(signed'({1'b0, ref_rd_data[8*(8*int'(x1_gx) + j) +: 8]})) + (drop_q ? 18'sd0 : 18'($signed(x1_d[9*j +: 9])));
+            if (v < 18'sd0)        w_data[8*j +: 8] <= 8'd0;
+            else if (v > 18'sd255) w_data[8*j +: 8] <= 8'd255;
+            else                   w_data[8*j +: 8] <= v[7:0];
+          end
+        end
+      end
+    end else begin : g_no_t8
+      assign t8_use_q     = 1'b0;
+      assign o_t8sub      = 1'b0;
+      assign t8s_done     = 1'b0;
+      assign t8r_done     = 1'b0;
+      assign drn_done     = 1'b0;
+      assign t8_sum_seen  = 1'b0;
+      assign t8_nz4       = '0;
+      assign t8_cost      = '0;
+      assign t8_big       = 1'b0;
+      assign t8_sat       = 1'b0;
+      assign t8_nblk      = '0;
+      assign t8_src_en    = 1'b0;
+      assign t8_src_addr  = '0;
+      assign t8_ref_en    = 1'b0;
+      assign t8_ref_addr  = '0;
+      assign t8_wr_v      = 1'b0;
+      assign t8_wr_addr   = '0;
+      assign t8_wr_data   = '0;
+      assign t8_wr_y      = '0;
+      assign t8_wr_bx     = '0;
+      assign tf_res_valid = 1'b0;
+      assign tf_res_data  = '0;
+      assign tf_rec_ready = 1'b0;
+      /* verilator lint_off UNUSEDSIGNAL */
+      logic unused_t8;
+      assign unused_t8 = &{1'b0, tf_res_ready, tf_rec_valid, tf_rec_data, tf_sum_valid, tf_sum_data, t8_en};
+      /* verilator lint_on UNUSEDSIGNAL */
+    end
+  endgenerate
 
   // ---------------------------------------------------------------------------
   // Sequencing
@@ -963,6 +1222,12 @@ module rtlnet_h264_mb_enc #(
         end
       end
 
+      // 8x8 transform: left column and bottom row capture of the luma words written by S_T8R.
+      if (T8 && t8_wr_v) begin
+        if (t8_wr_bx == 2'd3) left_y[8*t8_wr_y +: 8] <= t8_wr_data[31:24];
+        if (t8_wr_y == 4'd15) bot_y[32*t8_wr_bx +: 32] <= t8_wr_data;
+      end
+
       // I_PCM copy: left column and bottom row capture of the rebuilt macroblock.
       if (pcm_wr) begin
         if (!pcm_idx[6]) begin
@@ -1098,6 +1363,15 @@ module rtlnet_h264_mb_enc #(
           iss_run <= 1'b1;
           cnt     <= '0;
           st      <= S_P1;
+          if (T8 && t8_en && (cost_in <= cost_ia)) begin
+            // 8x8 transform: the luma residual goes to the module (S_T8S), PASS1 then runs the chroma blocks (items 64..95); there is no
+            // luma DC unit result and the luma rows of the forward transform do not come.
+            iss_run     <= 1'b0;
+            st          <= S_T8S;
+            fq_rows     <= 7'd64;
+            dc_cnt      <= 5'd16;
+            dqy_done_q  <= 1'b1;
+          end
         end
 
         S_P1: begin
@@ -1112,7 +1386,7 @@ module rtlnet_h264_mb_enc #(
 
         // Wait for all coefficient rows written and the three DC units finished.
         S_P1W: begin
-          if ((fq_rows == 7'd96) && dqy_done_q && dqcb_done_q && dqcr_done_q) begin
+          if ((fq_rows == 7'd96) && dqy_done_q && dqcb_done_q && dqcr_done_q && (!T8 || !t8_use_q || t8_sum_seen)) begin
             st    <= S_CHK;
             dcw_n <= '0;
           end
@@ -1153,22 +1427,22 @@ module rtlnet_h264_mb_enc #(
         end
 
         S_CHK4: begin
-          est_tot <= est_q + est_dc + 16'(EST_BASE) + 16'(EST_BLK) * (16'(nb_q) + 16'(nb_dc));
-          lv_sum  <= est_q + est_dc;
+          est_tot <= est_q + est_dc + t8_cost_g + 16'(EST_BASE) + 16'(EST_BLK) * (16'(nb_q) + 16'(nb_dc) + t8_nb4_g);
+          lv_sum  <= est_q + est_dc + t8_cost_g;
           st      <= S_CHK5;
         end
 
         S_CHK5: begin
-          if (ovf_q || (est_tot > 16'(EST_LIMIT))) begin
+          if (ovf_q || t8_sat_g || (est_tot > 16'(EST_LIMIT))) begin
             o_pcm  <= 1'b1;
             o_inter <= 1'b0;
             o_skip <= 1'b0;
             inter_q <= 1'b0;
             pcm_w  <= '0;
             pcm_ph <= '0;
-            st     <= S_PCM;
+            st     <= (T8 && t8_use_q) ? S_DRN : S_PCM;
           end else begin
-            drop_q <= inter_q && !big_q && (lv_sum <= 16'(DROP_LEVELS));
+            drop_q <= inter_q && !big_q && !t8_big_g && (lv_sum <= 16'(DROP_LEVELS));
             st     <= S_DCW;
           end
         end
@@ -1184,11 +1458,11 @@ module rtlnet_h264_mb_enc #(
             // skip vector is too when they are equal).
             o_skip       <= inter_q && (nz8_e == 4'd0) && (drop_q || (!ac_nz_c && !dqcb_nz && !dqcr_nz)) &&
                             (skip_x == inter_mv_x) && (skip_y == inter_mv_y);
-            p3_n         <= '0;
-            p3_run       <= 1'b1;
-            sel_p3       <= 1'b1;
+            p3_n         <= (T8 && t8_use_q) ? 7'd64 : 7'd0;
+            p3_run       <= !(T8 && t8_use_q);
+            sel_p3       <= !(T8 && t8_use_q);
             wr_cnt       <= '0;
-            st           <= S_P3;
+            st           <= (T8 && t8_use_q) ? S_T8R : S_P3;
           end
         end
 
@@ -1197,7 +1471,7 @@ module rtlnet_h264_mb_enc #(
         end
 
         S_P3W: begin
-          if (wr_cnt == 7'd96) begin
+          if (wr_cnt == ((T8 && t8_use_q) ? 7'd32 : 7'd96)) begin
             sel_p3 <= 1'b0;
             cnt <= '0;
             st  <= S_LINE;
@@ -1242,6 +1516,31 @@ module rtlnet_h264_mb_enc #(
 
         default: st <= S_IDLE;
       endcase
+
+      // 8x8 transform states (T8 = 1 only). They are handled after the case statement, not as its items, so that with T8 = 0 the state machine
+      // is the one of the Constrained Baseline encoder (the case's default sends them, unreachable, to S_IDLE); with T8 = 1 these assignments
+      // come last and win over the default.
+      if (T8) begin
+        // The residual is sent; PASS1 of the chroma blocks follows.
+        if ((st == S_T8S) && t8s_done) begin
+          iss_n   <= 7'd64;
+          iss_run <= 1'b1;
+          cnt     <= '0;
+          st      <= S_P1;
+        end
+        // The luma words of the rebuilt macroblock, then PASS3 of the chroma blocks.
+        if ((st == S_T8R) && t8r_done) begin
+          p3_run  <= 1'b1;
+          sel_p3  <= 1'b1;
+          st      <= S_P3;
+        end
+        // I_PCM fallback: the rebuilt residual is taken and discarded, then the I_PCM copy.
+        if ((st == S_DRN) && drn_done) st <= S_PCM;
+        // The three states hold until their sub-unit is done (the case's default would send them to S_IDLE).
+        if ((st == S_T8S) && !t8s_done) st <= S_T8S;
+        if ((st == S_T8R) && !t8r_done) st <= S_T8R;
+        if ((st == S_DRN) && !drn_done) st <= S_DRN;
+      end
     end
   end
 

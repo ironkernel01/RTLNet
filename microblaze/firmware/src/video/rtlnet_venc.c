@@ -296,6 +296,47 @@ static int profile_in_force(void)
     return ((hp.present != 0u) && (hp.licensed != 0u) && (hp.enabled != 0u) && ((hp.caps & RTLNET_H264_HP_CAP_CABAC) != 0u)) ? 1 : 0;
 }
 
+/* The 8x8 transform of inter macroblocks: requested by the user (default on), and in force while the High profile is. */
+static uint32_t g_t8_pref = 1u;
+
+/*
+ * t8_in_force -- 1 when the pictures use the 8x8 transform: the High profile is in force, the request bit is set and the module offers the
+ * transform. The PPS then has transform_8x8_mode_flag 1.
+ */
+static int t8_in_force(void)
+{
+    rtlnet_h264_enc_hp_t hp;
+    if ((profile_in_force() == 0) || (rtlnet_h264_enc_hp_status(RTLNET_PLAT_H264_BASE, &hp) != 0)) {
+        return 0;
+    }
+    return ((hp.t8_enabled != 0u) && ((hp.caps & RTLNET_H264_HP_CAP_TRANSFORM8X8) != 0u)) ? 1 : 0;
+}
+
+/*
+ * rtlnet_venc_set_transform8x8 -- see the header
+ */
+int rtlnet_venc_set_transform8x8(int on)
+{
+    g_t8_pref = (on != 0) ? 1u : 0u;
+    return rtlnet_h264_enc_set_transform8x8(RTLNET_PLAT_H264_BASE, on);
+}
+
+/*
+ * rtlnet_venc_transform8x8_wanted -- see the header
+ */
+int rtlnet_venc_transform8x8_wanted(void)
+{
+    return (int)g_t8_pref;
+}
+
+/*
+ * rtlnet_venc_transform8x8_in_force -- see the header
+ */
+int rtlnet_venc_transform8x8_in_force(void)
+{
+    return t8_in_force();
+}
+
 /*
  * configure_mode -- program the core for a video mode: frame size and SPS/PPS bytes from the driver, ring and index ring
  * pointers cleared, firmware read pointers restarted. Called when the mode changes (and for the first picture).
@@ -304,8 +345,10 @@ static int configure_mode(uint32_t mode)
 {
     rtlnet_h264_enc_cfg_t cfg;
     rtlnet_h264_enc_mode_t m;
+    /* The 8x8 transform request is applied before the parameter sets are written (default on; the module ignores it without hp_caps bit 1). */
+    (void)rtlnet_h264_enc_set_transform8x8(RTLNET_PLAT_H264_BASE, (int)g_t8_pref);
     if (rtlnet_h264_enc_get_mode(mode, &m) != 0 || rtlnet_h264_enc_set_mode(RTLNET_PLAT_H264_BASE, mode, &g.sps_cfg) != 0 ||
-        rtlnet_h264_enc_write_sps_pps_profile(g.sps_pps, sizeof(g.sps_pps), &g.sps_cfg, profile_in_force(), &g.sps_len) != 0) {
+        rtlnet_h264_enc_write_sps_pps_tools(g.sps_pps, sizeof(g.sps_pps), &g.sps_cfg, profile_in_force(), t8_in_force(), &g.sps_len) != 0) {
         return -1;
     }
     memset(&cfg, 0, sizeof(cfg));
@@ -473,7 +516,7 @@ static void hp_after_picture(void)
     /* The parameter sets are rewritten for the profile now in force: High (profile_idc 100, entropy_coding_mode_flag 1) while the module
      * codes CABAC pictures, Constrained Baseline after the license ended or the enable was cleared. The mux sends them in front of this
      * forced IDR picture. */
-    (void)rtlnet_h264_enc_write_sps_pps_profile(g.sps_pps, sizeof(g.sps_pps), &g.sps_cfg, profile_in_force(), &g.sps_len);
+    (void)rtlnet_h264_enc_write_sps_pps_tools(g.sps_pps, sizeof(g.sps_pps), &g.sps_cfg, profile_in_force(), t8_in_force(), &g.sps_len);
 }
 
 /*

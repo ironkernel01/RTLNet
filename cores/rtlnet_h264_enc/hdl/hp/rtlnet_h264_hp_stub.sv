@@ -26,6 +26,8 @@ module rtlnet_h264_hp #(
   // profile coding is allowed; hp_seconds_left is the license time left (16'hFFFF unlimited); hp_caps bit 0 CABAC, bit 1 8x8
   // transform (bits 3:2 reserved 0); hp_active is high from pic_start to pic_done when this module codes the picture.
   input  logic              hp_enable,
+  // hp_t8_enable: the register block's 8x8 transform enable bit (applied with hp_enable at a picture start).
+  input  logic              hp_t8_enable,
   output logic              hp_present,
   output logic              hp_licensed,
   output logic [15:0]       hp_seconds_left,
@@ -58,6 +60,8 @@ module rtlnet_h264_hp #(
   input  logic              skip,
   input  logic              inter,
   input  logic [3:0]        cbp_luma4,
+  // t8_sub: the macroblock submitted its luma residual on tf_res (the levels are in the module).
+  input  logic              t8_sub,
   input  logic signed [15:0] mvd_x,
   input  logic signed [15:0] mvd_y,
   input  logic [5:0]        qp,
