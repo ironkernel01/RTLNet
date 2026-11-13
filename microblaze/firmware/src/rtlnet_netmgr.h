@@ -72,8 +72,7 @@ typedef struct {
 } netmgr_socket_cfg_t;
 
 typedef struct {
-    int      autoneg;           /* 1: auto-negotiation; 0: forced full duplex, 10 Mb/s when adv_mask is 10f, else 100 Mb/s */
-    uint32_t adv_mask;          /* full-duplex modes advertised (RTLNET_PHY_ADV_10F/100F/1000F, never 0): the one speed state;
+    uint32_t adv_mask;          /* the link always auto-negotiates; full-duplex modes advertised (RTLNET_PHY_ADV_10F/100F/1000F, never 0): the one speed state;
                                    all three = "speed auto", one mode = "speed 10" / "speed 100" */
     int      shutdown;          /* 1: MAC receive/transmit disabled */
     uint32_t static_ip;

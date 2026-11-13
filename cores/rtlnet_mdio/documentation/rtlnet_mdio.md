@@ -244,7 +244,7 @@ Tables 28 and 33) and the raw BMCR, BMSR, PHYSR, ANLPAR and GBSR words.
 | 5 | read reg 28; write `(r28 \| bit13 \| bit11) & ~bit12`; read back | bit 13 puts the RGMII delays under register control, bit 11 is the RX delay, bit 12 the TX delay (not in the public datasheet; the Linux `rtl8211e_config_init` definitions, verify on hardware). Read-modify-write because bits 10:0 are vendor settings. The Nexys Video straps the PHY with no delay; the MAC's RX capture needs the PHY's 2 ns RXC delay, and the FPGA forwards TXC at 90 degrees, so TX delay stays off. Board value before the write: 0x8575, after: 0xAD75 |
 | 6 | PAGSEL = 0 (on every path, also after a failed step) | all later accesses (status poll, CLI) assume page 0 |
 | 7 | pass when the readback has bits 13 and 11 set and 12 clear | the readback proves the bits stick, not that the delay works; the working RX path is the real evidence |
-| 8 | optional: advertisement, AN restart | the board straps advertise all modes; the CLI restricts them to full-duplex modes (`speed 10`, `speed 100`, `speed auto`, `advertise`, `autoneg`) |
+| 8 | optional: advertisement, AN restart | the board straps advertise all modes; the CLI restricts them to full-duplex modes (`speed 10`, `speed 100`, `speed auto`) |
 
 A PHY hardware reset clears every register, including register 28: run `rtlnet_phy_rtl8211e_init` again after
 `rtlnet_mdio_phy_reset`. A BMCR soft reset returns BMCR and BMSR to defaults (Table 23); whether it clears register 28

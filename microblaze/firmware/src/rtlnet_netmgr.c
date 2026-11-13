@@ -76,7 +76,6 @@ static void event_end(void)
 void netmgr_config_defaults(void)
 {
     static const uint8_t mac_default[6] = { 0x02u, 0x49u, 0x4Bu, 0x52u, 0x4Eu, 0x01u };   /* rtlnet_pkg default */
-    g_cfg.autoneg     = 1;
     g_cfg.adv_mask    = RTLNET_PHY_ADV_FULL;
     g_cfg.shutdown    = 0;
     g_cfg.static_ip   = NETMGR_DEFAULT_IP;
@@ -112,8 +111,8 @@ void netmgr_config_defaults(void)
 
 /*
  * netmgr_adv_effective -- advertisement the PHY is given with auto-negotiation.
- * The configured full-duplex set (speed and advertise commands write the same
- * mask, the last command wins); half-duplex bits are never part of it.
+ * The configured full-duplex set, written by the speed command (the last
+ * command wins); half-duplex bits are never part of it.
  * Returns: RTLNET_PHY_ADV_* mask, never 0.
  */
 uint32_t netmgr_adv_effective(void)
@@ -123,12 +122,10 @@ uint32_t netmgr_adv_effective(void)
 }
 
 /*
- * netmgr_apply_phy -- program speed/duplex/auto-negotiation into the PHY.
+ * netmgr_apply_phy -- program the speed setting into the PHY.
  * Steps:
- *   1. Auto-negotiation: write the effective advertisement, enable and
- *      restart AN.
- *   2. Forced (no autoneg): full duplex at 10 Mb/s when only 10f is configured,
- *      else 100 Mb/s.
+ *   1. Write the effective advertisement (full-duplex modes only).
+ *   2. Enable and restart auto-negotiation; the link always auto-negotiates.
  * Returns: RTLNET_PHY_OK, a driver error, or -1 when the PHY is absent.
  */
 int netmgr_apply_phy(void)
@@ -137,17 +134,11 @@ int netmgr_apply_phy(void)
     if (!g_present.phy) {
         return -1;
     }
-    if (g_cfg.autoneg) {
-        rc = rtlnet_phy_rtl8211e_advertise_set(&g_mdio, netmgr_adv_effective());
-        if (rc == RTLNET_PHY_OK) {
-            rc = rtlnet_phy_rtl8211e_autoneg_restart(&g_mdio);
-        }
-        return rc;
+    rc = rtlnet_phy_rtl8211e_advertise_set(&g_mdio, netmgr_adv_effective());
+    if (rc == RTLNET_PHY_OK) {
+        rc = rtlnet_phy_rtl8211e_autoneg_restart(&g_mdio);
     }
-    return rtlnet_phy_rtl8211e_force(&g_mdio,
-                                     (netmgr_adv_effective() == RTLNET_PHY_ADV_10F) ? RTLNET_PHY_SPEED_10
-                                                                                    : RTLNET_PHY_SPEED_100,
-                                     1);
+    return rc;
 }
 
 /*
@@ -283,7 +274,7 @@ void netmgr_apply_dhcp_auto(void)
  *      (rtlnet_phy_rtl8211e_leds_default); EEE advertisement off
  *      (rtlnet_phy_rtl8211e_set_eee_advert(false)), because EEE makes the
  *      RJ45 LEDs blink (400 ms / 2 s pattern).
- *   7. The configured advertisement (or forced speed), then the
+ *   7. The configured advertisement, then the
  *      auto-negotiation restart (netmgr_apply_phy).
  *   8. One summary line on the console.
  * Called at boot (netmgr_init, before InitLWIP) and after every PHY reset
@@ -345,9 +336,9 @@ int InitPHY(void)
         return NETMGR_PHY_AN_FAIL;
     }
     g_present.phy_rc = NETMGR_PHY_OK;
-    fmt_printf("PHY: RTL8211E ID 0x%08X, RX delay 0x%04X -> 0x%04X, MDC half period %u ns, LEDs %s, %s\n",
+    fmt_printf("PHY: RTL8211E ID 0x%08X, RX delay 0x%04X -> 0x%04X, MDC half period %u ns, LEDs %s, auto-negotiation restarted\n",
                (unsigned)id, (unsigned)g_present.rgmii_before, (unsigned)g_present.rgmii_after,
-               (unsigned)g_present.mdc_half_ns, leds, g_cfg.autoneg ? "auto-negotiation restarted" : "forced speed");
+               (unsigned)g_present.mdc_half_ns, leds);
     return NETMGR_PHY_OK;
 }
 

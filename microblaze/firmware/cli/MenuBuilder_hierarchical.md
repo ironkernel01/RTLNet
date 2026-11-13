@@ -186,7 +186,6 @@ rtlnet>enable
 rtlnet#conf t
 rtlnet(config)#int eth0
 rtlnet(config-if)#no ?
-  autoneg    - Disable auto-negotiation (forced speed)
   shutdown   - Enable the interface
   ip         - Remove the static IPv4 address
 rtlnet(config-if)#no shutdown

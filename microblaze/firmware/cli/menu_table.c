@@ -51,6 +51,8 @@
  *  11-12-2026  MenuBuilder AI / Steve Spano    Encoder interrupt: encoder notify interrupt|polled (default interrupt), encoder irqtest, notification and interrupt lines in show stream and show encoder
  *  11-12-2026  MenuBuilder AI / Steve Spano    Deblocking filter: encoder deblock on|off (default on), encoder deblock-offsets <alpha> <beta> (-6..6), Deblocking line in show encoder
  *  11-13-2026  MenuBuilder AI / Steve Spano    Link speed: speed 10|100|auto (auto = 10/100/1000 full duplex, the full restore); duplex removed; advertise takes full modes only and shares the state of speed
+ *  11-13-2026  MenuBuilder AI / Steve Spano    autoneg and no autoneg removed: the link always auto-negotiates the advertised full-duplex set
+ *  11-13-2026  MenuBuilder AI / Steve Spano    advertise and no advertise removed: speed 10|100|auto is the only link control
  * ===========================================================================
  */
 #include "menu.h"
@@ -239,14 +241,6 @@ const MenuCommandDef g_menu_commands[] = {
       "Disable a policer", cli_no_cls_policer, MENU_MODE_NONE },
     { "cli_if_speed", MENU_MODE_CONFIG_IF, "SPEED [MBPS]",
       "Link speed, full duplex: 10, 100 or auto (auto = 10/100/1000, best rate)", cli_if_speed, MENU_MODE_NONE },
-    { "cli_if_autoneg", MENU_MODE_CONFIG_IF, "AUTONEG",
-      "Enable auto-negotiation with the speed or advertise setting", cli_if_autoneg, MENU_MODE_NONE },
-    { "cli_if_no_autoneg", MENU_MODE_CONFIG_IF, "NO AUTONEG",
-      "Disable auto-negotiation (forced full duplex, 10 or 100 Mb/s)", cli_if_no_autoneg, MENU_MODE_NONE },
-    { "cli_if_advertise", MENU_MODE_CONFIG_IF, "ADVERTISE [MODES]",
-      "Advertise full-duplex modes, e.g. 10f,100f,1000f or all", cli_if_advertise, MENU_MODE_NONE },
-    { "cli_if_no_advertise", MENU_MODE_CONFIG_IF, "NO ADVERTISE",
-      "Same as speed auto: advertise 10f,100f,1000f", cli_if_no_advertise, MENU_MODE_NONE },
     { "cli_if_shutdown", MENU_MODE_CONFIG_IF, "SHUTDOWN",
       "Disable the interface (MAC receive and transmit)", cli_if_shutdown, MENU_MODE_NONE },
     { "cli_if_no_shutdown", MENU_MODE_CONFIG_IF, "NO SHUTDOWN",

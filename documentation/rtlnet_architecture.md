@@ -280,8 +280,8 @@ buffer. The C driver is the MDIO master:
   of bits 13/11, readback), auto-negotiation enable/restart, advertisement selection (10/100/1000, full duplex only: the half-duplex bits are always written 0),
   forced speed, status decode from BMSR/PHYSR, loopback, register dump.
 
-The CLI uses the driver to report link, speed, duplex and partner abilities, to configure advertisement and
-forced speed, and to keep the MAC speed register in step with PHYSR.
+The CLI uses the driver to report link, speed, duplex and partner abilities, to set the link speed (`speed`, by the
+advertised full-duplex modes), and to keep the MAC speed register in step with PHYSR.
 
 ### 7.4 `rtlnet_eth_protocol` — protocol wrapper
 
@@ -509,7 +509,7 @@ CLI: a light network-switch style hierarchy built on the MenuBuilder rules
 | exec `rtlnet>` | power-up | `show version`, `show system`, `show interfaces`, `show ip`, `enable` |
 | privileged `rtlnet#` | `enable` | everything in exec, `debug read/write`, `phy read/write/dump`, `reload`, `configure terminal` |
 | config `rtlnet(config)#` | `configure terminal` | `ip address`, `ip gateway`, `mac-address`, `interface eth0`, `dhcp`, `socket <n>` |
-| config-if `rtlnet(config-if)#` | `interface eth0` | `speed 10/100/auto` (full duplex; `auto` advertises 10/100/1000 and takes the best rate), `advertise` (full modes only, shares the state of `speed`), `shutdown` |
+| config-if `rtlnet(config-if)#` | `interface eth0` | `speed 10/100/auto` (full duplex; `auto` advertises 10/100/1000 and takes the best rate; the only link control), `shutdown` |
 | config-dhcp / config-sock | `dhcp`, `socket <n>` | `start`, `stop`, `auto`; `port`, `remote`, `connect-on-rx` |
 
 `exit` leaves one level, `end` (or Ctrl-Z) returns to privileged exec, `?` lists the commands of the current

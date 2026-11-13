@@ -28,6 +28,8 @@ REVISION:11-12-2026:Transform default: encoder transform8x8 starts at off (the 4
 REVISION:11-12-2026:Encoder interrupt: encoder notify interrupt|polled (default interrupt), encoder irqtest, notification and interrupt lines in show stream and show encoder
 REVISION:11-12-2026:Deblocking filter: encoder deblock on|off (default on), encoder deblock-offsets <alpha> <beta> (-6..6), Deblocking line in show encoder
 REVISION:11-13-2026:Link speed: speed 10|100|auto (auto = 10/100/1000 full duplex, the full restore); duplex removed; advertise takes full modes only and shares the state of speed
+REVISION:11-13-2026:autoneg and no autoneg removed: the link always auto-negotiates the advertised full-duplex set
+REVISION:11-13-2026:advertise and no advertise removed: speed 10|100|auto is the only link control
 
 # ---------------------------------------------------------------------------
 # Modes
@@ -168,10 +170,6 @@ cli_no_cls_policer:config:NO CLASSIFIER POLICER [INDEX]:Disable a policer
 # Interface configuration (eth0)
 # ---------------------------------------------------------------------------
 cli_if_speed:config-if:SPEED [MBPS]:Link speed, full duplex: 10, 100 or auto (auto = 10/100/1000, best rate)
-cli_if_autoneg:config-if:AUTONEG:Enable auto-negotiation with the speed or advertise setting
-cli_if_no_autoneg:config-if:NO AUTONEG:Disable auto-negotiation (forced full duplex, 10 or 100 Mb/s)
-cli_if_advertise:config-if:ADVERTISE [MODES]:Advertise full-duplex modes, e.g. 10f,100f,1000f or all
-cli_if_no_advertise:config-if:NO ADVERTISE:Same as speed auto: advertise 10f,100f,1000f
 cli_if_shutdown:config-if:SHUTDOWN:Disable the interface (MAC receive and transmit)
 cli_if_no_shutdown:config-if:NO SHUTDOWN:Enable the interface
 cli_if_ip_address:config-if:IP ADDRESS [ADDR] [MASK]:Set the static IPv4 address and mask

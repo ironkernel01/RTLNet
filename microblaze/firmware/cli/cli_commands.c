@@ -60,6 +60,8 @@
  *  11-12-2026  MenuBuilder AI / Steve Spano    Encoder interrupt: encoder notify interrupt|polled, encoder irqtest, notification and interrupt lines in show stream and show encoder; the encoder is controlled through the driver layer only
  *  11-12-2026  MenuBuilder AI / Steve Spano    Deblocking filter: encoder deblock on|off, encoder deblock-offsets <alpha> <beta>, Deblocking line in show encoder
  *  11-13-2026  MenuBuilder AI / Steve Spano    Link speed: speed 10|100|auto (auto = 10/100/1000 full duplex); duplex removed; advertise takes full modes only
+ *  11-13-2026  MenuBuilder AI / Steve Spano    autoneg and no autoneg removed: the link always auto-negotiates the advertised full-duplex set
+ *  11-13-2026  MenuBuilder AI / Steve Spano    advertise and no advertise removed: speed 10|100|auto is the only link control
  * ===========================================================================
  */
 #include "cli_commands.h"
@@ -366,20 +368,17 @@ static void cli_print_adv(uint32_t m)
 /**
  * @brief Name the configured speed setting from the advertised full-duplex set.
  * @param adv Full-duplex advertisement mask (netmgr_adv_effective()).
- * @return "auto" (10f, 100f and 1000f), "10", "100", or "list" (any other set).
+ * @return "10" (10f only), "100" (100f only), else "auto" (10f, 100f and 1000f).
  */
 static const char *cli_speed_text(uint32_t adv)
 {
-    if (adv == RTLNET_PHY_ADV_FULL) {
-        return "auto";
-    }
     if (adv == RTLNET_PHY_ADV_10F) {
         return "10";
     }
     if (adv == RTLNET_PHY_ADV_100F) {
         return "100";
     }
-    return "list";
+    return "auto";
 }
 
 /**
@@ -657,10 +656,7 @@ int cli_show_interfaces(const MenuCommandContext *ctx)
                (unsigned)st.inband_speed_mbps, st.inband_full_duplex ? "full" : "half");
     fmt_printf("  Frames          : rx good %u, rx bad %u, rx overflow %u, tx %u\n", (unsigned)k.rx_good,
                (unsigned)k.rx_bad, (unsigned)k.rx_overflow, (unsigned)k.tx_frames);
-    fmt_printf("  Configuration   : speed %s, autoneg %s, advertise ", cli_speed_text(netmgr_adv_effective()),
-               c->autoneg ? "on" : "off");
-    cli_print_adv(netmgr_adv_effective());
-    fmt_printf("\n");
+    fmt_printf("  Configuration   : speed %s\n", cli_speed_text(netmgr_adv_effective()));
     return 0;
 }
 
@@ -1213,17 +1209,7 @@ int cli_show_running(const MenuCommandContext *ctx)
     char mt[18];
     (void)ctx;
     fmt_printf("!\n! RTLNet running configuration\n!\ninterface eth0\n");
-    {
-        const char *sp = cli_speed_text(netmgr_adv_effective());
-        if (cli_word_is(sp, "list")) {
-            fmt_printf(" advertise ");
-            cli_print_adv(netmgr_adv_effective());
-            fmt_printf("\n");
-        } else {
-            fmt_printf(" speed %s\n", sp);
-        }
-    }
-    fmt_printf(" %sautoneg\n", c->autoneg ? "" : "no ");
+    fmt_printf(" speed %s\n", cli_speed_text(netmgr_adv_effective()));
     fmt_printf(" %sshutdown\n", c->shutdown ? "" : "no ");
     fmt_printf(" mac-address %s\n", cli_mac_text(c->mac, mt));
     if (c->static_ip != 0u) {
@@ -1686,8 +1672,7 @@ static int cli_apply_phy(void)
 /**
  * @brief SPEED [MBPS]: 10, 100 or auto, full duplex.
  *        Writes the one speed state (the advertised full-duplex set) and
- *        turns auto-negotiation on, so the last speed or advertise command
- *        always wins: auto advertises 10f, 100f and 1000f (best common rate),
+ *        restarts auto-negotiation, so the last speed command always wins: auto advertises 10f, 100f and 1000f (best common rate),
  *        10 and 100 advertise that one full-duplex mode.
  * @param ctx argv[0] = speed.
  * @return 0, or -1 for another value.
@@ -1706,97 +1691,6 @@ int cli_if_speed(const MenuCommandContext *ctx)
         return cli_bad_value("speed (10, 100, auto)", ctx->argv[0]);
     }
     c->adv_mask = adv;
-    c->autoneg = 1;
-    return cli_apply_phy();
-}
-
-/**
- * @brief AUTONEG.
- * @param ctx Unused.
- * @return 0, or -1 on a driver error.
- */
-int cli_if_autoneg(const MenuCommandContext *ctx)
-{
-    (void)ctx;
-    netmgr_config()->autoneg = 1;
-    return cli_apply_phy();
-}
-
-/**
- * @brief NO AUTONEG: forced full duplex at 10 Mb/s when the speed setting is
- *        10, else 100 Mb/s (the setting becomes 100 when it was auto or a list).
- * @param ctx Unused.
- * @return 0, or -1 on a driver error.
- */
-int cli_if_no_autoneg(const MenuCommandContext *ctx)
-{
-    netmgr_config_t *c = netmgr_config();
-    (void)ctx;
-    c->autoneg = 0;
-    if (netmgr_adv_effective() != RTLNET_PHY_ADV_10F && netmgr_adv_effective() != RTLNET_PHY_ADV_100F) {
-        c->adv_mask = RTLNET_PHY_ADV_100F;
-        fmt_printf("%% Forced speed 100 Mb/s\n");
-    }
-    return cli_apply_phy();
-}
-
-/**
- * @brief ADVERTISE [MODES]: the advertised full-duplex modes, a comma list of
- *        10f,100f,1000f, or "all" (= speed auto). Writes the same state as
- *        SPEED and turns auto-negotiation on; the last command wins. Half
- *        duplex is not accepted.
- * @param ctx argv[0] = list.
- * @return 0, or -1 for a bad list.
- */
-int cli_if_advertise(const MenuCommandContext *ctx)
-{
-    static const char *const names[3] = { "10f", "100f", "1000f" };
-    static const uint32_t bits[3] = { RTLNET_PHY_ADV_10F, RTLNET_PHY_ADV_100F, RTLNET_PHY_ADV_1000F };
-    const char *s = ctx->argv[0];
-    uint32_t mask = 0u;
-    if (cli_word_is(s, "all")) {
-        mask = RTLNET_PHY_ADV_FULL;
-    } else {
-        while (s != NULL && *s != '\0') {
-            char word[8];
-            unsigned n = 0;
-            int hit = 0;
-            while (*s != '\0' && *s != ',' && n < sizeof(word) - 1u) {
-                word[n++] = *s++;
-            }
-            word[n] = '\0';
-            if (*s == ',') {
-                s++;
-            }
-            for (unsigned i = 0; i < 3u; i++) {
-                if (cli_word_is(word, names[i])) {
-                    mask |= bits[i];
-                    hit = 1;
-                }
-            }
-            if (!hit) {
-                return cli_bad_value("advertise mode (10f,100f,1000f,all)", word);
-            }
-        }
-    }
-    if (mask == 0u) {
-        return cli_bad_value("advertise list", ctx->argv[0]);
-    }
-    netmgr_config()->adv_mask = mask;
-    netmgr_config()->autoneg = 1;
-    return cli_apply_phy();
-}
-
-/**
- * @brief NO ADVERTISE: the same as SPEED AUTO (advertise 10f, 100f and 1000f).
- * @param ctx Unused.
- * @return 0, or -1 on a driver error.
- */
-int cli_if_no_advertise(const MenuCommandContext *ctx)
-{
-    (void)ctx;
-    netmgr_config()->adv_mask = RTLNET_PHY_ADV_FULL;
-    netmgr_config()->autoneg = 1;
     return cli_apply_phy();
 }
 

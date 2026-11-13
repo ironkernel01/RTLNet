@@ -61,6 +61,7 @@ Usage:
   powershell -NoProfile -ExecutionPolicy Bypass -File boards/nexys_video/scripts/stream_test.ps1 [-Mode both] [-Seconds 60]
     [-Port COM3] [-UdpPort 5004] [-HostIp <PC address>] [-Qp 28] [-Gop 30] [-Pattern all -Speed 4] [-Bitrate 2000 [-BufferMs 500]] [-Tag <name>] [-SkipVlc] [-NoBoard] [-LinkSpeed auto|10|100|1000] [-InputTs <file> -Width 1280 -Height 720]
 Revision: 11-13-2026
+  * 11-13-2026: -LinkSpeed waits on the PHY's own link state (show phy): the requested speed held for 2 s, or for auto the link down and up again / the speed held for 5 s.
   * 11-13-2026: -LinkSpeed (link speed from the console before the run, wait for link and DHCP lease); values auto|10|100|1000 with the speed command.
   * 11-12-2026: -Deblock and -SwitchDeblock (encoder deblock).
   * 11-12-2026: -IrqTest.
@@ -419,15 +420,27 @@ try {
         $swl = [System.Diagnostics.Stopwatch]::StartNew()
         [void](Invoke-Cli $sp 'end')
         $linkS = -1; $leaseS = -1; $mb = 0
+        # The link state is read from the PHY ("show phy", real time), not from the firmware's link monitor, which lags by up to 250 ms and
+        # still reports the old link right after the speed command. An explicit speed is accepted when the PHY reports exactly that speed
+        # and the speed has held for 2 s. auto is accepted after the link has been seen down and up again, or when the reported speed has
+        # held for 5 s (the speed did not change, so the restart may have been too short to see).
+        $sawDown = $false; $lastMb = -1; $stableAt = $null
         while ($swl.Elapsed.TotalSeconds -lt 40 -and $leaseS -lt 0) {
-            $o = Invoke-Cli $sp 'show interfaces' 4000
-            if ($o -match 'eth0 is up, (\d+) Mb/s') {
+            $o = Invoke-Cli $sp 'show phy' 4000
+            if ($o -match 'Link\s+: up, (\d+) Mb/s') {
                 $mb = [int]$Matches[1]
-                if ($linkS -lt 0 -and ($want -eq 0 -or $mb -eq $want)) { $linkS = $swl.Elapsed.TotalSeconds }
+                if ($mb -ne $lastMb) { $lastMb = $mb; $stableAt = $swl.Elapsed.TotalSeconds }
+                $held = $swl.Elapsed.TotalSeconds - $stableAt
+                if ($linkS -lt 0) {
+                    if ($want -ne 0) { if ($mb -eq $want -and $held -ge 2.0) { $linkS = $swl.Elapsed.TotalSeconds } }
+                    elseif (($sawDown -and $held -ge 1.0) -or $held -ge 5.0) { $linkS = $swl.Elapsed.TotalSeconds }
+                }
                 if ($linkS -ge 0) {
                     $o2 = Invoke-Cli $sp 'show ip' 4000
                     if ($o2 -match 'Effective IPv4\s+: (\d+\.\d+\.\d+\.\d+) .*\(DHCP lease\)') { $leaseS = $swl.Elapsed.TotalSeconds }
                 }
+            } elseif ($o -match 'Link\s+: down') {
+                $sawDown = $true; $lastMb = -1; $stableAt = $null; $linkS = -1
             }
             if ($leaseS -lt 0) { Start-Sleep -Milliseconds 300 }
         }
