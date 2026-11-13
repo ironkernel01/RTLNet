@@ -374,6 +374,7 @@ int main(void)
     check(rtlnet_h264_ctl_open(&info) == 0, "open");
     check((info.engines == NENG) && (info.irq_capable == 1u) && (info.irq_sources == 0x3Fu) && (info.hp_seam == 1u), "open: info");
     check(rtlnet_h264_ctl_notify() == RTLNET_H264_NOTIFY_INTERRUPT, "interrupt mode is the default");
+    check(rtlnet_h264_ctl_transform8x8_wanted() == RTLNET_H264_CTL_T8_OFF, "the transform request is off (4x4) by default");
     check((reg(RTLNET_H264_REG_CTRL) & RTLNET_H264_CTRL_IRQ_EN) != 0u, "open: global enable set");
     check(reg(RTLNET_H264_REG_IRQ_ENABLE) == (RTLNET_H264_IRQ_PIC_DONE | RTLNET_H264_IRQ_ERR | RTLNET_H264_IRQ_RING_STALL |
                                               RTLNET_H264_IRQ_PROFILE_CHG | RTLNET_H264_IRQ_LICENSE_LOST),

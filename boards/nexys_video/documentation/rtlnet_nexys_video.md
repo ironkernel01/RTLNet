@@ -1257,7 +1257,7 @@ Open items: patterns were run at 1080p30 only for `all`, `scroll` and `box` (720
 
 ### 6.19 The 8x8 transform on the board: the stage 3 High profile image (11-12-2026)
 
-Change: the stage 3 High profile netlist (`hp_caps` 3: CABAC and the 8x8 transform of inter luma; `rtlnet_h264_enc.md` section 17.6, `H264HighProfile/documentation/rtlnet_h264_hp.md` sections 9 and 11) is placed and routed in the board image for the first time and run on the board. The firmware of 6.17 gained `encoder transform8x8 on|off` and the `Transform 8x8` line of `show encoder` (the request is on by default and applies while the profile is high); the CLI test and the stream test know them (`cli_test.ps1`: `Transform 8x8` line and the command, tolerant of every image kind; `stream_test.ps1 -Transform8x8 on|off` and `-SwitchTransform8x8`; `stream_check.py` prints `transform_8x8_mode` in its `PROFILE_RUN` lines; `hp_board_table.py` summarises the run logs).
+Change: the stage 3 High profile netlist (`hp_caps` 3: CABAC and the 8x8 transform of inter luma; `rtlnet_h264_enc.md` section 17.6, `H264HighProfile/documentation/rtlnet_h264_hp.md` sections 9 and 11) is placed and routed in the board image for the first time and run on the board. The firmware of 6.17 gained `encoder transform8x8 on|off` and the `Transform 8x8` line of `show encoder` (the request is on in the firmware of that image and applies while the profile is high; the firmware of 6.21 starts at off); the CLI test and the stream test know them (`cli_test.ps1`: `Transform 8x8` line and the command, tolerant of every image kind; `stream_test.ps1 -Transform8x8 on|off` and `-SwitchTransform8x8`; `stream_check.py` prints `transform_8x8_mode` in its `PROFILE_RUN` lines; `hp_board_table.py` summarises the run logs).
 The images of 6.18 (CABAC only) are kept in `build/hp_full_cabac` and `build/hp_demo_cabac`; the images of this section are `build/hp_full` and `build/hp_demo`. The default image in `build/` is not rebuilt (no RTL change with `HIGH_PROFILE` 0: the 8x8 seam is identical in synthesis, `rtlnet_h264_enc.md` 17.6); only its firmware is rebuilt and merged.
 
 **Merged tree and default image.** The merge of `hp-stage3` into OV5640 (24 files, among them `rtlnet_venc.c`, the CLI files and `host/main.c`, which the mux change of 6.17 also touched) built and passed without a change to the merge: `build.ps1 -NoFirmware -Demo` `TEST PASS: menu_demo checks=470` and `RATECTL_TEST: PASS (15 gates)`, `picq_host_test.ps1` and `txring_host_test.ps1` (both runs pass with their negative controls), `h264_driver_test.ps1` 635 checks, `h264_lint.ps1` pass, `rtlnet_regression.ps1` (default parameter, Active-HDL) `RTLNET_REGRESSION: 164 passed, 0 failed` (`build/phase2g_regression.txt`). The firmware was rebuilt on the existing default XSA and merged into the default bitstream (no Vivado rebuild; `build/phase2g_default_before.bit` keeps the previous file): `PHASE1_GATE: PASS 19/19`, `CLI_TEST: PASS 87/87` (83 plus the four 8x8 steps; on the default image `Transform8x8 off` is accepted and `on` is refused with "this build has no High profile seam"), and the regression stream (1080p30 `all` 4, 8,000 kb/s, GOP 30, 60 s, `-Jm -PsnrStep 5`) `STREAM_TEST: PASS 18/18`, 0 dropped pictures, PSNR 25.09 / 25.54 dB (minimum / mean), the same as the CAVLC row of 6.18.
@@ -1360,18 +1360,178 @@ Both: FFmpeg 0 error lines over 1,800 access units, JM decodes every access unit
 
 At QP 40 and 32 the 8x8 transform streams without a drop; at QP 28 as well (a further point, 0 drops). **At QP 26 and below the 1080p30 `all` pattern is at the limit of the encoder with the 8x8 transform on**: 5 dropped pictures in 15 s at QP 26 and 26 at QP 24 (the last picture of the slower engine takes 30.7 and 31.9 ms of the 33.3 ms period, 692 and 720 clocks per macroblock against 735). The 4x4 transform with CABAC streams QP 26 and 24 without a drop but is close to the same limit at QP 26 (30.9 ms, 684 clocks per macroblock); CAVLC takes 22.9 ms at QP 24. The reason is the CABAC coder's throughput on a picture of 116 kB (a bit rate of 27.8 Mb/s) added to the 8x8 stage's cost; the mux (79 % load) is not the limit, and the simulation figure of 502 to 575 clocks per macroblock (against 735) is the figure for the P pictures of the simulated patterns, not for this one. Detailed content at QP 26 or below at 1080p30 on one engine pair is outside what the High profile module with the 8x8 transform sustains; the 4x4 transform (`encoder transform8x8 off`) is the choice there.
 
-**Demo image (`hp_demo`, 30-minute license): not on the board, the expiry test with the 8x8 transform is open.** Three runs of `build.ps1 -Network -HighProfile demo -Tag hp_demo -Image` did not close timing (about 1.6 to 2 hours each): `AltSpreadLogic_high` post-route WNS -0.243 ns (73 failing endpoints; 24 of the worst in the public encoder's dequantiser `u_mb_enc/u_invq` (`tt_reg` to `hs_reg`) and the chroma DC quantiser `u_dcq_cr`, the rest MicroBlaze V and the arbiter), `SpreadLogic_high` -0.813 ns (103 endpoints), `AltSpreadLogic_medium` **-0.031 ns with 2 failing endpoints** (MicroBlaze V core to the LMB RAM, -0.031 ns, 8 levels; `u_h264/g_engine[0].u_engine/u_rd_dma/arvalid_reg` to `u_arb/rd_pend_reg[3][1]/D`, -0.003 ns, 16 levels); WHS +0.008 to +0.017 ns in all. No failing path is inside the netlist; the failing paths are in the public encoder, MicroBlaze V and the arbiter. The directories are kept (`build/hp_demo_run1_altspreadlogic_high`, `_run2_spreadlogic_high`, `_run3_altspreadlogic_medium`, each with its reports). The demo image of 6.18 (CABAC, `build/hp_demo_cabac`) is the last demo image run; the licence-end test for the stage 3 netlist (High with 8x8 before, Constrained Baseline after, one forced IDR picture at 1,800 s) waits for pipeline stages in the public dequantiser and the module's inverse transform.
+**Demo image (`hp_demo`, 30-minute license): not on the board, the expiry test with the 8x8 transform is open.** Three runs of `build.ps1 -Network -HighProfile demo -Tag hp_demo -Image` did not close timing (about 1.6 to 2 hours each): `AltSpreadLogic_high` post-route WNS -0.243 ns (73 failing endpoints; 24 of the worst in the public encoder's dequantiser `u_mb_enc/u_invq` (`tt_reg` to `hs_reg`) and the chroma DC quantiser `u_dcq_cr`, the rest MicroBlaze V and the arbiter), `SpreadLogic_high` -0.813 ns (103 endpoints), `AltSpreadLogic_medium` **-0.031 ns with 2 failing endpoints** (MicroBlaze V core to the LMB RAM, -0.031 ns, 8 levels; `u_h264/g_engine[0].u_engine/u_rd_dma/arvalid_reg` to `u_arb/rd_pend_reg[3][1]/D`, -0.003 ns, 16 levels); WHS +0.008 to +0.017 ns in all. No failing path is inside the netlist; the failing paths are in the public encoder, MicroBlaze V and the arbiter. The directories are kept (`build/hp_demo_run1_altspreadlogic_high`, `_run2_spreadlogic_high`, `_run3_altspreadlogic_medium`, each with its reports). The demo image of 6.18 (CABAC, `build/hp_demo_cabac`) is the last demo image run; the licence-end test for the stage 3 netlist (High with 8x8 before, Constrained Baseline after, one forced IDR picture at 1,800 s) is not run on the stage 3 netlist: the pipeline stages for it are in the tree of 6.21, and the demo image with its test moves to the CABAC-only High profile image with the deblocking filter.
 
-Open items: the clocks per macroblock are snapshots of one picture (not averaged); no `net_test`, `tcp_test` or 10-minute soak was run on the 8x8 images; the 720p sweep points were not repeated; the adaptive 4x4 / 8x8 decision (section 9.9 of the private document) is the next step and not part of this image.
-### 6.20 Encoder interrupt (11-12-2026, board step open)
+Open items: the clocks per macroblock are snapshots of one picture (not averaged); the adaptive 4x4 / 8x8 decision (section 9.9 of the private document) is not part of this image and runs on the board in 6.21, which also holds the `net_test`, `tcp_test` and 10-minute soak results; the 720p sweep points are not repeated.
+### 6.20 Encoder interrupt (11-12-2026)
 
 Change: the `irq` output of `u_h264` (`rtlnet_h264_top`, level on `ui_clk`) drives the CPU interrupt input `irq[1]` (`cpu_irq = {6'd0, h264_irq, mdio_irq}` in both the network and
 the CPU-only build), INTC input 1 (`RTLNET_CPU_IRQ_H264`). The block design is unchanged (`irq[7:0]` already reaches INTC inputs 0..7, level). The core (VERSION 0x11122C03,
 `rtlnet_h264_enc.md` section 18) raises the interrupt for picture done, error, ring stall, profile change and license lost; the firmware connects the handler on that
 input and runs the encoder in interrupt mode by default (`encoder notify interrupt|polled`, `rtlnet_ts_mux.md` section 5.3). Status: simulation, host tests and the synthesis of the core are done
-(`rtlnet_h264_enc.md` section 18.5); no bitstream was built and the board was not used for this change. The encoder VERSION reads 0x11122C03 (`cli_test.ps1` and the board bench expect it). The board step is: build with the unchanged `build.ps1`, load the firmware,
-`stream h264 ...`, `encoder irqtest` (must pass), `show stream` (interrupts per source, handler time, pictures started by the handler), `encoder notify polled` and back (the stream
-continues), `stream_test.ps1` in both modes, and the handler time and the cycle time against the polled figures of section 6.17.
+(`rtlnet_h264_enc.md` section 18.5), and the board step is done in section 6.21: `encoder irqtest` passes, 60 s streams run in both modes with 0 dropped pictures, a switch of the mode in mid-stream keeps the stream running, a 10-minute soak passes, and the handler time (48 us last, 220 us maximum), the interrupts per picture (1.001) and the cycle time against the polled mode are measured there. The encoder VERSION reads 0x11122C03 (`cli_test.ps1` and the board bench expect it).
+
+### 6.21 The merged encoder on the board: adaptive transform, pipeline stages and interrupt (11-12-2026)
+
+Change: the tree is `hp-stage3` (adaptive 4x4 / 8x8 transform choice per macroblock, `hp_caps` 7; the clock cuts of the 8x8 path; pipeline stages on the long paths) merged with `h264-irq` (encoder interrupt registers, VERSION 0x11122C03, the control layer `rtlnet_h264_enc_ctl`, firmware `encoder notify interrupt|polled`) into OV5640. The two branches were merged without being run together; this section is their first run together. The merge changed no RTL source: both branches changed `rtlnet_h264_top.sv` in different places (the registered band split of the stage 3c, the interrupt output of the register file) and the combination lints, simulates, synthesises and runs. The firmware default of the transform request is now off (the 4x4 transform): on the board's test patterns the 8x8 transform saves no bits (6.19, and the matrix below), and the adaptive choice costs clocks on a macroblock that ends up with the 4x4 transform. `encoder transform8x8 on|off|auto` stay available. The demo image (`hp_demo`) and its license-end test are not part of this section: the product image becomes a CABAC-only High profile netlist with the deblocking filter, and the demo image and its 30-minute test move to that image.
+
+**Checks before the board** (merged tree, no board): `h264_lint.ps1` pass; `build.ps1 -NoFirmware -Demo` `TEST PASS: menu_demo checks=487`; `venc_irq_host_test.ps1` 181 checks in both notification modes (and its negative control), `picq_host_test.ps1`, `txring_host_test.ps1`, `tsmux_host_test.ps1` pass; `h264_driver_test.ps1`: register driver 674 checks, control layer 86 checks, `RATECTL_TEST: PASS` (15 gates, `cores/rtlnet_h264_enc/driver/rtlnet_ratectl.c`); `tb_rtlnet_h264_regs` 84 checks (`HIGH_PROFILE` 0) and 86 checks (1) with their negative controls; `rtlnet_regression.ps1` (Active-HDL and Verilator benches and host tests) 162 passed, 0 failed, the decoder-harness entries `h264_harness`, `_neg`, `_pcm`, `_burstneg`, `_burstrefneg`, `_irq` 6 passed, 0 failed, and the two parallel entries run through `h264_harness_par.ps1 -Jobs 1`: `p_*` 40 of 40 and `m_*` 53 of 53 configurations passed (`build/phase2h_regression_a.txt`, `_b.txt`, `phase2h_harness_p.txt`, `phase2h_harness_m.txt`); the private repository's `hp_regression.ps1` 169 passed, 0 failed. Streams: six QCIF configurations (pan QP 28, `bd2s24` QP 28, `objs` QP 20, `bd4s8` QP 28, two engines with four slices at QP 20, a cut with three slices at QP 38) in CAVLC, CABAC 4x4, 8x8 and auto were encoded three times: by the stage 3c tree (RTLNet 4c94da7 with the private netlist sources of 858200e, the reference), by the merged tree with the picture end polled, and by the merged tree with the picture end taken from the `irq` output (`hp_stream_run.ps1 -Irq`): all 24 stream groups (72 streams) are byte-identical (`build/phase2h_ident/identity_result.txt`); JM, OpenH264 and FFmpeg decode the 18 High-form groups identical to the rebuilt pictures (the CAVLC groups of this flow carry the High parameter sets and are compared byte for byte only; the decoder checks of the CAVLC streams are in the harness entries above).
+
+Fixes and changes for the merge, all outside the RTL: the transform default (`rtlnet_h264_enc_ctl.c` `t8_pref` off, the CLI help, `rtlnet_venc.h`, a check in the control-layer test and in the CLI demo that the request starts at off); `encoder notify` reply text (a switch while a picture is in flight takes effect at the next idle point of the encoder; the reply said "not available: polled stays in force", which was wrong for that case, the first board run of the switch test showed it); `cli_test.ps1` (bad-word text `on, off or auto`, `auto`, `encoder notify`, `encoder irqtest`, the interrupt lines, `hp_caps` 7), `stream_test.ps1` (`-Transform8x8 auto`, `-SwitchTransform8x8` now on, off, auto, `-Notify`, `-SwitchNotify`, `-IrqTest`), `hp_expiry_test.ps1` (`-Transform8x8`, `-Notify`, `hp_caps` 1, 3 or 7, the interrupt counts of the license end), `hp_stream_run.ps1` of the private repository (`-Irq`), `build_bitstream.tcl` (`RTLNET_UTIL_LIMIT`, `RTLNET_RESUME_DCP`, below). The version and CAPS expectations needed no change (VERSION 0x11122C03, CAPS bit 21, `hp_caps` 7 reads as `tools CABAC 8x8-transform adaptive-choice (hp_caps 7)`).
+
+**Out-of-context synthesis** (`xc7a200tsbg484-1`, `enc_clk` 90 MHz, two engines, Vivado 2026.1, `build/phase2h_synth_*`): `HIGH_PROFILE` 0: 46,915 LUT, 34,892 FF, 34 RAMB36 + 6 RAMB18, 76 DSP, post-synthesis WNS +1.992 ns, worst path `u_mb_enc/u_ipred` `pc_reg` to `q1_t_reg` (9 logic levels), 0 critical warnings. `HIGH_PROFILE` 1 with the rebuilt full netlist: 71,342 LUT, 58,433 FF, 34 RAMB36 + 6 RAMB18, 236 DSP, WNS +1.881 ns, worst path `u_pack/cnt_reg` to the write enable of the context RAM `u_hp/u_ctx` (11 levels); the entropy path (`u_pack` to `pk_cmd_*`) has +5.092 ns (6 levels) and the transform path `u_tf8/u_inv/u_col` to `arr_r_reg` +4.275 ns (8 levels).
+
+**Netlists** (`scripts/build_netlist.ps1`, sources hash `d259470e7fc98604`, git 7daf9dd with the merge staged, post-synthesis at 90 MHz): full 12,194 LUT, 11,357 FF, 80 DSP, WNS +2.817 ns; demo 12,221 LUT, 11,407 FF, 80 DSP, WNS +2.817 ns (the stage 3 netlists were 8,541 and 8,569 LUT with 56 DSP: the adaptive choice and the pipeline stages add the rest).
+
+**Images** (`build.ps1 -Network -HighProfile full -Tag hp_full -Image`, `-HighProfile none -Tag default_irq -Image`; the previous images are kept in `build/hp_full_stage3` and, for the default image, in `build/` itself; the other agent's flow was running its own Vivado jobs, so the builds waited for each other):
+
+| | hp_full (merged) | default (`default_irq`, no module) | hp_full of 6.19 (stage 3) |
+|---|---|---|---|
+| placer directive, attempts | `AltSpreadLogic_high`, one routed design | `AltSpreadLogic_high`, one | `AltSpreadLogic_high` (the second of two) |
+| post-route WNS / WHS / WPWS, failing endpoints | +0.012 / +0.010 / +0.131 ns, 0 | +0.095 / +0.008 / +0.131 ns, 0 | +0.007 / +0.013 / +0.131 ns, 0 |
+| LUT | 108,000 (80.72 % of the 133,800 available; 80.24 % of the 134,600 of the device table) | 83,373 (62.31 %) | 100,773 (75.32 %) |
+| FF | 107,075 (40.01 %) | 83,548 (31.22 %) | 95,368 (35.64 %) |
+| slices occupied | 33,005 of 33,450 (98.67 %) | 29,677 (88.72 %) | not recorded |
+| RAMB tiles / DSP | 284.5 (77.95 %) / 242 (32.70 %) | 284.5 / 82 | 284.5 / 194 |
+| CDC | `sync 31`, `reset 8`, `gray 6`, `fifo 10`, `axil_cdc 5`, `rtlnet_cdc: PASS` | same | same |
+| methodology | the classes of 6.19 (`PDRC-190`, `LUTAR-1` x3, `TIMING-9`, `TIMING-47` x4, `ULMTCS-1`, `XDCB-5`, `REQP-1959`), all waived by name | the same classes | same |
+| timing coverage (`phase2h_*_coverage.txt`) | `check_timing` 0 for no_clock, unconstrained endpoints, loops, multiple clocks, generated clocks; 33 clocks, 12 clock pairs with 0 endpoints, the same false paths and clock groups as 6.19 | the same | |
+| build time | 11,393 s to the post-route gate | 2,090 s | about 2.3 h |
+
+The hp_full run 1 met timing and stopped at the build's own utilization gate: `Slice LUTs at 80.72 % (limit 80.0 %)` (`build/hp_full_run1_utilgate`, exit 21, no bitstream). The image is made from that routed design: `build_bitstream.tcl` takes a routed checkpoint (`RTLNET_RESUME_DCP`) and runs the reports, the gates (utilization limit 82 through `RTLNET_UTIL_LIMIT`; the default of the limit stays 80.0), the bitstream, the memory map and the XSA from it; the firmware is built and merged as in `build.ps1 -Image`. The image therefore is run 1's routed design with the limit raised to 82 %. The slices are 98.67 % occupied: the image is at the capacity of the device.
+
+**Margin and the worst paths of hp_full.** The margin is +0.012 ns, no better than the +0.007 ns of the stage 3 image: none of the paths that failed in the demo builds of 6.19 (`u_invq`, `u_dcq_cr`) is among the worst 40 endpoints of this image. The worst post-route setup paths of the routed design (`build/phase2h_hp_full_worst_paths.txt`, distinct endpoints), by module:
+
+| # | slack ns | levels | from | to |
+|---|---|---|---|---|
+| 1 | +0.012 | 12 | `u_h264/g_engine[1]/u_search` `win_busy_reg_replica` | `u_arb` `rd_err_left_reg` |
+| 2 | +0.020 | 2 | `u_h264/g_engine[1]/g_hp.u_hp/u_tf8/u_fwd` `cp_j_reg` | `u_tf8/u_fwd/u_col` `oa_reg` (the private module, routing delay) |
+| 3 | +0.051 | 14 | `u_arb` `wr_err_pend_reg` | `u_arb` `wr_pend_reg` |
+| 4 | +0.054 | 13 | `u_h264/g_engine[1]/u_search` `win_busy_reg_replica` | `u_arb` `rd_err_left_reg` (eight endpoints) |
+| 5 | +0.055 | 13 | `u_arb` `wr_err_pend_reg` | `u_arb` `m_axi_awid_reg`, `m_axi_awlen_reg` |
+| 6 | +0.056 | 14 | `u_arb` `aw_rr_reg` | `u_arb` `wr_pend_reg` |
+| 7 | +0.064 | 13 | `u_arb` `wr_err_pend_reg` | `u_arb` `m_axi_awaddr_reg`, `m_axi_awid_reg`, `m_axi_awlen_reg` (sixteen endpoints) |
+| 8 | +0.073 | 12 | `u_h264/g_engine[1]/u_search` | `u_arb` `m_axi_araddr_reg`, `m_axi_arid_reg`, `m_axi_arlen_reg` |
+| 9 | +0.074 | 14 | `u_arb` `wr_err_pend_reg` | `u_arb` `err_awid_reg` |
+
+All of the worst 40 endpoints but one are inside the DDR3 arbiter or from the encoder's motion search into the arbiter's read multiplexer (12 to 14 logic levels); the one other is a two-level path of the private module's forward column transform whose delay is routing. No MicroBlaze V path is among the worst 40 (they were among the last failures of 6.19), and the path `u_rd_dma/arvalid_reg` to `u_arb/rd_pend_reg` is not among them either. The next timing step is the arbiter's grant and pending logic (14 levels).
+
+
+**Board** (JTAG, COM3, PC on Wi-Fi; logs `build/phase2h_*`, board lock taken for every use, the flash not touched). `program.ps1 -Bit build/hp_full/rtlnet_nexys_video.bit` PASS. `PHASE1_GATE: PASS 19/19`; `CLI_TEST: PASS 95/95` (VERSION `0x11122C03`, `Build: 2 engines, up to 120 x 68 macroblocks, interrupt registers present`, `High profile: present, licensed, time left unlimited, tools CABAC 8x8-transform adaptive-choice (hp_caps 7), profile baseline`, `Transform 8x8: off, not in force (4x4 transform)` after reset, the `Notification` and `Interrupts` lines, `encoder irqtest` refused without a stream). The default image gives the same two results (19/19, 95/95).
+
+**Interrupt, 1080p30 `all` 4, 8,000 kb/s, GOP 30, High profile, 60 s each** (`stream_test.ps1 -Bitrate 8000 -Profile high -PsnrStep 5 -Jm`; every gate passes in every row: 0 dropped pictures, 0 UDP drops, 0 errors, FFmpeg 0 error lines, JM 1,800 frames identical to FFmpeg, rate windows within 0.6 %):
+
+| | interrupt (`-IrqTest`) | polled | switched in mid-stream (interrupt, polled from 20 s, interrupt from 40 s) |
+|---|---|---|---|
+| result | `PASS 19/19`, `encoder irqtest` passed | `PASS 19/19` | `PASS 21/21` |
+| pictures sent / dropped | 1,802 / 0 | 1,802 / 0 | 1,802 / 0 |
+| interrupts | 1,812: picture done 1,810, ring stall 1 (the self test), profile change 1, error 0, license lost 0, 0 with no enabled event | none | 1,171 (picture done 1,810 events; the middle third runs polled) |
+| interrupts per picture | 1.001 | | 0.65 |
+| handler time, last / max | 48 / 220 us | | 49 / 211 us |
+| pictures started by the handler / by the main loop | 0 / 1,811 (2 starts left to the main loop) | | 0 / 1,810 |
+| cycle time (begin to begin), min / avg / max | 21.3 / 33.3 / 33.9 ms | 23.0 / 33.3 / 33.6 ms | 26.5 / 33.3 / 33.6 ms |
+| lag at begin, avg / max | 21 us / 546 us | 15 us / 11,809 us | 8 us / 315 us |
+| CPU load, TS mux / encoder handling and mux | 24.5 / 24.7 % | 23.6 / 23.7 % | 23.6 / 23.7 % |
+
+The level interrupt is acknowledged correctly: the interrupts per picture stay at one (1,812 for 1,810 pictures, 18,012 for 18,011 in the 10-minute soak, 460 for 459 to 461 in every 15 s sweep run), no interrupt arrives with no enabled event. At 8 Mb/s the encoder finishes a picture in about 15 ms and the next frame is not there yet, so the main loop starts every picture when the frame arrives and the handler starts none: the handler does its work only (read and acknowledge, collect the picture, release). Where the encoder is the limit (the QP 24 sweep points below) the handler starts the pictures: 408 (CABAC 4x4), 457 (8x8) and 456 (auto) of about 460, and the handler time is 61 us for a run that starts a picture and 37 us for one that does not, with 202 to 208 us as the largest value of a run. The interrupt mode removes the long start delays of the polled loop (lag at begin max 546 us against 11,809 us here, 14 us against 10,004 us on the default image) and the cycle time is unchanged. The first switch run (`build/phase2h_first_switch`) failed two gates (2 of 21) on the reply text of `encoder notify` (a switch waits for the encoder's next idle point; the text said "not available"): the stream ran without a drop and 603 of 1,810 pictures were handled polled (1,207 interrupts); the text is fixed and the second run passes with the mode read back from `show stream` after each switch.
+
+**Throughput sweep, 1080p30 `all` 4, constant QP, 15 s each** (`stream_test.ps1 -Qp N -PsnrStep 10`; the rate is the elementary stream over the pictures at 30 per second; clocks per macroblock and the picture time are the last picture of each engine in `show encoder` (a snapshot, a skipped-heavy P picture reads low); cycle time and lag from `show stream`; budget 735 clocks per macroblock, 33.3 ms):
+
+| mode | notify | QP | kb/s | dropped | clocks per MB, engine 0 / 1 | picture time, slower engine, ms | cycle min / avg / max, ms | lag at begin avg / max, ms | CPU load, mux / total, % | result |
+|---|---|---|---|---|---|---|---|---|---|---|
+| CAVLC | interrupt | 24 | 31,819 | 0 | 486 / 517 | 3.1 | 20.5 / 33.3 / 34.6 | 0.7 / 31.6 | 99.0 / 99.1 | PASS 13/13 |
+| CAVLC | interrupt | 26 | 29,374 | 0 | 491 / 495 | 18.5 | 20.5 / 33.3 / 34.6 | 0.6 / 19.5 | 89.2 / 89.3 | PASS 13/13 |
+| CAVLC | interrupt | 28 | 27,228 | 0 | 492 / 497 | 15.9 | 24.7 / 33.3 / 34.6 | 0.6 / 9.2 | 83.3 / 83.4 | PASS 13/13 |
+| CAVLC | interrupt | 32 | 23,338 | 0 | 491 / 495 | 18.5 | 20.8 / 33.3 / 34.6 | 0.8 / 28.5 | 69.9 / 70.0 | PASS 13/13 |
+| CAVLC | polled | 24 | 31,819 | 0 | 492 / 496 | 18.3 | 20.8 / 33.3 / 34.5 | 0.6 / 17.9 | 98.8 / 98.9 | PASS 13/13 |
+| CAVLC | polled | 26 | 29,374 | 0 | 496 / 498 | 21.0 | 28.5 / 33.3 / 34.9 | 0.5 / 6.0 | 90.1 / 90.2 | PASS 13/13 |
+| CABAC 4x4 | interrupt | 24 | 27,820 | 0 | 692 / 550 | 31.0 | 30.2 / 33.3 / 34.6 | 2.2 / 14.6 | 85.0 / 85.1 | PASS 14/14 |
+| CABAC 4x4 | interrupt | 26 | 25,775 | 0 | 463 / 682 | 12.6 | 30.3 / 33.3 / 34.4 | 0.7 / 9.0 | 79.1 / 79.2 | PASS 14/14 |
+| CABAC 4x4 | interrupt | 28 | 23,825 | 0 | 525 / 558 | 22.2 | 28.0 / 33.3 / 34.5 | 0.9 / 30.4 | 73.2 / 73.3 | PASS 14/14 |
+| CABAC 4x4 | interrupt | 32 | 20,031 | 0 | 600 / 524 | 26.8 | 25.2 / 33.3 / 34.3 | 0.7 / 21.8 | 62.7 / 62.8 | PASS 14/14 |
+| CABAC 4x4 | polled | 24 | 27,820 | 0 | 693 / 554 | 31.0 | 30.2 / 33.3 / 34.6 | 2.9 / 23.2 | 85.0 / 85.1 | PASS 14/14 |
+| CABAC 4x4 | polled | 26 | 25,784 | 0 | 600 / 542 | 26.2 | 29.0 / 33.3 / 34.7 | 0.7 / 13.2 | 79.0 / 79.1 | PASS 14/14 |
+| CABAC 8x8 | interrupt | 24 | 27,839 | 0 | 589 / 558 | 25.3 | 30.1 / 33.3 / 33.8 | 15.6 / 21.0 | 81.9 / 82.0 | PASS 14/14 |
+| CABAC 8x8 | interrupt | 26 | 25,802 | 0 | 476 / 607 | 18.1 | 29.0 / 33.3 / 34.6 | 0.6 / 7.8 | 79.2 / 79.3 | PASS 14/14 |
+| CABAC 8x8 | interrupt | 28 | 23,841 | 0 | 529 / 554 | 22.4 | 28.9 / 33.3 / 34.6 | 0.6 / 9.7 | 73.4 / 73.5 | PASS 14/14 |
+| CABAC 8x8 | interrupt | 32 | 20,046 | 0 | 480 / 608 | 12.0 | 25.2 / 33.3 / 34.2 | 0.7 / 19.1 | 62.6 / 62.7 | PASS 14/14 |
+| CABAC 8x8 | polled | 24 | 27,838 | 0 | 574 / 564 | 24.6 | 30.1 / 33.4 / 34.1 | 13.2 / 16.3 | 82.1 / 82.2 | PASS 14/14 |
+| CABAC 8x8 | polled | 26 | 25,799 | 0 | 514 / 579 | 21.6 | 30.2 / 33.3 / 34.5 | 0.6 / 6.8 | 79.0 / 79.1 | PASS 14/14 |
+| CABAC auto | interrupt | 24 | 27,817 | 1 | 474 / 627 | 18.5 | 30.0 / 33.4 / 34.2 | 18.7 / 33.1 | 87.5 / 87.6 | FAIL 3/14 (1 dropped picture) |
+| CABAC auto | interrupt | 26 | 25,789 | 0 | 499 / 592 | 20.8 | 30.3 / 33.3 / 34.6 | 0.6 / 4.7 | 80.1 / 80.2 | PASS 14/14 |
+| CABAC auto | interrupt | 28 | 23,835 | 0 | 543 / 556 | 23.1 | 28.9 / 33.3 / 34.6 | 0.6 / 12.2 | 73.3 / 73.4 | PASS 14/14 |
+| CABAC auto | interrupt | 32 | 20,043 | 0 | 623 / 539 | 27.8 | 26.8 / 33.3 / 34.5 | 0.7 / 22.1 | 61.6 / 61.7 | PASS 14/14 |
+| CABAC auto | polled | 24 | 27,816 | 0 | 473 / 613 | 19.6 | 29.6 / 33.4 / 34.2 | 19.8 / 28.9 | 84.6 / 84.7 | PASS 14/14 |
+| CABAC auto | polled | 26 | 25,789 | 0 | 578 / 558 | 24.8 | 29.0 / 33.3 / 34.5 | 0.8 / 20.4 | 80.2 / 80.3 | PASS 14/14 |
+
+The drops of 6.19 are gone: with the 8x8 transform on, QP 24 and QP 26 stream with 0 dropped pictures in 15 s (26 and 5 before; 720 and 692 clocks per macroblock against the budget of 735 then), in the interrupt and in the polled mode, and the 4x4 transform and CAVLC stream with 0 as before. One point drops: CABAC auto at QP 24 in interrupt mode lost 1 picture of 450; two reruns of the same case (`phase2h_full_sweep_q24_ha_int_rerun1/2`) gave 0 and 1 dropped pictures (the failed logs are kept in `build/phase2h_failed_runs` and `build/phase2h_full_sweep_q24_ha_int_rerun2_*`); the polled run of the same case dropped none. What bounds the point: the encoder. At QP 24 with the 8x8 transform or the adaptive choice the frames wait 15.6 to 19.8 ms on average for the encoder to begin (lag at begin; 0.6 to 0.9 ms at QP 26 and above, 2.2 to 2.9 ms for CABAC 4x4 at QP 24), the largest lag is 21 to 33 ms of the 33.3 ms period, and the handler starts 89 % (CABAC 4x4) to 99 % (8x8, auto) of the pictures; the output rate is 27.8 Mb/s (the pictures are 116 kB) and the TS multiplexer takes 82 to 88 % of the CPU (CAVLC at QP 24: 99 % at 31.8 Mb/s with 0 drops, so the multiplexer is not what drops the picture). The last-picture times of the slower engine at QP 24 read 18.5 to 31.0 ms of the 33.3 ms period; they are single pictures. The stage 3c clock cuts and the interrupt moved the limit from QP 26 to below QP 24 for the 8x8 transform and leaves the adaptive choice, which costs 5 clocks per macroblock more than "on" (17.8), at the edge at QP 24.
+
+**Stream matrix, 30 s each, constant QP 28, GOP 30, every decoded picture compared with the pattern model** (`stream_test.ps1 -Mode both -Seconds 30 -PsnrStep 1 -Jm`; 32 captures, 16 commands): all 16 commands pass (25/25 Baseline, 27/27 High), 0 dropped pictures, 0 UDP drops, FFmpeg 0 error lines, JM output identical to FFmpeg's for every access unit, ffprobe `Constrained Baseline` for the first row of each pattern and `High` for the others. The bars PSNR minimum is 51.14 dB in every case. PSNR minimum / mean over all pictures; clocks per macroblock of the last picture of engine 0 / engine 1; "Transform MBs" is the line of `show encoder` (macroblocks of the last picture with a coded luma block, per transform; one picture, a snapshot):
+
+1080p30
+
+| pattern | profile | kb/s | PSNR min / mean dB | clocks per MB | Transform MBs, last picture |
+|---|---|---|---|---|---|
+| bars | Baseline CAVLC | 76 | 51.14 | 491 / 491 | |
+| bars | CABAC 4x4 | 28 | 51.14 | 492 / 492 | |
+| bars | CABAC 8x8 | 28 | 51.14 | 496 / 497 | 8x8 0, 4x4 0 |
+| bars | CABAC auto | 28 | 51.14 | 492 / 492 | 8x8 0, 4x4 0 |
+| `all` 4 | Baseline CAVLC | 27,220 | 44.39 / 44.96 | 490 / 498 | |
+| `all` 4 | CABAC 4x4 | 23,820 | 44.46 / 44.95 | 541 / 541 | |
+| `all` 4 | CABAC 8x8 | 23,846 | 44.27 / 44.88 | 530 / 561 | 8x8 5, 4x4 0 |
+| `all` 4 | CABAC auto | 23,836 | 44.27 / 44.88 | 561 / 545 | 8x8 0, 4x4 4 |
+| `scroll` -7 | Baseline CAVLC | 526 | 47.95 / 50.08 | 492 / 492 | |
+| `scroll` -7 | CABAC 4x4 | 260 | 48.13 / 50.05 | 480 / 480 | |
+| `scroll` -7 | CABAC 8x8 | 263 | 48.13 / 50.39 | 492 / 492 | 8x8 16, 4x4 0 |
+| `scroll` -7 | CABAC auto | 252 | 47.91 / 50.18 | 489 / 489 | 8x8 12, 4x4 0 |
+| `box` 24 | Baseline CAVLC | 166 | 51.02 / 51.19 | 492 / 492 | |
+| `box` 24 | CABAC 4x4 | 89 | 51.04 / 51.21 | 490 / 490 | |
+| `box` 24 | CABAC 8x8 | 91 | 51.03 / 51.16 | 459 / 458 | 8x8 11, 4x4 0 |
+| `box` 24 | CABAC auto | 84 | 51.03 / 51.16 | 487 / 487 | 8x8 8, 4x4 5 |
+
+720p30
+
+| pattern | profile | kb/s | PSNR min / mean dB | clocks per MB | Transform MBs, last picture |
+|---|---|---|---|---|---|
+| bars | Baseline CAVLC | 38 | 51.14 | 450 / 453 | |
+| bars | CABAC 4x4 | 18 | 51.14 | 456 / 460 | |
+| bars | CABAC 8x8 | 18 | 51.14 | 462 / 464 | 8x8 0, 4x4 0 |
+| bars | CABAC auto | 18 | 51.14 | 462 / 463 | 8x8 0, 4x4 0 |
+| `all` 4 | Baseline CAVLC | 18,087 | 43.01 / 43.53 | 463 / 456 | |
+| `all` 4 | CABAC 4x4 | 15,878 | 42.98 / 43.51 | 730 / 541 | |
+| `all` 4 | CABAC 8x8 | 15,893 | 42.98 / 43.51 | 541 / 556 | 8x8 4, 4x4 0 |
+| `all` 4 | CABAC auto | 15,878 | 43.11 / 43.55 | 739 / 551 | 8x8 3, 4x4 1 |
+| `scroll` -7 | Baseline CAVLC | 330 | 47.16 / 49.54 | 453 / 456 | |
+| `scroll` -7 | CABAC 4x4 | 167 | 47.11 / 49.48 | 448 / 449 | |
+| `scroll` -7 | CABAC 8x8 | 168 | 47.12 / 49.74 | 458 / 460 | 8x8 8, 4x4 0 |
+| `scroll` -7 | CABAC auto | 167 | 47.39 / 49.68 | 452 / 452 | 8x8 0, 4x4 0 |
+| `box` 24 | Baseline CAVLC | 127 | 50.91 / 51.16 | 452 / 455 | |
+| `box` 24 | CABAC 4x4 | 78 | 50.82 / 51.15 | 449 / 452 | |
+| `box` 24 | CABAC 8x8 | 80 | 50.45 / 51.14 | 444 / 448 | 8x8 3, 4x4 0 |
+| `box` 24 | CABAC auto | 75 | 50.82 / 51.15 | 462 / 463 | 8x8 5, 4x4 4 |
+
+Against the 4x4 transform the 8x8 transform costs 0.1 % (`all`), 1.2 % (`scroll` 1080p) and 2.2 % (`box` 1080p) more bits, as in 6.19. The adaptive choice saves bits on the two patterns that have large moving areas: `box` -5.6 % at 1080p and -3.8 % at 720p against the 4x4 transform (-7.7 % and -6.3 % against "on"), `scroll` -3.1 % at 1080p against the 4x4 transform (-4.2 % against "on"), the same as the 4x4 transform at 720p, and 0.1 % more on `all` at 1080p. The PSNR means of the three CABAC rows agree within 0.34 dB (`scroll` 1080p with "on" gains 0.34 dB for 1.2 % more bits); the largest minimum difference is 0.37 dB (`box` 24 at 720p with "on", 50.45 dB). The clocks per macroblock of the sparse patterns differ from the 4x4 row by -31 to +12 (single-picture snapshots; the 730 and 739 of the 720p `all` 4x4 and auto rows are single pictures on the CABAC coder, the other engine reads 541 and 551).
+
+**Rate control, 1080p `all` 4, GOP 30, 60 s, `-Bitrate 8000|16000 -PsnrStep 5 -Jm`** (High profile; all six pass 19/19 with 0 dropped pictures):
+
+| Target | Transform | Mean rate (PC) | 1 s / 10 s windows, worst | QP min / avg / max | PSNR min / mean | CPU load, mux |
+|---|---|---|---|---|---|---|
+| 8,000 kb/s | 4x4 | 8,000.3 kb/s | 0.48 % / 0.05 % | 46 / 46.49 / 47 | 26.68 / 27.45 dB | 23.6 % |
+| 8,000 kb/s | 8x8 | 8,000.7 kb/s | 0.55 % / 0.08 % | 46 / 46.50 / 48 | 25.84 / 27.39 dB | 24.0 % |
+| 8,000 kb/s | auto | 8,000.8 kb/s | 0.76 % / 0.11 % | 46 / 46.50 / 48 | 25.84 / 27.41 dB | 24.1 % |
+| 16,000 kb/s | 4x4 | 16,005.4 kb/s | 2.07 % / 0.30 % | 35 / 36.48 / 48 | 25.84 / 37.28 dB | 47.4 % |
+| 16,000 kb/s | 8x8 | 16,005.4 kb/s | 2.02 % / 0.29 % | 35 / 36.49 / 48 | 25.84 / 37.29 dB | 48.5 % |
+| 16,000 kb/s | auto | 16,005.6 kb/s | 1.86 % / 0.28 % | 35 / 36.48 / 48 | 25.84 / 37.35 dB | 49.3 % |
+
+The controller holds the rate in all three transform modes with the same QP trajectory; the PSNR means agree within 0.06 dB at 8,000 kb/s and 0.07 dB at 16,000 kb/s.
+
+**Switches in mid-stream** (`-ForcedIdr 2`, 1080p30 `all` 4 QP 28, GOP 30, 60 s, `-PsnrStep 1 -Jm`): `-Profile high -SwitchTransform8x8` (8x8 on, `encoder transform8x8 off` at 20 s, `auto` at 40 s) `STREAM_TEST: PASS 16/16`: exactly 2 forced IDR pictures, at access units 605 (PTS 20.167 s) and 1,209 (40.300 s), each with the NAL types 5, 7, 8, 9; `transform_8x8_mode_flag` 1, 0, 1; 1,800 pictures decoded by FFmpeg and JM identical, PSNR minimum 44.41 dB, 0 dropped. `-SwitchProfile -Transform8x8 auto` (Constrained Baseline, `encoder profile high` at 20 s, `baseline` at 40 s) `PASS 16/16`: forced IDR pictures at access units 574 (19.133 s) and 1,177 (39.233 s), `profile_idc` 66, 100, 66 with `entropy_coding_mode` 0, 1, 0 and `transform_8x8_mode_flag` 0, 1, 0; 1,770 access units decoded identical, PSNR minimum 44.51 dB, 0 dropped. The change from "on" to "off" and from "off" to "auto" each forced one IDR picture here; a change between "on" and "auto" forces none (17.7, not run here).
+
+**Network and soak.** `net_test.ps1` (default `-Speed 100`) `FAIL 3/18`: the three link-speed items that expect a 100 Mb/s link fail because the link is 1000 Mb/s; with `-Speed 1000` it passes `NET_TEST: PASS 18/18` with the 4 host items that need the PC's wired NIC reported BLOCKED (the NIC is disconnected: ARP entry, ping sweep, UDP echo client, iperf). `tcp_test.ps1 -Board <address>` `TCP_TEST: PASS 8/8`. Soak, 10 minutes, 1080p30 `all` 4, 8,000 kb/s, High profile, interrupt mode (`-Seconds 600 -PsnrStep 30`): `STREAM_TEST: PASS 18/18`, 18,002 pictures sent, 0 dropped, 0 UDP drops, 0 errors, 3,308,633 TS packets with 0 continuity errors and 0 PTS gaps, the 1 s windows within 0.57 % of the target (17,912 windows), 18,012 interrupts (picture done 18,011, ring stall 1, profile change 1), handler time last 49 us and max 220 us, lag at begin avg 43 us and max 17,649 us (the largest single start delay of the 10 minutes; no picture was lost).
+
+**Default image** (`default_irq`, no module: `High profile: not present`): `PHASE1_GATE: PASS 19/19`, `CLI_TEST: PASS 95/95`; 1080p30 `all` 4 at 8,000 kb/s in interrupt mode `PASS 19/19` (1,812 interrupts for 1,811 pictures, handler last 48 us, max 58 us, lag at begin avg 4 us, max 14 us), polled `PASS 18/18` (lag max 10,004 us), switched in mid-stream `PASS 20/20` (1,169 interrupts); CAVLC sweep QP 24, 26, 28 `PASS 12/12` each, 0 dropped pictures at 31.8, 29.4 and 27.2 Mb/s (CPU load 94.3, 89.7, 83.2 %); one 1080p30 `all` 4 QP 28 stream (27,220 kb/s, PSNR 44.54 / 45.01 dB, `PASS 12/12`) and one 720p30 (18,082 kb/s, 43.12 / 43.52 dB, `PASS 12/12`), bars at both sizes `PASS 23/23`, all with every picture compared.
+
+**Left open.** No demo image and no license-end test for this tree (see the change above). The clocks per macroblock, the picture time and the Transform MBs counts are snapshots of one picture. The adaptive choice was run on the board's patterns only; its simulation result (private document 11.2) is a gain on the 720p and 1080p test content that the board's patterns do not show. The hp_full image has 98.67 % of the slices occupied and +0.012 ns of margin: a next change of the encoder needs a directive search and the arbiter's grant logic (rows 3 to 9 of the table above) is the first path to cut. The run-1 gate (`Slice LUTs` above 80 %) is a build-flow limit, not a timing limit; the product image (CABAC-only High profile with the deblocking filter) is built separately.
 
 ## 7. Network integration (done 10-22-2026) and what remains
 
@@ -1409,7 +1569,8 @@ Open:
 | 11-09-2026 | Phase 1 (section 6.10): video cores `u_csi2`, `u_s2mm`, `u_fb` on decoder slaves 7 to 9, arbiter with two masters, CDC expectation `axil_cdc 9` (network) and `4` (CPU-only), firmware video commands and the Phase 1 gate |
 | 11-10-2026 | Wide cache bus (512-bit cache buses, 32 KiB caches, AXI BRAM 64 KiB): build and board results in section 6.12 |
 | 11-12-2026 | Section 6.19: the 8x8 transform on the board (stage 3 netlist: build `hp_full` closes with `AltSpreadLogic_high`, stream matrix Baseline / CABAC 4x4 / CABAC 8x8, mid-stream switches, throughput limit; `hp_demo` did not close in three runs, expiry test open) |
-| 11-12-2026 | Section 6.20: the encoder interrupt wired to the CPU interrupt input irq[1] (INTC input 1); the firmware runs the encoder in interrupt mode by default; board step open |
+| 11-12-2026 | Section 6.20: the encoder interrupt wired to the CPU interrupt input irq[1] (INTC input 1); the firmware runs the encoder in interrupt mode by default; measured on the board in 6.21 |
+| 11-12-2026 | Section 6.21: the merged encoder (adaptive transform, stage 3c pipeline stages, interrupt) on the board: hp_full from the routed design of run 1 with the utilization limit raised to 82 % (`RTLNET_UTIL_LIMIT`, `RTLNET_RESUME_DCP`; measured 80.72 % LUT, WNS +0.012 ns), default image WNS +0.095 ns, interrupt and polled results, throughput sweep without drops at QP 24 and 26 for the 8x8 transform, stream matrix, rate control, switches, 10-minute soak, firmware transform default off; the demo image and its expiry test move to the CABAC-only image with the deblocking filter |
 | 11-11-2026 | Section 6.18: CABAC on the board (hp_full and hp_demo images placed and routed, stream matrix CABAC against CAVLC, profile switch, 30-minute license end) |
 | 11-11-2026 | Section 6.17: stream throughput, the mux runs apart from the encoder (picture queue, resumable mux, console transmit on the UART interrupt); sweep before and after, knee at about 33 Mb/s |
 | 11-11-2026 | Section 6.15: High profile demo netlist image (`build.ps1 -HighProfile demo -Tag hp_demo -Image`), license timer test; section 6.16: start QP of the rate control (board before and after) |

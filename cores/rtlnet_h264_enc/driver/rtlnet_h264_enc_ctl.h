@@ -248,7 +248,7 @@ int  rtlnet_h264_ctl_has_reference(void);
 
 /* High profile controls (all of them refuse by named error codes, see RTLNET_H264_CTL_HP_ERR_*). set_profile: high != 0 selects High, 0
  * Constrained Baseline. set_transform8x8: RTLNET_H264_CTL_T8_OFF / _ON / _AUTO; the request is remembered (wanted) and re-applied at every
- * set_mode, where the default auto degrades to on on a module without the adaptive choice. profile_in_force and transform8x8_in_force describe
+ * set_mode (the default is OFF, the 4x4 transform), where auto degrades to on on a module without the adaptive choice. profile_in_force and transform8x8_in_force describe
  * what the next picture uses. */
 int  rtlnet_h264_ctl_set_profile(int high);
 int  rtlnet_h264_ctl_hp_info(rtlnet_h264_ctl_hp_t *out);

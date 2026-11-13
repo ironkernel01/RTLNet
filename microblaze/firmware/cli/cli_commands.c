@@ -56,6 +56,7 @@
  *  11-11-2026  MenuBuilder AI / Steve Spano    High profile seam: encoder profile baseline|high, High profile line in show encoder
  *  11-12-2026  MenuBuilder AI / Steve Spano    8x8 transform (High profile stage 3): encoder transform8x8 on|off, Transform 8x8 line in show encoder
  *  11-12-2026  MenuBuilder AI / Steve Spano    Adaptive transform (stage 3a): encoder transform8x8 on|off|auto (default auto), macroblock counts in show encoder
+ *  11-12-2026  MenuBuilder AI / Steve Spano    Transform default: encoder transform8x8 starts at off (the 4x4 transform); on, off and auto stay
  *  11-12-2026  MenuBuilder AI / Steve Spano    Encoder interrupt: encoder notify interrupt|polled, encoder irqtest, notification and interrupt lines in show stream and show encoder; the encoder is controlled through the driver layer only
  * ===========================================================================
  */
@@ -3725,8 +3726,8 @@ int cli_encoder_profile(const MenuCommandContext *ctx)
 }
 
 /**
- * @brief ENCODER TRANSFORM8X8 [STATE]: the transform of inter macroblocks: auto (the default: the module chooses the 4x4 or the 8x8 transform per
- *        macroblock), on (the 8x8 transform on every inter macroblock) or off (the 4x4 transform).
+ * @brief ENCODER TRANSFORM8X8 [STATE]: the transform of inter macroblocks: off (the default: the 4x4 transform), on (the 8x8 transform on every inter macroblock) or auto (the module chooses the 4x4 or the 8x8
+ *        transform per macroblock).
  * @param ctx argv[0] = on, off or auto.
  * @return 0, or -1 for a bad word, an absent core or a refused request (named reason). Takes effect at the next picture while the profile is high:
  *         between off and on or auto that picture is an IDR picture with new parameter sets.
@@ -3893,7 +3894,7 @@ int cli_encoder_notify(const MenuCommandContext *ctx)
     if (!s.running) {
         fmt_printf(" (applied at the next stream start)\n");
     } else if (s.notify_mode != mode) {
-        fmt_printf(" (not available: polled stays in force)\n");
+        fmt_printf(" (takes effect at the next idle point of the encoder; the Notification line of show stream gives the mode in force)\n");
     } else {
         fmt_printf("\n");
     }

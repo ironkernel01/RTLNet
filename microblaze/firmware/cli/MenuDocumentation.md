@@ -265,7 +265,7 @@ token counts; exec commands are also accepted in priv.
 | 42 | cli_encoder_profile | priv | `ENCODER PROFILE [PROFILE]` | PROFILE | — | 3 | 3 | — | Stream profile: baseline (Constrained Baseline, default) or high (High profile tools, needs the High profile netlist) |
 | 43 | cli_encoder_notify | priv | `ENCODER NOTIFY [MODE]` | MODE | — | 3 | 3 | — | How the end of a picture reaches the firmware: interrupt (default, the encoder interrupt starts the next picture) or polled (the main loop reads STATUS) |
 | 44 | cli_encoder_irqtest | priv | `ENCODER IRQTEST` | — | — | 2 | 2 | — | Interrupt self-test: force an event in the encoder core and check that the interrupt handler counts it (needs a stream in interrupt mode) |
-| 45 | cli_encoder_transform8x8 | priv | `ENCODER TRANSFORM8X8 [STATE]` | STATE | — | 3 | 3 | — | Transform of inter macroblocks: auto (default, the module chooses per macroblock), on (8x8 always) or off (4x4); used in the High profile when the netlist offers it |
+| 45 | cli_encoder_transform8x8 | priv | `ENCODER TRANSFORM8X8 [STATE]` | STATE | — | 3 | 3 | — | Transform of inter macroblocks: off (default, 4x4), on (8x8 always) or auto (the module chooses per macroblock); used in the High profile when the netlist offers it |
 | 46 | cli_debug_read | priv | `DEBUG READ [ADDR]` | ADDR | — | 3 | 3 | — | Read a 32-bit word (hex 0x... or decimal address) |
 | 47 | cli_debug_write | priv | `DEBUG WRITE [ADDR] [VALUE]` | ADDR, VALUE | — | 4 | 4 | — | Write a 32-bit word |
 | 48 | cli_phy_read | priv | `PHY READ [REG]` | REG | — | 3 | 3 | — | Read a PHY register (0..31) over MDIO |

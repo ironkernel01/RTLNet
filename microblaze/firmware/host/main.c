@@ -912,6 +912,10 @@ static void demo_video(void)
     demo_check(demo_has("  Transform 8x8   : not offered (hp_caps bit 1 is 0)"), "show encoder: Transform 8x8 line, not offered");
     host_model_h264_hp(1u, 1u, RTLNET_H264_CTL_HP_CAP_CABAC | RTLNET_H264_CTL_HP_CAP_TRANSFORM8X8, 600u);   /* stage 3: CABAC and the 8x8 transform */
     host_capture_clear();
+    demo_type("show encoder\r");
+    demo_check(demo_has("  Transform 8x8   : off, not in force (4x4 transform)") && host_model_h264_hp_ctrl_t8() == 0u,
+               "show encoder: the transform request starts at off (the default is the 4x4 transform)");
+    host_capture_clear();
     demo_type("encoder transform8x8 on\r");
     demo_check(demo_has("Transform8x8 on, effective at the next picture in the High profile") && host_model_h264_hp_ctrl_t8() == 1u,
                "encoder transform8x8 on: accepted, HP_CTRL bit 1 set");

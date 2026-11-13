@@ -45,6 +45,7 @@ Revision: 11-10-2026
   * 11-10-2026: Phase 2d: camera pattern (bad name, bad speed, all -7, box 24, bars), encoder bitrate, buffer and qprange (bad values, good values),
     the rate-control lines of show stream, show encoder history, back to constant QP.
   * 11-11-2026: the full High profile image (tools CABAC, encoder profile high accepted) passes the same steps.
+  * 11-12-2026: merged tree: encoder transform8x8 auto (bad word text on, off or auto), hp_caps 7, encoder notify (bad, polled, interrupt), encoder irqtest without a stream, the interrupt lines of show encoder and the Notification line of show stream.
   * 11-12-2026: Transform 8x8 line of show encoder, encoder transform8x8 (bad, off, on), hp_caps 3; tolerant of every image kind.
   * 11-11-2026: High profile seam: the High profile line of show encoder, encoder profile (bad, high refused, baseline); tolerant of the default image and the High profile netlist image.
   * 11-10-2026: Phase 2c: encoder VERSION 0x11102C02, encoder gop (bad values, 1, 30) and the GOP lines of show stream and show encoder,
@@ -226,20 +227,29 @@ try {
     # H.264 stream (Phase 2b-3): command formats and refusals; the stream itself is checked by stream_test.ps1.
     Send-Step $sp 'encoder VERSION' "debug read 0x44a08004`r" @('0x44A08004 = 0x11122C03') 'rtlnet#'
     Send-Step $sp 'show encoder' "show encoder`r" @(
-        'ID "H264" 0x48323634', 'GOP\s+: \d+ \(IDR every \d+ pictures, P pictures between\), last picture (IDR|P)', 'Build\s+: 2 engines, up to 120 x 68 macroblocks', 'QP\s+: \d+ configured, \d+ written; STATUS 0x[0-9A-F]{8}',
+        'ID "H264" 0x48323634', 'GOP\s+: \d+ \(IDR every \d+ pictures, P pictures between\), last picture (IDR|P)', 'Build\s+: 2 engines, up to 120 x 68 macroblocks, interrupt registers present', 'Interrupt regs\s+: IRQ_STATUS 0x[0-9A-F]{2}, IRQ_ENABLE 0x[0-9A-F]{2}, global enable [01]; last error code \d+', 'Notification\s+: (interrupt|polled)', 'QP\s+: \d+ configured, \d+ written; STATUS 0x[0-9A-F]{8}',
         'Engine 0\s+: \d+ macroblocks, picture \d+ cycles', 'Engine 1\s+: \d+ macroblocks, picture \d+ cycles') 'rtlnet#'
     # High profile seam (11-11-2026): tolerant of the default image (no seam or no netlist) and of a High profile netlist image (stage 1: present, hp_caps 0).
     Send-Step $sp 'show encoder (High profile line)' "show encoder`r" @(
-        'High profile\s+: (not present \((this build has no High profile seam|the High profile netlist is not in this build)\)|present, (licensed|license ended), time left (unlimited|\d+ min \d+ s), (tools none \(hp_caps 0\)|tools CABAC \(hp_caps 1\)|tools CABAC 8x8-transform \(hp_caps 3\)), profile baseline, \d+ forced IDR pictures)') 'rtlnet#'
+        'High profile\s+: (not present \((this build has no High profile seam|the High profile netlist is not in this build)\)|present, (licensed|license ended), time left (unlimited|\d+ min \d+ s), (tools none \(hp_caps 0\)|tools CABAC \(hp_caps 1\)|tools CABAC 8x8-transform \(hp_caps 3\)|tools CABAC 8x8-transform adaptive-choice \(hp_caps 7\)), profile baseline, \d+ forced IDR pictures)') 'rtlnet#'
     Send-Step $sp 'encoder profile (bad)' "encoder profile main`r" @('% Invalid profile \(baseline or high\) "main"') 'rtlnet#'
     Send-Step $sp 'encoder profile high (refused)' "encoder profile high`r" @(
         '(Profile high, effective at the next picture|% Profile high refused: (this build has no High profile seam|the High profile netlist is not in this build|the High profile module offers no tool yet \(hp_caps is 0\)|the High profile license has ended))') 'rtlnet#'
     Send-Step $sp 'encoder profile baseline' "encoder profile baseline`r" @('Profile baseline \(Constrained Baseline\), effective at the next picture') 'rtlnet#'
     # 8x8 transform (11-12-2026): the Transform 8x8 line of show encoder exists only where the High profile module is present; tolerant of every image kind.
-    Send-Step $sp 'show encoder (Transform 8x8 line)' "show encoder`r" @('(?s)\A(?!.*High profile\s+: present)|Transform 8x8\s+: (not offered \(hp_caps bit 1 is 0\)|(on|off), (in force \(inter macroblocks use the 8x8 transform\)|not in force \(4x4 transform\)))') 'rtlnet#'
-    Send-Step $sp 'encoder transform8x8 (bad)' "encoder transform8x8 maybe`r" @('% Invalid state \(on or off\) "maybe"') 'rtlnet#'
+    Send-Step $sp 'show encoder (Transform 8x8 line)' "show encoder`r" @('(?s)\A(?!.*High profile\s+: present)|Transform 8x8\s+: (not offered \(hp_caps bit 1 is 0\)|(on|off|auto), (in force \((inter macroblocks use the 8x8 transform|the module chooses the 4x4 or the 8x8 transform per macroblock)\)|not in force \(4x4 transform\)))') 'rtlnet#'
+    Send-Step $sp 'encoder transform8x8 (bad)' "encoder transform8x8 maybe`r" @('% Invalid state \(on, off or auto\) "maybe"') 'rtlnet#'
     Send-Step $sp 'encoder transform8x8 off' "encoder transform8x8 off`r" @('(Transform8x8 off \(4x4 transform\), effective at the next picture|% Transform8x8 on refused: (this build has no High profile seam|the High profile netlist is not in this build|the High profile module offers no 8x8 transform \(hp_caps bit 1 is 0\)))') 'rtlnet#'
     Send-Step $sp 'encoder transform8x8 on' "encoder transform8x8 on`r" @('(Transform8x8 on, effective at the next picture in the High profile|% Transform8x8 on refused: (this build has no High profile seam|the High profile netlist is not in this build|the High profile module offers no 8x8 transform \(hp_caps bit 1 is 0\)))') 'rtlnet#'
+    Send-Step $sp 'encoder transform8x8 auto' "encoder transform8x8 auto`r" @('(Transform8x8 auto, effective at the next picture in the High profile|% Transform8x8 auto refused: (this build has no High profile seam|the High profile netlist is not in this build|the High profile module offers no 8x8 transform \(hp_caps bit 1 is 0\)|the High profile module offers no adaptive transform choice \(hp_caps bit 2 is 0\)))') 'rtlnet#'
+    Send-Step $sp 'show encoder (Transform 8x8 line, auto)' "show encoder`r" @('(?s)\A(?!.*High profile\s+: present)|Transform 8x8\s+: (not offered \(hp_caps bit 1 is 0\)|(on|off|auto), (in force \((inter macroblocks use the 8x8 transform|the module chooses the 4x4 or the 8x8 transform per macroblock)\)|not in force \(4x4 transform\)))') 'rtlnet#'
+    Send-Step $sp 'encoder transform8x8 off (default)' "encoder transform8x8 off`r" @('(Transform8x8 off \(4x4 transform\), effective at the next picture|% Transform8x8 on refused: (this build has no High profile seam|the High profile netlist is not in this build|the High profile module offers no 8x8 transform \(hp_caps bit 1 is 0\)))') 'rtlnet#'
+    # Encoder interrupt (11-12-2026): the notification mode and the interrupt self test (needs a running stream, so it is refused here).
+    Send-Step $sp 'encoder notify (bad)' "encoder notify maybe`r" @('% Invalid notification mode \(interrupt or polled\) "maybe"') 'rtlnet#'
+    Send-Step $sp 'encoder notify polled' "encoder notify polled`r" @('Notification polled: the main loop reads STATUS and starts the next picture \(applied at the next stream start\)') 'rtlnet#'
+    Send-Step $sp 'show encoder (notify polled)' "show encoder`r" @('Notification\s+: polled') 'rtlnet#'
+    Send-Step $sp 'encoder notify interrupt' "encoder notify interrupt`r" @('Notification interrupt requested: the encoder interrupt starts the next picture \(applied at the next stream start\)') 'rtlnet#'
+    Send-Step $sp 'encoder irqtest (no stream)' "encoder irqtest`r" @('% The interrupt test needs a running stream in interrupt mode \(stream h264, encoder notify interrupt\)') 'rtlnet#'
     Send-Step $sp 'encoder qp (bad)' "encoder qp 52`r" @('% Invalid QP \(0\.\.51\) "52"') 'rtlnet#'
     Send-Step $sp 'encoder qp 8 (floor)' "encoder qp 8`r" @('QP 8 set; the driver writes 12') 'rtlnet#'
     Send-Step $sp 'encoder qp 28' "encoder qp 28`r" @('QP 28, effective at the next picture') 'rtlnet#'
@@ -267,7 +277,7 @@ try {
     Send-Step $sp 'stream h264 (bad address)' "stream h264 300.1.1.1 5004`r" @('% Invalid IPv4 address "300\.1\.1\.1"') 'rtlnet#'
     Send-Step $sp 'stream h264 (bad port)' "stream h264 192.168.68.1 0`r" @('% Invalid UDP port \(1\.\.65535\) "0"') 'rtlnet#'
     Send-Step $sp 'show stream (stopped)' "show stream`r" @(
-        'State\s+: stopped', 'Pictures\s+: \d+ sent, \d+ dropped', 'GOP\s+: 30 \(IDR every 30 pictures\); \d+ IDR pictures \(\d+ bytes each on average\), \d+ P pictures', 'TS packets\s+: \d+ in \d+ datagrams',
+        'State\s+: stopped', 'Pictures\s+: \d+ sent, \d+ dropped', 'Notification\s+: (interrupt|polled)', 'GOP\s+: 30 \(IDR every 30 pictures\); \d+ IDR pictures \(\d+ bytes each on average\), \d+ P pictures', 'TS packets\s+: \d+ in \d+ datagrams',
         'CPU load\s+: TS mux \d+\.\d %', 'Errors\s+: \d+; frame buffer published \d+, dropped \d+') 'rtlnet#'
     Send-Step $sp 'stream stop (none)' "stream stop`r" @('No stream is running') 'rtlnet#'
     Send-Step $sp 'conf t (tcp)' "configure terminal`r" @() 'rtlnet(config)#'

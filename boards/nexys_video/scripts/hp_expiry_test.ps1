@@ -17,7 +17,8 @@ Overview:
   * Output: boards/nexys_video/build/<prefix>_summary.txt; the last line is "HP_EXPIRY_TEST: PASS" or "HP_EXPIRY_TEST: FAIL <n>".
 Usage:
   powershell -NoProfile -ExecutionPolicy Bypass -File boards/nexys_video/scripts/hp_expiry_test.ps1 [-Seconds 1980] [-PollSeconds 180] [-Prefix phase2e_hp_expiry]
-Revision: 11-11-2026
+Revision: 11-12-2026
+  * 11-12-2026: -Transform8x8 and -Notify (passed to stream_test), hp_caps 1, 3 or 7, the interrupt counts of the license end (license lost, profile change).
   * 11-11-2026: initial version.
 -------------------------------------------------------------------------------
 #>
@@ -32,6 +33,8 @@ param(
     [int64]$CfgEpoch = 0,
     [string]$HostIp = '',
     [ValidateSet('', 'baseline', 'high')][string]$Profile = '',
+    [ValidateSet('', 'on', 'off', 'auto')][string]$Transform8x8 = '',
+    [string]$Notify = '',
     [switch]$SkipStream
 )
 $ErrorActionPreference = 'Stop'
@@ -129,7 +132,7 @@ Gate 'time left does not rise (counts down)' ((Left-Seconds $hp2) -le $left1) "$
 if ($hp1 -match 'tools none \(hp_caps 0\)') {
     Gate 'encoder profile high refused (hp_caps 0)' ($pr -match '% Profile high refused: the High profile module offers no tool yet \(hp_caps is 0\)') ($pr.Trim() -replace '\s+', ' ')
 } else {
-    Gate 'tools CABAC (hp_caps 1) and encoder profile high accepted' ($hp1 -match 'tools CABAC \(hp_caps 1\)' -and $pr -match 'Profile high, effective at the next picture') ($pr.Trim() -replace '\s+', ' ')
+    Gate 'tools CABAC (hp_caps 1, 3 or 7) and encoder profile high accepted' ($hp1 -match 'tools CABAC( 8x8-transform( adaptive-choice)?)? \(hp_caps [137]\)' -and $pr -match 'Profile high, effective at the next picture') ($pr.Trim() -replace '\s+', ' ')
 }
 }
 
@@ -142,6 +145,8 @@ $spw.Close()
 $args2 = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $PSScriptRoot 'stream_test.ps1'), '-Mode', '1080p30', '-Seconds', "$Seconds", '-Gop', '30', '-Qp', '28',
            '-CcTolPct', '0.01', '-PollSeconds', "$PollSeconds", '-ForcedIdr', '1', '-SkipVlc', '-PsnrStep', "$PsnrStep", '-FilePrefix', $Prefix)
 if ($Profile) { $args2 += @('-Profile', $Profile) }
+if ($Transform8x8) { $args2 += @('-Transform8x8', $Transform8x8) }
+if ($Notify) { $args2 += @('-Notify', $Notify) }
 if ($HostIp) { $args2 += @('-HostIp', $HostIp) }
 Say "stream_test: $($args2 -join ' ')"
 if (-not $SkipStream) {
@@ -173,7 +178,7 @@ if ($Profile -eq 'high') {
     # High profile image (CABAC): the profile command before the stream start counts one forced IDR picture (it coincides with the first IDR picture),
     # the license end the second.
     # The profile word of the line is the requested profile (the hp_enable bit): it stays high after the license ended, the encoder then codes Constrained Baseline.
-    Gate 'board after the capture: license ended, 2 forced IDR pictures' ($fsl -match 'license ended, time left 0 min 0 s, tools CABAC \(hp_caps 1\), profile (high|baseline), 2 forced IDR pictures') "$fsl"
+    Gate 'board after the capture: license ended, 2 forced IDR pictures' ($fsl -match 'license ended, time left 0 min 0 s, tools CABAC( 8x8-transform( adaptive-choice)?)? \(hp_caps [137]\), profile (high|baseline), 2 forced IDR pictures') "$fsl"
     $profRuns = @($tsText -split "`n" | Where-Object { $_ -match '^PROFILE_RUN ' })
     $okRuns = ($profRuns.Count -eq 2 -and $profRuns[0] -match 'access_unit=0 .*profile_idc=100 .*entropy_coding_mode=1' -and $profRuns[1] -match 'profile_idc=66 constraint_set1=1 entropy_coding_mode=0')
     $forcedAu = [regex]::Match($tsText, 'FORCED_IDR access_unit=(\d+)')
@@ -182,6 +187,13 @@ if ($Profile -eq 'high') {
 } else {
     Gate 'board after the capture: license ended, 1 forced IDR picture' ($fsl -match 'license ended, time left 0 min 0 s, tools none \(hp_caps 0\), profile baseline, 1 forced IDR pictures') "$fsl"
 }
+# Interrupt mode: the license end shows in the interrupt counts of show stream (read after the capture): one license lost event and a profile change event.
+$irqLine = [string](@($stLines | Where-Object { $_ -match 'Interrupts\s+: \d+ taken' }) | Select-Object -Last 1)
+if ($irqLine) {
+    $lic = [int][regex]::Match($irqLine, 'license lost (\d+)').Groups[1].Value
+    $chg = [int][regex]::Match($irqLine, 'profile change (\d+)').Groups[1].Value
+    Gate 'interrupt counts show the license end (license lost 1, profile change at least 1)' ($lic -eq 1 -and $chg -ge 1) "$irqLine"
+} else { Say '  note: no Interrupts line in the stream_test transcript (polled mode or no interrupt registers)' }
 $dr = @($stLines | Where-Object { $_ -match 'Pictures\s+: \d+ sent, (\d+) dropped' })
 Gate '0 board-side dropped pictures' ($dr.Count -gt 0 -and $dr[0] -match ', 0 dropped') "$($dr -join ' ')"
 $pollFile = Join-Path $Build "${Prefix}_1080p30_poll.txt"

@@ -92,7 +92,7 @@ void rtlnet_h264_ctl_init(uintptr_t base, const rtlnet_h264_ctl_layout_t *layout
     }
     g.notify_wanted = RTLNET_H264_NOTIFY_INTERRUPT;
     g.mode = RTLNET_H264_CTL_MODE_NONE;
-    g.t8_pref = (uint32_t)RTLNET_H264_T8_AUTO;
+    g.t8_pref = (uint32_t)RTLNET_H264_T8_OFF;   /* the default is the 4x4 transform; on and auto are requests */
     (void)rtlnet_h264_enc_buffers_init(&g.bufs, g.layout.ry_base[0], g.layout.ru_base[0], g.layout.ry_base[1], g.layout.ru_base[1]);
 }
 
@@ -446,7 +446,7 @@ int rtlnet_h264_ctl_mode_info(uint32_t mode, rtlnet_h264_ctl_mode_t *out)
 
 /*
  * rtlnet_h264_ctl_set_mode -- see the header
- * Steps: apply the transform request (a module without the adaptive choice degrades auto to on); size registers and the SPS/PPS bytes from the
+ * Steps: apply the transform request (default off; a module without the adaptive choice degrades auto to on); size registers and the SPS/PPS bytes from the
  * driver; the configuration registers with the memory layout; ring reset; the index scan positions restart.
  */
 int rtlnet_h264_ctl_set_mode(uint32_t mode, uint32_t qp)

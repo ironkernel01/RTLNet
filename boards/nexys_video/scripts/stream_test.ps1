@@ -43,6 +43,10 @@ Overview:
   * -Profile baseline|high: "encoder profile <name>" before the stream starts (the full High profile image, CABAC); with high the ffprobe step requires profile High
     (baseline: Constrained Baseline). -SwitchProfile: the capture starts in baseline, "encoder profile high" is sent one third into the capture and
     "encoder profile baseline" at two thirds; use -ForcedIdr 2 (one forced IDR picture at each switch); the ffprobe profile is not gated.
+  * -Transform8x8 on|off|auto: "encoder transform8x8" before the stream starts; -SwitchTransform8x8: the capture starts with the 8x8 transform on, off is sent one third into the
+    capture and auto at two thirds (two forced IDR pictures: on to off, off to auto). -Notify interrupt|polled: "encoder notify" before the stream starts; -SwitchNotify: the capture starts in
+    interrupt mode, "encoder notify polled" is sent one third into the capture and "encoder notify interrupt" at two thirds; the stream must keep running with 0 dropped pictures.
+  * -IrqTest: three seconds after the stream start "encoder irqtest" is sent (a forced ring stall event must reach the interrupt handler); needs interrupt mode.
   * -ForcedIdr <n>: exactly n IDR pictures off the GOP cadence are expected (the forced IDR picture at the license end of the High profile demo netlist).
   * -InputTs <file>: check an existing capture offline (no board, no capture).
   * The transcript is boards/nexys_video/build/phase2c_gop<N>_stream_transcript.txt. The last line is
@@ -50,7 +54,9 @@ Overview:
 Usage:
   powershell -NoProfile -ExecutionPolicy Bypass -File boards/nexys_video/scripts/stream_test.ps1 [-Mode both] [-Seconds 60]
     [-Port COM3] [-UdpPort 5004] [-HostIp <PC address>] [-Qp 28] [-Gop 30] [-Pattern all -Speed 4] [-Bitrate 2000 [-BufferMs 500]] [-Tag <name>] [-SkipVlc] [-NoBoard] [-InputTs <file> -Width 1280 -Height 720]
-Revision: 11-11-2026
+Revision: 11-12-2026
+  * 11-12-2026: -IrqTest.
+  * 11-12-2026: -Transform8x8 auto, -SwitchTransform8x8 ends in auto (off, then auto), -Notify and -SwitchNotify (encoder notify), the transform request is set back to off (the firmware default) after the run.
   * 11-12-2026: -Transform8x8 on|off ("encoder transform8x8" before the stream starts; the full High profile image with the 8x8 transform) and -SwitchTransform8x8
     (the capture starts with the 8x8 transform on, "encoder transform8x8 off" is sent one third into the capture and "on" at two thirds; use -ForcedIdr 2 and -Profile high).
   * 11-11-2026: -PollSeconds (show encoder read during the capture).
@@ -97,8 +103,11 @@ param(
     [int]$ForcedIdr = -1,
     [ValidateSet('', 'baseline', 'high')][string]$Profile = '',
     [switch]$SwitchProfile,
-    [ValidateSet('', 'on', 'off')][string]$Transform8x8 = '',
-    [switch]$SwitchTransform8x8
+    [ValidateSet('', 'on', 'off', 'auto')][string]$Transform8x8 = '',
+    [switch]$SwitchTransform8x8,
+    [ValidateSet('', 'interrupt', 'polled')][string]$Notify = '',
+    [switch]$SwitchNotify,
+    [switch]$IrqTest
 )
 $ErrorActionPreference = 'Stop'
 $Repo  = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..')).Path
@@ -443,11 +452,22 @@ try {
             $t8r = Invoke-Cli $sp "encoder transform8x8 $t8Wanted"
             Add-Result "$m encoder transform8x8 $t8Wanted" ($t8r -match "Transform8x8 $t8Wanted") ($t8r.Trim() -replace '\s+', ' ')
         }
+        $nfWanted = $(if ($SwitchNotify) { 'interrupt' } else { $Notify })
+        if ($nfWanted) {
+            $nfr = Invoke-Cli $sp "encoder notify $nfWanted"
+            Add-Result "$m encoder notify $nfWanted" ($nfr -match "Notification $nfWanted") ($nfr.Trim() -replace '\s+', ' ')
+        }
         $tA = [int64]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()
         $r = Invoke-Cli $sp "stream h264 $HostIp $UdpPort"
         $tB = [int64]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()
         Say "STREAM_START_EPOCH_MS $tA $tB (host time before and after the stream start command)"
         Add-Result "$m stream start" ($r -match 'Streaming H.264') ($r.Trim() -replace '\s+', ' ')
+        if ($IrqTest) {
+            # Interrupt self test with the stream running (interrupt mode): a forced ring stall event must reach the handler.
+            Start-Sleep -Seconds 3
+            $irr = Invoke-Cli $sp 'encoder irqtest'
+            Add-Result "$m encoder irqtest" ($irr -match 'Interrupt test passed') ($irr.Trim() -replace '\s+', ' ')
+        }
         if ($PollSeconds -gt 0) {
             # License-timer test: read "show encoder" every -PollSeconds s while the capture runs (every 5 s while 90 s or less are left and for 40 s after
             # the end), one line per read with the host time, into <prefix>_poll.txt.
@@ -483,13 +503,26 @@ try {
             Add-Result "$m profile switch to baseline" ($pfr -match 'Profile baseline') ($pfr.Trim() -replace '\s+', ' ')
         }
         if ($SwitchTransform8x8) {
-            # 8x8 transform switch in mid-stream: off at one third, on at two thirds of the capture.
+            # 8x8 transform switch in mid-stream: off at one third, auto at two thirds of the capture.
             [void]$capObj.Join([int]($Seconds * 1000 / 3))
             $t8r = Invoke-Cli $sp 'encoder transform8x8 off'
             Add-Result "$m transform8x8 switch to off" ($t8r -match 'Transform8x8 off') ($t8r.Trim() -replace '\s+', ' ')
             [void]$capObj.Join([int]($Seconds * 1000 / 3))
-            $t8r = Invoke-Cli $sp 'encoder transform8x8 on'
-            Add-Result "$m transform8x8 switch to on" ($t8r -match 'Transform8x8 on') ($t8r.Trim() -replace '\s+', ' ')
+            $t8r = Invoke-Cli $sp 'encoder transform8x8 auto'
+            Add-Result "$m transform8x8 switch to auto" ($t8r -match 'Transform8x8 auto') ($t8r.Trim() -replace '\s+', ' ')
+        }
+        if ($SwitchNotify) {
+            # Notification switch in mid-stream: polled at one third, interrupt at two thirds of the capture; the stream keeps running.
+            [void]$capObj.Join([int]($Seconds * 1000 / 3))
+            $nfr = Invoke-Cli $sp 'encoder notify polled'
+            Start-Sleep -Seconds 1
+            $nfs = Invoke-Cli $sp 'show stream'
+            Add-Result "$m notify switch to polled" (($nfr -match 'Notification polled') -and ($nfs -match 'Notification\s+: polled')) (($nfr.Trim() -replace '\s+', ' ') + ' | ' + (Get-Field $nfs 'Notification\s+: ([^\r\n]*)'))
+            [void]$capObj.Join([int]($Seconds * 1000 / 3))
+            $nfr = Invoke-Cli $sp 'encoder notify interrupt'
+            Start-Sleep -Seconds 1
+            $nfs = Invoke-Cli $sp 'show stream'
+            Add-Result "$m notify switch to interrupt" (($nfr -match 'Notification interrupt') -and ($nfs -match 'Notification\s+: interrupt')) (($nfr.Trim() -replace '\s+', ' ') + ' | ' + (Get-Field $nfs 'Notification\s+: ([^\r\n]*)'))
         }
         if (-not $capObj.Join(($Seconds + 40) * 1000)) { $capObj.Abort(); [void]$capObj.Join(5000) }
         $cap = [pscustomobject]@{ Datagrams = $capObj.Datagrams; Bytes = $capObj.Bytes; Seconds = $capObj.Seconds; Odd = $capObj.Odd }
@@ -501,7 +534,8 @@ try {
         if ($sd -notmatch 'Master 3') { Start-Sleep -Milliseconds 700; [void]$sp.ReadExisting(); $sd = Invoke-Cli $sp 'show ddr' }   # the previous command's late prompt can end the read early
         [void](Invoke-Cli $sp 'stream stop')
         if ($Profile -or $SwitchProfile) { [void](Invoke-Cli $sp 'encoder profile baseline') }   # leave the board in the default profile
-        if ($Transform8x8 -or $SwitchTransform8x8) { [void](Invoke-Cli $sp 'encoder transform8x8 on') }   # and with the default transform request
+        if ($Transform8x8 -or $SwitchTransform8x8) { [void](Invoke-Cli $sp 'encoder transform8x8 off') }   # and with the default transform request (the 4x4 transform)
+        if ($Notify -or $SwitchNotify) { [void](Invoke-Cli $sp 'encoder notify interrupt') }   # and in the default notification mode
         $histN = [Math]::Min(3600, $Seconds + 15)
         $sh = Invoke-Cli $sp "show encoder history $histN" 120000
         Set-Content -LiteralPath (Join-Path $Build "${Prefix}_${m}_history.txt") -Value ($sh -replace "`r", '') -Encoding ascii

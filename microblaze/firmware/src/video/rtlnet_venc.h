@@ -182,9 +182,9 @@ void venc_get_status(venc_status_t *out);
 void venc_clear_counters(void);
 
 /*
- * Transform of inter macroblocks (High profile module with hp_caps bit 1). rtlnet_venc_set_transform8x8: RTLNET_H264_CTL_T8_OFF (0, the 4x4 transform),
- * RTLNET_H264_CTL_T8_ON (1, the 8x8 transform on every inter macroblock) or RTLNET_H264_CTL_T8_AUTO (2, the default: the module chooses per macroblock);
- * returns the driver's result (0, or RTLNET_H264_CTL_HP_ERR_NO_SEAM / _NO_MODULE / _NO_T8 for on and auto, _NO_AUTO for auto without hp_caps bit 2; the default auto degrades to on without bit 2). The change takes effect at the next
+ * Transform of inter macroblocks (High profile module with hp_caps bit 1). rtlnet_venc_set_transform8x8: RTLNET_H264_CTL_T8_OFF (0, the 4x4 transform, the default),
+ * RTLNET_H264_CTL_T8_ON (1, the 8x8 transform on every inter macroblock) or RTLNET_H264_CTL_T8_AUTO (2: the module chooses per macroblock);
+ * returns the driver's result (0, or RTLNET_H264_CTL_HP_ERR_NO_SEAM / _NO_MODULE / _NO_T8 for on and auto, _NO_AUTO for auto without hp_caps bit 2; a requested auto degrades to on without bit 2 at the next mode change). The change takes effect at the next
  * picture start while the profile is High: between off and on or auto that picture is a forced IDR picture and the parameter sets are rewritten
  * (PPS transform_8x8_mode_flag); between on and auto nothing else changes.
  * rtlnet_venc_transform8x8_wanted: the request (0, 1 or 2). rtlnet_venc_transform8x8_in_force: 1 when the pictures use the transform now (High

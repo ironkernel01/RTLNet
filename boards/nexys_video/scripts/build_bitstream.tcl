@@ -63,6 +63,8 @@
 #   * 11-09-2026 (superseded, kept for the history): enc_clk (90 MHz, second MMCM): the two engine masters of u_h264 cross to ui_clk through one rtlnet_axi_cdc each, five
 #     packet FIFOs per bridge: expected fifo +10 in both builds (network 15 to 25, CPU-only 5 to 15). The register window of u_h264 now crosses
 #     cpu_clk to enc_clk (still one rtlnet_axil_cdc); no new Gray or axil_cdc instance. cpu_clk is 90 MHz.
+#   * 11-12-2026: RTLNET_RESUME_DCP environment variable continues from a routed checkpoint.
+#   * 11-12-2026: RTLNET_UTIL_LIMIT environment variable raises the utilization ceiling (default 80.0 %).
 #   * 11-09-2026: RTLNET_PLACE_DIRECTIVE environment variable selects the place_design directive (default Explore).
 #   * 11-09-2026: Phase 2b-3 u_h264 (rtlnet_h264_top, register window cpu_clk to ui_clk through its one rtlnet_axil_cdc): expected
 #     rtlnet_axil_cdc +1 in both builds (network 9 to 10, CPU-only 4 to 5); the engines and their masters are all on ui_clk, so no
@@ -78,6 +80,8 @@ set RPT_DIR    [file join $BUILD_DIR reports]
 set PART       xc7a200tsbg484-1
 set TOP        rtlnet_nexys_video_top
 set UTIL_LIMIT 80.0
+# RTLNET_UTIL_LIMIT (percent) raises the ceiling for a build that is known to be above it (the merged High profile images are at 80.7 %); the default stays 80.0.
+if {[info exists ::env(RTLNET_UTIL_LIMIT)] && $::env(RTLNET_UTIL_LIMIT) ne ""} { set UTIL_LIMIT $::env(RTLNET_UTIL_LIMIT) }
 
 proc nv_exit {code msg} {
   puts "rtlnet_build: FAIL ($code) $msg"
@@ -172,6 +176,16 @@ proc read_filelist {repo path} {
   }
 }
 
+# RTLNET_RESUME_DCP (path of a routed checkpoint): skip synthesis, placement and routing and continue with the reports, gates, bitstream and XSA on that
+# checkpoint (a build whose routed design met timing but stopped at a later gate, for example the utilization ceiling).
+set RESUME ""
+if {[info exists ::env(RTLNET_RESUME_DCP)] && $::env(RTLNET_RESUME_DCP) ne ""} { set RESUME $::env(RTLNET_RESUME_DCP) }
+if {$RESUME ne ""} {
+  puts "rtlnet_build: resumed from routed checkpoint $RESUME"
+  if {[catch {open_checkpoint $RESUME} err]} { nv_exit 12 "open_checkpoint: $err" }
+  set crit_synth 0
+  set ::rtlnet_cdc_result "not rerun (the instance counts are in the log of the run that wrote the checkpoint)"
+} else {
 # ---------------------------------------------------------------------------
 # Block design.
 # ---------------------------------------------------------------------------
@@ -332,6 +346,7 @@ if {$wns_pr ne "" && $wns_pr < 0} {
   puts "rtlnet_build: post-route phys_opt WNS $wns_pr ns"
 }
 write_checkpoint -force [file join $BUILD_DIR post_route.dcp]
+}
 
 # ---------------------------------------------------------------------------
 # Reports.

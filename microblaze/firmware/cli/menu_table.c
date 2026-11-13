@@ -47,6 +47,7 @@
  *  11-11-2026  MenuBuilder AI / Steve Spano    High profile seam: encoder profile baseline|high, High profile line in show encoder
  *  11-12-2026  MenuBuilder AI / Steve Spano    8x8 transform (High profile stage 3): encoder transform8x8 on|off, Transform 8x8 line in show encoder
  *  11-12-2026  MenuBuilder AI / Steve Spano    Adaptive transform (High profile stage 3a): encoder transform8x8 on|off|auto (default auto), macroblock counts in show encoder
+ *  11-12-2026  MenuBuilder AI / Steve Spano    Transform default: encoder transform8x8 starts at off (the 4x4 transform); on, off and auto stay
  *  11-12-2026  MenuBuilder AI / Steve Spano    Encoder interrupt: encoder notify interrupt|polled (default interrupt), encoder irqtest, notification and interrupt lines in show stream and show encoder
  * ===========================================================================
  */
@@ -155,7 +156,7 @@ const MenuCommandDef g_menu_commands[] = {
     { "cli_encoder_irqtest", MENU_MODE_PRIV, "ENCODER IRQTEST",
       "Interrupt self-test: force an event in the encoder core and check that the interrupt handler counts it (needs a stream in interrupt mode)", cli_encoder_irqtest, MENU_MODE_NONE },
     { "cli_encoder_transform8x8", MENU_MODE_PRIV, "ENCODER TRANSFORM8X8 [STATE]",
-      "Transform of inter macroblocks: auto (default, the module chooses per macroblock), on (8x8 always) or off (4x4); used in the High profile when the netlist offers it", cli_encoder_transform8x8, MENU_MODE_NONE },
+      "Transform of inter macroblocks: off (default, 4x4), on (8x8 always) or auto (the module chooses per macroblock); used in the High profile when the netlist offers it", cli_encoder_transform8x8, MENU_MODE_NONE },
     { "cli_debug_read", MENU_MODE_PRIV, "DEBUG READ [ADDR]",
       "Read a 32-bit word (hex 0x... or decimal address)", cli_debug_read, MENU_MODE_NONE },
     { "cli_debug_write", MENU_MODE_PRIV, "DEBUG WRITE [ADDR] [VALUE]",
