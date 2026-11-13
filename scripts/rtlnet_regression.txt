@@ -1,3 +1,3 @@
 # RTLNet system-level regression entries: <bench> <filelist> [tag] [defines=A,B] [plusargs=X,Y] [expectfail]
-# Per-core benches live in cores/<core>/testbench/regression.txt (and microblaze/testbench, boards/<board>/testbench);
+# Per-core benches live in cores/<core>/testbench/regression.txt (board branches add microblaze/ and boards/<board>/testbench);
 # scripts/rtlnet_regression.ps1 collects all of them.

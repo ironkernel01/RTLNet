@@ -2,15 +2,16 @@
 -------------------------------------------------------------------------------
 File: rtlnet_regression.ps1
 Purpose: run every bench listed in scripts/rtlnet_regression.txt and in each
-  core's cores/<core>/testbench/regression.txt, microblaze/testbench and
-  boards/<board>/testbench (same line format) through
+  core's cores/<core>/testbench/regression.txt and, when the folders exist (board branches), in every regression.txt under
+  microblaze/ and boards/ (same line format) through
   rtlnet_run_sim.ps1, sequentially (one Active-HDL seat), and fail if any
   bench fails.
   A line may carry the token sim=verilator (run through rtlnet_run_verilator.ps1 instead of Active-HDL) and
   threads=N (Verilator --threads N). A line whose second field is script:<path> runs that host script with the
   remaining fields as arguments and passes on exit code 0 (decoder harness, driver host test).
 Usage: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rtlnet_regression.ps1 [-Match <regex>]
-Revision: 11-09-2026
+Revision: 11-13-2026
+  * 11-13-2026: microblaze/ and boards/ are optional (the script is the same on main and on the board branches).
   * 11-09-2026: sim=verilator and threads=N tokens (rtlnet_run_verilator.ps1).
   * 10-22-2026: initial version.
 -------------------------------------------------------------------------------
@@ -21,7 +22,9 @@ $Repo   = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $Runner = Join-Path $PSScriptRoot 'rtlnet_run_sim.ps1'
 $VlRunner = Join-Path $PSScriptRoot 'rtlnet_run_verilator.ps1'
 $list   = @(Get-Content -LiteralPath (Join-Path $PSScriptRoot 'rtlnet_regression.txt'))
-foreach ($f in (Get-ChildItem -Path (Join-Path $Repo 'cores'), (Join-Path $Repo 'microblaze'), (Join-Path $Repo 'boards') -Recurse -Filter regression.txt -ErrorAction SilentlyContinue | Sort-Object FullName)) {
+# cores/ always; microblaze/ and boards/ only on the branches that have them.
+$roots = @('cores', 'microblaze', 'boards') | ForEach-Object { Join-Path $Repo $_ } | Where-Object { Test-Path -LiteralPath $_ -PathType Container }
+foreach ($f in (Get-ChildItem -Path $roots -Recurse -Filter regression.txt | Sort-Object FullName)) {
     $list += Get-Content -LiteralPath $f.FullName
 }
 $pass = 0; $fail = 0; $failed = @()

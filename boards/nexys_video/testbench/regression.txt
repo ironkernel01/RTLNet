@@ -6,3 +6,5 @@ tb_rtlnet_nexys_video_net   boards/nexys_video/testbench/tb_rtlnet_nexys_video_n
 tb_rtlnet_nexys_video_net   boards/nexys_video/testbench/tb_rtlnet_nexys_video_net.f  g1000 plusargs=SPEED=1000
 tb_rtlnet_nexys_video_net   boards/nexys_video/testbench/tb_rtlnet_nexys_video_net.f  g10   plusargs=SPEED=10
 tb_rtlnet_nexys_video_net   boards/nexys_video/testbench/tb_rtlnet_nexys_video_net.f  neg   plusargs=INJECT_FAILURE  expectfail
+# Host test of the board stream checker (pattern PSNR path against the csi2_rx pattern model)
+stream_check_selftest   script:boards/nexys_video/scripts/stream_check_selftest.ps1

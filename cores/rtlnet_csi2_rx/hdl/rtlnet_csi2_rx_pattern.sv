@@ -13,7 +13,7 @@
 //   * Pattern (pattern 0 static bars, 1 scrolling bars, 2 box over the bars, 3 bars with a noise band, 4 scroll + noise
 //     band + box), every frame a pure function of (mode, pattern, speed, k); k is the pattern frame counter, 0 for the first
 //     frame after restart (a PATTERN write or a VIDEO_MODE change) and one more for each frame after. Exact definitions in
-//     documentation section 3 and in the host models (testbench/csi2_bars_model.c, boards/nexys_video/scripts/pattern_model.py).
+//     documentation section 3 and in the host models (testbench/csi2_bars_model.c, testbench/pattern_model.py).
 //   * No multiplier and no memory: the scroll offset, the box position and the noise seed are running registers that a
 //     small sequencer (five phases, one per clock, after the frame start) steps by one frame while the frame is sent; the
 //     per-word datapath is a three-stage pipeline (flags, colors and ramps, layer mux) behind the position counters, with

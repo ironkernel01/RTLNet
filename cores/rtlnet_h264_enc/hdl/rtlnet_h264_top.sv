@@ -30,7 +30,7 @@
 //       either on or off for a whole picture, set by software).
 //     - DEBLOCK: 1 = include the in-loop deblocking filter. 0 = leave it out.
 //     - NUM_ENGINES: how many engines code slice bands in parallel (one engine carries 720p30, two carry 1080p30 at 90 MHz).
-//     Legal combinations (and the build.ps1 switches of boards/nexys_video that produce them):
+//     Legal combinations (and the board build script switches that produce them):
 //       Encoder                         HIGH_PROFILE  HP_T8  HP_T8_AUTO   build.ps1 switches
 //       CAVLC Baseline                  0             -      -            (none)
 //       CABAC                           1             0      0            -HighProfile full|demo -HpTools cabac

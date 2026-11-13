@@ -1,5 +1,7 @@
 # rtlnet_ddr — DDR3 memory controller core
 
+> Paths under `boards/`, `microblaze/` and `demos/` in this guide, and the board results it quotes, are on the `nexys_video_h264_baseline` branch; `main` holds the board-independent cores only.
+
 | Item | Value |
 |---|---|
 | Core | `rtlnet_ddr` (wrapper), `rtlnet_ddr_amd` (AMD 7-series implementation), `rtlnet_ddr_sim` (simulation model) |
@@ -25,11 +27,10 @@ Contents: 1 files, 2 interface, 3 clocks and resets, 4 the MIG project, 5 simula
 | `hdl/rtlnet_ddr.sv` | wrapper: `TARGET` selects the implementation; connects it by name |
 | `hdl/rtlnet_ddr_amd.sv` | one instance of the generated `rtlnet_ddr_mig`; the only AMD-specific RTL |
 | `hdl/rtlnet_ddr.f`, `hdl/rtlnet_ddr_sim.f` | filelists: synthesis (wrapper + AMD file) and benches that define `RTLNET_DDR_SIM` (wrapper + model) |
-| `ip/rtlnet_ddr_mig.prj` | MIG project file, committed |
-| `ip/rtlnet_ddr_mig.tcl` | `rtlnet_ddr_mig_create <dir>`: generates the MIG IP from the project into a build tree |
+| `ip/rtlnet_ddr_mig.tcl` | `rtlnet_ddr_mig_create <dir> <prj>`: generates the MIG IP from the board's project file into a build tree |
 | `testbench/rtlnet_ddr_sim.sv` | simulation model: AXI4 memory (`rtlnet_tb_axi4_mem`) with a calibration delay |
 
-The generated IP (RTL, constraints, XCI) is never committed; every build recreates it under `boards/<board>/build/ip`.
+The generated IP (RTL, constraints, XCI) is never committed; every build recreates it under `boards/<board>/build/ip` of the board branch.
 
 ---
 
@@ -74,7 +75,7 @@ master that needs read-after-write waits for the write response first (the CPU f
 
 ## 4. The MIG project
 
-`ip/rtlnet_ddr_mig.prj` is the Digilent Nexys Video MIG project (board files A.0 1.2, `mig.prj`) with these edits only:
+The MIG project file (pinout, part and timing) belongs to the board and is passed to `rtlnet_ddr_mig_create`; the core has no default. On the `nexys_video_h264_baseline` branch it is `boards/nexys_video/ip/rtlnet_ddr_mig.prj`, the Digilent Nexys Video MIG project (board files A.0 1.2, `mig.prj`) with these edits only:
 
 | Edit | Reason |
 |---|---|
@@ -115,7 +116,7 @@ calibration bit, the reset behaviour and the arbiter window through the CPU stub
 ## 6. Integration
 
 1. Add `-f cores/rtlnet_axi_arbiter/hdl/rtlnet_axi_arbiter.f` and `-f cores/rtlnet_ddr/hdl/rtlnet_ddr.f` to the board
-   filelist; the build calls `rtlnet_ddr_mig_create` (see `boards/nexys_video/scripts/build_bitstream.tcl`) before reading
+   filelist; the build calls `rtlnet_ddr_mig_create` (for the Nexys Video: `boards/nexys_video/scripts/build_bitstream.tcl`, which passes the board's project file) before reading
    the RTL.
 2. Feed `sys_clk` from a 100 MHz clock of the design on a BUFG (not from the oscillator pad that also feeds an MMCM) and `ref_clk` from a 200 MHz clock of the design.
 3. Instance `rtlnet_axi_arbiter` with `ADDR_W` 29, `DATA_W` 128 and `ID_W` such that `ID_W + IDX_W` is 4; connect its `m_axi_*`

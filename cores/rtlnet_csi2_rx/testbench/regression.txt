@@ -2,7 +2,7 @@
 #   or: <name> script:<host script path> [arguments]   (passes on exit code 0)
 rtlnet_csi2_rx_driver_test   script:cores/rtlnet_csi2_rx/testbench/rtlnet_csi2_rx_driver_test.ps1
 csi2_bars_model             script:cores/rtlnet_csi2_rx/testbench/csi2_bars_model.ps1 -SelfTest
-# C model, CRC tables of the benches and the numpy model (boards/nexys_video/scripts/pattern_model.py) agree byte for byte
+# C model, CRC tables of the benches and the numpy model (testbench/pattern_model.py) agree byte for byte
 pattern_model_xcheck        script:cores/rtlnet_csi2_rx/testbench/csi2_bars_model.ps1 -Verify
 # Defines: TB_REAL 1 = the real timing localparams (3,333,333 clocks per frame, line periods 4,444 and 2,962), TB_GAP 1 = random
 # output ready.

@@ -4,24 +4,25 @@ rem demorelease.bat - copy the built demo images into this demos folder
 rem
 rem Run it from anywhere:   demos\demorelease.bat
 rem
-rem What it does: for every demo in the list below it copies the bitstream
-rem and its build_info.txt from the board build folder into
+rem What it does: every folder under demos\ that holds a release.txt is a demo.
+rem For each of its lines it copies the bitstream and its build_info.txt from
+rem the board build folder into
 rem     demos\<demo name>\<board>\
 rem so that every demo image is in one easy-to-find place.
 rem It copies only. It builds nothing and it does not touch the board.
 rem
-rem To add a demo: add one "call :image" line to the list below, and write a
-rem README.md in the new demo folder that says how to run it.
+rem release.txt (one line per board image of the demo, # starts a comment):
 rem
-rem   call :image  <demo name>  <board>  <build tag>
+rem   <board>  <build tag>
 rem
-rem   demo name  = folder under demos\                 (example h264_baseline)
 rem   board      = folder under boards\ and under the demo (example nexys_video)
 rem   build tag  = folder under boards\<board>\build\  (the -Tag of build.ps1)
 rem
-rem Bitstreams only. Never add a netlist of the High profile extension and
-rem never add the full (not time limited) High profile image here: this
-rem folder is public.
+rem To add a demo: create demos\<demo name>\ with a release.txt and a README.md
+rem that says how to run it. This file does not change.
+rem
+rem Bitstreams only. Never add a netlist or sources of a paid extension and
+rem never add an image without its time limit here: this folder is public.
 rem ============================================================================
 setlocal EnableExtensions
 
@@ -36,10 +37,17 @@ echo demorelease: repository %REPO%
 echo.
 
 rem ---------------------------------------------------------------------------
-rem The list of demos. One line per demo image.
+rem The demos: every demos\<name>\release.txt, one image per line.
 rem ---------------------------------------------------------------------------
-call :image   h264_baseline            nexys_video  rel_base_dbk
-call :image   h264_high_profile_demo   nexys_video  rel_demo_cab_dbk
+set /a DEMOCOUNT=0
+for /d %%D in ("%DEMOS%\*") do if exist "%%D\release.txt" (
+  set /a DEMOCOUNT+=1
+  for /f "usebackq eol=# tokens=1,2" %%A in ("%%D\release.txt") do call :image "%%~nxD" %%A %%B
+)
+if %DEMOCOUNT% equ 0 (
+  echo DEMORELEASE: FAIL no demos\*\release.txt found
+  endlocal & exit /b 1
+)
 
 rem ---------------------------------------------------------------------------
 echo.

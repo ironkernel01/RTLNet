@@ -11,7 +11,7 @@
 #   * Steps: create the block design rtlnet_cpu (microblaze/
 #     hdl/rtlnet_cpu_bd.tcl) under build/bd, generate output products with
 #     global synthesis, generate the DDR3 controller IP rtlnet_ddr_mig from
-#     cores/rtlnet_ddr/ip/rtlnet_ddr_mig.prj under build/ip (nothing generated
+#     boards/nexys_video/ip/rtlnet_ddr_mig.prj under build/ip (nothing generated
 #     is kept in the repository), read the RTL through filelists, read the XDC,
 #     synth_design (top rtlnet_nexys_video_top, xc7a200tsbg484-1, generics
 #     BUILD_ID and BUILD_DIRTY, define RTLNET_WITH_NETWORK only for the
@@ -210,7 +210,7 @@ if {[catch {
 # ---------------------------------------------------------------------------
 if {[catch {
   source [file join $REPO cores rtlnet_ddr ip rtlnet_ddr_mig.tcl]
-  rtlnet_ddr_mig_create [file join $BUILD_DIR ip]
+  rtlnet_ddr_mig_create [file join $BUILD_DIR ip] [file join $REPO boards nexys_video ip rtlnet_ddr_mig.prj]
 } err]} { nv_exit 12 "DDR3 controller IP: $err" }
 
 # ---------------------------------------------------------------------------

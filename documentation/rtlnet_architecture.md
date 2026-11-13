@@ -3,7 +3,7 @@
 | Item | Value |
 |---|---|
 | Product line | IronKernel RTLNet |
-| Document revision | 11-09-2026 |
+| Document revision | 11-13-2026 |
 | First target | Digilent Nexys Video (Artix-7 XC7A200T-1SBG484C, Realtek RTL8211E RGMII PHY) |
 | Toolchain | Vivado 2026.1 (synthesis, implementation), Aldec Active-HDL 11.1 (simulation), MicroBlaze GCC 13.4 |
 | Languages | SystemVerilog-2012 for all RTL and benches (`.sv`), C11 for drivers and firmware |
@@ -67,13 +67,17 @@ RTLNet/
     rtlnet_classifier/            configurable frame filter
     rtlnet_tcp_offload/           IPv4 / TCP / UDP checksum insert (TX) and check with trailer (RX) on the CPU path
     rtlnet_axi_arbiter/           N:1 AXI4 arbiter in front of the DDR3 controller (illegal-burst guard, per-master counters)
-    rtlnet_ddr/                   DDR3 controller behind a vendor-neutral AXI4 slave (MIG IP generated from a committed project)
+    rtlnet_ddr/                   DDR3 controller behind a vendor-neutral AXI4 slave (MIG IP generated from the board's project file)
   microblaze/                     everything MicroBlaze: CPU core (hdl, driver, testbench, documentation) and
                                   firmware/ (CLI + lwIP TCP echo application; BSP, drivers and lwIP are generated or
                                   compiled in place from the AMD install, never copied)
   boards/nexys_video/             board top ("Top.sv"), XDC, build scripts, board bench
   scripts/                        shared simulation and constraint scripts
 ```
+
+`microblaze/`, `boards/` and `demos/` exist on the board branches only (`nexys_video_h264_baseline` and the branch stacked on
+it); `main` holds `cores/`, `scripts/`, `documentation/` and `diagrams/`. Paths of those three folders in this document, and the
+board results quoted from them, refer to the `nexys_video_h264_baseline` branch (branch rules: `rtlnet_contributing.md` section 8).
 
 Generated output (Vivado runs, Active-HDL work directories, firmware objects, bitstreams) is never committed;
 release bitstreams go in `releases/`.
@@ -725,3 +729,4 @@ and between the DMA MM2S stream and `u_cpu_tx_fifo` (TX).
 | 11-09-2026 | MicroBlaze V block design without the JTAG UART: the MDM address 0x4140_0000 is unmapped |
 | 11-09-2026 | DDR3 (Phase 0 stage 1): `rtlnet_ddr` (MIG, 512 MiB) and `rtlnet_axi_arbiter` in the board top; MicroBlaze V caches (8 KiB I, 8 KiB write-through D over `0x8000_0000..0x9FFF_FFFF`), SmartConnect and the exported 128-bit `M_AXI_DDR`; arbiter window `0x44A0_4000`; `ui_clk` domain; firmware `show ddr`, `ddr test`; the CPU's `M_AXI_DDR` runs on `cpu_clk` and crosses to `ui_clk` in the board top's `rtlnet_axi_cdc` (`u_ddr_cdc`), so the SmartConnect has one clock |
 | 11-09-2026 | DDR3 controller `sys_clk` is MMCM CLKOUT6 through a BUFG (`ddr_sys_clk`); the arbiter's CPU master sets `NARROW_MASK` for the write-through data cache's 32-bit stores |
+| 11-13-2026 | Repository split into `main` and board branches: the MIG project file moved to `boards/nexys_video/ip/` and is an argument of `rtlnet_ddr_mig_create`; section 2 notes where each folder lives |

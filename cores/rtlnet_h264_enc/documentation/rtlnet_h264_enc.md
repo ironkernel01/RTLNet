@@ -1,5 +1,7 @@
 # rtlnet_h264_enc: H.264 encoder core, phases 2b-2 to 2c-2 (Intra16x16, I_PCM fallback, P pictures with integer-pel motion search)
 
+> Paths under `boards/`, `microblaze/` and `demos/` in this guide, and the board results it quotes, are on the `nexys_video_h264_baseline` branch; `main` holds the board-independent cores only.
+
 Revision: 11-13-2026 (the filter's macroblock-count multiplier in a DSP block and the two-clock DDR3 arbiter, sections 19.7 and 19.8; interrupt, section 18; deblocking filter, section 19; High profile seam, CABAC slice syntax, section 17; phase 2c-2: integer-pel motion search, section 16; phase 2c-1: P pictures without motion search, section 15; phase 2b-4: burst-only DDR3 access, section 14)
 
 ## 1. Purpose and scope
@@ -1194,7 +1196,7 @@ transform and their syntax. Without `hp_t8_auto` the decision is not per macrobl
   `rtlnet_h264_enc_hp_t.t8_enabled`; `rtlnet_h264_enc_set_profile` keeps bit 1. Firmware (`rtlnet_venc`): `rtlnet_venc_set_transform8x8`, the request is off by default (the 4x4 transform) and applied in `configure_mode`; the parameter sets are written in the form in force.
   CLI: `encoder transform8x8 <on|off>` (named refusals as for `encoder profile`) and the `Transform 8x8` line of `show encoder` (not offered / on or off, in force or not).
 - Bench support: `tb_rtlnet_h264_top` has the define `TB_HP_T8` (HP_CTRL 3), the plusarg `+HPCTL=<digits>` (HP_CTRL before each picture), `TB_DUMP_MB` lines `R` (the residual beats of a macroblock that submits it) and the submission flag of the `M` line, `TB_DUMP_TOK` (the binarisation's tokens);
-  `h264_gen.py --bpat P --bspeed S` writes the board's moving test patterns (`boards/nexys_video/scripts/pattern_model.py`); `h264_spspps_tool` takes `high t8`.
+  `h264_gen.py --bpat P --bspeed S` writes the board's moving test patterns (`cores/rtlnet_csi2_rx/testbench/pattern_model.py`); `h264_spspps_tool` takes `high t8`.
 
 ### 17.7 Adaptive choice of the 4x4 or the 8x8 transform per macroblock (stage 3a, 11-12-2026)
 

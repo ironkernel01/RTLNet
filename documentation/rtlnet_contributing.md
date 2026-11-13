@@ -2,8 +2,8 @@
 
 | Item | Value |
 |---|---|
-| Document revision | 10-22-2026 |
-| Applies to | every file under `cores/`, `microblaze/`, `boards/`, `scripts/` |
+| Document revision | 11-13-2026 |
+| Applies to | every file under `cores/`, `scripts/`, and on the board branches `microblaze/`, `boards/`, `demos/` |
 
 Read `documentation/rtlnet_architecture.md` first (bus, register conventions, address map, leaf contract,
 section 15 port lists). This page lists the rules a core must follow to be accepted.
@@ -81,7 +81,7 @@ section 15 port lists). This page lists the rules a core must follow to be accep
 - Run: `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rtlnet_run_sim.ps1 -Bench <tb> -Filelist <f>`.
   The runner serializes the single Active-HDL seat machine-wide; just call it. Do not start the Active-HDL GUI.
 - Prove each new check can fail (perturb the bench once, see TEST FAIL, restore).
-- **Board-level benches never simulate the processor.** The CPU core is replaced by `microblaze/rtlnet_microblaze_sim_stub.sv`
+- **Board-level benches never simulate the processor.** (They live on the board branches.) The CPU core is replaced by `microblaze/rtlnet_microblaze_sim_stub.sv`
   (same ports): scripted AXI4-Lite register sequences do what firmware does, and frame source/sink tasks stand in for
   the DMA streams. Firmware (lwIP, CLI) is verified on hardware and by the host-side harnesses.
 
@@ -91,8 +91,10 @@ Always launch Vivado through `scripts/rtlnet_vivado.ps1` (machine-wide limit of 
 
 ```
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rtlnet_vivado.ps1 -Tcl scripts/rtlnet_synth_check.tcl `
-  -Log .sim/synth/<top>.log -TclArgs <top>,<filelist>,xc7a200tsbg484-1[,NAME=VALUE,...]
+  -Log .sim/synth/<top>.log -TclArgs <top>,<filelist>[,<part>][,NAME=VALUE,...]
 ```
+
+The part is optional (default `xc7a200tsbg484-1`, the part of the reference board).
 
 It must report `rtlnet_synth_check: PASS` with 0 critical warnings for every new synthesizable top. Record the
 utilization in the core documentation.
@@ -103,3 +105,32 @@ utilization in the core documentation.
 reset values, access), design (state machines, data path, latency), clocks/resets/crossings, verification
 (benches, what each proves, recorded results with date and check count), synthesis results, limitations,
 revision history.
+
+## 8. Branches
+
+The repository is split into layers, one branch each:
+
+| Branch | Holds |
+|---|---|
+| `main` | all board-independent RTL: `cores/`, generic `scripts/`, generic `documentation/`, `diagrams/` of the generic documents, `LICENSE.md`, `README.md` |
+| `nexys_video_h264_baseline` | `main` plus the Nexys Video design with the public Constrained Baseline encoder: `boards/nexys_video/`, `microblaze/`, `demos/`, the board scripts |
+| `nexys_video_h264_highprofile` | `nexys_video_h264_baseline` plus the High profile demonstration material (demo bitstream, brief, test scripts); never High profile sources or a netlist |
+| further board branches | one per board, branched from `main` the same way |
+
+Rules:
+
+1. **Core work is done on `main`.** A change to anything under `cores/`, to a generic script or to a generic document is made
+   on `main` and reaches the board branches by merge.
+2. **Board work is done on the board branch**: board top, constraints, MIG project file, build and test scripts, firmware,
+   demos. Work on the High profile demonstration is done on `nexys_video_h264_highprofile`.
+3. **Merges go one way**: `main` into `nexys_video_h264_baseline`, `nexys_video_h264_baseline` into
+   `nexys_video_h264_highprofile`; never the other way. A change made on a lower layer is merged up before the work goes on.
+4. **A file belongs to exactly one layer.** A path that exists on two layers has identical content on both; if a board needs a
+   different version of a file, the board gets its own file under `boards/<board>/` instead of a variant of the shared one.
+5. **Nothing board-specific on `main`**: no board path, pin, part or board address in core RTL, drivers, benches, generic
+   scripts or filelists. The cores take such data as parameters or arguments (for example `rtlnet_ddr_mig_create <dir> <prj>`
+   takes the MIG project file of the board). A default part in a script is a documented parameter default.
+6. `scripts/rtlnet_regression.ps1` is the same on every branch: it runs `cores/` and, when they exist, `microblaze/` and
+   `boards/<board>/testbench`. `main` must pass it alone.
+7. Documents on `main` that mention board results or board paths say that the paths are on the `nexys_video_h264_baseline`
+   branch.

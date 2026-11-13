@@ -5,10 +5,28 @@ Revision 11-13-2026
 Ready-to-run demonstration images of RTLNet. **Start with [`demos.md`](demos.md)**: it lists what is in this folder,
 the board, cables and PC tools needed, and how to run a demo.
 
-| Folder | Board | What it shows | Brief |
-|---|---|---|---|
-| [`h264_baseline/nexys_video`](h264_baseline/nexys_video/README.md) | Nexys Video | H.264 Constrained Baseline encoder with the deblocking filter, 1080p30 and 720p30, MPEG-TS over UDP to VLC or ffplay | [PDF](h264_baseline/h264_baseline_brief.pdf), [Markdown](h264_baseline/h264_baseline_brief.md) |
-| [`h264_high_profile_demo/nexys_video`](h264_high_profile_demo/nexys_video/README.md) | Nexys Video | the same with the High profile extension (CABAC), limited to 30 minutes after each programming | [PDF](h264_high_profile_demo/h264_high_profile_demo_brief.pdf), [Markdown](h264_high_profile_demo/h264_high_profile_demo_brief.md) |
+Every folder in `demos` is one demo:
 
-Licenses: `LICENSE.md` in the repository root for RTLNet, [`LICENSE_DEMO.md`](LICENSE_DEMO.md) for the High profile
-demonstration package.
+| File | Content |
+|---|---|
+| `<demo name>/<demo name>_brief.pdf` and `.md` | the brief: what the demo shows, results, limits, license |
+| `<demo name>/<board>/README.md` | the steps to run the demo on that board |
+| `<demo name>/<board>/rtlnet_<board>.bit` | the bitstream, firmware included |
+
+Exactly what is in a demo folder `demos/<demo name>/`:
+
+| Path | Content |
+|---|---|
+| `<demo name>_brief.pdf`, `<demo name>_brief.md` | the brief |
+| `images/` | the pictures the brief uses |
+| `release.txt` | the board images `demorelease.bat` copies for this demo (`<board> <build tag>` per line) |
+| `<board>/README.md` | the steps to run the demo |
+| `<board>/rtlnet_<board>.bit` | the bitstream, firmware included |
+| `<board>/build_info.txt` | source revision, timing and utilization of that image |
+
+`demorelease.bat` copies the bitstream and `build_info.txt` from `boards/<board>/build/<build tag>/` (the folder that
+`boards/<board>/scripts/build.ps1 -Tag <build tag> -Image` writes) into `<board>/`. List the folders of `demos` to see
+which demos this branch has; the README and the brief of each demo say what the demo shows and under which license it is.
+
+License: `LICENSE.md` in the repository root for RTLNet. A demo that is under other terms names its license file in its
+README and brief.

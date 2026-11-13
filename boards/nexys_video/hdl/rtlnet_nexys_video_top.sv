@@ -155,7 +155,7 @@ module rtlnet_nexys_video_top #(
 
   // DDR3 SDRAM MT41K256M16 (16 bit, one rank), banks 34 and 35 (1.5 V), SSTL15
   // (differential strobes and clock DIFF_SSTL15), balls and properties from the MIG
-  // project (cores/rtlnet_ddr/ip/rtlnet_ddr_mig.prj) in the board XDC.
+  // project (boards/nexys_video/ip/rtlnet_ddr_mig.prj) in the board XDC.
   inout  wire  [15:0] ddr3_dq,
   inout  wire  [1:0]  ddr3_dqs_n,
   inout  wire  [1:0]  ddr3_dqs_p,

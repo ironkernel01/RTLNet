@@ -14,7 +14,7 @@
 <table style="width:100%; border:none; margin:0; padding:0;">
 <tr>
 <td style="text-align:left; border:none; padding:0; width:50%;"><img src="pdf/ironkernel_logo.png" alt="IronKernel Embedded" style="width:231px; margin:0;"></td>
-<td style="text-align:right; border:none; padding:0; width:50%; vertical-align:bottom;"><strong>Product Brief</strong><br>Revision 11-06-2026</td>
+<td style="text-align:right; border:none; padding:0; width:50%; vertical-align:bottom;"><strong>Product Brief</strong><br>Revision 11-13-2026</td>
 </tr>
 </table>
 
@@ -101,7 +101,7 @@ whole frames.
 
 ## Measured on hardware
 
-Nexys Video on a 100 Mb/s link to a PC wired NIC, iperf 2.2.2, 10 s runs. The 100 Mb/s ceiling for
+Reference design on the Nexys Video (the `nexys_video_h264_baseline` branch of the repository; `main` holds the board-independent cores), 100 Mb/s link to a PC wired NIC, iperf 2.2.2, 10 s runs. The 100 Mb/s ceiling for
 1470-byte UDP payloads is 95.6 Mbit/s.
 
 | Traffic | Result |

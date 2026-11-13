@@ -467,9 +467,9 @@ def main():
     if w % 16 or h % 16 or (w * 2) % 32:
         raise SystemExit("w and h must be multiples of 16 (macroblock), line stride a multiple of 32")
     if a.bpat >= 0:
-        # The moving test patterns of the board (boards/nexys_video/scripts/pattern_model.py, byte for byte the generator of rtlnet_csi2_rx).
+        # The moving test patterns of the board (cores/rtlnet_csi2_rx/testbench/pattern_model.py, byte for byte the generator of rtlnet_csi2_rx).
         here = os.path.dirname(os.path.abspath(__file__))
-        sys.path.insert(0, os.path.normpath(os.path.join(here, "..", "..", "..", "boards", "nexys_video", "scripts")))
+        sys.path.insert(0, os.path.normpath(os.path.join(here, "..", "..", "rtlnet_csi2_rx", "testbench")))
         import pattern_model as pm
         for n in range(a.count):
             yp, cbp, crp = pm.frame_planes((w, h), a.bpat, a.bspeed, n)

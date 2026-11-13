@@ -1,5 +1,7 @@
 # rtlnet_csi2_rx — CSI-2 capture core, Phase 1: color bars and source switch
 
+> Paths under `boards/`, `microblaze/` and `demos/` in this guide, and the board results it quotes, are on the `nexys_video_h264_baseline` branch; `main` holds the board-independent cores only.
+
 | Item | Value |
 |---|---|
 | Core | `rtlnet_csi2_rx` |
@@ -168,7 +170,7 @@ except the noise register (an XOR of up to 22 state bits, two levels, and the lo
 
 The frame bytes are those of `testbench/csi2_bars_model.c` (host gcc, the reference; `--frame <mode> <pattern> <speed> <k>` prints the
 CRC-32 and `--dump-frame` writes the bytes), which prints the CRC-32 (IEEE 802.3, zlib `crc32`) of the packed frame as it lands in
-DDR3: static bars 720p30 1,843,200 bytes `0x6D3DF810`, 1080p30 4,147,200 bytes `0x8ED9EC2B`. `boards/nexys_video/scripts/pattern_model.py`
+DDR3: static bars 720p30 1,843,200 bytes `0x6D3DF810`, 1080p30 4,147,200 bytes `0x8ED9EC2B`. `testbench/pattern_model.py`
 (numpy) produces the same frames as YUYV arrays and as 4:2:0 planes (the encoder's rule: the 4:2:2 chroma of a line pair averaged as
 (a + b + 1) >> 1); `stream_check.py psnr --pattern N --speed S` compares decoded pictures with it, finding k per picture in
 k_prev + 1 .. k_prev + 4 so that a dropped picture resyncs.
@@ -302,7 +304,7 @@ more frames are published; `FRAMES_OK`, published and dropped counts agree. The 
 Host: `testbench/test_rtlnet_csi2_rx_driver.c` runs the driver against a register model with the rejection rules, now also `PATTERN`,
 `PATTERN_FRAME` and `PATTERN_ERR` (`rtlnet_csi2_rx_driver_test.ps1`); `testbench/csi2_bars_model.c` (`csi2_bars_model.ps1`) has the self test (its CRC
 engine returns 0xCBF43926 for "123456789", and every line of the static bars is identical), `-Verify` (regression entry
-`pattern_model_xcheck`: the committed CRC tables equal what the C model prints, and `boards/nexys_video/scripts/pattern_model.py --verify-c`
+`pattern_model_xcheck`: the committed CRC tables equal what the C model prints, and `testbench/pattern_model.py --verify-c`
 compares the numpy model with the C model byte for byte on 220 frames: every pattern, both modes, k = 0, 1, 2, 37, 1000, speeds +4, -7, +24,
 +32, -32, plus reduced geometries and box phases; then `stream_check.py selftest` builds streams from the Python model with ffmpeg libx264,
 leaves pictures out, decodes and checks that the PSNR path finds k per picture and counts the resyncs: pattern 1 two resyncs and three

@@ -11,24 +11,24 @@ has to be built.
 | Path | Content |
 |---|---|
 | `demos.md` | this guide |
-| `LICENSE_DEMO.md` | evaluation license of the High profile demonstration package |
 | `demorelease.bat` | maintainer script: copies freshly built images into the demo folders (section 6) |
 | `build_brief_pdf.ps1` | maintainer script: builds the PDF of a demo brief (section 6) |
-| `<demo name>/<board>/` | one demo on one board |
+| `<demo name>/` | one demo (every folder under `demos` is one demo) |
+| `<demo name>/release.txt` | what `demorelease.bat` copies for this demo: one line `<board> <build tag>` per board image |
+| `<demo name>/<board>/` | the demo on one board |
 | `<demo name>/<board>/README.md` | the steps to run that demo |
 | `<demo name>/<board>/rtlnet_<board>.bit` | the bitstream, firmware included |
 | `<demo name>/<board>/build_info.txt` | source revision, timing result and utilization of the image |
 | `<demo name>/<demo name>_brief.md` and `.pdf` | the demo brief: what the demo shows, data path, test pattern, measured results, build variants, utilization and limits |
 
-## 2. Demos available now
+## 2. Demos available
 
-| Demo folder | Board | What it shows | Time limit | License | Brief |
-|---|---|---|---|---|---|
-| `h264_baseline/nexys_video` | Nexys Video | H.264 video encoder, Constrained Baseline profile, with the in-loop deblocking filter. The board makes moving test patterns at 1080p30 or 720p30, encodes them and sends them as an MPEG-TS stream over Ethernet to VLC or ffplay. | none | `LICENSE.md` in the repository root | [`h264_baseline/h264_baseline_brief.pdf`](h264_baseline/h264_baseline_brief.pdf) |
-| `h264_high_profile_demo/nexys_video` | Nexys Video | The same encoder with the High profile extension (CABAC entropy coding), which lowers the bit rate at the same picture quality. | High profile runs for 30 minutes after each programming; the stream then continues in Constrained Baseline | `LICENSE_DEMO.md` | [`h264_high_profile_demo/h264_high_profile_demo_brief.pdf`](h264_high_profile_demo/h264_high_profile_demo_brief.pdf) |
+Every folder under `demos` is one demo. Its brief (`<demo name>/<demo name>_brief.pdf`) says what it shows, how it is
+built, the measured results, and its time limit and license if it has any; its `README.md` (`<demo name>/<board>/`) has the
+steps to run it. This guide does not list the demos, so it is the same for every demo that is added.
 
-Both images contain the complete RTLNet design for the board: the gigabit Ethernet stack, the MicroBlaze V processor
-with its command-line console, the DDR3 memory path and the two-engine H.264 encoder, all on one 90 MHz clock.
+The images contain the complete RTLNet design for the board: the gigabit Ethernet stack, the MicroBlaze V processor
+with its command-line console, the DDR3 memory path and the H.264 encoder, all on one 90 MHz clock.
 
 ## 3. What you need
 
@@ -78,7 +78,7 @@ The image is loaded into the FPGA only, not into the flash: a power cycle remove
 | Picture sizes | 1920 x 1080 and 1280 x 720 at 30 pictures per second |
 | Bit rate | set by `encoder bitrate <kb/s>`; 8,000 kb/s is a good start for 1080p30 |
 | Dropped pictures | 0 in `show stream` at 8,000 and 16,000 kb/s |
-| High profile demo | `show encoder` gives the time left; at 30 minutes the encoder sends one IDR picture and continues in Constrained Baseline without a break in the stream; programming the board again restores High profile |
+| Time-limited demo | the README and the brief of such a demo say what the limit is and how `show encoder` reports the time left |
 
 If the player stays black: check the PC address in the `stream` command, the firewall rule for UDP 5004, and that
 `show stream` counts pictures.
@@ -91,8 +91,8 @@ After a board build (`boards/<board>/scripts/build.ps1 ... -Tag <tag> -Image`) r
 demos\demorelease.bat
 ```
 
-It copies the bitstream and `build_info.txt` of every demo in its list from `boards/<board>/build/<tag>/` into
-`demos/<demo name>/<board>/`. It prints one line per file and
+It finds every `demos/<demo name>/release.txt` and, for each `<board> <build tag>` line in it, copies the bitstream and
+`build_info.txt` from `boards/<board>/build/<tag>/` into `demos/<demo name>/<board>/`. It prints one line per file and
 ends with `DEMORELEASE: PASS`, or with `DEMORELEASE: FAIL` when a source file is missing. It builds nothing and does not
 touch the board.
 
@@ -107,13 +107,12 @@ The drawings of the briefs are in `diagrams/src/demo-h264.js` (render with `diag
 
 To add a demo:
 
-1. Add one `call :image <demo name> <board> <build tag>` line to the list in `demorelease.bat`.
+1. Create `demos/<demo name>/release.txt` with one line `<board> <build tag>` per board image (`demorelease.bat` and this guide do not change).
 2. Write `demos/<demo name>/<board>/README.md` with the steps to run it.
-3. Add a row to the table in section 2.
-4. Write `demos/<demo name>/<demo name>_brief.md` and build its PDF with the line above.
+3. Write `demos/<demo name>/<demo name>_brief.md` and build its PDF with the line above.
 
-The demos are bitstreams only. No netlist of the High profile extension and no High profile image without the time
-limit goes into this folder; both belong to the paid feature (a paid license from IronKernel, ironkernel.com).
+The demos are bitstreams only. No netlist or source of a paid extension and no image without its time limit goes into
+this folder.
 
 ## 7. Planned demos
 

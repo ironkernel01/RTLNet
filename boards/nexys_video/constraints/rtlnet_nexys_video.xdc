@@ -102,7 +102,7 @@ set_property -dict { PACKAGE_PIN U7    IOSTANDARD LVCMOS33 } [get_ports { eth_rs
 # ---------------------------------------------------------------------------
 # DDR3 SDRAM MT41K256M16 (Micron), banks 34 and 35, 1.5 V. Balls, I/O standards,
 # slew and input termination exactly as the MIG project
-# cores/rtlnet_ddr/ip/rtlnet_ddr_mig.prj generates them (the generated IP
+# boards/nexys_video/ip/rtlnet_ddr_mig.prj generates them (the generated IP
 # constraints carry the same values, plus the PHY and timing constraints of the
 # controller, so nothing here contradicts them). Bank 35 uses the internal
 # VREF (0.75 V); the clock pair has no I/O buffer (the controller instantiates
