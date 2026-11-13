@@ -1,2 +1,0 @@
-# demorelease.bat: <board> <build tag>   (boards/<board>/build/<tag>/ holds the image)
-nexys_video  rel_demo_cab_dbk
