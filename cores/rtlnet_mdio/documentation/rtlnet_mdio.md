@@ -216,7 +216,7 @@ Bus errors pass through unchanged; the layer adds `RTLNET_PHY_ERR_ID` (-16), `_V
 | `rtlnet_phy_rtl8211e_init(mdio)` | probe, then RX delay: the bring-up pair, run after every PHY hardware reset |
 | `rtlnet_phy_rtl8211e_soft_reset(mdio)` | BMCR bit 15, poll for self-clear every 1 ms, at most 500 polls |
 | `rtlnet_phy_rtl8211e_autoneg_restart(mdio)` | BMCR ANE + Restart_AN (applies the advertisement) |
-| `rtlnet_phy_rtl8211e_advertise_set(mdio, mask)`, `_get(mdio, &mask)` | `RTLNET_PHY_ADV_10H/10F/100H/100F` in ANAR bits 8:5, `_1000H/1000F` in GBCR bits 8/9; other ANAR/GBCR bits kept |
+| `rtlnet_phy_rtl8211e_advertise_set(mdio, mask)`, `_get(mdio, &mask)` | `RTLNET_PHY_ADV_10F/100F` in ANAR bits 8:5, `_1000F` in GBCR bit 9; the half-duplex bits (ANAR 10H/100H, GBCR 1000H) are always written 0 and a mask without a full-duplex mode is rejected (`RTLNET_PHY_ERR_ARG`; `RTLNET_PHY_ADV_FULL` is the three full modes); other ANAR/GBCR bits kept. `_get` reads back all six bits |
 | `rtlnet_phy_rtl8211e_force(mdio, speed, full)` | ANE off, BMCR speed bits 13/6 and duplex bit 8; 10 or 100 only |
 | `rtlnet_phy_rtl8211e_status(mdio, &st)` | decode into `rtlnet_phy_status_t` |
 | `rtlnet_phy_rtl8211e_loopback(mdio, on)` | BMCR bit 14 (PCS loopback) |
@@ -244,7 +244,7 @@ Tables 28 and 33) and the raw BMCR, BMSR, PHYSR, ANLPAR and GBSR words.
 | 5 | read reg 28; write `(r28 \| bit13 \| bit11) & ~bit12`; read back | bit 13 puts the RGMII delays under register control, bit 11 is the RX delay, bit 12 the TX delay (not in the public datasheet; the Linux `rtl8211e_config_init` definitions, verify on hardware). Read-modify-write because bits 10:0 are vendor settings. The Nexys Video straps the PHY with no delay; the MAC's RX capture needs the PHY's 2 ns RXC delay, and the FPGA forwards TXC at 90 degrees, so TX delay stays off. Board value before the write: 0x8575, after: 0xAD75 |
 | 6 | PAGSEL = 0 (on every path, also after a failed step) | all later accesses (status poll, CLI) assume page 0 |
 | 7 | pass when the readback has bits 13 and 11 set and 12 clear | the readback proves the bits stick, not that the delay works; the working RX path is the real evidence |
-| 8 | optional: advertisement, AN restart | the board straps advertise all modes; the CLI can restrict them (`PHY ADVERTISE`, `PHY AUTONEG`, `PHY SPEED`) |
+| 8 | optional: advertisement, AN restart | the board straps advertise all modes; the CLI restricts them to full-duplex modes (`speed 10`, `speed 100`, `speed auto`) |
 
 A PHY hardware reset clears every register, including register 28: run `rtlnet_phy_rtl8211e_init` again after
 `rtlnet_mdio_phy_reset`. A BMCR soft reset returns BMCR and BMSR to defaults (Table 23); whether it clears register 28
@@ -401,3 +401,4 @@ Out of context, Vivado 2025.2, xc7a200tsbg484-1, defaults (`scripts/rtlnet_vivad
 |---|---|
 | 10-22-2026 | Initial version: GPIO register core, Clause 22 master, RTL8211E layer, bench, host test |
 | 10-22-2026 | Clause 45 native frames and MMD access through registers 13/14; RTL8211E LED setting (page 0x2C) and EEE advertisement; host test model extended |
+| 11-13-2026 | `rtlnet_phy_rtl8211e_advertise_set` writes the half-duplex advertisement bits as 0 and rejects a mask without a full-duplex mode; `RTLNET_PHY_ADV_FULL`; host test updated |

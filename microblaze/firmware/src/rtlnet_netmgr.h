@@ -27,7 +27,7 @@
  * gateway 192.169.1.1 (the protocol wrapper's reset values,
  * rtlnet_eth_protocol.h), UDP echo on socket 0 port 7 with connect-on-
  * receive, iperf on 5001, auto-negotiation advertising full duplex
- * 10/100/1000 (the MAC is full duplex only), TCP echo (lwIP) on port 7, TCP iperf (lwIP lwiperf) on port 5001,
+ * 10/100/1000 (the MAC is full duplex only; no half-duplex mode is ever advertised), TCP echo (lwIP) on port 7, TCP iperf (lwIP lwiperf) on port 5001,
  * classifier broadcast storm limit 10 frames per 100 ms.
  *
  * This header holds types, constants and signatures; rtlnet_netmgr.c holds
@@ -62,11 +62,6 @@
 #define NETMGR_PHY_EEE_FAIL     (-6)    /* EEE advertisement not cleared */
 #define NETMGR_PHY_AN_FAIL      (-7)    /* advertisement / AN restart failed */
 
-/* Duplex setting. */
-#define NETMGR_DUPLEX_AUTO      0u
-#define NETMGR_DUPLEX_HALF      1u
-#define NETMGR_DUPLEX_FULL      2u
-
 typedef struct {
     int      open;
     uint32_t local_port;
@@ -77,10 +72,8 @@ typedef struct {
 } netmgr_socket_cfg_t;
 
 typedef struct {
-    uint32_t speed_mbps;        /* 0 auto, 10, 100, 1000 */
-    uint32_t duplex;            /* NETMGR_DUPLEX_* */
-    int      autoneg;           /* 1: auto-negotiation (speed/duplex limit the advertisement) */
-    uint32_t adv_mask;          /* RTLNET_PHY_ADV_* explicit advertisement, 0 = derived */
+    uint32_t adv_mask;          /* the link always auto-negotiates; full-duplex modes advertised (RTLNET_PHY_ADV_10F/100F/1000F, never 0): the one speed state;
+                                   all three = "speed auto", one mode = "speed 10" / "speed 100" */
     int      shutdown;          /* 1: MAC receive/transmit disabled */
     uint32_t static_ip;
     uint32_t netmask;

@@ -1216,17 +1216,17 @@ static void test_autoneg(void)
     checkf(st.physr == 0x6C00u, "PHYSR 0x%04x, expected 0x%04x", st.physr, 0x6C00u);
     check(rtlnet_phy_speed_mbps(st.speed) == 100u, "speed code to Mb/s");
 
-    /* Advertise 10 only. */
+    /* Advertise 10 only; the half-duplex bit in the mask is written 0. */
     check(rtlnet_phy_rtl8211e_advertise_set(&g_ctx, RTLNET_PHY_ADV_10H | RTLNET_PHY_ADV_10F) == RTLNET_PHY_OK,
           "advertise 10H/10F");
-    checkf((g_m.anar & RTLNET_PHY_ANAR_TECH_MASK) == (RTLNET_PHY_ANAR_10H | RTLNET_PHY_ANAR_10F),
-           "ANAR tech bits 0x%04x, expected 0x%04x", g_m.anar & RTLNET_PHY_ANAR_TECH_MASK,
-           RTLNET_PHY_ANAR_10H | RTLNET_PHY_ANAR_10F);
+    checkf((g_m.anar & RTLNET_PHY_ANAR_TECH_MASK) == RTLNET_PHY_ANAR_10F,
+           "ANAR tech bits 0x%04x, expected 0x%04x (10F only, no half duplex)", g_m.anar & RTLNET_PHY_ANAR_TECH_MASK,
+           RTLNET_PHY_ANAR_10F);
     checkf((g_m.anar & 0x0C1Fu) == 0x0401u, "ANAR pause/selector kept 0x%04x (0x%04x)", g_m.anar & 0x0C1Fu,
            0x0401u);
     checkf((g_m.gbcr & RTLNET_PHY_GBCR_TECH_MASK) == 0u, "GBCR tech bits 0x%04x (%u)", g_m.gbcr, 0u);
     check(rtlnet_phy_rtl8211e_advertise_get(&g_ctx, &adv) == RTLNET_PHY_OK &&
-          adv == (RTLNET_PHY_ADV_10H | RTLNET_PHY_ADV_10F), "advertise_get after set");
+          adv == RTLNET_PHY_ADV_10F, "advertise_get after set");
     check(rtlnet_phy_rtl8211e_autoneg_restart(&g_ctx) == RTLNET_PHY_OK, "AN restart (10)");
     check(wait_link(&st, 20u) == RTLNET_PHY_OK, "link at 10");
     checkf(st.speed == RTLNET_PHY_SPEED_10 && st.full_duplex, "speed %u duplex %u (10 full)", st.speed,
@@ -1235,8 +1235,11 @@ static void test_autoneg(void)
     /* Gigabit partner, advertise everything. */
     g_m.partner_adv = RTLNET_PHY_ADV_ALL & ~RTLNET_PHY_ADV_1000H;
     check(rtlnet_phy_rtl8211e_advertise_set(&g_ctx, RTLNET_PHY_ADV_ALL) == RTLNET_PHY_OK, "advertise all");
-    checkf((g_m.gbcr & RTLNET_PHY_GBCR_TECH_MASK) == RTLNET_PHY_GBCR_TECH_MASK, "GBCR 0x%04x (0x%04x)",
-           g_m.gbcr, RTLNET_PHY_GBCR_TECH_MASK);
+    checkf((g_m.gbcr & RTLNET_PHY_GBCR_TECH_MASK) == RTLNET_PHY_GBCR_1000F, "GBCR 0x%04x (1000F only, 0x%04x)",
+           g_m.gbcr, RTLNET_PHY_GBCR_1000F);
+    checkf((g_m.anar & RTLNET_PHY_ANAR_TECH_MASK) == (RTLNET_PHY_ANAR_10F | RTLNET_PHY_ANAR_100F),
+           "ANAR after advertise all 0x%04x (10F/100F only, 0x%04x)", g_m.anar & RTLNET_PHY_ANAR_TECH_MASK,
+           RTLNET_PHY_ANAR_10F | RTLNET_PHY_ANAR_100F);
     check(rtlnet_phy_rtl8211e_autoneg_restart(&g_ctx) == RTLNET_PHY_OK, "AN restart (1000)");
     check(wait_link(&st, 20u) == RTLNET_PHY_OK, "link at 1000");
     checkf(st.speed == RTLNET_PHY_SPEED_1000 && st.full_duplex, "speed %u duplex %u (1000 full)", st.speed,
@@ -1253,6 +1256,8 @@ static void test_autoneg(void)
 
     /* Argument checks. */
     check(rtlnet_phy_rtl8211e_advertise_set(&g_ctx, 0u) == RTLNET_PHY_ERR_ARG, "advertise nothing rejected");
+    check(rtlnet_phy_rtl8211e_advertise_set(&g_ctx, RTLNET_PHY_ADV_10H | RTLNET_PHY_ADV_100H | RTLNET_PHY_ADV_1000H) ==
+          RTLNET_PHY_ERR_ARG, "advertise half duplex only rejected");
     check(rtlnet_phy_rtl8211e_advertise_set(&g_ctx, 0x40u) == RTLNET_PHY_ERR_ARG, "advertise unknown bit rejected");
     check(rtlnet_phy_rtl8211e_advertise_get(&g_ctx, NULL) == RTLNET_PHY_ERR_ARG, "advertise_get NULL");
     check(rtlnet_phy_rtl8211e_status(&g_ctx, NULL) == RTLNET_PHY_ERR_ARG, "status NULL");

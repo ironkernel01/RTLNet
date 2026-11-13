@@ -228,8 +228,8 @@ Routed timing: WNS +0.138 ns, WHS +0.012 ns, WPWS +0.131 ns, 0 failing endpoints
 
 | Link | Stream result | How to select |
 |---|---|---|
-| 1000 Mb/s | High profile 1080p30 at 8 Mb/s, 60 s: 0 dropped pictures, 0 lost datagrams | `enable`, `configure terminal`, `interface eth0`, `no advertise`, `speed auto`, `end` (the state after programming) |
-| 100 Mb/s | the same run: 0 dropped pictures, 0 lost datagrams | `enable`, `configure terminal`, `interface eth0`, `advertise 10f,100f`, `end` |
+| 1000 Mb/s | High profile 1080p30 at 8 Mb/s, 60 s: 0 dropped pictures, 0 lost datagrams | `enable`, `configure terminal`, `interface eth0`, `speed auto`, `end` (the state after programming) |
+| 100 Mb/s | the same run: 0 dropped pictures, 0 lost datagrams | `enable`, `configure terminal`, `interface eth0`, `speed 100`, `end` |
 
 Set the speed before `stream h264`; the link returns in 3 to 4 s and `show phy` prints the result.
 

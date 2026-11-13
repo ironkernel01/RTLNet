@@ -242,7 +242,7 @@ Hardware (board cabled to a 10/100 router at 192.169.1.1), network image d2aa397
 | Link | `%LINK: eth0 up, 100 Mb/s full duplex, MAC receive ready`; MAC RXC rate 102-103, receive path running |
 | DHCP | `%DHCP: bound 192.169.1.199 mask 255.255.255.0 router 192.169.1.1 lease 43200 s`; effective IP switched; renew and stop/start (release, discover, offer, request, ack) both worked |
 | Traffic | renew: MAC rx good / tx +1 each, RX_BAD 0; the router ARPed the board and got replies (ARP requests = replies) |
-| 10 Mb/s | `speed 10` (advertise 10f): link down/up, 10 Mb/s full duplex, RXC rate 10, renew + stop/start DHCP + ARP replies; `speed auto` back to 100 Mb/s |
+| 10 Mb/s | `speed 10`: link down/up, 10 Mb/s full duplex, RXC rate 10, renew + stop/start DHCP + ARP replies; `speed auto` back to 100 Mb/s |
 | Scripts | `net_test.ps1`: PASS 18/18 board-side, 4 host checks BLOCKED (PC NIC disconnected); `cli_test.ps1`: PASS 15/15 |
 
 #### Host-side network tests, 10-22-2026

@@ -281,11 +281,11 @@ buffer. The C driver is the MDIO master:
   MDC half-period from a calibrated delay loop, read/write, PHY hardware reset sequence (10 ms low + 30 ms
   settle, with margin).
 - `rtlnet_phy_rtl8211e.c`: ID check (0x001C/0xC915), RX-delay enable (page 0xA4 register 28, read-modify-write
-  of bits 13/11, readback), auto-negotiation enable/restart, advertisement selection (10/100/1000, half/full),
+  of bits 13/11, readback), auto-negotiation enable/restart, advertisement selection (10/100/1000, full duplex only: the half-duplex bits are always written 0),
   forced speed, status decode from BMSR/PHYSR, loopback, register dump.
 
-The CLI uses the driver to report link, speed, duplex and partner abilities, to configure advertisement and
-forced speed, and to keep the MAC speed register in step with PHYSR.
+The CLI uses the driver to report link, speed, duplex and partner abilities, to set the link speed (`speed`, by the
+advertised full-duplex modes), and to keep the MAC speed register in step with PHYSR.
 
 ### 7.4 `rtlnet_eth_protocol` — protocol wrapper
 
@@ -513,7 +513,7 @@ CLI: a light network-switch style hierarchy built on the MenuBuilder rules
 | exec `rtlnet>` | power-up | `show version`, `show system`, `show interfaces`, `show ip`, `enable` |
 | privileged `rtlnet#` | `enable` | everything in exec, `debug read/write`, `phy read/write/dump`, `reload`, `configure terminal` |
 | config `rtlnet(config)#` | `configure terminal` | `ip address`, `ip gateway`, `mac-address`, `interface eth0`, `dhcp`, `socket <n>` |
-| config-if `rtlnet(config-if)#` | `interface eth0` | `speed 10/100/1000/auto`, `duplex`, `advertise`, `shutdown` |
+| config-if `rtlnet(config-if)#` | `interface eth0` | `speed 10/100/auto` (full duplex; `auto` advertises 10/100/1000 and takes the best rate; the only link control), `shutdown` |
 | config-dhcp / config-sock | `dhcp`, `socket <n>` | `start`, `stop`, `auto`; `port`, `remote`, `connect-on-rx` |
 
 `exit` leaves one level, `end` (or Ctrl-Z) returns to privileged exec, `?` lists the commands of the current
@@ -724,6 +724,7 @@ and between the DMA MM2S stream and `u_cpu_tx_fifo` (TX).
 | 10-22-2026 | Initial architecture; all RTL in SystemVerilog; CPU as a replaceable core; one technology include file; Active-HDL simulation; CPU port list, BD address map and CLI hierarchy aligned with the built cores |
 | 10-22-2026 | CPU network path (`cpu_axis_ethernet_stream`, leaf `claim`), AXI DMA, lwIP TCP echo server, `microblaze/` folder, BSP generated from the AMD install |
 | 10-22-2026 | Broadcast storm limiter on the CPU path (default 10 frames / 100 ms) |
+| 11-13-2026 | Link speed: `speed 10/100/auto`, full duplex only (no half-duplex advertisement), `duplex` removed |
 | 10-22-2026 | `rtlnet_tcp_offload`: checksum insert on the CPU TX stream, check with trailer on the CPU RX stream (core built; sub-map slot 0x9000 planned) |
 | 10-22-2026 | `rtlnet_tcp_offload` integrated in the protocol wrapper's CPU path (`u_cpu_offload`, window 0x9000, `CPU_CAPS` bits 16..18); default `TX_BUF_KB` 8; firmware discovery, `rtlnet_offload_apply`, receive trailer policy, zero-copy options; AXI DMA realignment engine on MM2S |
 | 11-09-2026 | MicroBlaze V block design without the JTAG UART: the MDM address 0x4140_0000 is unmapped |

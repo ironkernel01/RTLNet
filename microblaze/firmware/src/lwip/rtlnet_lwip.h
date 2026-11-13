@@ -20,6 +20,10 @@
  * lost / new address, on a static IP / mask / gateway / MAC change from the
  * CLI, on link up, and as a consistency check every link-monitor period.
  *
+ * rtlnet_lwip_arp_resolve() makes the ARP entry of a destination's next hop exist (ARP request every
+ * RTLNET_LWIP_ARP_RETRY_MS, lwIP serviced meanwhile), so the first datagram to that destination is sent at
+ * once and not held in lwIP's ARP queue; the video stream calls it before its first datagram.
+ *
  * Main-loop contract: rtlnet_lwip_poll() from the main loop (netif receive
  * service, sys_check_timeouts). sys_now() is the platform millisecond tick.
  *
@@ -31,6 +35,8 @@
 #define RTLNET_LWIP_H
 
 #include <stdint.h>   /* uint8_t, uint32_t */
+
+#define RTLNET_LWIP_ARP_RETRY_MS   100u   /* spacing of the ARP requests of rtlnet_lwip_arp_resolve */
 
 /* InitLWIP() results. */
 #define RTLNET_LWIP_UNCHANGED      0    /* netif already matches the RTL registers */
@@ -68,6 +74,7 @@ typedef struct {
 int  InitLWIP(void);
 void rtlnet_lwip_poll(void);
 void rtlnet_lwip_set_link(int up);
+int  rtlnet_lwip_arp_resolve(uint32_t ip, uint32_t timeout_ms);
 void rtlnet_lwip_status(rtlnet_lwip_status_t *out);
 void rtlnet_lwip_counters(rtlnet_lwip_counters_t *out);
 void rtlnet_lwip_clear_counters(void);

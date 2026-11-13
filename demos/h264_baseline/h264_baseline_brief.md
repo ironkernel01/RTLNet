@@ -229,10 +229,10 @@ Routed timing: WNS +0.135 ns, WHS +0.013 ns, WPWS +0.131 ns, 0 failing endpoints
 
 | Link | Stream result | How to select |
 |---|---|---|
-| 1000 Mb/s | 1080p30 and 720p30 at 8 and 16 Mb/s, and 1080p30 at 28.09 Mb/s (QP 28): 60 s each, 0 dropped pictures, 0 lost datagrams | `enable`, `configure terminal`, `interface eth0`, `no advertise`, `speed auto`, `end` (the state after programming) |
-| 100 Mb/s | the same five runs: 0 dropped pictures, 0 lost datagrams | `enable`, `configure terminal`, `interface eth0`, `advertise 10f,100f`, `end` |
+| 1000 Mb/s | 1080p30 and 720p30 at 8 and 16 Mb/s, and 1080p30 at 28.09 Mb/s (QP 28): 60 s each, 0 dropped pictures, 0 lost datagrams | `enable`, `configure terminal`, `interface eth0`, `speed auto`, `end` (the state after programming) |
+| 100 Mb/s | the same five runs: 0 dropped pictures, 0 lost datagrams | `enable`, `configure terminal`, `interface eth0`, `speed 100`, `end` |
 
-The board negotiates 10/100/1000 Mb/s after programming. `advertise 10f,100f` limits the negotiation to 10 and 100 Mb/s; `no advertise` with `speed auto` returns to all three. The link returns in 3 to 4 s after either command and the DHCP address stays the same. Set the speed before `stream h264`. `show phy` prints the link speed, the advertised modes and the partner's modes.
+The board negotiates 10/100/1000 Mb/s after programming. `speed 100` runs the link at 100 Mb/s full duplex, `speed 10` at 10 Mb/s; `speed auto` returns to the best rate of 10, 100 and 1000 Mb/s. The link returns in 3 to 4 s after each command and the DHCP address stays the same. Set the speed before `stream h264`. `show phy` prints the link speed, the advertised modes and the partner's modes.
 
 ## Limits
 

@@ -2,7 +2,7 @@
 
 Copyright (C) 2026 IronKernel. All rights reserved.
 
-Revision: 11-11-2026 (the mux runs apart from the encoder: picture queue, resumable send)
+Revision: 11-13-2026 (the stream start resolves the receiver's ARP entry; 11-11-2026: the mux runs apart from the encoder: picture queue, resumable send)
 
 ## 1. Purpose
 
@@ -15,7 +15,7 @@ Two firmware modules in `microblaze/firmware/src/video/` turn the access units o
 | `rtlnet_venc.{h,c}` | session: frame-buffer take and release, encoder configuration and start, index-ring reading, the picture queue and the mux service (section 5.2), read pointers, statistics, load figures |
 | `rtlnet_picq.{h,c}` | queue of coded pictures: a descriptor per picture, coding order, the admit gate; no hardware |
 | `rtlnet_muxjob.{h,c}` | resumable send of one queued picture through `tsmux`, a bounded number of bytes per call; no hardware |
-| `src/lwip/rtlnet_video_udp.{h,c}` | one unicast `udp_pcb`; copies a datagram into a pbuf and calls `udp_sendto`; retries for at most 2 ms when lwIP has no pbuf or the transmit DMA is busy |
+| `src/lwip/rtlnet_video_udp.{h,c}` | one unicast `udp_pcb`; at open it resolves the ARP entry of the receiver (or of the gateway) with `rtlnet_lwip_arp_resolve`, at most 1 s, so the first datagram of a stream is sent at once and not lost to an unresolved ARP entry; copies a datagram into a pbuf and calls `udp_sendto`; retries for at most 2 ms when lwIP has no pbuf or the transmit DMA is busy |
 
 The datagram leaves through `netif_linkoutput`, the AXI DMA and `cpu_axis_ethernet_stream`; the
 checksum offload inserts the IPv4 and UDP checksums.

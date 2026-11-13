@@ -10,14 +10,18 @@
  * datagram and returns nonzero; the TS continuity counters make the loss visible. The desktop harness links
  * host_lwip_stub.c, whose version counts the datagrams.
  *
- * Revision: 11-11-2026 (send-time profile)
+ * video_udp_open resolves the ARP entry of the receiver (or of the gateway) before it returns (rtlnet_lwip_arp_resolve, at most 1 s), so the first
+ * datagram of a stream is sent at once.
+ *
+ * Revision: 11-13-2026 (ARP entry resolved at open; send-time profile 11-11-2026)
  */
 #ifndef RTLNET_VIDEO_UDP_H
 #define RTLNET_VIDEO_UDP_H
 
 #include <stdint.h>   /* uint8_t, uint16_t, uint32_t */
 
-/* Open the socket to ip (host order, first octet in [31:24]) and port. 0 on success, -1 when lwIP is not running or no PCB. */
+/* Open the socket to ip (host order, first octet in [31:24]) and port, after the ARP entry of the next hop exists or 1 s has passed.
+ * 0 on success, -1 when lwIP is not running or no PCB. */
 int  video_udp_open(uint32_t ip, uint16_t port);
 
 /* Close the socket. */

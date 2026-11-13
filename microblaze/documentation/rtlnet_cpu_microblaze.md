@@ -255,7 +255,7 @@ then 30 ms settle; MDC calibration against the AXI timer; PHY probe (ID 0x001C/0
 (page 0xA4 register 28) with read-back; LEDs (`rtlnet_phy_rtl8211e_leds_default`: LINK steady, ACT blinking,
 USER off; LCR 0x0070 / LACR 0x0010 on extended page 0x2C, read back); EEE advertisement off
 (`rtlnet_phy_rtl8211e_set_eee_advert(mdio, 0)`, MMD 7.60; EEE makes the RJ45 LEDs blink); the configured
-advertisement or forced speed; auto-negotiation restart. It returns `NETMGR_PHY_OK` or the first failing
+advertisement (full-duplex modes only, from the `speed` setting) auto-negotiation restart. It returns `NETMGR_PHY_OK` or the first failing
 step (`NETMGR_PHY_NO_MDIO`, `_POR_TIMEOUT`, `_NOT_FOUND`, `_RXDLY_FAIL`, `_LED_FAIL`, `_EEE_FAIL`,
 `_AN_FAIL`) and prints one line (`PHY: RTL8211E ID 0x001CC915, RX delay 0xAD77 -> 0xAD77, ...`). The boot
 sequence is `InitPHY()` then `InitLWIP()`; CLI `phy reset` pulses the PHY reset pin and calls `InitPHY()` again,
@@ -817,6 +817,9 @@ Details: `boards/nexys_video/documentation/rtlnet_nexys_video.md` sections 6.3 a
 | 10-22-2026 | lwIP glue and applications moved to `src/lwip/`; iperf server forked as `rtlnet_lwiperf` with -R, -r and -d; captured iperf 2.2.2 test header; desktop loopback test |
 | 10-22-2026 | Offload measurements and defaults (section 9.11): zero-copy receive on, zero-copy transmit off, AXI BRAM budget, throughput and CPU profile tables; netif merged with the word-wise copies of section 9.10 |
 | 10-22-2026 | AXI DMA data realignment engine on MM2S (zero-copy transmit); checksum offload in the firmware (feature discovery, `rtlnet_offload_apply`, receive trailer, zero-copy options, `show offload`, `offload` command, desktop netif test) |
+| 11-13-2026 | `advertise` and `no advertise` removed: `speed 10`, `speed 100`, `speed auto` is the only link control |
+| 11-13-2026 | `autoneg` and `no autoneg` removed: the link always auto-negotiates the advertised full-duplex set, the firmware no longer calls the forced-speed driver function |
+| 11-13-2026 | Link speed commands: `speed 10`, `speed 100`, `speed auto` (full duplex, `auto` = 10/100/1000 best rate) write one state, no half-duplex advertisement, `duplex` removed; `stream h264` resolves the receiver's ARP entry before the first datagram (`rtlnet_lwip_arp_resolve`) |
 | 10-22-2026 | Classifier driver integrated: `rtlnet_cpupath.c` on the real driver API (context, `RTLNET_CLS_ACT_*`), boot call `rtlnet_classifier_config_bcast_storm(10, 100)`, MAC mask removed and EtherType entries 0..7 (range pairs) in the CLI, harness register model of the classifier; the sim stub classifier task follows the driver register map |
 | 11-12-2026 | Encoder interrupt on INTC input 1 (`RTLNET_CPU_IRQ_H264`, section 9.2.2): `plat_irq_attach`, `plat_irq_enable`, public `plat_irq_save` / `plat_irq_restore`; the board top drives irq[1] |
 | 11-11-2026 | Console transmit on the UART interrupt (section 9.2.1): 4 KiB transmit ring, receive and transmit rings touched with interrupts masked; board results in `rtlnet_nexys_video.md` section 6.17 |

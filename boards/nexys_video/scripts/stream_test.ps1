@@ -50,18 +50,19 @@ Overview:
     picture, no forced IDR picture). The filter is set back to on after the run.
   * -IrqTest: three seconds after the stream start "encoder irqtest" is sent (a forced ring stall event must reach the interrupt handler); needs interrupt mode.
   * -ForcedIdr <n>: exactly n IDR pictures off the GOP cadence are expected (the forced IDR picture at the license end of the High profile demo netlist).
-  * -LinkSpeed auto|100|1000: before the run (no stream running) the link is set from the console: 100 = "advertise 10f,100f" (auto-negotiation limited to 10/100, the
-    PHY comes up at 100 Mb/s with this switch), auto and 1000 = "no advertise", "speed auto" (full 10/100/1000 negotiation); the script waits for the link (1000 must come
-    up at 1000 Mb/s, 100 at 10 or 100) and for the DHCP lease, prints "show phy" and the link and lease times, and fails if the link or the lease does not return in 40 s.
-    The setting stays after the run; set -LinkSpeed auto (or 1000) in a later run to restore it.
+  * -LinkSpeed auto|10|100|1000: before the run (no stream running) the link is set from the console with the "speed" command: 10 = "speed 10", 100 = "speed 100"
+    (full duplex, auto-negotiation advertising that one mode), auto = "speed auto" (full 10/100/1000 negotiation, best common rate); 1000 is an alias of auto that also
+    requires the link at 1000 Mb/s. The script waits for the link (10, 100 and 1000 must come up at exactly that speed) and for the DHCP lease, prints "show phy" and
+    the link and lease times, and fails if the link or the lease does not return in 40 s. The setting stays after the run; set -LinkSpeed auto in a later run to restore it.
   * -InputTs <file>: check an existing capture offline (no board, no capture).
   * The transcript is boards/nexys_video/build/phase2c_gop<N>_stream_transcript.txt. The last line is
     "STREAM_TEST: PASS <n>/<n>" or "STREAM_TEST: FAIL <failed>/<n>"; exit code 0 only on PASS.
 Usage:
   powershell -NoProfile -ExecutionPolicy Bypass -File boards/nexys_video/scripts/stream_test.ps1 [-Mode both] [-Seconds 60]
-    [-Port COM3] [-UdpPort 5004] [-HostIp <PC address>] [-Qp 28] [-Gop 30] [-Pattern all -Speed 4] [-Bitrate 2000 [-BufferMs 500]] [-Tag <name>] [-SkipVlc] [-NoBoard] [-LinkSpeed auto|100|1000] [-InputTs <file> -Width 1280 -Height 720]
+    [-Port COM3] [-UdpPort 5004] [-HostIp <PC address>] [-Qp 28] [-Gop 30] [-Pattern all -Speed 4] [-Bitrate 2000 [-BufferMs 500]] [-Tag <name>] [-SkipVlc] [-NoBoard] [-LinkSpeed auto|10|100|1000] [-InputTs <file> -Width 1280 -Height 720]
 Revision: 11-13-2026
-  * 11-13-2026: -LinkSpeed (link speed from the console before the run, wait for link and DHCP lease).
+  * 11-13-2026: -LinkSpeed waits on the PHY's own link state (show phy): the requested speed held for 2 s, or for auto the link down and up again / the speed held for 5 s.
+  * 11-13-2026: -LinkSpeed (link speed from the console before the run, wait for link and DHCP lease); values auto|10|100|1000 with the speed command.
   * 11-12-2026: -Deblock and -SwitchDeblock (encoder deblock).
   * 11-12-2026: -IrqTest.
   * 11-12-2026: -Transform8x8 auto, -SwitchTransform8x8 ends in auto (off, then auto), -Notify and -SwitchNotify (encoder notify), the transform request is set back to off (the firmware default) after the run.
@@ -118,7 +119,7 @@ param(
     [ValidateSet('', 'on', 'off')][string]$Deblock = '',
     [switch]$SwitchDeblock,
     [switch]$IrqTest,
-    [ValidateSet('', 'auto', '100', '1000')][string]$LinkSpeed = ''
+    [ValidateSet('', 'auto', '10', '100', '1000')][string]$LinkSpeed = ''
 )
 $ErrorActionPreference = 'Stop'
 $Repo  = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..')).Path
@@ -412,21 +413,34 @@ try {
     [void](Invoke-Cli $sp 'stream stop')
 
     if ($LinkSpeed) {
-        $want = $(if ($LinkSpeed -eq '100') { 100 } else { 1000 })
+        $want = $(if ($LinkSpeed -eq 'auto') { 0 } else { [int]$LinkSpeed })
+        $speedCmd = $(if ($LinkSpeed -in @('10', '100')) { "speed $LinkSpeed" } else { 'speed auto' })
         [void](Invoke-Cli $sp 'configure terminal'); [void](Invoke-Cli $sp 'interface eth0')
-        if ($LinkSpeed -eq '100') { [void](Invoke-Cli $sp 'advertise 10f,100f') } else { [void](Invoke-Cli $sp 'no advertise'); [void](Invoke-Cli $sp 'speed auto') }
+        [void](Invoke-Cli $sp $speedCmd)
         $swl = [System.Diagnostics.Stopwatch]::StartNew()
         [void](Invoke-Cli $sp 'end')
         $linkS = -1; $leaseS = -1; $mb = 0
+        # The link state is read from the PHY ("show phy", real time), not from the firmware's link monitor, which lags by up to 250 ms and
+        # still reports the old link right after the speed command. An explicit speed is accepted when the PHY reports exactly that speed
+        # and the speed has held for 2 s. auto is accepted after the link has been seen down and up again, or when the reported speed has
+        # held for 5 s (the speed did not change, so the restart may have been too short to see).
+        $sawDown = $false; $lastMb = -1; $stableAt = $null
         while ($swl.Elapsed.TotalSeconds -lt 40 -and $leaseS -lt 0) {
-            $o = Invoke-Cli $sp 'show interfaces' 4000
-            if ($o -match 'eth0 is up, (\d+) Mb/s') {
+            $o = Invoke-Cli $sp 'show phy' 4000
+            if ($o -match 'Link\s+: up, (\d+) Mb/s') {
                 $mb = [int]$Matches[1]
-                if ($linkS -lt 0 -and (($LinkSpeed -eq '100' -and $mb -le 100) -or ($LinkSpeed -ne '100' -and $mb -eq $want) -or $LinkSpeed -eq 'auto')) { $linkS = $swl.Elapsed.TotalSeconds }
+                if ($mb -ne $lastMb) { $lastMb = $mb; $stableAt = $swl.Elapsed.TotalSeconds }
+                $held = $swl.Elapsed.TotalSeconds - $stableAt
+                if ($linkS -lt 0) {
+                    if ($want -ne 0) { if ($mb -eq $want -and $held -ge 2.0) { $linkS = $swl.Elapsed.TotalSeconds } }
+                    elseif (($sawDown -and $held -ge 1.0) -or $held -ge 5.0) { $linkS = $swl.Elapsed.TotalSeconds }
+                }
                 if ($linkS -ge 0) {
                     $o2 = Invoke-Cli $sp 'show ip' 4000
                     if ($o2 -match 'Effective IPv4\s+: (\d+\.\d+\.\d+\.\d+) .*\(DHCP lease\)') { $leaseS = $swl.Elapsed.TotalSeconds }
                 }
+            } elseif ($o -match 'Link\s+: down') {
+                $sawDown = $true; $lastMb = -1; $stableAt = $null; $linkS = -1
             }
             if ($leaseS -lt 0) { Start-Sleep -Milliseconds 300 }
         }

@@ -34,6 +34,7 @@ Overview:
 Usage:
   powershell -NoProfile -ExecutionPolicy Bypass -File boards/nexys_video/scripts/cli_test.ps1 [-Port COM3] [-Baud 115200]
 Revision: 11-13-2026
+  * 11-13-2026: link speed steps: speed 1000 rejected, duplex, advertise and autoneg removed, speed auto; show running-config lists speed auto.
   * 11-13-2026: merged tree checked as it is on the Baseline + filter, the demo (CABAC) and the full (CABAC) release images: 101 of 101 each (VERSION 0x11122C04, deblock commands and lines, hp_caps 1 on the CABAC-only netlist, transform default off, transform8x8 auto accepted or refused with its named text, encoder notify texts).
   * 10-22-2026: initial version.
   * 10-22-2026: CPU network path steps (BSP-based firmware).
@@ -297,8 +298,16 @@ try {
     Send-Step $sp 'conf t (restore)' "configure terminal`r" @() 'rtlnet(config)#'
     Send-Step $sp 'tcp echo port 7' "tcp echo port 7`r" @() 'rtlnet(config)#'
     Send-Step $sp 'end (restore)' "end`r" @() 'rtlnet#'
+    Send-Step $sp 'conf t (link)' "configure terminal`r" @() 'rtlnet(config)#'
+    Send-Step $sp 'interface eth0 (link)' "interface eth0`r" @() 'rtlnet(config-if)#'
+    Send-Step $sp 'speed 1000 (rejected)' "speed 1000`r" @('% Invalid speed \(10, 100, auto\) "1000"') 'rtlnet(config-if)#'
+    Send-Step $sp 'duplex (removed)' "duplex half`r" @('% Invalid input detected') 'rtlnet(config-if)#'
+    Send-Step $sp 'advertise (removed)' "advertise 10f,100f`r" @('% Invalid input detected') 'rtlnet(config-if)#'
+    Send-Step $sp 'autoneg (removed)' "autoneg`r" @('% Invalid input detected') 'rtlnet(config-if)#'
+    Send-Step $sp 'speed auto' "speed auto`r" @() 'rtlnet(config-if)#'
+    Send-Step $sp 'end (link)' "end`r" @() 'rtlnet#'
     Send-Step $sp 'show running-config' "show running-config`r" @(
-        ' storm-control broadcast 10 100', 'tcp echo port 7', 'tcp echo enable', 'classifier mode pass-all', 'end') 'rtlnet#'
+        ' speed auto', ' storm-control broadcast 10 100', 'tcp echo port 7', 'tcp echo enable', 'classifier mode pass-all', 'end') 'rtlnet#'
     Send-Step $sp 'led 2 on' "led 2 on`r" @('LED 2 on') 'rtlnet#'
     Send-Step $sp 'LEDS readback' "debug read 0x44a00014`r" @('0x44A00014 = 0x000000[0-9A-F][4567CDEF]') 'rtlnet#'
     Send-Step $sp 'led 2 off' "led 2 off`r" @('LED 2 off') 'rtlnet#'

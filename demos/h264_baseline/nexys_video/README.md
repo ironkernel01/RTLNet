@@ -50,32 +50,32 @@ License: `LICENSE.md` in the repository root.
 
 ## Link speed
 
-The board negotiates 10/100/1000 Mb/s after programming. The demos run at 100 Mb/s and at 1000 Mb/s. Set the speed
-before `stream h264`.
+The board negotiates 10/100/1000 Mb/s full duplex after programming and takes the best rate both sides support.
+The demos run at 100 Mb/s and at 1000 Mb/s. Set the speed before `stream h264`. `speed` takes `10`, `100` or `auto`;
+the last `speed` command is the one in force.
 
-Limit the negotiation to 10 and 100 Mb/s:
+Run at 100 Mb/s (full duplex):
 
 ```
 enable
 configure terminal
 interface eth0
-advertise 10f,100f
+speed 100
 end
 ```
 
-Return to 10/100/1000 Mb/s:
+Return to 10/100/1000 Mb/s, best rate:
 
 ```
 enable
 configure terminal
 interface eth0
-no advertise
 speed auto
 end
 ```
 
-The link returns in 3 to 4 s and the DHCP address stays the same. `show phy` prints the link speed, the advertised
-modes and the partner's modes.
+`speed 10` selects 10 Mb/s. The link returns in 3 to 4 s and the DHCP address stays the same. `show phy` prints the link
+speed, the advertised modes and the partner's modes.
 
 ## Useful commands
 

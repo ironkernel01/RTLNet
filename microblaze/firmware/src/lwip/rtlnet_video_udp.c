@@ -5,7 +5,7 @@
  *
  * Role: implementation of the contract in rtlnet_video_udp.h.
  *
- * Revision: 11-11-2026 (send-time profile)
+ * Revision: 11-13-2026 (ARP entry resolved at open; send-time profile 11-11-2026)
  */
 #include "rtlnet_video_udp.h"
 
@@ -19,6 +19,7 @@
 #include "rtlnet_platform.h"
 
 #define VIDEO_UDP_RETRY_US  2000u
+#define VIDEO_UDP_ARP_MS    1000u   /* longest wait for the destination's ARP entry at stream start */
 
 static struct udp_pcb *g_pcb;
 static ip_addr_t       g_dst;
@@ -45,6 +46,11 @@ int video_udp_open(uint32_t ip, uint16_t port)
     }
     IP4_ADDR(&g_dst, (ip >> 24) & 0xFFu, (ip >> 16) & 0xFFu, (ip >> 8) & 0xFFu, ip & 0xFFu);
     g_port = port;
+    /* The ARP entry of the receiver (or the gateway) is resolved before the first datagram: with the entry missing the first
+     * datagram of the stream (PAT, PMT, SPS, PPS and the start of the first IDR picture) is lost, so a receiver that listens
+     * from before the start sees the stream begin in the middle of the first access unit. A receiver that does not answer
+     * ARP within VIDEO_UDP_ARP_MS is not waited for; the stream starts as before. */
+    (void)rtlnet_lwip_arp_resolve(ip, VIDEO_UDP_ARP_MS);
     return 0;
 }
 
