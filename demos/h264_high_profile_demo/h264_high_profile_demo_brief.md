@@ -69,7 +69,30 @@ This demo is a prebuilt bitstream, with its firmware inside, of the IronKernel R
 </div>
 
 
-<div style="page-break-after: always;"></div>
+## License
+
+This demo package is under the demonstration license (`LICENSE_DEMO.md`). The RTLNet sources are under the RTLNet source-available license (`LICENSE.md`).
+
+**Free, no fee:**
+
+- Loading this bitstream into the Nexys Video and running it, to evaluate and to demonstrate the High profile extension
+- Copying the package and passing it on, complete and unmodified, with its license file
+- Publishing measurements made with it, when the publication names the package revision and states that the demonstration form was used
+
+**Not allowed with this package:**
+
+- Shipping, selling or deploying it in a product or a paid service
+- Removing, bypassing or extending the 30-minute limit
+- Reverse engineering or modifying the bitstream
+
+**Paid license from IronKernel (ironkernel.com):**
+
+- CABAC and High profile in your own design, without the time limit
+- A commercial product with RTLNet whose design sources are not public
+
+A paid license carries no royalty and no per-unit fee.
+
+
 
 <div class="small">
 
@@ -182,7 +205,7 @@ Compile-time parameters of `rtlnet_h264_top` choose the tool set; a feature that
 </tbody>
 </table>
 
-This demo image is the bold entry, CABAC with `DEBLOCK` 1 and `NUM_ENGINES` 2, with the 30-minute license timer. The extension is a paid feature from IronKernel (ironkernel.com) and is delivered here as a bitstream.
+This demo image is the bold entry, CABAC with `DEBLOCK` 1 and `NUM_ENGINES` 2, with the 30-minute license timer.
 
 ## Device utilization, clocks and timing
 
@@ -196,10 +219,8 @@ Post-route result of this image on the XC7A200T.
 </tbody>
 </table>
 
-By block (out-of-context synthesis, not additive): encoder with filter 63,846 LUTs, 42,439 FFs, 76 DSP; Ethernet MAC 1,104 LUTs, 1,682 FFs; protocol wrapper with every leaf 9,432 LUTs, 12,737 FFs; frame classifier 3,351 LUTs, 6,217 FFs; checksum offload 1,867 LUTs, 3,613 FFs.
-
-Clocks: `ui_clk` = `cpu_clk` 90.000 MHz (MicroBlaze V, DDR3 arbiter, video DMA, pattern generator, both encoder engines); DDR3 memory clock 360 MHz, 4:1 to `ui_clk`, from a 102.857143 MHz input of a second MMCM;
-`clk125` and `clk125_90` 125 MHz, the second shifted by 90 degrees (Ethernet MAC, RGMII); `axis_clk` 62.5 MHz (AXI4-Stream paths); `proto_clk` 50 MHz (protocol wrapper).
+Clocks: `ui_clk` = `cpu_clk` 90.000 MHz (MicroBlaze V, DDR3 arbiter, video DMA, pattern generator, both encoder engines); DDR3 memory clock 360 MHz;
+`clk125` and `clk125_90` 125 MHz (Ethernet MAC, RGMII); `axis_clk` 62.5 MHz (AXI4-Stream paths); `proto_clk` 50 MHz (protocol wrapper).
 
 Routed timing: WNS +0.138 ns, WHS +0.012 ns, WPWS +0.131 ns, 0 failing endpoints, first build attempt, `rtlnet_cdc: PASS`.
 
@@ -210,16 +231,10 @@ Routed timing: WNS +0.138 ns, WHS +0.012 ns, WPWS +0.131 ns, 0 failing endpoints
 | 1000 Mb/s | High profile 1080p30 at 8 Mb/s, 60 s: 0 dropped pictures, 0 lost datagrams | `enable`, `configure terminal`, `interface eth0`, `no advertise`, `speed auto`, `end` (the state after programming) |
 | 100 Mb/s | the same run: 0 dropped pictures, 0 lost datagrams | `enable`, `configure terminal`, `interface eth0`, `advertise 10f,100f`, `end` |
 
-The board negotiates 10/100/1000 Mb/s after programming. `advertise 10f,100f` limits the negotiation to 10 and 100 Mb/s; `no advertise` with `speed auto` returns to all three. The link returns in 3 to 4 s after either command and the DHCP address stays the same. Set the speed before `stream h264`. `show phy` prints the link speed, the advertised modes and the partner's modes.
+Set the speed before `stream h264`; the link returns in 3 to 4 s and `show phy` prints the result.
 
 ## Limits
 
-- The pictures are test patterns; the demo has no camera, and PSNR is against the pattern model. The 8x8 transform, the adaptive transform choice and sub-sample motion search are not in this image. There are no B pictures.
-- High profile runs for 30 minutes after each configuration of the FPGA. `stream stop`, `stream h264` and a firmware `reload` do not restore the license; programming the board again does (29 min 59 s left at the start). `encoder transform8x8 on` is refused by name (`hp_caps` 0001).
-- The firmware multiplexer limits the rate at 1080p30: 27.5 Mb/s runs at 85 % load with no drop; at 31 to 32 Mb/s the load reaches 99 % and 13 to 16 pictures drop in 20 s.
-- On these patterns the filter moves the rate by up to 5 % and lowers PSNR by 0.03 to 0.8 dB. The image loads over JTAG only; a power cycle removes it.
-
-## License
-
-The package is under `LICENSE_DEMO.md`: running it on the board, evaluating and demonstrating the extension are free; copies stay complete and unmodified; published measurements name the package revision and the demonstration form.
-Shipping it in a product or a paid service is not allowed; use of CABAC and High profile in a design needs a paid license from IronKernel (ironkernel.com). The RTLNet sources are under `LICENSE.md`.
+- The pictures are test patterns; the demo has no camera, and PSNR is against the pattern model. The 8x8 transform, sub-sample motion search and B pictures are not in this image.
+- High profile runs for 30 minutes after each configuration of the FPGA. Programming the board again restores the 30 minutes; `stream stop`, `stream h264` and a firmware `reload` do not. `encoder transform8x8 on` is refused by name (`hp_caps` 0001).
+- The firmware multiplexer limits the rate at 1080p30: 27.5 Mb/s runs with no drop; pictures drop at 31 to 32 Mb/s. The image loads over JTAG only.

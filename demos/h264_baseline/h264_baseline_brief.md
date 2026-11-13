@@ -69,7 +69,25 @@ This demo is a prebuilt bitstream of the IronKernel RTLNet H.264 Constrained Bas
 </div>
 
 
-<div style="page-break-after: always;"></div>
+## License
+
+The RTLNet sources and this image are under the RTLNet source-available license (`LICENSE.md`).
+
+**Free, no fee:**
+
+- Evaluation and development, including prototypes and demonstrations that are not sold
+- Research and teaching
+- Hobby and personal projects
+- A commercial product whose complete design sources are public under the RTLNet license and whose changes to RTLNet files are offered back as pull requests
+
+**Paid license from IronKernel (ironkernel.com), before the product ships:**
+
+- A commercial product whose design sources are not public
+- Any design that uses CABAC or High profile; these are paid features and are not part of this demo
+
+A paid license carries no royalty and no per-unit fee.
+
+
 
 <div class="small">
 
@@ -202,8 +220,6 @@ Post-route result of this image on the XC7A200T.
 </tbody>
 </table>
 
-By block (out-of-context synthesis, not additive): encoder with filter 58,597 LUTs, 39,835 FFs, 76 DSP; Ethernet MAC 1,104 LUTs, 1,682 FFs; protocol wrapper with every leaf 9,432 LUTs, 12,737 FFs; frame classifier 3,351 LUTs, 6,217 FFs; checksum offload 1,867 LUTs, 3,613 FFs.
-
 Clocks: `ui_clk` = `cpu_clk` 90.000 MHz (MicroBlaze V, DDR3 arbiter, video DMA, pattern generator, both encoder engines); DDR3 memory clock 360 MHz, 4:1 to `ui_clk`, from a 102.857143 MHz input of a second MMCM;
 `clk125` and `clk125_90` 125 MHz, the second shifted by 90 degrees (Ethernet MAC, RGMII); `axis_clk` 62.5 MHz (AXI4-Stream paths); `proto_clk` 50 MHz (protocol wrapper).
 
@@ -224,8 +240,3 @@ The board negotiates 10/100/1000 Mb/s after programming. `advertise 10f,100f` li
 - This image has no time limit.
 - The firmware multiplexer limits the rate at 1080p30: 27.5 Mb/s runs at 85 % load with no drop; at 31 to 32 Mb/s the load reaches 99 % and 13 to 16 pictures drop in 20 s.
 - On these patterns the filter moves the rate by up to 5 % and lowers PSNR by 0.03 to 0.8 dB. The image loads over JTAG only; a power cycle removes it.
-
-## License
-
-The RTLNet sources and this image are under the RTLNet source-available license in `LICENSE.md`. Evaluation, development, research, teaching and hobby use is free.
-A commercial product with public design sources and contributed changes is free; a closed commercial design needs a paid license from IronKernel (ironkernel.com). CABAC and High profile are paid features and are not part of this demo.
