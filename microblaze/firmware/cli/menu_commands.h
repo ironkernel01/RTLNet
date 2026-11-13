@@ -21,7 +21,7 @@
  */
 /*
  * File:      menu_commands.h
- * Generated: 2026-11-12 00:00:00 -04:00
+ * Generated: 2026-11-13 00:00:00 -04:00
  * Project:   RTLNet Nexys Video firmware, hierarchical CLI
  * Purpose:   Prototypes of every command callback named in
  *            cli/cli_commands.txt; cli/cli_commands.c defines them.
@@ -114,7 +114,6 @@ int cli_no_cls_ethertype(const MenuCommandContext *ctx);
 int cli_no_cls_acl(const MenuCommandContext *ctx);
 int cli_no_cls_policer(const MenuCommandContext *ctx);
 int cli_if_speed(const MenuCommandContext *ctx);
-int cli_if_duplex(const MenuCommandContext *ctx);
 int cli_if_autoneg(const MenuCommandContext *ctx);
 int cli_if_no_autoneg(const MenuCommandContext *ctx);
 int cli_if_advertise(const MenuCommandContext *ctx);

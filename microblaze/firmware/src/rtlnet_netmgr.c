@@ -32,11 +32,6 @@
 #include "rtlnet_udp_socket.h"
 
 #define NETMGR_PHY_SETTLE_MS   30u    /* RTL8211E: 30 ms from reset release to MDIO access */
-#define NETMGR_ADV_FULL        (RTLNET_PHY_ADV_10F | RTLNET_PHY_ADV_100F | RTLNET_PHY_ADV_1000F)
-#define NETMGR_ADV_HALF        (RTLNET_PHY_ADV_10H | RTLNET_PHY_ADV_100H | RTLNET_PHY_ADV_1000H)
-#define NETMGR_ADV_10          (RTLNET_PHY_ADV_10H | RTLNET_PHY_ADV_10F)
-#define NETMGR_ADV_100         (RTLNET_PHY_ADV_100H | RTLNET_PHY_ADV_100F)
-#define NETMGR_ADV_1000        (RTLNET_PHY_ADV_1000H | RTLNET_PHY_ADV_1000F)
 
 static netmgr_config_t  g_cfg;
 static netmgr_present_t g_present;
@@ -81,10 +76,8 @@ static void event_end(void)
 void netmgr_config_defaults(void)
 {
     static const uint8_t mac_default[6] = { 0x02u, 0x49u, 0x4Bu, 0x52u, 0x4Eu, 0x01u };   /* rtlnet_pkg default */
-    g_cfg.speed_mbps  = 0u;
-    g_cfg.duplex      = NETMGR_DUPLEX_AUTO;
     g_cfg.autoneg     = 1;
-    g_cfg.adv_mask    = 0u;
+    g_cfg.adv_mask    = RTLNET_PHY_ADV_FULL;
     g_cfg.shutdown    = 0;
     g_cfg.static_ip   = NETMGR_DEFAULT_IP;
     g_cfg.netmask     = NETMGR_DEFAULT_MASK;
@@ -119,27 +112,14 @@ void netmgr_config_defaults(void)
 
 /*
  * netmgr_adv_effective -- advertisement the PHY is given with auto-negotiation.
- * Steps:
- *   1. An explicit mask (advertise command) wins.
- *   2. Else full-duplex modes (half with "duplex half"), limited to the
- *      configured speed when one is set.
- * Returns: RTLNET_PHY_ADV_* mask (never 0 for a valid configuration).
+ * The configured full-duplex set (speed and advertise commands write the same
+ * mask, the last command wins); half-duplex bits are never part of it.
+ * Returns: RTLNET_PHY_ADV_* mask, never 0.
  */
 uint32_t netmgr_adv_effective(void)
 {
-    uint32_t adv;
-    if (g_cfg.adv_mask != 0u) {
-        return g_cfg.adv_mask;
-    }
-    adv = (g_cfg.duplex == NETMGR_DUPLEX_HALF) ? NETMGR_ADV_HALF : NETMGR_ADV_FULL;
-    if (g_cfg.speed_mbps == 10u) {
-        adv &= NETMGR_ADV_10;
-    } else if (g_cfg.speed_mbps == 100u) {
-        adv &= NETMGR_ADV_100;
-    } else if (g_cfg.speed_mbps == 1000u) {
-        adv &= NETMGR_ADV_1000;
-    }
-    return adv;
+    uint32_t adv = g_cfg.adv_mask & RTLNET_PHY_ADV_FULL;
+    return (adv != 0u) ? adv : RTLNET_PHY_ADV_FULL;
 }
 
 /*
@@ -147,7 +127,8 @@ uint32_t netmgr_adv_effective(void)
  * Steps:
  *   1. Auto-negotiation: write the effective advertisement, enable and
  *      restart AN.
- *   2. Forced: 10 or 100 Mb/s with the configured duplex (full by default).
+ *   2. Forced (no autoneg): full duplex at 10 Mb/s when only 10f is configured,
+ *      else 100 Mb/s.
  * Returns: RTLNET_PHY_OK, a driver error, or -1 when the PHY is absent.
  */
 int netmgr_apply_phy(void)
@@ -164,8 +145,9 @@ int netmgr_apply_phy(void)
         return rc;
     }
     return rtlnet_phy_rtl8211e_force(&g_mdio,
-                                     (g_cfg.speed_mbps == 10u) ? RTLNET_PHY_SPEED_10 : RTLNET_PHY_SPEED_100,
-                                     g_cfg.duplex != NETMGR_DUPLEX_HALF);
+                                     (netmgr_adv_effective() == RTLNET_PHY_ADV_10F) ? RTLNET_PHY_SPEED_10
+                                                                                    : RTLNET_PHY_SPEED_100,
+                                     1);
 }
 
 /*

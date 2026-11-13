@@ -143,6 +143,7 @@
 #define RTLNET_PHY_ADV_1000H        (1u << 4)
 #define RTLNET_PHY_ADV_1000F        (1u << 5)
 #define RTLNET_PHY_ADV_ALL          (0x3Fu)
+#define RTLNET_PHY_ADV_FULL         (RTLNET_PHY_ADV_10F | RTLNET_PHY_ADV_100F | RTLNET_PHY_ADV_1000F)   /* the only modes advertise_set writes as 1 */
 
 /* Speed codes: PHYSR 17.15:14 and the MAC speed register encoding. */
 #define RTLNET_PHY_SPEED_10         0u

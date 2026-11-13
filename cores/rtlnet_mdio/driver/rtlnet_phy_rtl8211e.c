@@ -230,9 +230,12 @@ int rtlnet_phy_rtl8211e_autoneg_restart(const rtlnet_mdio_t *mdio)
 /*
  * rtlnet_phy_rtl8211e_advertise_set -- choose the advertised abilities
  * Steps:
- *   1. Reject an empty mask or unknown bits.
- *   2. ANAR bits 8:5 from 10H/10F/100H/100F (pause and other bits kept).
- *   3. GBCR bits 9:8 from 1000F/1000H (master/slave and test bits kept).
+ *   1. Reject unknown bits and a mask without a full-duplex mode.
+ *   2. ANAR bits 8:5 from 10F/100F; the half-duplex bits 10H/100H are always
+ *      written 0, whatever the mask holds (pause and other bits kept).
+ *   3. GBCR bits 9:8 from 1000F; 1000H is always written 0 (master/slave and
+ *      test bits kept).
+ * The MAC is full duplex only, so no half-duplex ability is ever advertised.
  * The new set takes effect at the next rtlnet_phy_rtl8211e_autoneg_restart.
  * Returns: RTLNET_PHY_OK; RTLNET_PHY_ERR_ARG; a bus error.
  */
@@ -242,14 +245,11 @@ int rtlnet_phy_rtl8211e_advertise_set(const rtlnet_mdio_t *mdio, uint32_t adv_ma
     uint16_t gbcr = 0u;
     int rc;
 
-    if (mdio == NULL || adv_mask == 0u || (adv_mask & ~RTLNET_PHY_ADV_ALL) != 0u) {
+    if (mdio == NULL || (adv_mask & RTLNET_PHY_ADV_FULL) == 0u || (adv_mask & ~RTLNET_PHY_ADV_ALL) != 0u) {
         return RTLNET_PHY_ERR_ARG;
     }
-    anar |= (adv_mask & RTLNET_PHY_ADV_10H) ? RTLNET_PHY_ANAR_10H : 0u;
     anar |= (adv_mask & RTLNET_PHY_ADV_10F) ? RTLNET_PHY_ANAR_10F : 0u;
-    anar |= (adv_mask & RTLNET_PHY_ADV_100H) ? RTLNET_PHY_ANAR_100H : 0u;
     anar |= (adv_mask & RTLNET_PHY_ADV_100F) ? RTLNET_PHY_ANAR_100F : 0u;
-    gbcr |= (adv_mask & RTLNET_PHY_ADV_1000H) ? RTLNET_PHY_GBCR_1000H : 0u;
     gbcr |= (adv_mask & RTLNET_PHY_ADV_1000F) ? RTLNET_PHY_GBCR_1000F : 0u;
 
     rc = modify(mdio, RTLNET_PHY_REG_ANAR, RTLNET_PHY_ANAR_TECH_MASK, anar);

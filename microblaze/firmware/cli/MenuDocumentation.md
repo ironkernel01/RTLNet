@@ -24,9 +24,9 @@ SPDX-License-Identifier: LGPL-2.1-or-later
 
 | Item | Value |
 |---|---|
-| Revision | 11-12-2026 (newest row of the revision history in cli/cli_commands.txt) |
-| Generated | 2026-11-12 00:00:00 -04:00 by cli/gen_menu.py from cli/cli_commands.txt |
-| Commands | 110 table entries (5 mode-entry), 30 keyword groups, 3 built-ins (exit, end, help) |
+| Revision | 11-13-2026 (newest row of the revision history in cli/cli_commands.txt) |
+| Generated | 2026-11-13 00:00:00 -04:00 by cli/gen_menu.py from cli/cli_commands.txt |
+| Commands | 109 table entries (5 mode-entry), 30 keyword groups, 3 built-ins (exit, end, help) |
 
 ## 1. Title and overview
 
@@ -305,32 +305,31 @@ token counts; exec commands are also accepted in priv.
 | 82 | cli_no_cls_ethertype | config | `NO CLASSIFIER ETHERTYPE [ENTRY]` | ENTRY | — | 4 | 4 | — | Clear an EtherType entry |
 | 83 | cli_no_cls_acl | config | `NO CLASSIFIER ACL [ENTRY]` | ENTRY | — | 4 | 4 | — | Clear an ACL entry |
 | 84 | cli_no_cls_policer | config | `NO CLASSIFIER POLICER [INDEX]` | INDEX | — | 4 | 4 | — | Disable a policer |
-| 85 | cli_if_speed | config-if | `SPEED [MBPS]` | MBPS | — | 2 | 2 | — | Link speed: 10, 100, 1000 or auto |
-| 86 | cli_if_duplex | config-if | `DUPLEX [MODE]` | MODE | — | 2 | 2 | — | Duplex: full, half or auto (the MAC is full duplex only) |
-| 87 | cli_if_autoneg | config-if | `AUTONEG` | — | — | 1 | 1 | — | Enable auto-negotiation (speed/duplex limit the advertisement) |
-| 88 | cli_if_no_autoneg | config-if | `NO AUTONEG` | — | — | 2 | 2 | — | Disable auto-negotiation (forced 10 or 100 Mb/s) |
-| 89 | cli_if_advertise | config-if | `ADVERTISE [MODES]` | MODES | — | 2 | 2 | — | Advertise modes, e.g. 10f,100f,1000f or all |
-| 90 | cli_if_no_advertise | config-if | `NO ADVERTISE` | — | — | 2 | 2 | — | Advertisement from speed and duplex again |
-| 91 | cli_if_shutdown | config-if | `SHUTDOWN` | — | — | 1 | 1 | — | Disable the interface (MAC receive and transmit) |
-| 92 | cli_if_no_shutdown | config-if | `NO SHUTDOWN` | — | — | 2 | 2 | — | Enable the interface |
-| 93 | cli_if_ip_address | config-if | `IP ADDRESS [ADDR] [MASK]` | ADDR, MASK | — | 4 | 4 | — | Set the static IPv4 address and mask |
-| 94 | cli_if_no_ip_address | config-if | `NO IP ADDRESS` | — | — | 3 | 3 | — | Remove the static IPv4 address (0.0.0.0) |
-| 95 | cli_if_ip_netmask | config-if | `IP NETMASK [MASK]` | MASK | — | 3 | 3 | — | Set the static netmask |
-| 96 | cli_if_mac | config-if | `MAC-ADDRESS [MAC]` | MAC | — | 2 | 2 | — | Set the node MAC address (aa:bb:cc:dd:ee:ff) |
-| 97 | cli_if_storm | config-if | `STORM-CONTROL BROADCAST [PKTS] [MS]` | PKTS, MS | — | 4 | 4 | — | Pass at most PKTS broadcast frames per MS milliseconds to the CPU |
-| 98 | cli_if_storm_enable | config-if | `STORM-CONTROL BROADCAST ENABLE` | — | — | 3 | 3 | — | Enable the broadcast storm limiter |
-| 99 | cli_if_storm_disable | config-if | `STORM-CONTROL BROADCAST DISABLE` | — | — | 3 | 3 | — | Disable the broadcast storm limiter (every broadcast passes) |
-| 100 | cli_if_no_storm | config-if | `NO STORM-CONTROL BROADCAST` | — | — | 3 | 3 | — | Disable the broadcast storm limiter |
-| 101 | cli_dhcp_start | config-dhcp | `START` | — | — | 1 | 1 | — | Start DHCP discovery now |
-| 102 | cli_dhcp_stop | config-dhcp | `STOP` | — | — | 1 | 1 | — | Stop the DHCP client and release the lease |
-| 103 | cli_dhcp_renew | config-dhcp | `RENEW` | — | — | 1 | 1 | — | Renew the lease now |
-| 104 | cli_dhcp_auto | config-dhcp | `AUTO` | — | — | 1 | 1 | — | Start DHCP automatically on link up |
-| 105 | cli_dhcp_no_auto | config-dhcp | `NO AUTO` | — | — | 2 | 2 | — | Do not start DHCP on link up |
-| 106 | cli_sock_open | config-sock | `OPEN [PORT]` | PORT | — | 2 | 2 | — | Open the socket on a local UDP port |
-| 107 | cli_sock_close | config-sock | `CLOSE` | — | — | 1 | 1 | — | Close the socket |
-| 108 | cli_sock_remote | config-sock | `REMOTE [ADDR] [PORT] {MAC}` | ADDR, PORT | MAC | 3 | 4 | — | Remote IPv4 address, UDP port and next-hop MAC |
-| 109 | cli_sock_connect | config-sock | `CONNECT-ON-RECEIVE` | — | — | 1 | 1 | — | Follow the sender of the last datagram |
-| 110 | cli_sock_no_connect | config-sock | `NO CONNECT-ON-RECEIVE` | — | — | 2 | 2 | — | Keep the configured remote address |
+| 85 | cli_if_speed | config-if | `SPEED [MBPS]` | MBPS | — | 2 | 2 | — | Link speed, full duplex: 10, 100 or auto (auto = 10/100/1000, best rate) |
+| 86 | cli_if_autoneg | config-if | `AUTONEG` | — | — | 1 | 1 | — | Enable auto-negotiation with the speed or advertise setting |
+| 87 | cli_if_no_autoneg | config-if | `NO AUTONEG` | — | — | 2 | 2 | — | Disable auto-negotiation (forced full duplex, 10 or 100 Mb/s) |
+| 88 | cli_if_advertise | config-if | `ADVERTISE [MODES]` | MODES | — | 2 | 2 | — | Advertise full-duplex modes, e.g. 10f,100f,1000f or all |
+| 89 | cli_if_no_advertise | config-if | `NO ADVERTISE` | — | — | 2 | 2 | — | Same as speed auto: advertise 10f,100f,1000f |
+| 90 | cli_if_shutdown | config-if | `SHUTDOWN` | — | — | 1 | 1 | — | Disable the interface (MAC receive and transmit) |
+| 91 | cli_if_no_shutdown | config-if | `NO SHUTDOWN` | — | — | 2 | 2 | — | Enable the interface |
+| 92 | cli_if_ip_address | config-if | `IP ADDRESS [ADDR] [MASK]` | ADDR, MASK | — | 4 | 4 | — | Set the static IPv4 address and mask |
+| 93 | cli_if_no_ip_address | config-if | `NO IP ADDRESS` | — | — | 3 | 3 | — | Remove the static IPv4 address (0.0.0.0) |
+| 94 | cli_if_ip_netmask | config-if | `IP NETMASK [MASK]` | MASK | — | 3 | 3 | — | Set the static netmask |
+| 95 | cli_if_mac | config-if | `MAC-ADDRESS [MAC]` | MAC | — | 2 | 2 | — | Set the node MAC address (aa:bb:cc:dd:ee:ff) |
+| 96 | cli_if_storm | config-if | `STORM-CONTROL BROADCAST [PKTS] [MS]` | PKTS, MS | — | 4 | 4 | — | Pass at most PKTS broadcast frames per MS milliseconds to the CPU |
+| 97 | cli_if_storm_enable | config-if | `STORM-CONTROL BROADCAST ENABLE` | — | — | 3 | 3 | — | Enable the broadcast storm limiter |
+| 98 | cli_if_storm_disable | config-if | `STORM-CONTROL BROADCAST DISABLE` | — | — | 3 | 3 | — | Disable the broadcast storm limiter (every broadcast passes) |
+| 99 | cli_if_no_storm | config-if | `NO STORM-CONTROL BROADCAST` | — | — | 3 | 3 | — | Disable the broadcast storm limiter |
+| 100 | cli_dhcp_start | config-dhcp | `START` | — | — | 1 | 1 | — | Start DHCP discovery now |
+| 101 | cli_dhcp_stop | config-dhcp | `STOP` | — | — | 1 | 1 | — | Stop the DHCP client and release the lease |
+| 102 | cli_dhcp_renew | config-dhcp | `RENEW` | — | — | 1 | 1 | — | Renew the lease now |
+| 103 | cli_dhcp_auto | config-dhcp | `AUTO` | — | — | 1 | 1 | — | Start DHCP automatically on link up |
+| 104 | cli_dhcp_no_auto | config-dhcp | `NO AUTO` | — | — | 2 | 2 | — | Do not start DHCP on link up |
+| 105 | cli_sock_open | config-sock | `OPEN [PORT]` | PORT | — | 2 | 2 | — | Open the socket on a local UDP port |
+| 106 | cli_sock_close | config-sock | `CLOSE` | — | — | 1 | 1 | — | Close the socket |
+| 107 | cli_sock_remote | config-sock | `REMOTE [ADDR] [PORT] {MAC}` | ADDR, PORT | MAC | 3 | 4 | — | Remote IPv4 address, UDP port and next-hop MAC |
+| 108 | cli_sock_connect | config-sock | `CONNECT-ON-RECEIVE` | — | — | 1 | 1 | — | Follow the sender of the last datagram |
+| 109 | cli_sock_no_connect | config-sock | `NO CONNECT-ON-RECEIVE` | — | — | 2 | 2 | — | Keep the configured remote address |
 
 Built-ins (menu.c): `EXIT` (every mode), `END` (privileged and configuration modes), `HELP` and `?`
 (every mode, identical listing), `!!` (repeat the previous line), Ctrl-C (cancel the line),
