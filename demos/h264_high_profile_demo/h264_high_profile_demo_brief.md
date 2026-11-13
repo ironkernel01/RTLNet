@@ -52,7 +52,7 @@ This demo is a prebuilt bitstream, with its firmware inside, of the IronKernel R
 | Item | Value |
 |---|---|
 | Picture sizes | 1920 x 1080 and 1280 x 720, 30 pictures/s |
-| Stream bit rate tested | 0.19 to 24.02 Mb/s with CABAC (1080p30, 6.18 and 6.23) |
+| Stream bit rate tested | 0.19 to 24.02 Mb/s with CABAC (1080p30) |
 | Compression ratio | 31 : 1 to 3,888 : 1 with CABAC (test patterns) |
 | Profile | High (profile_idc 100), CABAC; Constrained Baseline after 30 min |
 | Tools | I and P, one reference, whole-sample search +-16, deblocking filter |
@@ -116,7 +116,7 @@ The speed runs from -32 to +32 pixels per frame (default 4, 0 = still). The nois
 ## Bit rate and picture quality
 
 CAVLC against CABAC at the same QP, board runs, GOP 30, FFmpeg decode, PSNR against the pattern model; the saving is (CAVLC - CABAC) / CAVLC.
-Clocks per macroblock are measured against a budget of 735 at 1080p30 and 1,666 at 720p30 (two engines, 90 MHz). Board document 6.18 and 6.23.
+Clocks per macroblock are measured against a budget of 735 at 1080p30 and 1,666 at 720p30 (two engines, 90 MHz). QP is the quantisation parameter of H.264, 0 to 51: a higher QP codes the picture more coarsely, which gives fewer bits and a lower PSNR.
 
 <table class="num">
 <thead><tr><th>Size</th><th>Pattern, setting</th><th>CAVLC, Mb/s</th><th>CABAC, Mb/s</th><th>Saving</th><th>Ratio CAVLC / CABAC</th><th>PSNR min / mean, dB</th><th>Clocks per MB</th></tr></thead>
@@ -130,7 +130,6 @@ Clocks per macroblock are measured against a budget of 735 at 1080p30 and 1,666 
 </table>
 
 Ratio = raw rate / stream rate; 8-bit 4:2:0 at 30 pictures per second is 746.5 Mb/s for 1920 x 1080 and 331.8 Mb/s for 1280 x 720 (width x height x 1.5 x 8 x 30). The rate-control rows use the set point; the `scroll` ratios are large because most of the picture is static or repeats.
-Runs: board document 6.18 (rows 1 to 3) and 6.23 (rows 4 and 5).
 
 ## Encoder features
 
@@ -160,12 +159,6 @@ Not coded: B pictures, several reference pictures, partitions below 16 x 16, sub
 | `show ip`, `show stream`, `show encoder history [n]`, `clear counters` | the board's address; picture counts, rate, dropped pictures, multiplexer load; bits, QP and buffer fill per second; clears the statistics |
 | `show encoder` | QP, GOP, per-engine clocks per picture, rate control, High profile license state and time left |
 
-## Register and software interface
-
-One 4 KiB AXI4-Lite window (decoder slave 10, 0x44A0_8000): `ID`, `VERSION`, `CAPS`, `CTRL` (START, RING_RESET, interrupt enable), `STATUS`, `ERR_CODE`, picture setup (`MB_W`, `MB_H`, `SLICES`, `QP`, `PIC_CFG`), `HP_CTRL`, `HP_STATUS` (license, tools), `DBK_CTRL`, `DBK_STATUS`.
-Interrupt sources with a sticky status bit and an enable each: PIC_DONE, ERR, RING_STALL, PIC_START, PROFILE_CHG and LICENSE_LOST. The C driver `cores/rtlnet_h264_enc/driver/rtlnet_h264_enc.{h,c}`, the control layer `rtlnet_h264_enc_ctl` and the rate controller `rtlnet_ratectl` sit on it;
-read `rtlnet_h264_enc.md` (sections 6, 9, 18, 19), `rtlnet_ratectl.md` and `microblaze/documentation/rtlnet_ts_mux.md`.
-
 ## Verification
 
 | Evidence | Result |
@@ -193,7 +186,7 @@ This demo image is the bold entry, CABAC with `DEBLOCK` 1 and `NUM_ENGINES` 2, w
 
 ## Device utilization, clocks and timing
 
-Post-route result of this image on the XC7A200T (`build_info.txt`, board document 6.23).
+Post-route result of this image on the XC7A200T.
 
 <table class="num">
 <thead><tr><th></th><th>LUTs</th><th>Flip-flops</th><th>Slices</th><th>Block RAM tiles</th><th>DSP blocks</th></tr></thead>
@@ -203,8 +196,7 @@ Post-route result of this image on the XC7A200T (`build_info.txt`, board documen
 </tbody>
 </table>
 
-By block (out-of-context synthesis, not additive): encoder with filter 63,846 LUTs, 42,439 FFs, 76 DSP; Ethernet MAC 1,104 LUTs, 1,682 FFs; protocol wrapper with every leaf 9,432 LUTs, 12,737 FFs; frame classifier 3,351 LUTs, 6,217 FFs; checksum offload 1,867 LUTs, 3,613 FFs
-(product brief, Vivado 2025.2). The docs have no figures for the CPU, the DDR3 path and the video DMA.
+By block (out-of-context synthesis, not additive): encoder with filter 63,846 LUTs, 42,439 FFs, 76 DSP; Ethernet MAC 1,104 LUTs, 1,682 FFs; protocol wrapper with every leaf 9,432 LUTs, 12,737 FFs; frame classifier 3,351 LUTs, 6,217 FFs; checksum offload 1,867 LUTs, 3,613 FFs.
 
 Clocks: `ui_clk` = `cpu_clk` 90.000 MHz (MicroBlaze V, DDR3 arbiter, video DMA, pattern generator, both encoder engines); DDR3 memory clock 360 MHz, 4:1 to `ui_clk`, from a 102.857143 MHz input of a second MMCM;
 `clk125` and `clk125_90` 125 MHz, the second shifted by 90 degrees (Ethernet MAC, RGMII); `axis_clk` 62.5 MHz (AXI4-Stream paths); `proto_clk` 50 MHz (protocol wrapper).
@@ -215,7 +207,7 @@ Routed timing: WNS +0.138 ns, WHS +0.012 ns, WPWS +0.131 ns, 0 failing endpoints
 
 | Link | Stream result | How to select |
 |---|---|---|
-| 1000 Mb/s | stream gates and soak of the release images ran on a gigabit link (board document 6.23) | TBD-LINKTEST |
+| 1000 Mb/s | stream gates and soak of the release images ran on a gigabit link | TBD-LINKTEST |
 | 100 Mb/s | TBD-LINKTEST | TBD-LINKTEST |
 
 ## Limits

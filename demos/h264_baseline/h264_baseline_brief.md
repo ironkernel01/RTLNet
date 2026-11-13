@@ -52,7 +52,7 @@ This demo is a prebuilt bitstream of the IronKernel RTLNet H.264 Constrained Bas
 | Item | Value |
 |---|---|
 | Picture sizes | 1920 x 1080 and 1280 x 720, 30 pictures/s |
-| Stream bit rate tested | 0.43 to 31.79 Mb/s (1080p30, 6.17 and 6.23) |
+| Stream bit rate tested | 0.43 to 31.79 Mb/s (1080p30) |
 | Compression ratio | 11 : 1 to 1,752 : 1 (test patterns) |
 | Profile | Constrained Baseline (profile_idc 66), CAVLC |
 | Tools | I and P, one reference, whole-sample search +-16, deblocking filter |
@@ -116,7 +116,7 @@ The speed runs from -32 to +32 pixels per frame (default 4, 0 = still). The nois
 ## Bit rate and picture quality
 
 Board runs, pattern `all` speed 4 unless noted, GOP 30, FFmpeg decode, PSNR against the pattern model.
-Clocks per macroblock are measured against a budget of 735 at 1080p30 and 1,666 at 720p30 (two engines, 90 MHz). Board document 6.17, 6.18 and 6.23; rows marked no filter come from images built before the deblocking filter was added.
+Clocks per macroblock are measured against a budget of 735 at 1080p30 and 1,666 at 720p30 (two engines, 90 MHz). Rows marked no filter come from images built before the deblocking filter was added. QP is the quantisation parameter of H.264, 0 to 51: a higher QP codes the picture more coarsely, which gives fewer bits and a lower PSNR.
 
 <table class="num">
 <thead><tr><th>Size</th><th>Pattern, setting</th><th>Bit rate, Mb/s</th><th>Ratio</th><th>PSNR min / mean, dB</th><th>Dropped</th><th>Clocks per MB</th></tr></thead>
@@ -166,12 +166,6 @@ Not coded: B pictures, several reference pictures, partitions below 16 x 16, sub
 | `show ip`, `show stream`, `show encoder history [n]`, `clear counters` | the board's address; picture counts, rate, dropped pictures, multiplexer load; bits, QP and buffer fill per second; clears the statistics |
 | `show encoder` | QP, GOP, per-engine clocks per picture, rate control |
 
-## Register and software interface
-
-One 4 KiB AXI4-Lite window (decoder slave 10, 0x44A0_8000): `ID`, `VERSION`, `CAPS`, `CTRL` (START, RING_RESET, interrupt enable), `STATUS`, `ERR_CODE`, picture setup (`MB_W`, `MB_H`, `SLICES`, `QP`, `PIC_CFG`), `DBK_CTRL`, `DBK_STATUS`.
-Interrupt sources with a sticky status bit and an enable each: PIC_DONE, ERR, RING_STALL, PIC_START. The C driver `cores/rtlnet_h264_enc/driver/rtlnet_h264_enc.{h,c}`, the control layer `rtlnet_h264_enc_ctl` and the rate controller `rtlnet_ratectl` sit on it;
-read `rtlnet_h264_enc.md` (sections 6, 9, 18, 19), `rtlnet_ratectl.md` and `microblaze/documentation/rtlnet_ts_mux.md`.
-
 ## Verification
 
 | Evidence | Result |
@@ -198,7 +192,7 @@ This demo image is the bold entry: CAVLC Baseline, `DEBLOCK` 1, `NUM_ENGINES` 2.
 
 ## Device utilization, clocks and timing
 
-Post-route result of this image on the XC7A200T (`build_info.txt`, board document 6.23).
+Post-route result of this image on the XC7A200T.
 
 <table class="num">
 <thead><tr><th></th><th>LUTs</th><th>Flip-flops</th><th>Slices</th><th>Block RAM tiles</th><th>DSP blocks</th></tr></thead>
@@ -208,8 +202,7 @@ Post-route result of this image on the XC7A200T (`build_info.txt`, board documen
 </tbody>
 </table>
 
-By block (out-of-context synthesis, not additive): encoder with filter 58,597 LUTs, 39,835 FFs, 76 DSP; Ethernet MAC 1,104 LUTs, 1,682 FFs; protocol wrapper with every leaf 9,432 LUTs, 12,737 FFs; frame classifier 3,351 LUTs, 6,217 FFs; checksum offload 1,867 LUTs, 3,613 FFs
-(product brief, Vivado 2025.2). The docs have no figures for the CPU, the DDR3 path and the video DMA.
+By block (out-of-context synthesis, not additive): encoder with filter 58,597 LUTs, 39,835 FFs, 76 DSP; Ethernet MAC 1,104 LUTs, 1,682 FFs; protocol wrapper with every leaf 9,432 LUTs, 12,737 FFs; frame classifier 3,351 LUTs, 6,217 FFs; checksum offload 1,867 LUTs, 3,613 FFs.
 
 Clocks: `ui_clk` = `cpu_clk` 90.000 MHz (MicroBlaze V, DDR3 arbiter, video DMA, pattern generator, both encoder engines); DDR3 memory clock 360 MHz, 4:1 to `ui_clk`, from a 102.857143 MHz input of a second MMCM;
 `clk125` and `clk125_90` 125 MHz, the second shifted by 90 degrees (Ethernet MAC, RGMII); `axis_clk` 62.5 MHz (AXI4-Stream paths); `proto_clk` 50 MHz (protocol wrapper).
@@ -220,7 +213,7 @@ Routed timing: WNS +0.135 ns, WHS +0.013 ns, WPWS +0.131 ns, 0 failing endpoints
 
 | Link | Stream result | How to select |
 |---|---|---|
-| 1000 Mb/s | stream gates and soak of the release images ran on a gigabit link (board document 6.23) | TBD-LINKTEST |
+| 1000 Mb/s | stream gates and soak of the release images ran on a gigabit link | TBD-LINKTEST |
 | 100 Mb/s | TBD-LINKTEST | TBD-LINKTEST |
 
 ## Limits
