@@ -35,17 +35,47 @@ License: `LICENSE.md` in the repository root.
 4. On the console choose the picture and start the stream to the PC (use the PC's IP address):
 
    ```
+   enable
    camera mode 1080p30
    camera pattern all 4
    encoder bitrate 8000
    stream h264 <PC address> 5004
    ```
 
-   `camera mode 720p30` selects 720p. The patterns are `bars`, `scroll`, `box`, `noise` and `all`; the number is the speed.
+   `enable` enters privileged mode, which the camera, encoder and stream commands need. `camera mode 720p30` selects 720p. The patterns are `bars`, `scroll`, `box`, `noise` and `all`; the number is the speed.
 
 5. Watch the encoder: `show stream` and `show encoder` print the picture counts, the bit rate, dropped pictures and the encoder state.
 
 6. `stream stop` ends the stream.
+
+## Link speed
+
+The board negotiates 10/100/1000 Mb/s after programming. The demos run at 100 Mb/s and at 1000 Mb/s. Set the speed
+before `stream h264`.
+
+Limit the negotiation to 10 and 100 Mb/s:
+
+```
+enable
+configure terminal
+interface eth0
+advertise 10f,100f
+end
+```
+
+Return to 10/100/1000 Mb/s:
+
+```
+enable
+configure terminal
+interface eth0
+no advertise
+speed auto
+end
+```
+
+The link returns in 3 to 4 s and the DHCP address stays the same. `show phy` prints the link speed, the advertised
+modes and the partner's modes.
 
 ## Useful commands
 

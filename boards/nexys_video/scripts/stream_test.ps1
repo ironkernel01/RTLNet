@@ -50,13 +50,18 @@ Overview:
     picture, no forced IDR picture). The filter is set back to on after the run.
   * -IrqTest: three seconds after the stream start "encoder irqtest" is sent (a forced ring stall event must reach the interrupt handler); needs interrupt mode.
   * -ForcedIdr <n>: exactly n IDR pictures off the GOP cadence are expected (the forced IDR picture at the license end of the High profile demo netlist).
+  * -LinkSpeed auto|100|1000: before the run (no stream running) the link is set from the console: 100 = "advertise 10f,100f" (auto-negotiation limited to 10/100, the
+    PHY comes up at 100 Mb/s with this switch), auto and 1000 = "no advertise", "speed auto" (full 10/100/1000 negotiation); the script waits for the link (1000 must come
+    up at 1000 Mb/s, 100 at 10 or 100) and for the DHCP lease, prints "show phy" and the link and lease times, and fails if the link or the lease does not return in 40 s.
+    The setting stays after the run; set -LinkSpeed auto (or 1000) in a later run to restore it.
   * -InputTs <file>: check an existing capture offline (no board, no capture).
   * The transcript is boards/nexys_video/build/phase2c_gop<N>_stream_transcript.txt. The last line is
     "STREAM_TEST: PASS <n>/<n>" or "STREAM_TEST: FAIL <failed>/<n>"; exit code 0 only on PASS.
 Usage:
   powershell -NoProfile -ExecutionPolicy Bypass -File boards/nexys_video/scripts/stream_test.ps1 [-Mode both] [-Seconds 60]
-    [-Port COM3] [-UdpPort 5004] [-HostIp <PC address>] [-Qp 28] [-Gop 30] [-Pattern all -Speed 4] [-Bitrate 2000 [-BufferMs 500]] [-Tag <name>] [-SkipVlc] [-NoBoard] [-InputTs <file> -Width 1280 -Height 720]
-Revision: 11-12-2026
+    [-Port COM3] [-UdpPort 5004] [-HostIp <PC address>] [-Qp 28] [-Gop 30] [-Pattern all -Speed 4] [-Bitrate 2000 [-BufferMs 500]] [-Tag <name>] [-SkipVlc] [-NoBoard] [-LinkSpeed auto|100|1000] [-InputTs <file> -Width 1280 -Height 720]
+Revision: 11-13-2026
+  * 11-13-2026: -LinkSpeed (link speed from the console before the run, wait for link and DHCP lease).
   * 11-12-2026: -Deblock and -SwitchDeblock (encoder deblock).
   * 11-12-2026: -IrqTest.
   * 11-12-2026: -Transform8x8 auto, -SwitchTransform8x8 ends in auto (off, then auto), -Notify and -SwitchNotify (encoder notify), the transform request is set back to off (the firmware default) after the run.
@@ -112,7 +117,8 @@ param(
     [switch]$SwitchNotify,
     [ValidateSet('', 'on', 'off')][string]$Deblock = '',
     [switch]$SwitchDeblock,
-    [switch]$IrqTest
+    [switch]$IrqTest,
+    [ValidateSet('', 'auto', '100', '1000')][string]$LinkSpeed = ''
 )
 $ErrorActionPreference = 'Stop'
 $Repo  = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..')).Path
@@ -404,6 +410,30 @@ try {
     if ($Matches[1] -ne 'rtlnet>') { $sp.Write([string][char]26); [void](Read-UntilPrompt $sp $StepTimeoutMs); [void](Invoke-Cli $sp 'disable') }
     [void](Invoke-Cli $sp 'enable')
     [void](Invoke-Cli $sp 'stream stop')
+
+    if ($LinkSpeed) {
+        $want = $(if ($LinkSpeed -eq '100') { 100 } else { 1000 })
+        [void](Invoke-Cli $sp 'configure terminal'); [void](Invoke-Cli $sp 'interface eth0')
+        if ($LinkSpeed -eq '100') { [void](Invoke-Cli $sp 'advertise 10f,100f') } else { [void](Invoke-Cli $sp 'no advertise'); [void](Invoke-Cli $sp 'speed auto') }
+        $swl = [System.Diagnostics.Stopwatch]::StartNew()
+        [void](Invoke-Cli $sp 'end')
+        $linkS = -1; $leaseS = -1; $mb = 0
+        while ($swl.Elapsed.TotalSeconds -lt 40 -and $leaseS -lt 0) {
+            $o = Invoke-Cli $sp 'show interfaces' 4000
+            if ($o -match 'eth0 is up, (\d+) Mb/s') {
+                $mb = [int]$Matches[1]
+                if ($linkS -lt 0 -and (($LinkSpeed -eq '100' -and $mb -le 100) -or ($LinkSpeed -ne '100' -and $mb -eq $want) -or $LinkSpeed -eq 'auto')) { $linkS = $swl.Elapsed.TotalSeconds }
+                if ($linkS -ge 0) {
+                    $o2 = Invoke-Cli $sp 'show ip' 4000
+                    if ($o2 -match 'Effective IPv4\s+: (\d+\.\d+\.\d+\.\d+) .*\(DHCP lease\)') { $leaseS = $swl.Elapsed.TotalSeconds }
+                }
+            }
+            if ($leaseS -lt 0) { Start-Sleep -Milliseconds 300 }
+        }
+        Say (Invoke-Cli $sp 'show phy')
+        Add-Result "link set to $LinkSpeed" (($linkS -ge 0) -and ($leaseS -ge 0)) ("$mb Mb/s, link after {0:N1} s, DHCP lease after {1:N1} s" -f $linkS, $leaseS)
+        if ($linkS -lt 0 -or $leaseS -lt 0) { Write-Output "STREAM_TEST: FAIL link or DHCP lease did not return after -LinkSpeed $LinkSpeed"; exit 1 }
+    }
 
     # Board address and the PC address on the same network.
     $ipOut = Invoke-Cli $sp 'show ip'

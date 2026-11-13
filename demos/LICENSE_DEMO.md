@@ -38,7 +38,7 @@ The RTLNet sources are licensed separately by `LICENSE.md` in the repository roo
 ## 4. The full extension
 
 The High profile extension without the run limit, for use in Your own designs, is a paid
-feature. `licensing.md` in the repository root gives the tiers and the fixed prices. A paid
+feature. ironkernel.com gives the tiers and the prices. A paid
 license is a separate written agreement.
 
 ## 5. Patents

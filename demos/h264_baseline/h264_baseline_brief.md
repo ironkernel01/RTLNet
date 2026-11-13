@@ -30,7 +30,7 @@
 
 <div class="brief-band">A ready-to-run FPGA image: the board makes moving test patterns, encodes them to H.264 at 1080p30 or 720p30 with two encoder engines and streams MPEG-TS over Ethernet to VLC or ffplay.</div>
 
-This demo is a prebuilt bitstream of the IronKernel RTLNet H.264 Constrained Baseline encoder, with its firmware inside, for a Digilent Nexys Video (AMD Artix-7 XC7A200T). The board writes test patterns into a frame buffer in DDR3, two encoder engines code them with the in-loop deblocking filter, and the MicroBlaze V firmware sends the stream as MPEG-TS over the RTLNet gigabit Ethernet stack to a PC. Programming takes one script and the console takes four commands; the encoder runs at 1080p30 and 720p30 with no time limit.
+This demo is a prebuilt bitstream of the IronKernel RTLNet H.264 Constrained Baseline encoder, with its firmware inside, for a Digilent Nexys Video (AMD Artix-7 XC7A200T). The board writes test patterns into a frame buffer in DDR3, two encoder engines code them with the in-loop deblocking filter, and the MicroBlaze V firmware sends the stream as MPEG-TS over the RTLNet gigabit Ethernet stack to a PC. Programming takes one script and the console takes five commands; the encoder runs at 1080p30 and 720p30 with no time limit.
 
 <div class="brief-cols">
 <div>
@@ -93,7 +93,7 @@ A Nexys Video with its 12 V supply (JP4 on JTAG), two micro-USB cables (PROG, UA
 1. Program the board: `powershell -NoProfile -ExecutionPolicy Bypass -File boards/nexys_video/scripts/program.ps1 -Bit demos/h264_baseline/nexys_video/rtlnet_nexys_video.bit`
 2. Open the serial console. `show ip` prints the board's address once DHCP has answered.
 3. Start the player on the PC: `ffplay -fflags nobuffer udp://@:5004`, or open `udp://@:5004` in VLC.
-4. On the console: `camera mode 1080p30`, `camera pattern all 4`, `encoder bitrate 8000`, `stream h264 <PC address> 5004`.
+4. On the console: `enable` (privileged mode), `camera mode 1080p30`, `camera pattern all 4`, `encoder bitrate 8000`, `stream h264 <PC address> 5004`.
 5. `show stream` and `show encoder` print the picture counts, bit rate, dropped pictures and encoder state. `stream stop` ends the stream.
 
 ## The test pattern
@@ -213,8 +213,10 @@ Routed timing: WNS +0.135 ns, WHS +0.013 ns, WPWS +0.131 ns, 0 failing endpoints
 
 | Link | Stream result | How to select |
 |---|---|---|
-| 1000 Mb/s | stream gates and soak of the release images ran on a gigabit link | TBD-LINKTEST |
-| 100 Mb/s | TBD-LINKTEST | TBD-LINKTEST |
+| 1000 Mb/s | 1080p30 and 720p30 at 8 and 16 Mb/s, and 1080p30 at 28.09 Mb/s (QP 28): 60 s each, 0 dropped pictures, 0 lost datagrams | `enable`, `configure terminal`, `interface eth0`, `no advertise`, `speed auto`, `end` (the state after programming) |
+| 100 Mb/s | the same five runs: 0 dropped pictures, 0 lost datagrams | `enable`, `configure terminal`, `interface eth0`, `advertise 10f,100f`, `end` |
+
+The board negotiates 10/100/1000 Mb/s after programming. `advertise 10f,100f` limits the negotiation to 10 and 100 Mb/s; `no advertise` with `speed auto` returns to all three. The link returns in 3 to 4 s after either command and the DHCP address stays the same. Set the speed before `stream h264`. `show phy` prints the link speed, the advertised modes and the partner's modes.
 
 ## Limits
 

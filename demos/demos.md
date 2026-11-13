@@ -40,7 +40,7 @@ with its command-line console, the DDR3 memory path and the two-engine H.264 enc
 | 12 V power supply | the one supplied with the board |
 | Micro-USB cable to the PROG port | programming over JTAG |
 | Micro-USB cable to the UART port | serial console |
-| Ethernet cable | from the board to the same network as the PC; 10, 100 and 1000 Mb/s links work |
+| Ethernet cable | from the board to the same network as the PC; the demos run on 100 Mb/s and 1000 Mb/s links (the README of each demo has the console commands that select the speed) |
 
 No camera is needed: the demos use test patterns generated on the board.
 
@@ -66,7 +66,7 @@ The README in each demo folder has the exact commands. In short:
    `powershell -NoProfile -ExecutionPolicy Bypass -File boards/nexys_video/scripts/program.ps1 -Bit demos/<demo name>/nexys_video/rtlnet_nexys_video.bit`
 2. Open the serial console and wait for the prompt. `show ip` prints the board's address.
 3. Start the player on the PC: `ffplay -fflags nobuffer udp://@:5004`, or in VLC open the network stream `udp://@:5004`.
-4. On the console: `camera mode 1080p30`, `camera pattern all 4`, `encoder bitrate 8000`, then `stream h264 <PC address> 5004`.
+4. On the console: `enable` (privileged mode), `camera mode 1080p30`, `camera pattern all 4`, `encoder bitrate 8000`, then `stream h264 <PC address> 5004`.
 5. `show stream` and `show encoder` print the picture counts, the bit rate and the encoder state. `stream stop` ends the stream.
 
 The image is loaded into the FPGA only, not into the flash: a power cycle removes it.
@@ -113,7 +113,7 @@ To add a demo:
 4. Write `demos/<demo name>/<demo name>_brief.md` and build its PDF with the line above.
 
 The demos are bitstreams only. No netlist of the High profile extension and no High profile image without the time
-limit goes into this folder; both belong to the paid feature (`licensing.md` in the repository root).
+limit goes into this folder; both belong to the paid feature (a paid license from IronKernel, ironkernel.com).
 
 ## 7. Planned demos
 
