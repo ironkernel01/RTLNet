@@ -96,7 +96,8 @@ module rtlnet_h264_mb_enc #(
   parameter int    CRAM_AW    = 8,
   parameter int    REF_AW     = 6,
   parameter int    MV_LINE_KB = 1,
-  parameter bit    T8         = 1'b0     // 1: the 8x8 transform of inter macroblocks on the tf_* streams (HIGH_PROFILE builds)
+  parameter bit    T8         = 1'b0,    // 1: the 8x8 transform of inter macroblocks on the tf_* streams (HIGH_PROFILE builds)
+  parameter bit    T8_AUTO    = 1'b1     // 1 (needs T8 = 1): the adaptive choice of the transform per macroblock (request beat, S_T8L); 0: none of it is built
 )(
   // Clock and synchronous active-low reset.
   input  logic                clk,
@@ -339,7 +340,7 @@ module rtlnet_h264_mb_enc #(
   logic               p1w_ok;            // PASS1 of the macroblock's blocks is complete
   assign t8_use_clr = (st == S_IDLE) && start;
   assign t8_sub_set = (st == S_MD2) && t8_en && (cost_in <= cost_ia);
-  assign t8_use_set = t8_sub_set && !t8_auto;
+  assign t8_use_set = t8_sub_set && !(T8_AUTO && t8_auto);
   /* verilator lint_on UNUSEDSIGNAL */
   logic               t8s_done;
   logic               t8r_done;
@@ -366,7 +367,7 @@ module rtlnet_h264_mb_enc #(
   logic               t8_sat_g;
   logic               t8_big_g;
   assign p1w_ok = (fq_rows == 7'd96) && dqy_done_q && dqcb_done_q && dqcr_done_q && (!o_t8sub || t8_sum_seen);
-  assign t8_acc_set = T8 && (st == S_P1W) && p1w_ok && t8_auto_mb && !t8_lum_q && !t8_rej_q;
+  assign t8_acc_set = T8 && T8_AUTO && (st == S_P1W) && p1w_ok && t8_auto_mb && !t8_lum_q && !t8_rej_q;
   assign t8_cost_g = (T8 && t8_use_q) ? t8_cost : 16'd0;
   assign t8_nb4_g  = (T8 && t8_use_q) ? {10'd0, t8_nblk, 2'b00} : 16'd0;
   assign t8_sat_g  = T8 && t8_use_q && t8_sat;
@@ -864,13 +865,13 @@ module rtlnet_h264_mb_enc #(
           end
           if (t8_sub_set) o_t8sub <= 1'b1;
           if (t8_use_set || t8_acc_set) t8_use_q <= 1'b1;
-          if (t8_sub_set && t8_auto) begin
+          if (T8_AUTO && t8_sub_set && t8_auto) begin
             t8_auto_mb <= 1'b1;
             mk_pend    <= 1'b1;
           end
           if (mk_pend && res_v && tf_res_ready && res_last_q) mk_pend <= 1'b0;
-          if (tf_sum_valid && t8_auto_mb) t8_rej_q <= tf_sum_data[26];
-          if (st == S_T8L) t8_lum_q <= 1'b1;
+          if (T8_AUTO && tf_sum_valid && t8_auto_mb) t8_rej_q <= tf_sum_data[26];
+          if (T8_AUTO && (st == S_T8L)) t8_lum_q <= 1'b1;
         end
       end
 
@@ -1677,8 +1678,8 @@ module rtlnet_h264_mb_enc #(
         end
         // Adaptive choice: the module chose the 4x4 transform, so PASS1 of the luma blocks (items 0..63) still has to run, after the chroma blocks that
         // are done: the row and DC bookkeeping start like a 4x4 macroblock's (the chroma rows and DCs are in).
-        if ((st == S_P1W) && p1w_ok && t8_auto_mb && !t8_lum_q && t8_rej_q) st <= S_T8L;
-        if (st == S_T8L) begin
+        if (T8_AUTO && (st == S_P1W) && p1w_ok && t8_auto_mb && !t8_lum_q && t8_rej_q) st <= S_T8L;
+        if (T8_AUTO && (st == S_T8L)) begin
           iss_n      <= 7'd0;
           iss_run    <= 1'b1;
           cnt        <= '0;

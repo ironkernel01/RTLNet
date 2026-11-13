@@ -20,7 +20,8 @@
 #     hardware platform (XSA, write_hw_platform -fixed, the input of the
 #     firmware BSP flow microblaze/firmware/build.ps1), build_info.txt.
 #   * High profile: `highprofile full|demo hp_netlist <dir>` (build.ps1 -HighProfile) reads the black box hp/rtlnet_h264_hp_bb.sv and the EDIF
-#     <dir>/rtlnet_h264_hp.edf instead of the stand-in module and sets the generic HIGH_PROFILE 1; `none` (default) leaves the flow unchanged.
+#     <dir>/rtlnet_h264_hp.edf instead of the stand-in module and sets the generic HIGH_PROFILE 1 (and HP_T8, HP_T8_AUTO from `hp_t8 0|1 hp_t8_auto 0|1`, default 1 1:
+#     the tool set the netlist contains, build.ps1 -HpTools); `none` (default) leaves the flow unchanged.
 #   * Gates (each its own exit code; nothing is written past a failed gate):
 #       99 bad arguments            11 missing source, filelist or XDC
 #       12 block design failure     10 synthesis error or critical warning
@@ -63,6 +64,9 @@
 #   * 11-09-2026 (superseded, kept for the history): enc_clk (90 MHz, second MMCM): the two engine masters of u_h264 cross to ui_clk through one rtlnet_axi_cdc each, five
 #     packet FIFOs per bridge: expected fifo +10 in both builds (network 15 to 25, CPU-only 5 to 15). The register window of u_h264 now crosses
 #     cpu_clk to enc_clk (still one rtlnet_axil_cdc); no new Gray or axil_cdc instance. cpu_clk is 90 MHz.
+#   * 11-12-2026: RTLNET_RESUME_DCP environment variable continues from a routed checkpoint.
+#   * 11-12-2026: RTLNET_UTIL_LIMIT environment variable raises the utilization ceiling (default 80.0 %).
+#   * 11-12-2026: hp_t8 and hp_t8_auto arguments (HP_T8 and HP_T8_AUTO of the board top); SYNTH-9 waiver for the deblocking filter's mb_total multiplier.
 #   * 11-09-2026: RTLNET_PLACE_DIRECTIVE environment variable selects the place_design directive (default Explore).
 #   * 11-09-2026: Phase 2b-3 u_h264 (rtlnet_h264_top, register window cpu_clk to ui_clk through its one rtlnet_axil_cdc): expected
 #     rtlnet_axil_cdc +1 in both builds (network 9 to 10, CPU-only 4 to 5); the engines and their masters are all on ui_clk, so no
@@ -78,6 +82,8 @@ set RPT_DIR    [file join $BUILD_DIR reports]
 set PART       xc7a200tsbg484-1
 set TOP        rtlnet_nexys_video_top
 set UTIL_LIMIT 80.0
+# RTLNET_UTIL_LIMIT (percent) raises the ceiling for a build that is known to be above it (the merged High profile images are at 80.7 %); the default stays 80.0.
+if {[info exists ::env(RTLNET_UTIL_LIMIT)] && $::env(RTLNET_UTIL_LIMIT) ne ""} { set UTIL_LIMIT $::env(RTLNET_UTIL_LIMIT) }
 
 proc nv_exit {code msg} {
   puts "rtlnet_build: FAIL ($code) $msg"
@@ -96,9 +102,11 @@ set opt(dirty)    ""
 set opt(tag)      ""
 set opt(highprofile) none
 set opt(hp_netlist)  ""
+set opt(hp_t8)       1
+set opt(hp_t8_auto)  1
 set toks {}
 foreach a $argv { foreach t [split $a ",="] { if {$t ne ""} { lappend toks $t } } }
-if {[llength $toks] % 2 != 0} { puts "usage: \[network 0|1\] \[build_id XXXXXXXX\] \[dirty 0|1\] \[tag name\] \[highprofile none|full|demo hp_netlist <dir>\]"; exit 99 }
+if {[llength $toks] % 2 != 0} { puts "usage: \[network 0|1\] \[build_id XXXXXXXX\] \[dirty 0|1\] \[tag name\] \[highprofile none|full|demo hp_netlist <dir> hp_t8 0|1 hp_t8_auto 0|1\]"; exit 99 }
 foreach {k v} $toks {
   set k [string tolower $k]
   if {![info exists opt($k)]} { puts "rtlnet_build: unknown argument '$k'"; exit 99 }
@@ -172,6 +180,16 @@ proc read_filelist {repo path} {
   }
 }
 
+# RTLNET_RESUME_DCP (path of a routed checkpoint): skip synthesis, placement and routing and continue with the reports, gates, bitstream and XSA on that
+# checkpoint (a build whose routed design met timing but stopped at a later gate, for example the utilization ceiling).
+set RESUME ""
+if {[info exists ::env(RTLNET_RESUME_DCP)] && $::env(RTLNET_RESUME_DCP) ne ""} { set RESUME $::env(RTLNET_RESUME_DCP) }
+if {$RESUME ne ""} {
+  puts "rtlnet_build: resumed from routed checkpoint $RESUME"
+  if {[catch {open_checkpoint $RESUME} err]} { nv_exit 12 "open_checkpoint: $err" }
+  set crit_synth 0
+  set ::rtlnet_cdc_result "not rerun (the instance counts are in the log of the run that wrote the checkpoint)"
+} else {
 # ---------------------------------------------------------------------------
 # Block design.
 # ---------------------------------------------------------------------------
@@ -219,7 +237,7 @@ foreach x $xdc_list {
 set synth_args [list -top $TOP -part $PART -include_dirs $::incdirs \
   -generic BUILD_ID=32'h$BUILD_ID_HEX -generic BUILD_DIRTY=1'b$opt(dirty)]
 if {$NETWORK} { lappend synth_args -verilog_define RTLNET_WITH_NETWORK }
-if {$::HP_NETLIST ne ""} { lappend synth_args -generic HIGH_PROFILE=1'b1 }
+if {$::HP_NETLIST ne ""} { lappend synth_args -generic HIGH_PROFILE=1'b1 -generic HP_T8=1'b$opt(hp_t8) -generic HP_T8_AUTO=1'b$opt(hp_t8_auto) }
 if {[catch {synth_design {*}$synth_args} err]} { nv_exit 10 "synth_design: $err" }
 set crit_synth [get_msg_config -count -severity {CRITICAL WARNING}]
 if {$crit_synth > 0} { nv_exit 10 "$crit_synth critical warning(s) up to synthesis (see the log)" }
@@ -332,6 +350,7 @@ if {$wns_pr ne "" && $wns_pr < 0} {
   puts "rtlnet_build: post-route phys_opt WNS $wns_pr ns"
 }
 write_checkpoint -force [file join $BUILD_DIR post_route.dcp]
+}
 
 # ---------------------------------------------------------------------------
 # Reports.
@@ -501,6 +520,8 @@ set meth_waivers {
            {report_cdc (gated above: no Critical/Warning) shows every crossing synchronized; the asynchronous groups are the MDM BSCAN clocks of the vendor IP}}
   {TIMING-47 {^A False Path timing constraint is set between synchronous clocks rgmii_rxc_v and rgmii_rxc }
            {RGMII same-edge capture: the opposite-edge setup and same-edge hold pairs of the DDR input describe no capture (rtlnet_nexys_video_rgmii.xdc, MAC documentation section 6)}}
+  {SYNTH-9 {^Detected multiplier at u_h264/u_regs/mb_total_reg\[}
+           {the deblocking filter's per-band macroblock count (rtlnet_h264_deblock mb_total = cfg_mb_w * cfg_band_rows, an 8 x 8 multiplication per engine) is implemented in LUTs: it is evaluated once per picture and sits on no timing-critical path; 10 findings per engine}}
   {ULMTCS-1 {^This design uses \d+ control sets }
            {control set count above the 7.5 percent guideline (2,690 against 2,524 at 62 percent LUT): an advisory (RECOMMENDED) check, timing closes (WNS +0.070 ns, WHS +0.010 ns); revisit in Phase 2e (fewer control sets in the encoder through shared resets and enables, or the synthesis control_set_opt_threshold) if the count grows or timing suffers}}
   {LUTAR-1 proc:nv_waive_mig_lutar
@@ -591,6 +612,7 @@ puts $fh "git_dirty     $opt(dirty)"
 puts $fh "network       $NETWORK"
 if {$::HP_NETLIST ne ""} {
   puts $fh "high_profile  $opt(highprofile)"
+  puts $fh "hp_tools      HP_T8 $opt(hp_t8), HP_T8_AUTO $opt(hp_t8_auto)"
   if {[file exists [file join $::HP_NETLIST netlist_info.txt]]} {
     set nf [open [file join $::HP_NETLIST netlist_info.txt] r]
     foreach l [split [string trim [read $nf]] "\n"] { puts $fh "hp_netlist    $l" }

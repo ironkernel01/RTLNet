@@ -87,6 +87,8 @@ module rtlnet_h264_engine #(
   parameter bit    EMIT_AUD  = 1'b1,   // this engine writes the access unit delimiter (engine 0)
   parameter string RAM_STYLE = "block",
   parameter bit    HIGH_PROFILE = 1'b0,  // 1: instantiate rtlnet_h264_hp (the High profile netlist) and multiplex the entropy path
+  parameter bit    HP_T8       = 1'b1,   // only with HIGH_PROFILE = 1: 1 = include the 8x8 transform for inter macroblocks; 0 = leave it out (4x4 only)
+  parameter bit    HP_T8_AUTO  = 1'b1,   // only with HP_T8 = 1: 1 = include the per-macroblock choice of 4x4 or 8x8 transform; 0 = leave it out
   parameter int    DBK_LINE_KB = 16,     // deblocking filter line store, KiB
   parameter bit    DEBLOCK     = 1'b1    // 1: in-loop deblocking filter (slice header idc 2 while cfg_dbk_en)
 )(
@@ -209,6 +211,9 @@ module rtlnet_h264_engine #(
 
   import rtlnet_h264_pkg::*;
 
+  if (HP_T8_AUTO && !HP_T8) begin : g_bad_auto
+    $fatal(1, "rtlnet_h264_engine: HP_T8_AUTO = 1 needs HP_T8 = 1; set HP_T8 to 1 or HP_T8_AUTO to 0 (the choice between the 4x4 and the 8x8 transform needs the 8x8 transform)");
+  end
   localparam int BANK_WORDS = 32;
   localparam int RAM_AW     = $clog2(MB_BUF_KB * 1024 / 16);
   localparam int MI         = $clog2(RD_STRIP_MB);
@@ -616,7 +621,7 @@ module rtlnet_h264_engine #(
   assign err_busy = start && busy;
 
   // ---------------------------------------------------------------------------
-  // High profile seam. HIGH_PROFILE = 0: stage B's outputs feed the engine directly. HIGH_PROFILE = 1: rtlnet_h264_hp shares the
+  // High profile seam (HP_T8 / HP_T8_AUTO select the seam-side 8x8 transform and adaptive-choice logic; HP_T8_AUTO needs HP_T8). HIGH_PROFILE = 0: stage B's outputs feed the engine directly. HIGH_PROFILE = 1: rtlnet_h264_hp shares the
   // macroblock descriptor, the coefficient read port and the packer command path with stage B, selected by hp_act (constant for a
   // picture); a changed hp_licensed or hp_enable at a picture start turns that picture into a forced IDR picture.
   // ---------------------------------------------------------------------------
@@ -626,6 +631,8 @@ module rtlnet_h264_engine #(
       if (CRAM_AW > 10) begin : g_bad_cram
         $fatal(1, "rtlnet_h264_engine: CRAM_AW=%0d, the rtlnet_h264_hp seam carries 10 bits", CRAM_AW);
       end
+      logic [3:0]        hp_caps_n;       // the netlist's tool set; hp_caps is its intersection with the tools this build has seam-side logic for
+      assign hp_caps = hp_caps_n & {1'b0, HP_T8 && HP_T8_AUTO, HP_T8, 1'b1};
 
       logic              hp_lic_q;        // hp_licensed and hp_enable applied at the last picture start
       logic              hp_en_q;
@@ -683,7 +690,7 @@ module rtlnet_h264_engine #(
             hp_t8a_q <= hp_t8_now && hp_t8_auto && hp_caps[2];
             t8n8_c   <= 16'd0;
             t8n4_c   <= 16'd0;
-          end else if (a_done && a_inter && !a_skip && !a_pcm && (a_cbp4 != 4'd0)) begin
+          end else if (HP_T8 && a_done && a_inter && !a_skip && !a_pcm && (a_cbp4 != 4'd0)) begin
             if (a_t8use) t8n8_c <= t8n8_c + 16'd1;
             else         t8n4_c <= t8n4_c + 16'd1;
           end
@@ -745,7 +752,7 @@ module rtlnet_h264_engine #(
       rtlnet_h264_hp u_hp (
         .clk(clk), .resetn(resetn),
         .hp_enable(hp_enable), .hp_t8_enable(hp_t8_enable), .hp_present(hp_present), .hp_licensed(hp_licensed), .hp_seconds_left(hp_seconds_left),
-        .hp_caps(hp_caps), .hp_active(hp_act),
+        .hp_caps(hp_caps_n), .hp_active(hp_act),
         .pic_start(hp_pic_start), .pic_done(done), .slice_start(st == E_H0), .slice_end(st == E_SLEND),
         .mb_start(b_go && hp_act), .mb_x(bi_x[bb]), .av_top(bi_avt[bb]), .av_left(bi_avl[bb]), .pcm(bi_pcm[bb]),
         .i16_mode(bi_mode[bb]), .cbp_chroma(bi_cbpc[bb]), .cbp_luma(bi_cbpl[bb]), .chroma_mode(bi_cm[bb]),
@@ -1303,7 +1310,7 @@ module rtlnet_h264_engine #(
 
   rtlnet_h264_mb_enc #(
     .MAX_MB_W(MAX_MB_W), .LINE_KB(LINE_KB), .RAM_STYLE(RAM_STYLE), .SRC_AW(RAM_AW), .REC_AW(REC_AW), .CRAM_AW(CRAM_AW),
-    .REF_AW(REF_AW), .MV_LINE_KB(MV_LINE_KB), .T8(HIGH_PROFILE)
+    .REF_AW(REF_AW), .MV_LINE_KB(MV_LINE_KB), .T8(HIGH_PROFILE && HP_T8), .T8_AUTO(HP_T8_AUTO)
   ) u_mb_enc (
     .clk(clk), .resetn(resetn),
     .start(a_go), .pcm_mode(cfg_mb_pcm), .p_pic(e_p), .mb_x(a_x), .av_top(!a_first_row), .av_left(a_x != 8'd0),

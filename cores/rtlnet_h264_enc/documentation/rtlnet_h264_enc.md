@@ -191,7 +191,7 @@ on average. The driver therefore writes `max(QP, RTLNET_H264_QP_MIN_REALTIME)` i
 
 | Parameter | Default | Meaning |
 |---|---|---|
-| NUM_ENGINES | 2 | slice-band engines, 1..4 |
+| NUM_ENGINES | 2 | how many engines code slice bands in parallel, 1..4 (one engine carries 720p30, two carry 1080p30 at 90 MHz) |
 | MAX_MB_W, MAX_MB_H | 120, 68 | widest and tallest picture in macroblocks (1920x1088); range-checks and CAPS |
 | ADDR_W | 32 | only 32 supported (elaboration `$fatal`) |
 | ID_W | 4 | AXI ID width of each engine port |
@@ -206,9 +206,11 @@ on average. The driver therefore writes `max(QP, RTLNET_H264_QP_MIN_REALTIME)` i
 | LINE_KB | 4 | line RAM of stage A, KiB (two 16-byte words per macroblock column) |
 | FIFO_KB | 1 | ring word FIFO per engine, KiB (64 words of 16 bytes plus strobes) |
 | RAM_STYLE | "block" | `rtlnet_ram_core` style, "block" or "distributed" |
-| DEBLOCK | 1 | 1 instances the in-loop deblocking filter `rtlnet_h264_deblock` in every engine (section 19); 0 builds the encoder without it (slice header idc 1, `rtlnet_h264_recon_wr`) |
-| DBK_LINE_KB | 16 | deblocking filter line store per engine, KiB (6 beats of 16 bytes for each of up to 128 macroblock columns) |
-| HIGH_PROFILE | 0 | 1 instances the High profile extension `rtlnet_h264_hp` (a netlist delivered separately) in every engine; 0 builds the Constrained Baseline encoder (section 17) |
+| DEBLOCK | 1 | 1 = include the in-loop deblocking filter `rtlnet_h264_deblock` in every engine (section 19); 0 = leave it out (the slice header then says the filter is off, `disable_deblocking_filter_idc` 1) |
+| DBK_LINE_KB | 16 | KiB per engine; memory of the deblocking filter for the rows above the current macroblock row (6 beats of 16 bytes for each of up to 128 macroblock columns); only with DEBLOCK = 1 |
+| HIGH_PROFILE | 0 | 0 = Constrained Baseline encoder with CAVLC entropy coding (the public core alone); 1 = the High profile netlist `rtlnet_h264_hp` (delivered separately) is added to every engine, and it always contains CABAC entropy coding. CABAC has no parameter of its own (section 17) |
+| HP_T8 | 1 | only with HIGH_PROFILE = 1 (ignored without it): 1 = include the 8x8 transform for inter macroblocks; 0 = leave it out (4x4 transform only) (section 17.9) |
+| HP_T8_AUTO | 1 | only with HP_T8 = 1: 1 = include the per-macroblock choice between the 4x4 and the 8x8 transform; 0 = leave it out (the 8x8 transform is then on or off for a whole picture, set by software). HP_T8_AUTO = 1 with HP_T8 = 0 stops the elaboration (section 17.9) |
 
 All memories are instances of `rtlnet_ram_core`. Frame size, band split, slice count and QP come from registers, not
 parameters, so one build codes both video modes.
@@ -1167,7 +1169,7 @@ is its Constrained Baseline form). `encoder profile high` is accepted when the n
 | `full` | `HIGH_PROFILE` 1 with the netlist of the unlimited-license variant, taken from `H264HighProfile\netlist\full` (or `$env:H264_HIGHPROFILE_ROOT`) |
 | `demo` | `HIGH_PROFILE` 1 with the netlist of the variant whose license ends 30 minutes after FPGA configuration |
 
-The build stops when the netlist is missing. `build_info.txt` names the variant and the netlist's `netlist_info.txt`.
+The build stops when the netlist is missing. `build_info.txt` names the variant, the tool set (`hp_tools`) and the netlist's `netlist_info.txt`. `-HpTools cabac|t8|all` (default `all`, with `-HighProfile full|demo`) chooses the tool set: it picks the netlist (`netlist\<variant>` for `all`, `netlist\<variant>_<tools>` for the others) and sets `HP_T8` and `HP_T8_AUTO` of the encoder to match (section 17.9).
 
 ### 17.6 The 8x8 transform of inter luma (stage 3, 11-12-2026)
 
@@ -1248,6 +1250,49 @@ State profile (`MB_PROF`, a bench define of `rtlnet_h264_mb_enc`: clocks per sta
 **Timing, out-of-context synthesis** (`h264_synth.tcl`, `xc7a200tsbg484-1`, 90 MHz, two engines; the new `*_paths.rpt` lists the worst path of every endpoint below 3 ns): `HIGH_PROFILE` 0: 46,915 LUT, 34,883 FF, 76 DSP, 34 RAMB36 + 6 RAMB18, post-synthesis WNS **+1.992 ns**, worst path `u_mb_enc/u_ipred` `pc_reg` to `q1_t_reg` (9 levels: DSP48E1 1, CARRY4 5); the paths that were worst before are gone (`cfg_mb_h` to `me_left` +0.881 ns, 12 levels; `u_mvctx` `avl_q_reg` to `mvp_x_reg` +1.315 ns, 12 levels; `u_search` `w_q_reg` to the state enable, 12 levels, after the registers of the bands and of `lim_g`). The next paths are `u_cavlc` `rem_reg` (+2.39 ns, 8 levels) and `u_search` `pc_reg` (+2.42 ns, 10 levels). **This is the new `HIGH_PROFILE` 0 baseline**: the identity with the commit before stage 3 (47,083 LUT, 31,071 FF, +0.881 ns) no longer holds because the engine itself changed (+3,812 FF for the pipeline registers, -168 LUT). `HIGH_PROFILE` 1 with the full netlist: 71,341 LUT, 58,418 FF, 236 DSP, 34 RAMB36 + 6 RAMB18, WNS **+1.881 ns** (`u_pack` `cnt_reg` to the write enable of the CABAC context RAM in the module, 11 levels; the demo netlist 71,387 LUT, 58,518 FF, the same path); the entropy path `pk_cmd_*` +5.092 ns (6 levels), the module's transform paths +4.275 ns (8 levels). The post-synthesis figures use estimated net delays; the failing paths of the board builds were dominated by routing (80 to 90 %), so the next board build confirms the stages. Paths of the board reports left to others: `u_rd_dma` `arvalid_reg` to `u_arb` `rd_pend_reg` / `rd_err_left_reg` CE (14 levels, -0.19 ns; the arbiter is `rtlnet_axi_arbiter`, not part of the encoder) and the MicroBlaze internal paths.
 
 **Verification of the stage.** The benches of the changed units (`tb_rtlnet_h264_xform` with the latencies 10 and 9, `tb_rtlnet_h264_ipred` with the prediction three clocks after the query, `tb_rtlnet_h264_mvpred` and `tb_rtlnet_h264_search`) pass with their negative controls; the mutation of the single-neighbour rule moved to `rtlnet_h264_mvpred_s2.sv`. Streams: byte-identical to the stage 3a streams in CAVLC, CABAC 4x4, 8x8 and auto mode (40 of 40 comparisons: 9 QCIF configurations and one 720p configuration) and equal to the model (private regression 169 of 169); this repository's regression 162 of 162 on the same RTL; mutation 19 (single-neighbour rule) is caught in `rtlnet_h264_mvpred_s2.sv`.
+
+### 17.9 Feature options and tool sets (11-12-2026)
+
+The High profile tools are chosen at build time, in three sets. CABAC entropy coding is part of every set; the 8x8 transform and the per-macroblock choice between the 4x4 and the 8x8 transform are options.
+Each option is a parameter of `rtlnet_h264_top` (section 4) that includes the feature or leaves it out; a feature that is left out costs no logic.
+
+| Encoder | `HIGH_PROFILE` | `HP_T8` | `HP_T8_AUTO` | `hp_caps` | `build.ps1` switches (`boards/nexys_video`) |
+|---|---|---|---|---|---|
+| CAVLC Baseline | 0 | - | - | (no module) | none |
+| CABAC | 1 | 0 | 0 | 0001 | `-HighProfile full\|demo -HpTools cabac` |
+| CABAC + 8x8 transform | 1 | 1 | 0 | 0011 | `-HighProfile full\|demo -HpTools t8` |
+| CABAC + 8x8 transform + adaptive choice | 1 | 1 | 1 | 0111 | `-HighProfile full\|demo -HpTools all` (default) |
+
+Every row exists with `DEBLOCK` 1 (default) and with `DEBLOCK` 0 (section 19). `HP_T8` is ignored without `HIGH_PROFILE`. `HP_T8_AUTO` = 1 with `HP_T8` = 0 stops the elaboration of the top and of the engine with a message that names both parameters.
+
+**The netlist and the parameters match.** The netlist built in the High profile repository (`build_netlist.ps1 -Tools cabac|t8|all`, parameters `T8_EN` and `T8_AUTO_EN` of `rtlnet_h264_hp`) must contain the tool set that `HP_T8` and `HP_T8_AUTO` say. `build.ps1 -HpTools cabac|t8|all` selects both together: it picks the netlist folder
+(`netlist\<variant>` for `all`, `netlist\<variant>_<tools>` for the others) and sets the two parameters of the board top (`build_info.txt` has the line `hp_tools`). Software never has to know the parameters: it reads the tool set from `hp_caps` (`HP_STATUS` [11:8]: bit 0 CABAC,
+bit 1 8x8 transform, bit 2 adaptive choice), which the engine reports as the intersection of the netlist's tools and its own parameters. A mismatch therefore shows as the smaller set (netlist with 8x8 and `HP_T8` 0: `hp_caps` 0001; netlist CABAC-only and `HP_T8` 1: `hp_caps` 0001, the unused seam logic idles) and never as an error;
+`show encoder` prints it in the `High profile` line (`tools CABAC (hp_caps 1)`, `tools CABAC 8x8-transform (hp_caps 3)`, `tools CABAC 8x8-transform adaptive-choice (hp_caps 7)`) and says `Transform 8x8   : not offered (hp_caps bit 1 is 0)` for a set without the 8x8 transform.
+
+**What is removed.** `HP_T8` 0: in `rtlnet_h264_mb_enc` (`T8` = `HIGH_PROFILE && HP_T8`) the residual feeder (S_T8S), the rebuild (S_T8R), the discard (S_DRN), the summary registers and the rebuilt-RAM write path of the 8x8 transform; in the engine the macroblock counters of `HP_T8_COUNT`
+(both halves read 0); `hp_caps` bits 1 and 2 read 0. `HP_T8_AUTO` 0: the request beat on `tf_res`, the state S_T8L (the luma pass of a macroblock the module gave back to the 4x4 transform), the per-macroblock request and rejection flags, and `hp_t8a_q` (the picture's choice mode); `hp_caps` bit 2 reads 0.
+Registers read back consistently: `HP_CTRL` bit 1 (8x8 transform) is ignored and reads 0 without `hp_caps` bit 1, bit 2 (adaptive choice) is ignored and reads 0 without `hp_caps` bit 2; `HP_STATUS` bits 5 and 6 read the stored bits (0), `HP_T8_COUNT` reads 0 with `HP_T8` 0. The driver already follows `hp_caps`:
+`rtlnet_h264_enc_set_transform8x8` refuses on with `RTLNET_H264_HP_ERR_NO_T8` and auto with `RTLNET_H264_HP_ERR_NO_AUTO` (the firmware's default request, auto, degrades to on without bit 2 and to nothing without bit 1; no message at start-up), the PPS is written with `transform_8x8_mode_flag` 0, `encoder transform8x8 on|auto` prints its named refusal.
+
+**Cost of each option.** Out-of-context synthesis of the encoder (two engines, `enc_clk` 11.111 ns, `xc7a200tsbg484-1`, Vivado 2026.1, `encoder_synth.ps1` of the High profile repository), post-synthesis, with the netlists of the `full` variant:
+
+| Tool set | Netlist alone: LUT cells / FF / DSP | Encoder, `DEBLOCK` 0: LUT / FF / DSP | Encoder, `DEBLOCK` 1: LUT / FF / DSP | RAMB36 + RAMB18 (`DEBLOCK` 0 / 1) | Worst slack (`DEBLOCK` 0 / 1) |
+|---|---|---|---|---|---|
+| `HIGH_PROFILE` 0 (CAVLC Baseline, no netlist) | - | 46,773 / 34,892 / 76 | 58,597 / 39,835 / 76 | 34 + 6 / 42 + 6 | +1.992 / +1.748 ns |
+| CABAC (`HP_T8` 0, `HP_T8_AUTO` 0) | 2,691 / 1,243 / 0 | 52,032 / 37,497 / 76 | 63,846 / 42,439 / 76 | 34 + 6 / 42 + 6 | +1.874 / +1.748 ns |
+| CABAC + 8x8 transform (1, 0) | 8,869 / 9,735 / 56 | 65,365 / 55,172 / 188 | 77,085 / 60,124 / 188 | 34 + 6 / 42 + 6 | +1.874 / +1.748 ns |
+| CABAC + 8x8 + adaptive choice (1, 1) | 12,194 / 11,357 / 80 | 71,538 / 58,425 / 236 | 82,968 / 63,382 / 236 | 34 + 6 / 42 + 6 | +1.874 / +1.748 ns |
+
+The netlist column counts the primitives of one module (the encoder has two), the encoder columns are the slice LUTs of the report. The deblocking filter costs 11,430 to 11,824 LUT, 4,942 to 4,957 FF and 8 RAMB36 in every row (11,430 for the default all-tools encoder). Over the CAVLC Baseline encoder with the filter (58,597 LUT) CABAC adds 5,249 LUT and 2,604 FF, the 8x8 transform a further 13,239 LUT, 17,685 FF and 112 DSP, the adaptive choice a further 5,883 LUT, 3,258 FF and 48 DSP.
+The worst path of the `DEBLOCK` 1 rows is the filter's `d1_reg` to its line store (13 levels); without the filter it is the packer count to the CABAC context RAM write enable (11 levels, +1.874 ns), and the entropy path (`pk_cmd_*` register inputs) keeps its 6 levels in every row. These are estimates without placement.
+The CABAC-only encoder with the filter (63,846 LUT, 42,439 FF, 76 DSP, 42 + 6 RAMB) is 19,122 LUT below the all-tools encoder with the filter (82,968 LUT).
+
+**Default builds.** `HIGH_PROFILE` 0 with `DEBLOCK` 0 and 1: the utilization reports of the worktree before and after the edit are identical line for line (46,773 and 58,597 LUT, a `diff` shows the date and the tool header only), the worst paths and slacks are the same. `HIGH_PROFILE` 1 with all tools (the default parameters, the netlist rebuilt from the edited sources): 71,538 LUT and 58,425 FF with `DEBLOCK` 0 (before the edit, 71,541 and 58,425), 82,968 LUT and 63,382 FF with `DEBLOCK` 1 (before, 82,982 and 63,387); RAMB, DSP and every slack are equal. These are not line-for-line identical: 3 and 14 LUT, 0 and 5 FF fewer, which the mapper's choices explain (the rebuilt netlist alone is 1 LUT and, for `demo`, 1 FF smaller; the encoder with the edited sources and the old netlist gives 71,540 and 82,970 LUT, 63,382 FF with the filter).
+
+**Verification of this section** (all with the RTL of the High profile repository and the real engine): the RTLNet regression in the worktree on the final code, default parameters (`rtlnet_regression.ps1`): `RTLNET_REGRESSION: 176 passed, 0 failed`; the driver host test and the control layer test (`h264_driver_test.ps1`, in that regression) pass; `h264_lint.ps1` passes; the firmware host demo `TEST PASS: menu_demo checks=502`, `RATECTL_TEST: PASS (15 gates)`, the picture queue, transmit ring, transport stream mux and encoder interrupt host tests pass with their negative controls.
+Streams: for every tool set, filter off and on, QCIF, 720p and 1080p, I and P pictures, 1 and 2 engines, the slices are identical to the model, JM, OpenH264 and FFmpeg are identical to the encoder's reference picture, and the stream of the CABAC set is byte-identical to the all-tools build with the transform switched off (`HP_CTRL` 1), the stream of the 8x8 set to the all-tools build with the fixed 8x8 transform (`HP_CTRL` 3), both with the filter off and on (24 comparisons, all identical; the private document section 10.7). A mismatch between the netlist and the parameters (an encoder with all tools on a CABAC-only netlist, a CABAC-only encoder on a netlist with all tools, an 8x8-only encoder on a netlist with all tools) reports the smaller `hp_caps`, ignores the request bits and codes a valid stream.
+The driver host test checks the three tool sets (`hp_caps` 1, 3 and 7: `set_transform8x8` refusals `RTLNET_H264_HP_ERR_NO_T8` and `_NO_AUTO`, nothing written, the PPS flag), the firmware demo prints `Transform 8x8   : not offered (hp_caps bit 1 is 0)` for `hp_caps` 1 and refuses `encoder transform8x8 on|auto` with its named text; the control layer ignores the refusal of its default request (auto) silently, so no line is printed at start-up.
 
 ### 17.5 Verification in this repository
 

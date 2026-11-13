@@ -94,6 +94,12 @@
 `ifndef TB_HIGH_PROFILE
   `define TB_HIGH_PROFILE 1'b0
 `endif
+`ifndef TB_HP_TOOL_T8
+  `define TB_HP_TOOL_T8 1'b1      // HP_T8 of the top: the seam-side 8x8 transform logic (0: not built)
+`endif
+`ifndef TB_HP_TOOL_AUTO
+  `define TB_HP_TOOL_AUTO 1'b1    // HP_T8_AUTO of the top: the seam-side adaptive-choice logic (0: not built)
+`endif
 `ifndef TB_SR
   `define TB_SR 16
 `endif
@@ -179,7 +185,7 @@ module tb_rtlnet_h264_top;
   logic [15:0]       wstrb_m;
   logic              irq;
 
-  rtlnet_h264_top #(.NUM_ENGINES(NE), .SR(`TB_SR), .HIGH_PROFILE(`TB_HIGH_PROFILE), .DEBLOCK(`TB_DEBLOCK)) dut (
+  rtlnet_h264_top #(.NUM_ENGINES(NE), .SR(`TB_SR), .HIGH_PROFILE(`TB_HIGH_PROFILE), .HP_T8(`TB_HP_TOOL_T8), .HP_T8_AUTO(`TB_HP_TOOL_AUTO), .DEBLOCK(`TB_DEBLOCK)) dut (
     .enc_clk(enc_clk), .enc_resetn(resetn), .s_axi_aclk(s_clk), .s_axi_aresetn(resetn),
     .s_axi_awaddr(awaddr), .s_axi_awvalid(awvalid_l), .s_axi_awready(awready_l),
     .s_axi_wdata(wdata_l), .s_axi_wstrb(4'hF), .s_axi_wvalid(wvalid_l), .s_axi_wready(wready_l),
