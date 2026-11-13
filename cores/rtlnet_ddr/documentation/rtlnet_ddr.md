@@ -5,7 +5,7 @@
 | Core | `rtlnet_ddr` (wrapper), `rtlnet_ddr_amd` (AMD 7-series implementation), `rtlnet_ddr_sim` (simulation model) |
 | Document revision | 11-09-2026 |
 | Language | SystemVerilog-2012 (RTL, bench support), Vivado Tcl (IP generation) |
-| Position | behind `rtlnet_axi_arbiter`; the one DDR3 port of the design (`documentation/gige.md` sections 5.1, 6, 7) |
+| Position | behind `rtlnet_axi_arbiter`; the one DDR3 port of the design |
 | First target | Digilent Nexys Video: Micron MT41K256M16 x16 DDR3L (512 MiB, one rank), AMD MIG 7 series 4.2, 2778 ps memory clock (360 MHz, 720 Mb/s per pin), 4:1 ratio |
 | Interface | one AXI4 slave, 128-bit data, 29-bit byte address, 4-bit ID, on `ui_clk` (90.000 MHz, the system clock of the Nexys Video build) |
 | Verification | board bench in Active-HDL with `rtlnet_ddr_sim`; hardware: `ddr test` on the board (`boards/nexys_video/documentation/rtlnet_nexys_video.md` section 9) |

@@ -1,8 +1,8 @@
 // -----------------------------------------------------------------------------
 // File: rtlnet_ddr.sv
 // Purpose: the RTLNet DDR3 core: a vendor-neutral AXI4 slave port in front of
-//   the DDR3 SDRAM controller of the target technology (documentation/gige.md
-//   section 5.1, cores/rtlnet_ddr/documentation/rtlnet_ddr.md).
+//   the DDR3 SDRAM controller of the target technology
+//   (cores/rtlnet_ddr/documentation/rtlnet_ddr.md).
 // Overview:
 //   * TARGET selects the implementation; the default is the technology macro of
 //     rtlnet_technology.svh (AMD unless the build defines another). "AMD":

@@ -5,7 +5,7 @@
 | Core | `rtlnet_axi_arbiter` |
 | Document revision | 11-12-2026 |
 | Language | SystemVerilog-2012 (RTL, benches), C11 (driver) |
-| Position | between the DMA masters and the CPU caches and the memory-controller AXI port (`documentation/gige.md` sections 5.1, 6, 7) |
+| Position | between the DMA masters and the CPU caches and the memory-controller AXI port |
 | Register map revision | `VERSION` = `0x11092026`, `ID` = `0x41524254` ("ARBT") |
 | Verification | Active-HDL 11.1: `tb_rtlnet_axi_arbiter` (16 configurations + 4 negative controls: 11 configurations and 2 controls of 11-09-2026, 5 with `ADDR_REG` 0 and 2 latency controls of 11-12-2026); host driver test |
 | Synthesis | Vivado 2026.1 out of context, xc7a200tsbg484-1: PASS, 0 critical warnings; 1477 LUT, 1096 FF, 0 BRAM (3 masters, 128-bit, no narrow or WRAP master, state of 11-09-2026); section 6 has the board configuration before and after the two-clock grant of 11-12-2026 |

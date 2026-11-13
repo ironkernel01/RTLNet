@@ -1,6 +1,6 @@
 // -----------------------------------------------------------------------------
 // File: rtlnet_h264_top.sv
-// Purpose: H.264 Constrained Baseline encoder core (documentation/gige.md section 10), phase 2b-1: the whole
+// Purpose: H.264 Constrained Baseline encoder core, phase 2b-1: the whole
 //   encoder pipeline with I_PCM macroblocks, from the packed YUYV 4:2:2 input frame in memory to the
 //   Annex B stream in a compressed ring, the index ring and the rebuilt 4:2:0 picture.
 // Overview:

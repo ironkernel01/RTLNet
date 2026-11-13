@@ -21,7 +21,7 @@
 //     registers are decoder slave 6. The ui_clk reset ddr_resetn is an
 //     rtlnet_reset_sync (clk ui_clk) of rst_arstn, ANDed with the MIG ui reset after the chain;
 //     init_calib_complete enters the system registers through rtlnet_sync.
-//   * Video path (documentation/gige.md sections 5, 6; ui_clk): u_csi2 (rtlnet_csi2_rx) sends 720p30 or 1080p30 color bars (the camera
+//   * Video path (ui_clk): u_csi2 (rtlnet_csi2_rx) sends 720p30 or 1080p30 color bars (the camera
 //     stream input is tied off, valid 0) into u_s2mm (rtlnet_vdma_s2mm), which writes each frame into a slot granted by u_fb
 //     (rtlnet_framebuf, 3 slots of 4 MiB at DDR3 offset 0x1000_0000, CPU address 0x9000_0000) through arbiter master 1 (fixed top
 //     priority: HIGH_PRIO_MASK 2'b10); master 0 stays the CPU caches (NARROW_MASK and WRAP_MASK bit 0). The framebuf reader port

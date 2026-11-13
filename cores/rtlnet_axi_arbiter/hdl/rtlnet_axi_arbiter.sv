@@ -1,7 +1,7 @@
 // -----------------------------------------------------------------------------
 // File: rtlnet_axi_arbiter.sv
-// Purpose: N:1 AXI4 arbiter in front of the DDR3 memory controller
-//   (documentation/gige.md sections 5.1, 6, 7). Masters (capture write DMA,
+// Purpose: N:1 AXI4 arbiter in front of the DDR3 memory controller.
+//   Masters (capture write DMA,
 //   encoder DMAs, CPU caches) share the one memory-controller AXI port.
 // Overview:
 //   * All data ports run on clk (the controller user clock). Ports are packed

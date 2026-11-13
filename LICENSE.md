@@ -19,7 +19,7 @@ Copyright (C) 2026 IronKernel. All rights reserved except as granted below.
 - **Changes** are Your modifications of RTLNet files and Your new files that are derived from
   RTLNet files.
 - **Paid Features** are the features that IronKernel delivers only under a paid license and
-  that are not in this repository. `licensing.md` lists them.
+  that are not in this repository. ironkernel.com lists them.
 
 ## 2. Evaluation license (no fee)
 
@@ -55,7 +55,7 @@ applies to further shipments.
 
 A Product whose Design Sources are not public, or that does not meet every condition of
 section 3, needs a paid license from IronKernel before it ships. The tiers, the fixed prices
-and what each includes are published in `licensing.md` and on ironkernel.com. A paid license
+and what each includes are published on ironkernel.com. A paid license
 is a separate written agreement; where it differs from this text, it governs for that
 Product. Paid licenses carry no royalty and no per-unit fee.
 

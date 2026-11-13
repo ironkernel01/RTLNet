@@ -1,6 +1,6 @@
 // -----------------------------------------------------------------------------
 // File: rtlnet_csi2_rx_pattern.sv
-// Purpose: test-pattern generator of rtlnet_csi2_rx (documentation/gige.md section 5.4, rtlnet_csi2_rx.md section 3): one
+// Purpose: test-pattern generator of rtlnet_csi2_rx (rtlnet_csi2_rx.md section 3): one
 //   frame of the selected pattern (static or scrolling 75 percent color bars, a moving textured box, a noise band) as a
 //   YUV422 word stream, with the line timing a sensor would produce.
 // Overview:
@@ -92,7 +92,7 @@ module rtlnet_csi2_rx_pattern #(
   localparam logic [31:0] SEED_BASE = 32'hACE1_0000;
   localparam logic [31:0] SEED_STEP = 32'h9E37_79B9;
 
-  // Bar colors {Cr, Cb, Y} (gige.md section 5.4), 8-bit limited range BT.709.
+  // Bar colors {Cr, Cb, Y}, 8-bit limited range BT.709.
   function automatic logic [23:0] bar_ycc(input logic [BAR_IDX_W-1:0] idx);
     case (idx)
       3'd0:    return {8'd128, 8'd128, 8'd180};   // white 75 %

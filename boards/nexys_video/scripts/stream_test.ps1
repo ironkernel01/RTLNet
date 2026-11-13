@@ -1,7 +1,7 @@
 <#
 -------------------------------------------------------------------------------
 File: stream_test.ps1
-Purpose: board gate of Phase 2b-3 and 2c (documentation/gige.md sections 14 and 17): the H.264 encoder streams the color bars as
+Purpose: board gate of Phase 2b-3 and 2c: the H.264 encoder streams the color bars as
   MPEG-TS over UDP (an IDR picture every -Gop pictures, P pictures between), and this PC checks the stream with its own TS parser,
   ffprobe, ffmpeg and VLC.
 Overview:

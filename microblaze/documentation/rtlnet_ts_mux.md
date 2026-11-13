@@ -17,7 +17,7 @@ Two firmware modules in `microblaze/firmware/src/video/` turn the access units o
 | `rtlnet_muxjob.{h,c}` | resumable send of one queued picture through `tsmux`, a bounded number of bytes per call; no hardware |
 | `src/lwip/rtlnet_video_udp.{h,c}` | one unicast `udp_pcb`; copies a datagram into a pbuf and calls `udp_sendto`; retries for at most 2 ms when lwIP has no pbuf or the transmit DMA is busy |
 
-The path is `gige.md` section 9: the datagram leaves through `netif_linkoutput`, the AXI DMA and `cpu_axis_ethernet_stream`; the
+The datagram leaves through `netif_linkoutput`, the AXI DMA and `cpu_axis_ethernet_stream`; the
 checksum offload inserts the IPv4 and UDP checksums.
 
 ## 2. Stream layout
@@ -48,7 +48,7 @@ PTS minus 9000 ticks (100 ms of receiver buffering).
 
 | Region | Offset | Size |
 |---|---|---|
-| frame buffer (3 slots) | 0x1000_0000 | 12 MiB (`gige.md` section 6) |
+| frame buffer (3 slots) | 0x1000_0000 | 12 MiB |
 | rebuilt picture A, luma tiles / chroma tiles | 0x1100_0000 / 0x1120_0000 | 256 B and 128 B per macroblock (macroblock-tiled, raster order), 2 MiB areas; 1080p needs 2,088,960 B and 1,044,480 B (3,133,440 B per picture) |
 | rebuilt picture B, luma tiles / chroma tiles | 0x1140_0000 / 0x1160_0000 | the second rebuilt buffer (Phase 2c, 2 MiB areas, 3,133,440 B used at 1080p): the encoder writes A and B alternately and a P picture reads the other one, the previous picture, as its reference |
 | compressed rings | 0x1200_0000 | 8 MiB, split by the core into one share per engine (4 MiB each) |

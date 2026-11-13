@@ -1,6 +1,6 @@
 // -----------------------------------------------------------------------------
 // File: rtlnet_framebuf.sv
-// Purpose: tear-free frame-buffer slot manager (documentation/gige.md section 6): N slots in DDR3, one writer (the write
+// Purpose: tear-free frame-buffer slot manager: N slots in DDR3, one writer (the write
 //   DMA), NUM_READERS reader ports and the firmware as one more reader. It only hands out slot ownership; the frame
 //   data moves between DDR3 and the DMAs.
 // Overview:

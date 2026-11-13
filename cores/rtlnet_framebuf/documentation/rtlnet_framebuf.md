@@ -5,7 +5,7 @@
 | Core | `rtlnet_framebuf` |
 | Document revision | 11-09-2026 |
 | Language | SystemVerilog-2012 (RTL, benches), C11 (driver) |
-| Position | slot ownership between the write DMA and the frame readers (`documentation/gige.md` section 6) |
+| Position | slot ownership between the write DMA and the frame readers |
 | Register map revision | `VERSION` = `0x11092026`, `ID` = `0x46425546` ("FBUF") |
 | Verification | Active-HDL 11.1: `tb_rtlnet_framebuf` (5 configurations + negative control), `tb_rtlnet_video_path`, host driver test |
 | Synthesis | Vivado 2026.1 out of context, xc7a200tsbg484-1: PASS, 0 critical warnings; 763 LUT, 713 FF, 0 BRAM |
@@ -43,7 +43,7 @@ Source flag: 1 pattern, 0 camera (the same encoding as `rtlnet_csi2_rx` `STATUS[
 | `SLOT_LOG2` | 22 | log2 of the slot size (4 MiB: a 1080p YUV422 frame is 3.96 MiB) |
 | `FB_BASE` | 0x1000_0000 | DDR3 byte offset of slot 0, a multiple of the slot size (`$fatal` otherwise); the CPU address is the DDR3 window base + this offset (0x9000_0000 on the board) |
 
-`N` = readers + 2 is the sizing rule of `gige.md`: with the encoder as the one reader port, 3 slots. The firmware reader is a
+`N` = readers + 2 is the sizing rule: with the encoder as the one reader port, 3 slots. The firmware reader is a
 debug reader outside that formula: with it and the encoder both holding different slots the writer can find no free slot
 and drops the frame, which the counters show.
 

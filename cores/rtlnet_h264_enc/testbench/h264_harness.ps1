@@ -1,7 +1,7 @@
 <#
 -------------------------------------------------------------------------------
 File: h264_harness.ps1
-Purpose: the decoder-checked verification run of rtlnet_h264_top (documentation/gige.md section 13): input image,
+Purpose: the decoder-checked verification run of rtlnet_h264_top: input image,
   encode in the Verilator bench, Annex B stream, three independent decoders, byte comparison, PNGs.
 Overview:
   * Per configuration (see $Configs): h264_gen.py writes the input frame(s) and their 4:2:0 reference; the driver's

@@ -8,7 +8,7 @@
  *
  * Static bars (pattern 0, the reset default): eight vertical 75 percent color bars, full height. Bar b covers pixels
  * [b * W / 8, (b + 1) * W / 8): 160 pixels at 720p, 240 at 1080p. Colors are the ITU-R BT.709 8-bit limited-range
- * values of the gige.md section 5.4 table. YUV422, two pixels per four bytes in memory order Y0 Cb Y1 Cr. Lines are
+ * values of the table below. YUV422, two pixels per four bytes in memory order Y0 Cb Y1 Cr. Lines are
  * packed (stride = W * 2 bytes).
  *
  * Moving patterns: a frame is a pure function of (mode, pattern, speed, k), k the pattern frame counter (0 for the first
@@ -102,7 +102,7 @@ static uint32_t g_box_x0 = BOX_X0_DEFAULT;
 static uint32_t g_box_y0 = BOX_Y0_DEFAULT;
 static uint32_t g_crc_tbl[256];
 
-/* Y, Cb, Cr of white 75 %, yellow, cyan, green, magenta, red, blue, black (gige.md section 5.4). */
+/* Y, Cb, Cr of white 75 %, yellow, cyan, green, magenta, red, blue, black. */
 static const uint8_t g_bar[BARS][3] = {
     { 180u, 128u, 128u }, { 168u, 44u, 136u }, { 145u, 147u, 44u }, { 133u, 63u, 52u },
     { 63u, 193u, 204u }, { 51u, 109u, 212u }, { 28u, 212u, 120u }, { 16u, 128u, 128u }

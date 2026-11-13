@@ -1,7 +1,7 @@
 // -----------------------------------------------------------------------------
 // File: tb_rtlnet_csi2_rx.sv
 // Purpose: self-checking bench for rtlnet_csi2_rx (Phase 1): the color-bar generator at both video modes against a reference
-//   written in the bench from documentation/gige.md section 5.4, the moving patterns against the frame CRC-32 of the C model, the
+//   written in the bench, the moving patterns against the frame CRC-32 of the C model, the
 //   register rules, the frame timing and the source switch with a camera stream model.
 // Cases:
 //   1. Reset values and header: ID, CAPS, VIDEO_MODE 0, SOURCE 0, FRAME_PERIOD, CAM_TIMEOUT 2, STATUS (pattern source),
@@ -127,7 +127,7 @@ module tb_rtlnet_csi2_rx;
     .s_axi_rready(rready));
 
   // ---------------------------------------------------------------------------
-  // Reference: the bars of gige.md section 5.4 (written here independently of the RTL)
+  // Reference: the bars (written here independently of the RTL)
   // ---------------------------------------------------------------------------
   function automatic logic [31:0] ref_word(input int mode, input int word);
     int bar_px;

@@ -5,7 +5,7 @@
 | Core | `rtlnet_vdma_s2mm` |
 | Document revision | 11-09-2026 |
 | Language | SystemVerilog-2012 (RTL, benches), C11 (driver) |
-| Position | between `rtlnet_csi2_rx` and the DDR3 arbiter; slot owner `rtlnet_framebuf` (`documentation/gige.md` sections 5.1, 5.2, 6) |
+| Position | between `rtlnet_csi2_rx` and the DDR3 arbiter; slot owner `rtlnet_framebuf` |
 | Register map revision | `VERSION` = `0x11092026`, `ID` = `0x53324D4D` ("S2MM") |
 | Verification | Active-HDL 11.1: `tb_rtlnet_vdma_s2mm` (5 configurations + negative control), `tb_rtlnet_video_path`, host driver test |
 | Synthesis | Vivado 2026.1 out of context, xc7a200tsbg484-1: PASS, 0 critical warnings; 595 LUT, 1038 FF, 2 RAMB36 (2 KiB beat FIFO) |

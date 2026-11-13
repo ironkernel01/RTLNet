@@ -5,7 +5,7 @@
 // Overview:
 //   * Strobe interface of rtlnet_axil_slave: a write strobe carries a full 32-bit word; a read strobe is answered with a
 //     registered read mux, data valid the clock after reg_rd_en. Undefined offsets read 0; writes to them are ignored.
-//   * Rejection rules (documentation/gige.md section 5.4): a VIDEO_MODE value above 1 sets STATUS.MODE_ERR and leaves the
+//   * Rejection rules: a VIDEO_MODE value above 1 sets STATUS.MODE_ERR and leaves the
 //     register unchanged; a VIDEO_MODE write whose mode minimum exceeds the present FRAME_PERIOD sets STATUS.PERIOD_ERR
 //     and leaves the register unchanged; a FRAME_PERIOD below the minimum of the selected mode sets STATUS.PERIOD_ERR
 //     and leaves the register unchanged; SOURCE 3 (or any value above 3) sets STATUS.SOURCE_ERR. Nothing is clamped.

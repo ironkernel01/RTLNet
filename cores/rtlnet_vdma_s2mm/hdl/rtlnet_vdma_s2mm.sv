@@ -1,6 +1,6 @@
 // -----------------------------------------------------------------------------
 // File: rtlnet_vdma_s2mm.sv
-// Purpose: 2D write DMA of the video path (documentation/gige.md sections 5.1, 5.2, 6): writes a YUV422 word stream as a
+// Purpose: 2D write DMA of the video path: writes a YUV422 word stream as a
 //   frame of lines into a frame-buffer slot of DDR3 through 128-bit AXI4 INCR bursts of at most MAX_BURST_BEATS beats.
 // Overview:
 //   * Stream in: 32-bit words of two pixels, tuser = first word of a frame, tlast = last word of a line, with the frame

@@ -5,7 +5,7 @@
 | Core | `rtlnet_csi2_rx` |
 | Document revision | 11-10-2026 |
 | Language | SystemVerilog-2012 (RTL, benches), C11 (driver, C model) |
-| Position | video source of the camera design (`documentation/gige.md` sections 5.1, 5.4) |
+| Position | video source of the camera design |
 | Register map revision | `VERSION` = `0x11102026`, `ID` = `0x43534932` ("CSI2") |
 | Phase | Phase 1 and the Phase 2d moving patterns: register block, test-pattern generator (static bars, scrolling bars, moving box, noise band), source switch. The camera front end (D-PHY capture, CSI-2 decode, SCCB, lane calibration) is Phase 3 and joins through the camera stream port |
 | Verification | Active-HDL 11.1: `tb_rtlnet_csi2_rx` (3 configurations + the full-size pattern run + negative control), `tb_rtlnet_csi2_rx_pattern` (816 frames on reduced geometry, with and without backpressure + negative control), `tb_rtlnet_video_path` (with the C model CRC), host driver test, C model self test, C model against the numpy model (`pattern_model.py`) byte for byte, pattern PSNR path of `stream_check.py`; results in section 8 |
@@ -267,7 +267,7 @@ output stage and the camera mux, unchanged; the new logic is at most two LUT lev
 
 `tb_rtlnet_csi2_rx` (`testbench/regression.txt`, tags `fast`, `fast_gap`, `real`, `patfull`, `neg`) drives the register window through
 `rtlnet_tb_axil_master` on a 9.7 ns clock against the 10 ns core clock, with a camera stream model and an output monitor
-that checks every word against a reference written in the bench from `gige.md` section 5.4.
+that checks every word against a reference written in the bench.
 
 | Group | Proves |
 |---|---|

@@ -483,7 +483,7 @@ AXI4-Lite transactions for the board bench.
 The block design also carries an AXI DMA (simple mode, 64-bit streams, data realignment engine on MM2S only (transmit buffers at any byte address; the DMA buffers and lwIP's heap are in the AXI BRAM), `S2MM` from `s_axis_eth_*`, `MM2S` to
 `m_axis_eth_*`, both interrupts on the INTC) and an AXI BRAM for the DMA buffers; the LMB BRAM (512 KiB) holds code,
 stack, heap and the lwIP pools. **All firmware code and data run from internal block RAM**; the DDR3 window
-(`0x8000_0000`, 512 MiB) is used by the `ddr test` memory test and is the frame store of the camera design (`documentation/gige.md`).
+(`0x8000_0000`, 512 MiB) is used by the `ddr test` memory test and is the frame store of the camera design.
 The MicroBlaze caches (8 KiB instruction, 8 KiB write-through data) cover only the DDR3 window: code runs from the
 single-cycle LMB and the DMA buffers are accessed uncached, so the DMA path has no coherence handling; software that
 shares the DDR3 window with another master flushes or invalidates the data cache around the access.

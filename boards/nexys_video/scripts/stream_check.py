@@ -19,7 +19,7 @@ Role: two independent checks that need no decoder library.
        --forced-idr N (High profile demo netlist): exactly N IDR pictures lie off the GOP cadence (the forced IDR picture at a license end); each is printed as "FORCED_IDR" with its position.
   psnr <file.yuv> <width> <height> [--floor 30] [--max-frames 24] [--pattern <0..4> --speed <n> [--k-first-max 64] [--step 1]]
        Reads decoded yuv420p frames one at a time (ffmpeg -pix_fmt yuv420p -f rawvideo; --max-frames 0 checks every frame), builds the expected 4:2:0 bar frame from the same
-       eight 75 percent bars as rtlnet_csi2_rx (BT.709 limited range values of gige.md section 5.4; vertical bars of width/8
+       eight 75 percent bars as rtlnet_csi2_rx (BT.709 limited range values; vertical bars of width/8
        pixels, chroma 4:2:0 of flat bars equals the bar chroma), and prints the PSNR of Y, Cb and Cr per sampled frame and the
        minimum. "CHECK psnr PASS|FAIL ...".
        With --pattern N --speed S (Phase 2d) every decoded picture, in order, is compared with the pattern of

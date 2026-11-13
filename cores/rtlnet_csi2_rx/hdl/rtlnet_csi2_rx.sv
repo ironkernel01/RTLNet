@@ -1,6 +1,6 @@
 // -----------------------------------------------------------------------------
 // File: rtlnet_csi2_rx.sv
-// Purpose: capture core of the OV5640 GigE camera design, Phase 1 part (documentation/gige.md sections 5.1, 5.4): the
+// Purpose: capture core of the OV5640 GigE camera design, Phase 1 part: the
 //   register block, the 75 percent color-bar generator and the source switch, with one YUV422 video stream out. The
 //   camera front end (D-PHY capture, CSI-2 decode, SCCB) is Phase 3; its post-FIFO camera stream joins through the
 //   s_cam_* port, which the board ties off (valid 0) until then.

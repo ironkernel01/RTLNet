@@ -1,7 +1,7 @@
 <#
 -------------------------------------------------------------------------------
 File: phase1_gate.ps1
-Purpose: board gate of Phase 1 (documentation/gige.md section 14): the color bars run into the frame buffer with no
+Purpose: board gate of Phase 1: the color bars run into the frame buffer with no
   firmware writes, the frame CRC-32 read back through the cache equals the C model at 720p30 and 1080p30, and the
   DDR3 arbiter reports no errors. Talks to the firmware CLI over the board USB-UART (115200 8N1) like cli_test.ps1.
 Overview:

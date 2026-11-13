@@ -619,7 +619,7 @@ static uint32_t  g_fb_fw_mode;
 static uint32_t  g_fb_err;
 static uint32_t  g_fb_takes;
 
-/* Bar colors of gige.md section 5.4: Y, Cb, Cr of white, yellow, cyan, green, magenta, red, blue, black. */
+/* Bar colors: Y, Cb, Cr of white, yellow, cyan, green, magenta, red, blue, black. */
 static const uint8_t g_vid_bar[HOST_VID_BARS][3] = {
     { 180u, 128u, 128u }, { 168u, 44u, 136u }, { 145u, 147u, 44u }, { 133u, 63u, 52u },
     { 63u, 193u, 204u }, { 51u, 109u, 212u }, { 28u, 212u, 120u }, { 16u, 128u, 128u }

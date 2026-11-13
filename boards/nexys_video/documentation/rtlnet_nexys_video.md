@@ -734,7 +734,7 @@ JTAG, runs the console, `net_test` and `tcp_test` with 0 arbiter errors, and the
 
 ### 6.10 Phase 1: color bars into the frame buffer (11-09-2026)
 
-Change: three cores on `ui_clk` (`documentation/gige.md` sections 5 and 6): `u_csi2` (`rtlnet_csi2_rx`: register block, 75 % color bars at 720p30
+Change: three cores on `ui_clk`: `u_csi2` (`rtlnet_csi2_rx`: register block, 75 % color bars at 720p30
 or 1080p30, source switch; the camera stream input is tied off, valid 0), `u_s2mm` (`rtlnet_vdma_s2mm`: 2D write DMA, INCR bursts of at most 16 beats
 that never cross 4 KiB) and `u_fb` (`rtlnet_framebuf`: 3 slots of 4 MiB at DDR3 offset 0x1000_0000, CPU address 0x9000_0000, the reader port tied off, the
 firmware reads through the register window). `u_s2mm` is arbiter master 1 at fixed top priority (`HIGH_PRIO_MASK` 2'b10); `NUM_MASTERS` 2 with `NARROW_MASK`
