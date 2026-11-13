@@ -1,7 +1,6 @@
 # RTLNet Source-Available License
 
-Revision 11-13-2026. DRAFT for the owner's review. This text is not in force until the owner
-approves it, and it has not been reviewed by a lawyer.
+Revision 11-13-2026.
 
 Copyright (C) 2026 IronKernel. All rights reserved except as granted below.
 
@@ -64,7 +63,7 @@ Product. Paid licenses carry no royalty and no per-unit fee.
 
 The Paid Features are not licensed by this text. A demonstration form of a Paid Feature
 that IronKernel distributes for evaluation (for example a time-limited netlist) comes with
-its own evaluation terms. You may not remove, bypass or extend the time limit of a
+its own evaluation terms (`demos/LICENSE_DEMO.md`). You may not remove, bypass or extend the time limit of a
 demonstration form, and You may not ship it in a Product.
 
 ## 6. Conditions for every use
@@ -132,14 +131,3 @@ after the license ends.
 - If a court finds one term unenforceable, the other terms stay in force.
 - Questions about this license and requests for a paid license go to the contact named on
   ironkernel.com.
-
-## Points for the owner to settle before this text is in force
-
-1. The licenses of the decoder sources used by the test harness (JM, OpenH264, FFmpeg) need
-   a check before the release: whether any of their files are stored in this repository or
-   only downloaded and built by the scripts.
-2. A lawyer's review of the whole text, the patent section in particular.
-
-Settled by the owner on 11-13-2026: section 3 puts the whole Product design under this
-license; the pull request period and the period to correct a breach are 90 days; section 6
-item 3 (no competing IP core) stays; section 7 stays without a contributor agreement.

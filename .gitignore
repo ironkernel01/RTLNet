@@ -41,10 +41,17 @@ xsim.*
 .lock
 *.lpr
 
-# Build outputs (store release bitstreams under releases/ instead)
+# Build outputs (demo and release images are copied to demos/ by demos/demorelease.bat and are tracked there)
 build/
 output/
 *.bit
+!demos/**/*.bit
+# Never commit a High profile netlist (the demos are bitstreams only)
+*.edf
+*.edn
+*_funcsim.v
+*_stub.v
+demos/**/netlist/
 *.bin
 *.mcs
 *.prm
