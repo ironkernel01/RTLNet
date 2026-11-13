@@ -33,8 +33,13 @@
 //     module chooses the 4x4 or the 8x8 transform per macroblock; clear: the 8x8 transform on every inter macroblock). HP_T8_COUNT (0x0C8, read only):
 //     [15:0] macroblocks of the last picture coded with the 8x8 transform, [31:16] with the 4x4 transform (inter macroblocks with luma residual;
 //     all engines added). With HIGH_PROFILE = 0 both registers read 0 and the logic is that of the Constrained Baseline encoder.
+//   * Deblocking filter (parameter DEBLOCK, default 1; VERSION 0x11122C04, CAPS bit 22): DBK_CTRL (0x0E0) bit 0 enable (reset 1 with DEBLOCK, writes of 0 and 1 are kept; reads 0 and
+//     is ignored without the filter), [7:4] alpha_c0_offset_div2 and [11:8] beta_offset_div2 (4 bit two's complement, a value outside -6..+6 leaves its field unchanged);
+//     DBK_STATUS (0x0E4, read only) [0] filter present, [1] enable applied to the last started picture, [11:8] alpha and [15:12] beta applied. The applied values
+//     are latched at the accepted start (cfg_dbk_*), so a change while a picture runs takes effect at the next picture.
 // Language: SystemVerilog-2012.
 // Revision: 11-12-2026
+//   * 11-12-2026: deblocking filter: DBK_CTRL, DBK_STATUS, CAPS bit 22, VERSION 0x11122C04.
 //   * 11-12-2026: interrupt controller: IRQ_STATUS, IRQ_ENABLE, IRQ_FORCE, CAPS bit 21 and [31:24], VERSION 0x11122C03; irq = IRQ_EN and an enabled event.
 //   * 11-11-2026: High profile seam: CAPS bit 20, HP_CTRL, HP_STATUS.
 //   * 11-12-2026: HP_CTRL bit 1 and HP_STATUS bit 5 (8x8 transform enable).
@@ -51,7 +56,8 @@ module rtlnet_h264_enc_regs #(
   parameter int MAX_MB_W     = 120,
   parameter int MAX_MB_H     = 68,
   parameter int NUM_ENGINES  = 1,
-  parameter bit HIGH_PROFILE = 1'b0
+  parameter bit HIGH_PROFILE = 1'b0,
+  parameter bit DEBLOCK      = 1'b1
 )(
   // Register clock and synchronous active-low reset.
   input  logic        clk,
@@ -110,6 +116,11 @@ module rtlnet_h264_enc_regs #(
   input  logic [3:0]  hp_caps,
   input  logic [15:0] hp_seconds_left,
   input  logic        hp_chg,
+
+  // Deblocking filter control (DEBLOCK = 1; else 0): the values latched at the start of a picture, stable while the engines run.
+  output logic        cfg_dbk_en,
+  output logic signed [3:0] cfg_dbk_a,
+  output logic signed [3:0] cfg_dbk_b,
 
   // Engine status and events, clk domain: busy level, one-clock pulses done, slice_pulse and the error
   // pulses, and the statistics and pointer values.
@@ -185,6 +196,8 @@ module rtlnet_h264_enc_regs #(
   localparam logic [11:0] REG_HP_CTRL     = 12'h0C0;   // [0] hp_enable, [1] hp_t8_enable (High profile seam builds)
   localparam logic [11:0] REG_HP_STATUS   = 12'h0C4;   // see the header
   localparam logic [11:0] REG_HP_T8CNT    = 12'h0C8;   // [15:0] macroblocks of the last picture with the 8x8 transform, [31:16] with the 4x4 transform
+  localparam logic [11:0] REG_DBK_CTRL    = 12'h0E0;   // [0] enable, [7:4] alpha_c0_offset_div2, [11:8] beta_offset_div2 (4 bit two's complement, -6..6)
+  localparam logic [11:0] REG_DBK_STATUS  = 12'h0E4;   // [0] present, [1] applied to the last started picture, [11:8] alpha, [15:12] beta applied
   localparam logic [11:0] REG_IRQ_STATUS  = 12'h0D0;   // sticky event bits, write 1 to clear
   localparam logic [11:0] REG_IRQ_ENABLE  = 12'h0D4;   // one enable bit per source, reset 0
   localparam logic [11:0] REG_IRQ_FORCE   = 12'h0D8;   // write only: a 1 sets the status bit
@@ -205,7 +218,7 @@ module rtlnet_h264_enc_regs #(
   localparam int HP_STATUS_AUTO_BIT     = 6;
 
   localparam logic [31:0] CORE_ID      = id4("H", "2", "6", "4");
-  localparam logic [31:0] CORE_VERSION = 32'h1112_2C03;   // 11-12, interrupt controller (the earlier registers are those of 11-10 phase 2c-2)
+  localparam logic [31:0] CORE_VERSION = 32'h1112_2C04;   // 11-12, deblocking filter (2C03: interrupt controller; the earlier registers are those of 11-10 phase 2c-2)
   // Interrupt sources: bit numbers of IRQ_STATUS, IRQ_ENABLE and IRQ_FORCE; IRQ_IMPL is the mask of the implemented ones.
   localparam int IRQ_PIC_DONE     = 0;
   localparam int IRQ_ERR          = 1;
@@ -215,8 +228,8 @@ module rtlnet_h264_enc_regs #(
   localparam int IRQ_PIC_START    = 5;
   localparam logic [7:0] IRQ_IMPL = HIGH_PROFILE ? 8'h3F : 8'h27;
   // CAPS: [7:0] MAX_MB_W, [15:8] MAX_MB_H, [19:16] NUM_ENGINES, [20] HP_SEAM (HIGH_PROFILE build), [21] IRQ (interrupt registers present),
-  // [31:24] implemented interrupt sources.
-  localparam logic [31:0] CORE_CAPS    = {IRQ_IMPL, 2'd0, 1'b1, HIGH_PROFILE, 4'(NUM_ENGINES), 8'(MAX_MB_H), 8'(MAX_MB_W)};
+  // [22] DBK (the deblocking filter is present), [31:24] implemented interrupt sources.
+  localparam logic [31:0] CORE_CAPS    = {IRQ_IMPL, 1'b0, DEBLOCK, 1'b1, HIGH_PROFILE, 4'(NUM_ENGINES), 8'(MAX_MB_H), 8'(MAX_MB_W)};
 
   logic        irq_en;
   logic [7:0]  irq_status;
@@ -237,6 +250,12 @@ module rtlnet_h264_enc_regs #(
   logic [7:0]  err_new;
   logic [31:0] status_word;
   logic [31:0] hp_status_word;
+  logic        dbk_en_q;
+  logic signed [3:0] dbk_a_q;
+  logic signed [3:0] dbk_b_q;
+  logic        dbk_ap_en;
+  logic signed [3:0] dbk_ap_a;
+  logic signed [3:0] dbk_ap_b;
 
   assign err_any = err_cfg || err_axi || err_rptr || err_busy;
   assign err_new = err_cfg ? ERR_CONFIG : (err_busy ? ERR_BUSY : (err_rptr ? ERR_RPTR : ERR_AXI));
@@ -310,6 +329,10 @@ module rtlnet_h264_enc_regs #(
     end
   endgenerate
 
+  assign cfg_dbk_en = dbk_ap_en;
+  assign cfg_dbk_a  = dbk_ap_a;
+  assign cfg_dbk_b  = dbk_ap_b;
+
   always_ff @(posedge clk) begin
     if (!resetn) begin
       start           <= 1'b0;
@@ -344,6 +367,12 @@ module rtlnet_h264_enc_regs #(
       cfg_ring_size   <= '0;
       cfg_idx_base    <= '0;
       cfg_idx_entries <= '0;
+      dbk_en_q        <= DEBLOCK;
+      dbk_a_q         <= 4'sd0;
+      dbk_b_q         <= 4'sd0;
+      dbk_ap_en       <= 1'b0;
+      dbk_ap_a        <= 4'sd0;
+      dbk_ap_b        <= 4'sd0;
       rptr_wr         <= '0;
       rptr_val        <= '0;
       idx_rptr_wr     <= '0;
@@ -359,6 +388,12 @@ module rtlnet_h264_enc_regs #(
       idx_rptr_wr <= '0;
       stall_q     <= |ring_stall;
       lic_q       <= hp_licensed;
+      // The deblocking filter state in force for a picture is the register state at the accepted start.
+      if (start && !busy) begin
+        dbk_ap_en <= dbk_en_q;
+        dbk_ap_a  <= dbk_a_q;
+        dbk_ap_b  <= dbk_b_q;
+      end
 
       // IRQ_STATUS: an event or a force sets, a written 1 clears, and an event in the clock of the clear wins.
       irq_status <= (irq_status | irq_event | ((reg_wr_en && (reg_wr_addr == REG_IRQ_FORCE)) ? (reg_wr_data[7:0] & IRQ_IMPL) : 8'd0)) &
@@ -411,6 +446,14 @@ module rtlnet_h264_enc_regs #(
             end
           end
           REG_IRQ_ENABLE:  irq_enable      <= reg_wr_data[7:0] & IRQ_IMPL;
+          REG_DBK_CTRL: begin
+            if (DEBLOCK) begin
+              dbk_en_q <= reg_wr_data[0];
+              // An offset outside -6..+6 leaves its field unchanged.
+              if ($signed(reg_wr_data[7:4]) >= -4'sd6 && $signed(reg_wr_data[7:4]) <= 4'sd6)   dbk_a_q <= $signed(reg_wr_data[7:4]);
+              if ($signed(reg_wr_data[11:8]) >= -4'sd6 && $signed(reg_wr_data[11:8]) <= 4'sd6) dbk_b_q <= $signed(reg_wr_data[11:8]);
+            end
+          end
           REG_MB_W:        cfg_mb_w        <= reg_wr_data[7:0];
           REG_MB_H:        cfg_mb_h        <= reg_wr_data[7:0];
           REG_SLICES:      cfg_slices      <= reg_wr_data[7:0];
@@ -527,6 +570,8 @@ module rtlnet_h264_enc_regs #(
         REG_HP_CTRL:     reg_rd_data <= {29'd0, hp_t8_auto, hp_t8_enable, hp_enable};
         REG_HP_T8CNT:    reg_rd_data <= HIGH_PROFILE ? {hp_t8_n4, hp_t8_n8} : 32'd0;
         REG_HP_STATUS:   reg_rd_data <= hp_status_word;
+        REG_DBK_CTRL:    reg_rd_data <= DEBLOCK ? {20'd0, dbk_b_q, dbk_a_q, 3'd0, dbk_en_q} : 32'd0;
+        REG_DBK_STATUS:  reg_rd_data <= DEBLOCK ? {16'd0, dbk_ap_b, dbk_ap_a, 6'd0, dbk_ap_en, 1'b1} : 32'd0;
         REG_IRQ_STATUS:  reg_rd_data <= {24'd0, irq_status};
         REG_IRQ_ENABLE:  reg_rd_data <= {24'd0, irq_enable};
         default:         reg_rd_data <= '0;

@@ -88,8 +88,17 @@
 `ifndef TB_MEM_LOG2
   `define TB_MEM_LOG2 20
 `endif
+`ifndef TB_DEBLOCK
+  `define TB_DEBLOCK 1'b1     // 0: the build without the deblocking filter (DEBLOCK 0)
+`endif
 `ifndef TB_HIGH_PROFILE
   `define TB_HIGH_PROFILE 1'b0
+`endif
+`ifndef TB_HP_TOOL_T8
+  `define TB_HP_TOOL_T8 1'b1      // HP_T8 of the top: the seam-side 8x8 transform logic (0: not built)
+`endif
+`ifndef TB_HP_TOOL_AUTO
+  `define TB_HP_TOOL_AUTO 1'b1    // HP_T8_AUTO of the top: the seam-side adaptive-choice logic (0: not built)
 `endif
 `ifndef TB_SR
   `define TB_SR 16
@@ -176,7 +185,7 @@ module tb_rtlnet_h264_top;
   logic [15:0]       wstrb_m;
   logic              irq;
 
-  rtlnet_h264_top #(.NUM_ENGINES(NE), .SR(`TB_SR), .HIGH_PROFILE(`TB_HIGH_PROFILE)) dut (
+  rtlnet_h264_top #(.NUM_ENGINES(NE), .SR(`TB_SR), .HIGH_PROFILE(`TB_HIGH_PROFILE), .HP_T8(`TB_HP_TOOL_T8), .HP_T8_AUTO(`TB_HP_TOOL_AUTO), .DEBLOCK(`TB_DEBLOCK)) dut (
     .enc_clk(enc_clk), .enc_resetn(resetn), .s_axi_aclk(s_clk), .s_axi_aresetn(resetn),
     .s_axi_awaddr(awaddr), .s_axi_awvalid(awvalid_l), .s_axi_awready(awready_l),
     .s_axi_wdata(wdata_l), .s_axi_wstrb(4'hF), .s_axi_wvalid(wvalid_l), .s_axi_wready(wready_l),
@@ -591,6 +600,22 @@ module tb_rtlnet_h264_top;
       mv_true[e] = 0;
     end
     pic_is_p = (gop.len() > p) && (gop.getc(p) == "P");
+    // +DBKCTL=<one hex digit per picture>: DBK_CTRL written before the picture, bit 0 the filter enable, bits 3:1 an offset code o (alpha = o, beta = -o
+    // for o <= 6, so one digit covers both signs); the last digit repeats. Without the plusarg the register keeps its reset value (filter on).
+    begin
+      string dbkctl;
+      if ($value$plusargs("DBKCTL=%s", dbkctl) && (dbkctl.len() > 0)) begin
+        automatic int di = (dbkctl.len() > p) ? p : (dbkctl.len() - 1);
+        automatic int dv = (dbkctl.getc(di) >= "a") ? (dbkctl.getc(di) - "a" + 10) : (dbkctl.getc(di) - "0");
+        automatic int oc = (dv >> 1) & 7;
+        automatic int ao = oc;
+        automatic int bo = (oc > 6) ? 0 : -oc;
+        reg_write(12'h0E0, 32'((dv & 1) | ((ao & 15) << 4) | ((bo & 15) << 8)));
+      end
+`ifdef TB_DBK_OFF
+      else reg_write(12'h0E0, 32'd0);   // the define TB_DBK_OFF switches the filter off for runs that compare streams with the entropy models
+`endif
+    end
 `ifdef TB_HP_ENABLE
     // +HPCTL=<one digit per picture>: HP_CTRL written before the picture (0 baseline, 1 High, 2 baseline with the 8x8 request, 3 High with the 8x8
     // transform); the engine applies a change at the picture start and forces an IDR picture there.
@@ -733,9 +758,10 @@ module tb_rtlnet_h264_top;
     tb_check(v == 32'h48323634, $sformatf("ID %08x", v));
     reg_read(R_CAPS, v);
     tb_check(v[7:0] == 8'd120 && v[15:8] == 8'd68 && v[19:16] == 4'(NE), $sformatf("CAPS %08x", v));
+    tb_check(v[22] == `TB_DEBLOCK, $sformatf("CAPS bit 22 (deblocking filter) %08x", v));
     tb_check(v[21] == 1'b1 && v[31:24] == (`TB_HIGH_PROFILE ? 8'h3F : 8'h27), $sformatf("CAPS interrupt bits %08x", v));
     reg_read(R_VERSION, v);
-    tb_check(v == 32'h1112_2C03, $sformatf("VERSION %08x", v));
+    tb_check(v == 32'h1112_2C04, $sformatf("VERSION %08x", v));
     reg_read(R_IRQ_ENABLE, v);
     tb_check(v == 32'd0 && !irq, "reset: nothing enabled, irq low");
     irq_mode = $test$plusargs("IRQ");

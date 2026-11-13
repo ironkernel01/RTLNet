@@ -3,12 +3,12 @@
 | Item | Value |
 |---|---|
 | Core | `rtlnet_axi_arbiter` |
-| Document revision | 11-09-2026 |
+| Document revision | 11-12-2026 |
 | Language | SystemVerilog-2012 (RTL, benches), C11 (driver) |
 | Position | between the DMA masters and the CPU caches and the memory-controller AXI port (`documentation/gige.md` sections 5.1, 6, 7) |
 | Register map revision | `VERSION` = `0x11092026`, `ID` = `0x41524254` ("ARBT") |
-| Verification | Active-HDL 11.1: `tb_rtlnet_axi_arbiter` (11 configurations + 2 negative controls); host driver test |
-| Synthesis | Vivado 2026.1 out of context, xc7a200tsbg484-1: PASS, 0 critical warnings; 1477 LUT, 1096 FF, 0 BRAM (3 masters, 128-bit, no narrow or WRAP master) |
+| Verification | Active-HDL 11.1: `tb_rtlnet_axi_arbiter` (16 configurations + 4 negative controls: 11 configurations and 2 controls of 11-09-2026, 5 with `ADDR_REG` 0 and 2 latency controls of 11-12-2026); host driver test |
+| Synthesis | Vivado 2026.1 out of context, xc7a200tsbg484-1: PASS, 0 critical warnings; 1477 LUT, 1096 FF, 0 BRAM (3 masters, 128-bit, no narrow or WRAP master, state of 11-09-2026); section 6 has the board configuration before and after the two-clock grant of 11-12-2026 |
 
 The arbiter shares the one AXI4 port of the DDR3 controller between up to eight masters. Arbitration is per transaction
 and separate for writes and reads. A burst the memory controller cannot execute (not INCR unless the master is in `WRAP_MASK` and the burst is a legal WRAP, not full width unless the master is in
@@ -53,6 +53,7 @@ All data ports are packed vectors, master `i` at `[i*W +: W]`, on one clock.
 | `NARROW_MASK` | `'0` | masters whose bursts may use any `AxSIZE` up to the full width (the CPU's former write-through cache issued 32-bit stores; since 11-10-2026 the data cache is write-back and its stores are 4-beat full-width bursts, measured on the board, so the bit is a margin on the board and unused by stores); the other masters must use the full width |
 | `WRAP_MASK` | `'0` | masters whose WRAP bursts of 2, 4, 8 or 16 beats at a size-aligned address are legal (the CPU caches fill a line critical word first); for every other master a WRAP is illegal |
 | `MAX_OUTSTANDING` | 8 | bursts in flight per direction, whole arbiter, 1..255 |
+| `ADDR_REG` | 1 | 1 = put a register slice on every master's AW and AR channel (one clock more latency per burst address; it cuts the timing paths from the masters into the grant logic); 0 = leave the slices out (the grant still takes two clocks) |
 
 `IDX_W` = `$clog2(NUM_MASTERS)`, at least 1; the master index is in the upper ID bits.
 
@@ -71,7 +72,22 @@ Write and read arbitrate independently, once per transaction, on the AW and AR c
    (AR) register must also be free or accepted in the same clock.
 
 A granted legal burst is registered into the memory-side AW (AR) port with the master index added to the upper ID bits.
-One AW (AR) is accepted per clock.
+
+Two-clock grant (11-12-2026, timing). The grant is split so that no master signal reaches the output registers through the whole decision:
+
+* With `ADDR_REG` 1 every master's AW and AR pass a register slice (`rtlnet_axi_arbiter_slice`: a main and a skid register, full throughput, the
+  ready towards the master comes from a flop, nothing behind the slice depends on the master's valid or address fields in the same clock).
+* Clock 1: the request mask and the pick of steps 1 to 3 run on the offered requests, the burst legality of every master's offered burst
+  is evaluated beside them, and the winner's index and its legality flags are registered (the registered grant).
+* Clock 2: the registered grant fires when the window of step 4 is open: counters, W-order queue push, error state and the memory-side AW (AR)
+  register load from the winner's fields, the round-robin pointer moves, and the slice (or the master with `ADDR_REG` 0) receives its ready.
+  A registered grant that cannot fire is chosen again from the current requests in every clock, so a high-priority master that arrives meanwhile
+  still wins; once the grant fires the winner's offered burst is consumed and the next grant starts with clock 1.
+* The order of grants for the same arrival order is the order of the one-clock arbiter; what changes is the time. One AW (AR) is granted per
+  two clocks and direction (every burst of the encoder and the video DMA has 8 beats or more; the CPU caches issue 1- and 4-beat bursts and wait
+  two clocks more per address).
+* Latency from the clock a master's valid is first high to the clock the memory-side valid is first high, with the arbiter idle (measured by
+  the bench, both directions, every master): **3 clocks with `ADDR_REG` 1, 2 with `ADDR_REG` 0**; the arbiter before 11-12-2026 took 1.
 
 Write data: the granted master's index is pushed into the W-order queue at the AW grant. The W channel connects to the
 master at the head of that queue until its WLAST beat is accepted, then the entry pops. There is no W interleaving; a
@@ -80,7 +96,7 @@ master may present W before its AW is granted and waits.
 Responses: B and R are routed by the upper ID bits and carry the master's original ID. The memory controller must
 answer in order of acceptance for each ID (it does for the DDR3 controller).
 
-Wait cycles: a clock with `awvalid` or `arvalid` high and not granted counts in the master's `WAIT_CYCLES`.
+Wait cycles: a clock with a request inside the arbiter (the output of the slice with `ADDR_REG` 1, the master's `awvalid` or `arvalid` with 0) high and not granted counts in the master's `WAIT_CYCLES`; a request has at least one such clock, because the grant takes two.
 
 Starvation: a high-priority master that requests continuously holds off the round-robin group by design. Within the
 round-robin group a waiting master sees at most `NUM_MASTERS - 1` grants of other round-robin masters.
@@ -187,13 +203,33 @@ Vivado 2026.1, out-of-context synthesis, xc7a200tsbg484-1 (`scripts/rtlnet_synth
 | Slice register | 1047 (0.39 %) |
 | Block RAM | 0 |
 
+(State of 11-09-2026.) Board configuration (`testbench/arb_synth.tcl`: 4 masters, 29-bit address, 128-bit data, `ID_W` 2, `HIGH_PRIO_MASK` 0010, `NARROW_MASK` 0001, `WRAP_MASK` 0001,
+`MAX_OUTSTANDING` 8, `clk` 90 MHz, every input and output timed against `clk`, post-synthesis estimate without placement), before and after the two-clock grant:
+
+| Version | LUT | FF | Worst path levels | Worst slack (WNS) | Worst path |
+|---|---|---|---|---|---|
+| before 11-12-2026 (one-clock grant) | 1,793 | 1,225 | 14 | +0.341 ns | `rd_err_pend_reg` to `m_axi_araddr_reg/CE` (the read grant) |
+| `ADDR_REG` 1 (default) | 2,072 | 1,957 | 7 | +6.313 ns | slice register to `g1_ar_fail_reg` (the legality evaluation); every other endpoint has 3 levels or fewer |
+| `ADDR_REG` 0 | 1,857 | 1,237 | 4 (of the 40 worst endpoints) | +6.044 ns | register file reset to `cap_addr_q` |
+
+The slices and the registered grant cost 279 LUT and 732 FF with `ADDR_REG` 1, 64 LUT and 12 FF with `ADDR_REG` 0. The 4 KiB check was
+rewritten from `aligned_start + bytes > 4096` to the carry of `aligned_start + (len << size)` (the same predicate; the bench's own `exp_fail` agrees
+in every case), which removed 3 levels from the legality path.
+
 The W-order queue is a shift queue in flops (8 entries of 4 bits); it is deliberately not a RAM. The data paths are
-combinational multiplexers from the packed vectors to the registered memory-side AW/AR ports and the memory-side W
-port; the W mux is the widest (`NUM_MASTERS` x `DATA_W`).
+combinational multiplexers from the register slices (from the packed vectors with `ADDR_REG` 0) to the registered memory-side AW/AR ports, driven by the registered grant index, and the
+combinational memory-side W port; the W mux is the widest (`NUM_MASTERS` x `DATA_W`).
 
 ---
 
 ## 7. Verification
+
+11-12-2026 (two-clock grant): the bench takes a grant from the arbiter's own fire signals (`dut.aw_fire`, `dut.ar_fire`, and the master index the arbiter chose); a descriptor waits in a per-master queue
+from the handshake on the master's port (the slice accepts it, or with `ADDR_REG` 0 the grant) until its grant. Priority and round robin are checked against the requests of the clock before the fire
+(what the pick saw), `WAIT_CYCLES` against the requests inside the arbiter. New directed cases (`directed_grants`): the latency of a lone burst of every master in both directions (3 or 2 clocks)
+and back-to-back 8-beat bursts of every master at once with the monitors on. `TB_ADDR_REG` selects the parameter: the regression runs the 11 configurations of 11-09-2026 with `ADDR_REG` 1 and five with
+`ADDR_REG` 0 (3 masters 128- and 64-bit, 5 masters, a narrow and WRAP master, 1 master), the two controls of 11-09-2026 and two latency controls (`INJECT_LATENCY` adds a clock to the expected latency: the bench must fail).
+Result: `RTLNET_REGRESSION` for `axi_arbiter`: 20 passed, 0 failed.
 
 `tb_rtlnet_axi_arbiter` drives `NUM_MASTERS` bench masters (random legal bursts, several IDs, random strobes) through
 the arbiter into `rtlnet_tb_axi4_mem` (`cores/rtlnet_common/testbench`, the AXI4 memory model for every DDR3 bench; it
@@ -331,7 +367,8 @@ The memory-controller wrapper connects to the `m_axi_*` ports; widths follow `ID
 - Address alignment is checked for a WRAP only; the memory controller handles an unaligned INCR start.
 - The capture holds one burst (the first); `AxCACHE` is not captured.
 - A master with an unanswered illegal burst is not arbitrated in that direction until the answer is delivered.
-- Grants are one per clock and per direction; a legal grant needs the memory-side register free or accepted that clock.
+- Grants are one per two clocks and per direction (section 2); a legal grant needs the memory-side register free or accepted in its second clock.
+- With `ADDR_REG` 0 a master must hold `AxVALID` and its address fields until the ready (AXI4 rule): the grant is registered one clock before the burst is taken.
 - A continuously requesting high-priority master can starve the round-robin group.
 - The memory controller must return responses in order per ID (reordering across different IDs is allowed).
 - No W-order skid: a master's W beat is accepted only when the memory controller accepts it (legal burst) or at once

@@ -47,9 +47,17 @@
 //   width [128], TB_HP high-priority mask [1], TB_LAT memory read latency in
 //   clocks [0], TB_GAP 1 for random ready/valid gaps on the memory model and
 //   the masters [0], TB_SIZE burst count scale in percent [100], TB_NARROW mask of
-//   masters that may issue narrow transfers [0], TB_WRAP mask of masters in WRAP_MASK [0].
+//   masters that may issue narrow transfers [0], TB_WRAP mask of masters in WRAP_MASK [0], TB_ADDR_REG the ADDR_REG
+//   parameter of the arbiter (register slices on the AW and AR channels) [1].
+//   Grants: the arbiter grants in two clocks (registered grant, then fire). The bench takes a grant from the arbiter's own
+//   fire signals (dut.aw_fire, dut.ar_fire) with the master it chose; a master's descriptor waits in a per-master queue from
+//   the handshake on its port (accepted by the slice or the grant itself) until its grant. Priority and round robin are
+//   checked against the requests of the clock before the fire (the requests the pick saw), WAIT_CYCLES against the
+//   requests inside the arbiter (after the slices).
 // Language: SystemVerilog-2012 (simulation only).
-// Revision: 11-09-2026
+// Revision: 11-12-2026
+//   * 11-12-2026: TB_ADDR_REG; grants taken from the arbiter's fire signals (two-clock grant, register slices); directed cases of
+//     simultaneous requests, back-to-back bursts and the grant latency.
 //   * 11-09-2026: initial version.
 //   * 11-09-2026: TB_NARROW (NARROW_MASK): narrow legal traffic with strobes, directed narrow
 //     cases, narrow burst crossing 4 KiB, NARROW register.
@@ -84,6 +92,9 @@
 `ifndef TB_WRAP
   `define TB_WRAP 0
 `endif
+`ifndef TB_ADDR_REG
+  `define TB_ADDR_REG 1
+`endif
 
 module tb_rtlnet_axi_arbiter;
 
@@ -105,6 +116,7 @@ module tb_rtlnet_axi_arbiter;
   localparam logic [NM-1:0] WRAPM = `TB_WRAP;
   localparam int GAPS  = `TB_GAP;
   localparam int LAT   = `TB_LAT;
+  localparam bit ADDRREG = `TB_ADDR_REG;
 
   localparam int OUTS_M    = 12;         // outstanding bursts per master and direction
   localparam int IDS       = 4;          // IDs used per master
@@ -203,7 +215,7 @@ module tb_rtlnet_axi_arbiter;
   logic        err_irq;
 
   rtlnet_axi_arbiter #(.NUM_MASTERS(NM), .ADDR_W(AW), .DATA_W(DW), .ID_W(IDW), .HIGH_PRIO_MASK(HPM),
-                       .NARROW_MASK(NARM), .WRAP_MASK(WRAPM), .MAX_OUTSTANDING(MAXO)) dut (
+                       .NARROW_MASK(NARM), .WRAP_MASK(WRAPM), .MAX_OUTSTANDING(MAXO), .ADDR_REG(ADDRREG)) dut (
     .clk(clk), .resetn(resetn), .s_axi_aclk(cpu_clk), .s_axi_aresetn(cpu_resetn),
     .s_awid(s_awid), .s_awaddr(s_awaddr), .s_awlen(s_awlen), .s_awsize(s_awsize), .s_awburst(s_awburst),
     .s_awvalid(s_awvalid), .s_awready(s_awready),
@@ -455,6 +467,9 @@ module tb_rtlnet_axi_arbiter;
   desc_t aw_chk_q [$];
   desc_t w_chk_q  [$];
   desc_t ar_chk_q [$];
+  // Descriptors accepted on a master's port and not yet granted, per master (FIFO: the slice keeps the order of one master).
+  desc_t aw_pend_q [NM][$];
+  desc_t ar_pend_q [NM][$];
 
   int tot_legal_wr   = 0;
   int tot_legal_rd   = 0;
@@ -489,6 +504,7 @@ module tb_rtlnet_axi_arbiter;
       aw_wait_c[g] = 0; ar_wait_c[g] = 0;
     end
     aw_chk_q.delete(); w_chk_q.delete(); ar_chk_q.delete();
+    for (int g = 0; g < NM; g++) begin aw_pend_q[g].delete(); ar_pend_q[g].delete(); end
     wr_if = 0; rd_if = 0; mem_wr_if = 0; mem_rd_if = 0; wm_beat = 0;
     inject_q.delete();
   endtask
@@ -508,11 +524,11 @@ module tb_rtlnet_axi_arbiter;
     clear_expectations();
   end
 
-  // Wait counts: a clock with awvalid or arvalid high and not granted.
+  // Wait counts: a clock with an address request inside the arbiter (after the slice) and not granted.
   always @(posedge clk) begin
     if (resetn === 1'b1) begin
       for (int g = 0; g < NM; g++) begin
-        if ((s_awvalid[g] === 1'b1 && s_awready[g] !== 1'b1) || (s_arvalid[g] === 1'b1 && s_arready[g] !== 1'b1)) begin
+        if ((dut.a_awvalid[g] === 1'b1 && dut.a_awready[g] !== 1'b1) || (dut.a_arvalid[g] === 1'b1 && dut.a_arready[g] !== 1'b1)) begin
           exp_wait[g]++;
         end
       end
@@ -835,6 +851,10 @@ module tb_rtlnet_axi_arbiter;
   // Channel bookkeeping shared by the master models
   // ---------------------------------------------------------------------------
   task automatic note_aw_grant(input desc_t d);
+    aw_pend_q[d.g].push_back(d);
+  endtask
+
+  task automatic do_aw_grant(input desc_t d);
     if (d.burst == 2'b10) begin
       if (d.kind == KIND_LEGAL) tot_wrap_legal++;
       else                      tot_wrap_ill++;
@@ -854,6 +874,10 @@ module tb_rtlnet_axi_arbiter;
   endtask
 
   task automatic note_ar_grant(input desc_t d);
+    ar_pend_q[d.g].push_back(d);
+  endtask
+
+  task automatic do_ar_grant(input desc_t d);
     if (d.burst == 2'b10) begin
       if (d.kind == KIND_LEGAL) tot_wrap_legal++;
       else                      tot_wrap_ill++;
@@ -1234,24 +1258,64 @@ module tb_rtlnet_axi_arbiter;
   end
 
   // ---------------------------------------------------------------------------
-  // Priority and round-robin monitors (legal-only phases)
+  // Grant monitor, priority and round-robin monitors
   // ---------------------------------------------------------------------------
+  // The grant of a clock is the arbiter's fire with the master it chose; the bench processes it a picosecond after the edge, after the master
+  // models have taken their handshakes of that edge (with ADDR_REG 0 the handshake and the grant are the same clock). The monitors compare the
+  // grant with the requests of the clock before (aw_req and ar_req of the arbiter: what the pick saw, a master with an unanswered illegal
+  // burst excluded) and count, for every round-robin master, the grants of other round-robin masters it saw while it waited.
+  logic [NM-1:0] aw_req_d1 = '0;
+  logic [NM-1:0] ar_req_d1 = '0;
+  int            grant_aw_n = 0;
+  int            grant_ar_n = 0;
   always @(posedge clk) begin
     logic [NM-1:0] v;
-    logic [NM-1:0] r;
     logic [NM-1:0] hpv;
     int            gi;
     int            low;
     bit            rr_valid;
+    bit            f_aw;
+    bit            f_ar;
+    int            ix_aw;
+    int            ix_ar;
+    logic [NM-1:0] rq_aw;
+    logic [NM-1:0] rq_ar;
+    f_aw  = (resetn === 1'b1) && (dut.aw_fire === 1'b1);
+    f_ar  = (resetn === 1'b1) && (dut.ar_fire === 1'b1);
+    ix_aw = int'(dut.aw_idx);
+    ix_ar = int'(dut.ar_idx);
+    rq_aw = aw_req_d1;
+    rq_ar = ar_req_d1;
+    aw_req_d1 = dut.aw_req;
+    ar_req_d1 = dut.ar_req;
+    #1ps;
+    if (f_aw) begin
+      grant_aw_n++;
+      if (aw_pend_q[ix_aw].size() == 0) tb_error($sformatf("AW grant of master %0d with no burst accepted from it", ix_aw));
+      else begin
+        desc_t d;
+        d = aw_pend_q[ix_aw].pop_front();
+        do_aw_grant(d);
+      end
+    end
+    if (f_ar) begin
+      grant_ar_n++;
+      if (ar_pend_q[ix_ar].size() == 0) tb_error($sformatf("AR grant of master %0d with no burst accepted from it", ix_ar));
+      else begin
+        desc_t d;
+        d = ar_pend_q[ix_ar].pop_front();
+        do_ar_grant(d);
+      end
+    end
     if (mon_en && resetn === 1'b1) begin
       // AW channel.
-      v = s_awvalid; r = s_awready; hpv = v & HPM;
-      gi = -1;
-      for (int i = 0; i < NM; i++) if (v[i] === 1'b1 && r[i] === 1'b1) gi = i;
+      v = rq_aw; hpv = v & HPM;
+      gi = f_aw ? ix_aw : -1;
       if (gi >= 0) begin
         low = -1;
         for (int i = NM - 1; i >= 0; i--) if (hpv[i]) low = i;
         rr_valid = ((v & ~HPM) != '0);
+        tb_check(v[gi] === 1'b1, $sformatf("AW grant of master %0d which did not request in the clock before", gi));
         if (hpv != '0) begin
           tb_check(gi == low, $sformatf("AW arbitration: master %0d granted while high-priority master %0d requests", gi, low));
           hp_grants++;
@@ -1273,12 +1337,12 @@ module tb_rtlnet_axi_arbiter;
       end
       for (int i = 0; i < NM; i++) if (v[i] !== 1'b1) aw_wait_c[i] = 0;
       // AR channel.
-      v = s_arvalid; r = s_arready; hpv = v & HPM;
-      gi = -1;
-      for (int i = 0; i < NM; i++) if (v[i] === 1'b1 && r[i] === 1'b1) gi = i;
+      v = rq_ar; hpv = v & HPM;
+      gi = f_ar ? ix_ar : -1;
       if (gi >= 0) begin
         low = -1;
         for (int i = NM - 1; i >= 0; i--) if (hpv[i]) low = i;
+        tb_check(v[gi] === 1'b1, $sformatf("AR grant of master %0d which did not request in the clock before", gi));
         if (hpv != '0) begin
           tb_check(gi == low, $sformatf("AR arbitration: master %0d granted while high-priority master %0d requests", gi, low));
         end
@@ -1357,6 +1421,49 @@ module tb_rtlnet_axi_arbiter;
     for (int g = 0; g < NM; g++) bursts_left[g] = n;
     run = 1'b1;
     wait_idle(what);
+  endtask
+
+  // Grant latency monitor: clocks from the first clock a master's AW (AR) valid is high to the first clock the master-side valid is high.
+  int  lat_cnt  = 0;
+  int  lat_in   = -1;
+  int  lat_out  = -1;
+  bit  lat_arm  = 1'b0;
+  bit  lat_wr   = 1'b0;
+  int  lat_g    = 0;
+  always @(posedge clk) begin
+    lat_cnt <= lat_cnt + 1;
+    if (lat_arm) begin
+      if (lat_in < 0 && (lat_wr ? (s_awvalid[lat_g] === 1'b1) : (s_arvalid[lat_g] === 1'b1))) lat_in = lat_cnt;
+      if (lat_in >= 0 && lat_out < 0 && (lat_wr ? (m_awvalid === 1'b1) : (m_arvalid === 1'b1))) lat_out = lat_cnt;
+    end
+  end
+
+  // Directed grant cases. (1) Latency of a lone burst of every master, both directions: 3 clocks from the master's valid to the master-side
+  // valid with ADDR_REG 1, 2 with ADDR_REG 0. (2) Back-to-back 8-beat bursts of every master at once, saturated, with the priority and
+  // round-robin monitors on: the grant order and the data are checked by the always-on monitors, the register counters afterwards.
+  task automatic directed_grants();
+    int exp_lat;
+    exp_lat = (ADDRREG ? 3 : 2) + ($test$plusargs("INJECT_LATENCY") ? 1 : 0);
+    set_gaps(1'b0);
+    mode_sel = MODE_OWN; p_wr = 50;
+    for (int g = 0; g < NM; g++) begin
+      for (int dir = 0; dir < 2; dir++) begin
+        lat_g = g; lat_wr = (dir == 0); lat_in = -1; lat_out = -1; lat_arm = 1'b1;
+        inject_q.push_back(build_desc(g, (dir == 0), KIND_LEGAL, MODE_OWN));
+        run = 1'b1;
+        wait_idle("grant latency");
+        lat_arm = 1'b0;
+        tb_check(lat_in >= 0 && lat_out >= 0 && (lat_out - lat_in) == exp_lat,
+                 $sformatf("grant latency master %0d %s: %0d clocks, expected %0d", g, (dir == 0) ? "AW" : "AR", lat_out - lat_in, exp_lat));
+      end
+    end
+    mon_en = 1'b1;
+    len_cap = 7;
+    traffic(scaled(80), "back-to-back 8-beat bursts");
+    len_cap = 255;
+    mon_en = 1'b0;
+    check_counters("after the directed grant cases");
+    check_memory_counts("after the directed grant cases");
   endtask
 
   function automatic int scaled(input int n);
@@ -1803,6 +1910,9 @@ module tb_rtlnet_axi_arbiter;
     tb_check(err_irq === 1'b1, "err_irq high after mixed illegal traffic");
     u_axi.wr(R_STATUS, 32'h1);
     tb_check(err_irq === 1'b0, "err_irq low after clear");
+
+    // Directed grant cases: latency and back-to-back bursts of every master.
+    directed_grants();
 
     // ---- 5. Reset in the middle of traffic ----------------------------------------
     set_gaps(1'b0);

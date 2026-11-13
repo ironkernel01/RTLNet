@@ -46,6 +46,8 @@ Overview:
   * -Transform8x8 on|off|auto: "encoder transform8x8" before the stream starts; -SwitchTransform8x8: the capture starts with the 8x8 transform on, off is sent one third into the
     capture and auto at two thirds (two forced IDR pictures: on to off, off to auto). -Notify interrupt|polled: "encoder notify" before the stream starts; -SwitchNotify: the capture starts in
     interrupt mode, "encoder notify polled" is sent one third into the capture and "encoder notify interrupt" at two thirds; the stream must keep running with 0 dropped pictures.
+  * -Deblock on|off: "encoder deblock" before the stream starts; -SwitchDeblock: the capture starts with the filter on, off is sent one third into the capture and on at two thirds (effective at the next
+    picture, no forced IDR picture). The filter is set back to on after the run.
   * -IrqTest: three seconds after the stream start "encoder irqtest" is sent (a forced ring stall event must reach the interrupt handler); needs interrupt mode.
   * -ForcedIdr <n>: exactly n IDR pictures off the GOP cadence are expected (the forced IDR picture at the license end of the High profile demo netlist).
   * -InputTs <file>: check an existing capture offline (no board, no capture).
@@ -55,6 +57,7 @@ Usage:
   powershell -NoProfile -ExecutionPolicy Bypass -File boards/nexys_video/scripts/stream_test.ps1 [-Mode both] [-Seconds 60]
     [-Port COM3] [-UdpPort 5004] [-HostIp <PC address>] [-Qp 28] [-Gop 30] [-Pattern all -Speed 4] [-Bitrate 2000 [-BufferMs 500]] [-Tag <name>] [-SkipVlc] [-NoBoard] [-InputTs <file> -Width 1280 -Height 720]
 Revision: 11-12-2026
+  * 11-12-2026: -Deblock and -SwitchDeblock (encoder deblock).
   * 11-12-2026: -IrqTest.
   * 11-12-2026: -Transform8x8 auto, -SwitchTransform8x8 ends in auto (off, then auto), -Notify and -SwitchNotify (encoder notify), the transform request is set back to off (the firmware default) after the run.
   * 11-12-2026: -Transform8x8 on|off ("encoder transform8x8" before the stream starts; the full High profile image with the 8x8 transform) and -SwitchTransform8x8
@@ -107,6 +110,8 @@ param(
     [switch]$SwitchTransform8x8,
     [ValidateSet('', 'interrupt', 'polled')][string]$Notify = '',
     [switch]$SwitchNotify,
+    [ValidateSet('', 'on', 'off')][string]$Deblock = '',
+    [switch]$SwitchDeblock,
     [switch]$IrqTest
 )
 $ErrorActionPreference = 'Stop'
@@ -452,6 +457,11 @@ try {
             $t8r = Invoke-Cli $sp "encoder transform8x8 $t8Wanted"
             Add-Result "$m encoder transform8x8 $t8Wanted" ($t8r -match "Transform8x8 $t8Wanted") ($t8r.Trim() -replace '\s+', ' ')
         }
+        $dbWanted = $(if ($SwitchDeblock) { 'on' } else { $Deblock })
+        if ($dbWanted) {
+            $dbr = Invoke-Cli $sp "encoder deblock $dbWanted"
+            Add-Result "$m encoder deblock $dbWanted" ($dbr -match "Deblock $dbWanted,") ($dbr.Trim() -replace '\s+', ' ')
+        }
         $nfWanted = $(if ($SwitchNotify) { 'interrupt' } else { $Notify })
         if ($nfWanted) {
             $nfr = Invoke-Cli $sp "encoder notify $nfWanted"
@@ -511,6 +521,15 @@ try {
             $t8r = Invoke-Cli $sp 'encoder transform8x8 auto'
             Add-Result "$m transform8x8 switch to auto" ($t8r -match 'Transform8x8 auto') ($t8r.Trim() -replace '\s+', ' ')
         }
+        if ($SwitchDeblock) {
+            # Deblocking filter switch in mid-stream: off at one third, on at two thirds of the capture (effective at the next picture, no IDR picture).
+            [void]$capObj.Join([int]($Seconds * 1000 / 3))
+            $dbr = Invoke-Cli $sp 'encoder deblock off'
+            Add-Result "$m deblock switch to off" ($dbr -match 'Deblock off,') ($dbr.Trim() -replace '\s+', ' ')
+            [void]$capObj.Join([int]($Seconds * 1000 / 3))
+            $dbr = Invoke-Cli $sp 'encoder deblock on'
+            Add-Result "$m deblock switch to on" ($dbr -match 'Deblock on,') ($dbr.Trim() -replace '\s+', ' ')
+        }
         if ($SwitchNotify) {
             # Notification switch in mid-stream: polled at one third, interrupt at two thirds of the capture; the stream keeps running.
             [void]$capObj.Join([int]($Seconds * 1000 / 3))
@@ -535,6 +554,7 @@ try {
         [void](Invoke-Cli $sp 'stream stop')
         if ($Profile -or $SwitchProfile) { [void](Invoke-Cli $sp 'encoder profile baseline') }   # leave the board in the default profile
         if ($Transform8x8 -or $SwitchTransform8x8) { [void](Invoke-Cli $sp 'encoder transform8x8 off') }   # and with the default transform request (the 4x4 transform)
+        if ($Deblock -or $SwitchDeblock) { [void](Invoke-Cli $sp 'encoder deblock on') }   # and with the filter on (the firmware default)
         if ($Notify -or $SwitchNotify) { [void](Invoke-Cli $sp 'encoder notify interrupt') }   # and in the default notification mode
         $histN = [Math]::Min(3600, $Seconds + 15)
         $sh = Invoke-Cli $sp "show encoder history $histN" 120000

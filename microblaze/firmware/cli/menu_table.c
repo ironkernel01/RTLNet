@@ -49,6 +49,7 @@
  *  11-12-2026  MenuBuilder AI / Steve Spano    Adaptive transform (High profile stage 3a): encoder transform8x8 on|off|auto (default auto), macroblock counts in show encoder
  *  11-12-2026  MenuBuilder AI / Steve Spano    Transform default: encoder transform8x8 starts at off (the 4x4 transform); on, off and auto stay
  *  11-12-2026  MenuBuilder AI / Steve Spano    Encoder interrupt: encoder notify interrupt|polled (default interrupt), encoder irqtest, notification and interrupt lines in show stream and show encoder
+ *  11-12-2026  MenuBuilder AI / Steve Spano    Deblocking filter: encoder deblock on|off (default on), encoder deblock-offsets <alpha> <beta> (-6..6), Deblocking line in show encoder
  * ===========================================================================
  */
 #include "menu.h"
@@ -157,6 +158,10 @@ const MenuCommandDef g_menu_commands[] = {
       "Interrupt self-test: force an event in the encoder core and check that the interrupt handler counts it (needs a stream in interrupt mode)", cli_encoder_irqtest, MENU_MODE_NONE },
     { "cli_encoder_transform8x8", MENU_MODE_PRIV, "ENCODER TRANSFORM8X8 [STATE]",
       "Transform of inter macroblocks: off (default, 4x4), on (8x8 always) or auto (the module chooses per macroblock); used in the High profile when the netlist offers it", cli_encoder_transform8x8, MENU_MODE_NONE },
+    { "cli_encoder_deblock", MENU_MODE_PRIV, "ENCODER DEBLOCK [STATE]",
+      "In-loop deblocking filter of the encoder core: on (default) or off; effective at the next picture, no IDR picture needed; refused when the build has no filter", cli_encoder_deblock, MENU_MODE_NONE },
+    { "cli_encoder_deblock_offsets", MENU_MODE_PRIV, "ENCODER DEBLOCK-OFFSETS [ALPHA] [BETA]",
+      "Deblocking filter offsets (slice_alpha_c0_offset_div2, slice_beta_offset_div2), each -6..6 (default 0 0); effective at the next picture", cli_encoder_deblock_offsets, MENU_MODE_NONE },
     { "cli_debug_read", MENU_MODE_PRIV, "DEBUG READ [ADDR]",
       "Read a 32-bit word (hex 0x... or decimal address)", cli_debug_read, MENU_MODE_NONE },
     { "cli_debug_write", MENU_MODE_PRIV, "DEBUG WRITE [ADDR] [VALUE]",

@@ -96,7 +96,8 @@ module rtlnet_h264_mb_enc #(
   parameter int    CRAM_AW    = 8,
   parameter int    REF_AW     = 6,
   parameter int    MV_LINE_KB = 1,
-  parameter bit    T8         = 1'b0     // 1: the 8x8 transform of inter macroblocks on the tf_* streams (HIGH_PROFILE builds)
+  parameter bit    T8         = 1'b0,    // 1: the 8x8 transform of inter macroblocks on the tf_* streams (HIGH_PROFILE builds)
+  parameter bit    T8_AUTO    = 1'b1     // 1 (needs T8 = 1): the adaptive choice of the transform per macroblock (request beat, S_T8L); 0: none of it is built
 )(
   // Clock and synchronous active-low reset.
   input  logic                clk,
@@ -133,6 +134,11 @@ module rtlnet_h264_mb_enc #(
   output logic                o_inter,
   output logic                o_skip,
   output logic [3:0]          o_cbp4,
+  // Deblocking filter inputs, valid with done: the 4x4 luma blocks (bit 4 * by + bx) of an inter macroblock with non-zero levels (an 8x8 transform
+  // macroblock: all four blocks of a coded 8x8 block; a dropped residual: none) and the macroblock's motion vector in quarter samples (0 for intra).
+  output logic [15:0]         o_nz16,
+  output logic signed [13:0]  o_mv_x,
+  output logic signed [13:0]  o_mv_y,
   output logic signed [15:0]  o_mvd_x,
   output logic signed [15:0]  o_mvd_y,
 
@@ -297,6 +303,8 @@ module rtlnet_h264_mb_enc #(
   logic [19:0]        cost_in;
   logic [19:0]        cost_ia;
   logic [3:0]         nz8;
+  logic [15:0]        nz16;
+  logic [15:0]        nz16_t8;
   logic               drop_q;
   logic               big_q;
   logic [15:0]        lv_sum;
@@ -332,7 +340,7 @@ module rtlnet_h264_mb_enc #(
   logic               p1w_ok;            // PASS1 of the macroblock's blocks is complete
   assign t8_use_clr = (st == S_IDLE) && start;
   assign t8_sub_set = (st == S_MD2) && t8_en && (cost_in <= cost_ia);
-  assign t8_use_set = t8_sub_set && !t8_auto;
+  assign t8_use_set = t8_sub_set && !(T8_AUTO && t8_auto);
   /* verilator lint_on UNUSEDSIGNAL */
   logic               t8s_done;
   logic               t8r_done;
@@ -359,7 +367,7 @@ module rtlnet_h264_mb_enc #(
   logic               t8_sat_g;
   logic               t8_big_g;
   assign p1w_ok = (fq_rows == 7'd96) && dqy_done_q && dqcb_done_q && dqcr_done_q && (!o_t8sub || t8_sum_seen);
-  assign t8_acc_set = T8 && (st == S_P1W) && p1w_ok && t8_auto_mb && !t8_lum_q && !t8_rej_q;
+  assign t8_acc_set = T8 && T8_AUTO && (st == S_P1W) && p1w_ok && t8_auto_mb && !t8_lum_q && !t8_rej_q;
   assign t8_cost_g = (T8 && t8_use_q) ? t8_cost : 16'd0;
   assign t8_nb4_g  = (T8 && t8_use_q) ? {10'd0, t8_nblk, 2'b00} : 16'd0;
   assign t8_sat_g  = T8 && t8_use_q && t8_sat;
@@ -787,6 +795,11 @@ module rtlnet_h264_mb_enc #(
 
   assign iq_in_v     = p3_s1_v;
   assign iq_in_first = (p3_s1_r == 2'd0);
+  // An 8x8 transform macroblock: the coded 8x8 blocks (t8_nz4, index 2 * by8 + bx8) cover all four of their 4x4 blocks.
+  always_comb begin
+    nz16_t8 = '0;
+    for (int b = 0; b < 16; b++) nz16_t8[b] = t8_nz4[2 * (b / 8) + ((b % 4) / 2)];
+  end
   assign nz8_e       = drop_q ? 4'd0 : ((T8 && t8_use_q) ? t8_nz4 : nz8);
   assign iq_in_lvl   = drop_q ? 48'd0 : cof_rdata;
   assign iq_in_tag   = {3'd0, p3_s1_b};
@@ -852,13 +865,13 @@ module rtlnet_h264_mb_enc #(
           end
           if (t8_sub_set) o_t8sub <= 1'b1;
           if (t8_use_set || t8_acc_set) t8_use_q <= 1'b1;
-          if (t8_sub_set && t8_auto) begin
+          if (T8_AUTO && t8_sub_set && t8_auto) begin
             t8_auto_mb <= 1'b1;
             mk_pend    <= 1'b1;
           end
           if (mk_pend && res_v && tf_res_ready && res_last_q) mk_pend <= 1'b0;
-          if (tf_sum_valid && t8_auto_mb) t8_rej_q <= tf_sum_data[26];
-          if (st == S_T8L) t8_lum_q <= 1'b1;
+          if (T8_AUTO && tf_sum_valid && t8_auto_mb) t8_rej_q <= tf_sum_data[26];
+          if (T8_AUTO && (st == S_T8L)) t8_lum_q <= 1'b1;
         end
       end
 
@@ -1104,6 +1117,10 @@ module rtlnet_h264_mb_enc #(
       cost_in     <= '0;
       cost_ia     <= '0;
       nz8         <= '0;
+      nz16        <= '0;
+      o_nz16      <= '0;
+      o_mv_x      <= '0;
+      o_mv_y      <= '0;
       drop_q      <= 1'b0;
       big_q       <= 1'b0;
       lv_sum      <= '0;
@@ -1268,6 +1285,7 @@ module rtlnet_h264_mb_enc #(
           if (|fq_out_lvl) begin
             ac_nz_y <= 1'b1;
             nz8[{fq_out_tag[3], fq_out_tag[1]}] <= 1'b1;
+            nz16[fq_out_tag[3:0]] <= 1'b1;
           end
         end else begin
           if (|fq_out_lvl) ac_nz_c <= 1'b1;
@@ -1392,6 +1410,7 @@ module rtlnet_h264_mb_enc #(
             o_skip  <= 1'b0;
             inter_q <= 1'b0;
             nz8     <= '0;
+            nz16    <= '0;
             drop_q  <= 1'b0;
             big_q   <= 1'b0;
             mv_ready_seen <= 1'b0;
@@ -1572,6 +1591,9 @@ module rtlnet_h264_mb_enc #(
           if (dcw_n == 3'd5) begin
             o_cbp_luma   <= ac_nz_y;
             o_cbp4       <= nz8_e;
+            o_nz16       <= drop_q ? 16'd0 : ((T8 && t8_use_q) ? nz16_t8 : nz16);
+            o_mv_x       <= inter_q ? inter_mv_x : 14'sd0;
+            o_mv_y       <= inter_q ? inter_mv_y : 14'sd0;
             o_cbp_chroma <= drop_q ? 2'd0 : (ac_nz_c ? 2'd2 : ((dqcb_nz || dqcr_nz) ? 2'd1 : 2'd0));
             // P_Skip (clause 8.4.1.1): the inter candidate with nothing to code, and the skip vector equal to the vector of the prediction
             // (a decoder predicts a skipped macroblock at the skip vector; the search vector is inside the picture and the window, so the
@@ -1656,8 +1678,8 @@ module rtlnet_h264_mb_enc #(
         end
         // Adaptive choice: the module chose the 4x4 transform, so PASS1 of the luma blocks (items 0..63) still has to run, after the chroma blocks that
         // are done: the row and DC bookkeeping start like a 4x4 macroblock's (the chroma rows and DCs are in).
-        if ((st == S_P1W) && p1w_ok && t8_auto_mb && !t8_lum_q && t8_rej_q) st <= S_T8L;
-        if (st == S_T8L) begin
+        if (T8_AUTO && (st == S_P1W) && p1w_ok && t8_auto_mb && !t8_lum_q && t8_rej_q) st <= S_T8L;
+        if (T8_AUTO && (st == S_T8L)) begin
           iss_n      <= 7'd0;
           iss_run    <= 1'b1;
           cnt        <= '0;

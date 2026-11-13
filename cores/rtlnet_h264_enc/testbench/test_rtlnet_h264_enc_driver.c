@@ -79,6 +79,32 @@ void rtlnet_host_reg_write32(uintptr_t addr, uint32_t value)
         g_reg[off / 4u] = value & g_irq_impl;                 /* bits of sources the build lacks read 0 */
         return;
     }
+    if (off == RTLNET_H264_REG_DBK_STATUS) {
+        return;                                               /* read only */
+    }
+    if (off == RTLNET_H264_REG_DBK_CTRL) {
+        /* The core's rules: without the filter (CAPS bit 22 clear) the register reads 0; with it, bit 0 is the enable, each offset field takes a value
+         * of -6..+6 and keeps its old value for any other, the other bits read 0. */
+        uint32_t cur = g_reg[off / 4u];
+        uint32_t nv = 0u;
+        uint32_t sh;
+
+        if ((g_reg[RTLNET_REG_CAPS / 4u] & RTLNET_H264_CAPS_DBK) != 0u) {
+            nv = value & RTLNET_H264_DBK_CTRL_ENABLE;
+            for (sh = RTLNET_H264_DBK_CTRL_ALPHA_SHIFT; sh <= RTLNET_H264_DBK_CTRL_BETA_SHIFT; sh += 4u) {
+                uint32_t f = (value >> sh) & 0xFu;
+                int      s = (f >= 8u) ? ((int)f - 16) : (int)f;
+
+                if ((s >= RTLNET_H264_DBK_OFFSET_MIN) && (s <= RTLNET_H264_DBK_OFFSET_MAX)) {
+                    nv |= f << sh;
+                } else {
+                    nv |= cur & (0xFu << sh);
+                }
+            }
+        }
+        g_reg[off / 4u] = nv;
+        return;
+    }
     if (off == RTLNET_H264_REG_CTRL) {
         g_reg[off / 4u] = value & RTLNET_H264_CTRL_IRQ_EN;   /* START and RING_RESET self-clear */
         g_reg[0x0F0u / 4u] = value;                           /* last CTRL write, for the checks */
@@ -389,7 +415,8 @@ int main(void)
     {
         rtlnet_h264_enc_buffers_t bufs;
 
-        check(RTLNET_H264_VERSION_VALUE == 0x11122C03u, "VERSION with the interrupt registers");
+        check(RTLNET_H264_VERSION_VALUE == 0x11122C04u, "VERSION with the deblocking filter registers");
+        check(RTLNET_H264_VERSION_PRE_DBK == 0x11122C03u, "VERSION with the interrupt registers");
         check(RTLNET_H264_VERSION_PRE_IRQ == 0x11102C02u, "VERSION of phase 2c-2");
         check((RTLNET_H264_REG_REFY_BASE == 0x054u) && (RTLNET_H264_REG_REFU_BASE == 0x058u), "reference register offsets");
         g_reg[RTLNET_H264_REG_STATUS / 4u] = 0u;
@@ -647,6 +674,84 @@ int main(void)
         rtlnet_h264_enc_ring_reset(TEST_BASE);
         check((g_reg[RTLNET_H264_REG_CTRL / 4u] & RTLNET_H264_CTRL_IRQ_EN) != 0u, "ring_reset keeps the global enable");
         g_irq_impl = 0x3Fu;
+    }
+
+    /* Deblocking filter (CAPS bit 22, VERSION 0x11122C04): DBK_CTRL and DBK_STATUS. */
+    {
+        rtlnet_h264_enc_dbk_t dbk;
+        rtlnet_h264_enc_caps_t c;
+
+        check((RTLNET_H264_REG_DBK_CTRL == 0x0E0u) && (RTLNET_H264_REG_DBK_STATUS == 0x0E4u), "DBK register offsets");
+        check(RTLNET_H264_CAPS_DBK == (1u << 22), "CAPS bit 22 is DBK");
+        check((RTLNET_H264_DBK_ERR_NOT_PRESENT < -1) && (RTLNET_H264_DBK_ERR_RANGE < -1) && (RTLNET_H264_DBK_ERR_NOT_PRESENT != RTLNET_H264_DBK_ERR_RANGE) &&
+              (RTLNET_H264_DBK_ERR_NOT_PRESENT != RTLNET_H264_HP_ERR_NO_AUTO) && (RTLNET_H264_DBK_ERR_RANGE != RTLNET_H264_HP_ERR_NO_AUTO), "named DBK errors are distinct");
+        memset(g_reg, 0, sizeof(g_reg));
+        g_reg[RTLNET_REG_ID / 4u] = RTLNET_H264_ID_VALUE;
+        g_reg[RTLNET_REG_VERSION / 4u] = RTLNET_H264_VERSION_VALUE;
+        /* A build without the filter (DEBLOCK = 0): CAPS bit 22 clear; the registers read 0 and a write of 1 is ignored. */
+        g_reg[RTLNET_REG_CAPS / 4u] = MODEL_CAPS;
+        check((rtlnet_h264_enc_probe(TEST_BASE, &c) == 0) && (c.dbk == 0u), "caps.dbk 0 without CAPS bit 22");
+        rtlnet_reg_write32(TEST_BASE, RTLNET_H264_REG_DBK_CTRL, 0x6A1u);
+        check(g_reg[RTLNET_H264_REG_DBK_CTRL / 4u] == 0u, "model: DBK_CTRL without the filter reads 0, writes ignored");
+        g_reg[RTLNET_H264_REG_DBK_CTRL / 4u] = 0xA5u;   /* sentinel: a refused call must leave it */
+        check(rtlnet_h264_enc_set_deblock(TEST_BASE, 1) == RTLNET_H264_DBK_ERR_NOT_PRESENT, "set_deblock on refused without the filter");
+        check(g_reg[RTLNET_H264_REG_DBK_CTRL / 4u] == 0xA5u, "a refused set_deblock writes nothing");
+        check(rtlnet_h264_enc_set_deblock(TEST_BASE, 0) == 0 && g_reg[RTLNET_H264_REG_DBK_CTRL / 4u] == 0xA5u, "set_deblock off without the filter is an accepted no-op");
+        check(rtlnet_h264_enc_set_deblock_offsets(TEST_BASE, 1, 2) == RTLNET_H264_DBK_ERR_NOT_PRESENT && g_reg[RTLNET_H264_REG_DBK_CTRL / 4u] == 0xA5u,
+              "set_deblock_offsets refused without the filter, nothing written");
+        check(rtlnet_h264_enc_set_deblock_offsets(TEST_BASE, 9, 0) == RTLNET_H264_DBK_ERR_RANGE, "range is checked before presence");
+        dbk.present = 7u;
+        check((rtlnet_h264_enc_deblock_status(TEST_BASE, &dbk) == RTLNET_H264_DBK_ERR_NOT_PRESENT) && (dbk.present == 0u) && (dbk.enable == 0u) &&
+              (dbk.applied == 0u) && (dbk.alpha_applied == 0) && (dbk.alpha_req == 0), "deblock_status without the filter: named error, zeroed");
+        check(rtlnet_h264_enc_deblock_status(TEST_BASE, NULL) == -1, "deblock_status NULL");
+        /* The previous core (VERSION 0x11122C03) probes: no filter, the interrupt registers exist. */
+        g_reg[RTLNET_REG_VERSION / 4u] = RTLNET_H264_VERSION_PRE_DBK;
+        g_reg[RTLNET_REG_CAPS / 4u] = MODEL_CAPS | RTLNET_H264_CAPS_IRQ | (0x27u << RTLNET_H264_CAPS_IRQ_SRC_SHIFT);
+        check((rtlnet_h264_enc_probe(TEST_BASE, &c) == 0) && (c.dbk == 0u) && (c.irq == 1u) && (c.irq_sources == 0x27u) && (c.version == RTLNET_H264_VERSION_PRE_DBK),
+              "VERSION 0x11122C03 probes with caps.dbk 0 and the interrupt registers");
+        check(rtlnet_h264_enc_irq_capable(TEST_BASE, NULL) == 1, "irq_capable on VERSION 0x11122C03");
+        /* CAPS bit 22 with an older VERSION is not a capability. */
+        g_reg[RTLNET_REG_CAPS / 4u] = MODEL_CAPS | RTLNET_H264_CAPS_DBK;
+        check((rtlnet_h264_enc_probe(TEST_BASE, &c) == 0) && (c.dbk == 0u), "caps.dbk needs the current VERSION");
+        /* A build with the filter: reset value enable 1, offsets 0. */
+        g_reg[RTLNET_REG_VERSION / 4u] = RTLNET_H264_VERSION_VALUE;
+        g_reg[RTLNET_H264_REG_DBK_CTRL / 4u] = 1u;
+        g_reg[RTLNET_H264_REG_DBK_STATUS / 4u] = RTLNET_H264_DBK_STATUS_PRESENT;
+        check((rtlnet_h264_enc_probe(TEST_BASE, &c) == 0) && (c.dbk == 1u) && (c.version == RTLNET_H264_VERSION_VALUE), "caps.dbk 1 with CAPS bit 22");
+        check((rtlnet_h264_enc_deblock_status(TEST_BASE, &dbk) == 0) && (dbk.present == 1u) && (dbk.enable == 1u) && (dbk.applied == 0u) &&
+              (dbk.alpha_req == 0) && (dbk.beta_req == 0) && (dbk.alpha_applied == 0) && (dbk.beta_applied == 0), "deblock_status: reset state, on, offsets 0");
+        check(rtlnet_h264_enc_set_deblock(TEST_BASE, 0) == 0 && g_reg[RTLNET_H264_REG_DBK_CTRL / 4u] == 0u, "set_deblock off clears the enable bit");
+        check((rtlnet_h264_enc_deblock_status(TEST_BASE, &dbk) == 0) && (dbk.enable == 0u), "deblock_status: off");
+        check(rtlnet_h264_enc_set_deblock(TEST_BASE, 1) == 0 && g_reg[RTLNET_H264_REG_DBK_CTRL / 4u] == 1u, "set_deblock on sets the enable bit");
+        check(rtlnet_h264_enc_set_deblock(TEST_BASE, 5) == 0 && g_reg[RTLNET_H264_REG_DBK_CTRL / 4u] == 1u, "any non-zero value is on");
+        check(rtlnet_h264_enc_set_deblock_offsets(TEST_BASE, -6, 6) == 0 && g_reg[RTLNET_H264_REG_DBK_CTRL / 4u] == 0x6A1u,
+              "offsets -6 and +6: alpha field 0xA, beta field 6, enable kept");
+        check((rtlnet_h264_enc_deblock_status(TEST_BASE, &dbk) == 0) && (dbk.enable == 1u) && (dbk.alpha_req == -6) && (dbk.beta_req == 6), "deblock_status: offsets requested decode");
+        check(rtlnet_h264_enc_set_deblock(TEST_BASE, 0) == 0 && g_reg[RTLNET_H264_REG_DBK_CTRL / 4u] == 0x6A0u, "set_deblock off keeps the offsets");
+        check(rtlnet_h264_enc_set_deblock_offsets(TEST_BASE, 0, -1) == 0 && g_reg[RTLNET_H264_REG_DBK_CTRL / 4u] == 0xF00u, "offsets 0 and -1 keep the enable bit (off)");
+        check(rtlnet_h264_enc_set_deblock(TEST_BASE, 1) == 0 && g_reg[RTLNET_H264_REG_DBK_CTRL / 4u] == 0xF01u, "set_deblock on keeps the offsets");
+        /* Range: both limits accepted, any value outside refused with nothing written. */
+        check(rtlnet_h264_enc_set_deblock_offsets(TEST_BASE, 6, -6) == 0 && g_reg[RTLNET_H264_REG_DBK_CTRL / 4u] == 0xA61u, "offsets +6 and -6 accepted");
+        check(rtlnet_h264_enc_set_deblock_offsets(TEST_BASE, 7, 0) == RTLNET_H264_DBK_ERR_RANGE && g_reg[RTLNET_H264_REG_DBK_CTRL / 4u] == 0xA61u, "alpha +7 refused, nothing written");
+        check(rtlnet_h264_enc_set_deblock_offsets(TEST_BASE, 0, -7) == RTLNET_H264_DBK_ERR_RANGE && g_reg[RTLNET_H264_REG_DBK_CTRL / 4u] == 0xA61u, "beta -7 refused, nothing written");
+        check(rtlnet_h264_enc_set_deblock_offsets(TEST_BASE, -7, 7) == RTLNET_H264_DBK_ERR_RANGE && rtlnet_h264_enc_set_deblock_offsets(TEST_BASE, 100, 0) == RTLNET_H264_DBK_ERR_RANGE &&
+              rtlnet_h264_enc_set_deblock_offsets(TEST_BASE, 0, -100) == RTLNET_H264_DBK_ERR_RANGE && g_reg[RTLNET_H264_REG_DBK_CTRL / 4u] == 0xA61u, "larger values refused, nothing written");
+        /* The model's write masks (the core's rules): a field outside -6..+6 stays, the other fields are written, other bits read 0. */
+        g_reg[RTLNET_H264_REG_DBK_STATUS / 4u] = RTLNET_H264_DBK_STATUS_PRESENT | RTLNET_H264_DBK_STATUS_APPLIED | (0xAu << 8) | (0x6u << 12);
+        check((rtlnet_h264_enc_deblock_status(TEST_BASE, &dbk) == 0) && (dbk.applied == 1u) && (dbk.alpha_applied == -6) && (dbk.beta_applied == 6),
+              "deblock_status: applied to the last picture, alpha -6, beta +6");
+        check((dbk.alpha_req == 6) && (dbk.beta_req == -6), "deblock_status: requested and applied offsets are separate");
+        g_reg[RTLNET_H264_REG_DBK_STATUS / 4u] = RTLNET_H264_DBK_STATUS_PRESENT | (0xFu << 8) | (0x7u << 12);
+        check((rtlnet_h264_enc_deblock_status(TEST_BASE, &dbk) == 0) && (dbk.applied == 0u) && (dbk.alpha_applied == -1) && (dbk.beta_applied == 7),
+              "deblock_status: not applied, alpha -1, beta 7");
+        rtlnet_reg_write32(TEST_BASE, RTLNET_H264_REG_DBK_CTRL, 0xFFFFFFFFu);
+        check(g_reg[RTLNET_H264_REG_DBK_CTRL / 4u] == 0xFF1u, "model: all-ones write: enable 1, both fields -1, the other bits read 0");
+        rtlnet_reg_write32(TEST_BASE, RTLNET_H264_REG_DBK_CTRL, 0xFFFFF970u);
+        check(g_reg[RTLNET_H264_REG_DBK_CTRL / 4u] == 0xFF0u, "model: alpha 7 and beta 9 are outside -6..+6 and stay, enable 0");
+        rtlnet_reg_write32(TEST_BASE, RTLNET_H264_REG_DBK_CTRL, 0x831u);
+        check(g_reg[RTLNET_H264_REG_DBK_CTRL / 4u] == 0xF31u, "model: alpha 3 written, beta 8 outside the range stays, enable 1");
+        rtlnet_reg_write32(TEST_BASE, RTLNET_H264_REG_DBK_STATUS, 0u);
+        check(g_reg[RTLNET_H264_REG_DBK_STATUS / 4u] != 0u, "model: DBK_STATUS is read only");
     }
 
     if (g_fails == 0) {

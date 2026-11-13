@@ -48,6 +48,8 @@ module tb_rtlnet_h264_regs;
   logic [0:0]  ring_stall = 1'b0;
   logic        hp_licensed = 1'b1, hp_chg = 1'b0;
   logic        irq;
+  logic        dbk_en;
+  logic signed [3:0] dbk_a, dbk_b;
 
   always #5 clk = ~clk;
 
@@ -62,6 +64,7 @@ module tb_rtlnet_h264_regs;
     .rptr_wr(), .rptr_val(), .idx_rptr_wr(), .idx_rptr_val(),
     .hp_enable(), .hp_t8_enable(), .hp_t8_auto(), .hp_t8_n8(16'd0), .hp_t8_n4(16'd0),
     .hp_present(HP), .hp_licensed(hp_licensed), .hp_active(1'b0), .hp_caps(HP ? 4'h7 : 4'h0), .hp_seconds_left(16'hFFFF), .hp_chg(hp_chg),
+    .cfg_dbk_en(dbk_en), .cfg_dbk_a(dbk_a), .cfg_dbk_b(dbk_b),
     .busy(busy), .done(done), .slice_pulse(slice_pulse),
     .err_cfg(err_cfg), .err_axi(err_axi), .err_rptr(err_rptr), .err_busy(err_busy),
     .ring_stall(ring_stall), .ring_wptr(32'd0), .ring_fill(32'd0), .idx_wptr(32'd0), .idx_fill(32'd0),
@@ -149,7 +152,7 @@ module tb_rtlnet_h264_regs;
     rd(R_CTRL, v);
     tb_check(v == 32'd0, "CTRL reset value (global enable off)");
     rd(R_VERSION, v);
-    tb_check(v == 32'h1112_2C03, $sformatf("VERSION %08x", v));
+    tb_check(v == 32'h1112_2C04, $sformatf("VERSION %08x", v));
     rd(R_CAPS, v);
     tb_check(v[21] === 1'b1, "CAPS bit 21 (interrupt registers)");
     tb_check(v[20] === HP, "CAPS bit 20 (HP_SEAM)");
@@ -306,6 +309,41 @@ module tb_rtlnet_h264_regs;
     @(negedge clk); busy = 1'b0;
     wr(R_CTRL, 32'h1);
     expect_status(8'h20, "start while idle");
+    clean();
+
+    // Deblocking filter registers (CAPS bit 22, DBK_CTRL 0x0E0, DBK_STATUS 0x0E4): reset values, offset range, latching at the accepted start.
+    rd(R_CAPS, v);
+    tb_check(v[22] === 1'b1, "CAPS bit 22 (deblocking filter)");
+    rd(12'h0E0, v);
+    tb_check(v == 32'h1, $sformatf("DBK_CTRL reset value %08x", v));
+    rd(12'h0E4, v);
+    tb_check(v == 32'h3, $sformatf("DBK_STATUS after the earlier starts %08x (present, reset state applied)", v));
+    tb_check((dbk_en === 1'b1) && (dbk_a === 4'sd0) && (dbk_b === 4'sd0), "applied state is the reset state");
+    wr(12'h0E0, {20'd0, 4'hA, 4'h3, 3'd0, 1'b1});          // alpha 3, beta -6
+    rd(12'h0E0, v);
+    tb_check(v == {20'd0, 4'hA, 4'h3, 3'd0, 1'b1}, $sformatf("DBK_CTRL written %08x", v));
+    wr(12'h0E0, {20'd0, 4'h7, 4'h9, 3'd0, 1'b1});          // alpha -7 (out of range, kept 3), beta 7 (out of range, kept -6)
+    rd(12'h0E0, v);
+    tb_check(v == {20'd0, 4'hA, 4'h3, 3'd0, 1'b1}, $sformatf("DBK_CTRL out-of-range fields kept %08x", v));
+    wr(12'h0E0, {20'd0, 4'h6, 4'hA, 3'd0, 1'b0});          // alpha -6, beta 6, off
+    rd(12'h0E0, v);
+    tb_check(v == {20'd0, 4'h6, 4'hA, 3'd0, 1'b0}, $sformatf("DBK_CTRL range limits %08x", v));
+    tb_check((dbk_en === 1'b1) && (dbk_a === 4'sd0), "the applied state does not change before a start");
+    wr(R_CTRL, 32'h1);
+    repeat (2) @(negedge clk);
+    rd(12'h0E4, v);
+    tb_check(v == {16'd0, 4'h6, 4'hA, 6'd0, 1'b0, 1'b1}, $sformatf("DBK_STATUS after a start %08x", v));
+    wr(12'h0E0, {20'd0, 4'h0, 4'h0, 3'd0, 1'b1});
+    @(negedge clk); busy = 1'b1;
+    wr(R_CTRL, 32'h1);
+    rd(12'h0E4, v);
+    tb_check(v == {16'd0, 4'h6, 4'hA, 6'd0, 1'b0, 1'b1}, $sformatf("DBK_STATUS unchanged by a start while busy %08x", v));
+    @(negedge clk); busy = 1'b0;
+    wr(R_CTRL, 32'h1);
+    repeat (2) @(negedge clk);
+    rd(12'h0E4, v);
+    tb_check(v == {16'd0, 4'h0, 4'h0, 6'd0, 1'b1, 1'b1}, $sformatf("DBK_STATUS second start %08x", v));
+    wr(R_IRQ_STATUS, 32'hFF);
     clean();
 
     // Polled STATUS unchanged: DONE and ERR flags, ERR_CODE, BUSY and RING_STALL, independent of IRQ_STATUS; IRQ_EN and the sources do not touch them.

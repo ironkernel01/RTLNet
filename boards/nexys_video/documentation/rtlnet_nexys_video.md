@@ -3,7 +3,7 @@
 | Item | Value |
 |---|---|
 | Board | Digilent Nexys Video, XC7A200T-1SBG484C, Realtek RTL8211E-VL |
-| Document revision | 11-09-2026 |
+| Document revision | 11-13-2026 |
 | Top | `boards/nexys_video/hdl/rtlnet_nexys_video_top.sv` (`rtlnet_nexys_video_top`) |
 | Builds | network (`build.ps1 -Network`, `RTLNET_WITH_NETWORK`: MAC, MDIO, protocol wrapper with ARP/ICMP/DHCP/iperf/UDP socket leaves, CPU network path with its classifier, UDP echo) and CPU-only (default); both built, timing met, on hardware |
 | Tools | Vivado 2026.1, GNU GCC 13.4 (RISC-V, MicroBlaze V), Active-HDL 11.1 |
@@ -1366,7 +1366,7 @@ Open items: the clocks per macroblock are snapshots of one picture (not averaged
 ### 6.20 Encoder interrupt (11-12-2026)
 
 Change: the `irq` output of `u_h264` (`rtlnet_h264_top`, level on `ui_clk`) drives the CPU interrupt input `irq[1]` (`cpu_irq = {6'd0, h264_irq, mdio_irq}` in both the network and
-the CPU-only build), INTC input 1 (`RTLNET_CPU_IRQ_H264`). The block design is unchanged (`irq[7:0]` already reaches INTC inputs 0..7, level). The core (VERSION 0x11122C03,
+the CPU-only build), INTC input 1 (`RTLNET_CPU_IRQ_H264`). The block design is unchanged (`irq[7:0]` already reaches INTC inputs 0..7, level). The core (VERSION 0x11122C04,
 `rtlnet_h264_enc.md` section 18) raises the interrupt for picture done, error, ring stall, profile change and license lost; the firmware connects the handler on that
 input and runs the encoder in interrupt mode by default (`encoder notify interrupt|polled`, `rtlnet_ts_mux.md` section 5.3). Status: simulation, host tests and the synthesis of the core are done
 (`rtlnet_h264_enc.md` section 18.5), and the board step is done in section 6.21: `encoder irqtest` passes, 60 s streams run in both modes with 0 dropped pictures, a switch of the mode in mid-stream keeps the stream running, a 10-minute soak passes, and the handler time (48 us last, 220 us maximum), the interrupts per picture (1.001) and the cycle time against the polled mode are measured there. The encoder VERSION reads 0x11122C03 (`cli_test.ps1` and the board bench expect it).
@@ -1533,6 +1533,139 @@ The controller holds the rate in all three transform modes with the same QP traj
 
 **Left open.** No demo image and no license-end test for this tree (see the change above). The clocks per macroblock, the picture time and the Transform MBs counts are snapshots of one picture. The adaptive choice was run on the board's patterns only; its simulation result (private document 11.2) is a gain on the 720p and 1080p test content that the board's patterns do not show. The hp_full image has 98.67 % of the slices occupied and +0.012 ns of margin: a next change of the encoder needs a directive search and the arbiter's grant logic (rows 3 to 9 of the table above) is the first path to cut. The run-1 gate (`Slice LUTs` above 80 %) is a build-flow limit, not a timing limit; the product image (CABAC-only High profile with the deblocking filter) is built separately.
 
+### 6.22 CABAC-only High profile image with the deblocking filter (11-12-2026, board gates open)
+
+Change: the board image going forward is **CABAC + the in-loop deblocking filter**, without the 8x8 transform and without the adaptive choice. The full High profile image of 6.19 (CABAC, 8x8 transform and adaptive choice) is at 80.7 % LUT with +0.012 ns of routed slack, and the filter adds about 11,700 LUT; the 8x8 transform and the adaptive choice give the smallest measured gain (1 to 4 %) for about 20,000 LUT, so this image leaves them out.
+The tools are compile-time options (`rtlnet_h264_enc.md` section 17.9): `build.ps1 -HpTools cabac` selects the CABAC-only netlist of the High profile repository (`netlist\full_cabac`, `netlist\demo_cabac`) and sets `HP_T8` 0 and `HP_T8_AUTO` 0 of the encoder (new board top parameters, `build_info.txt` line `hp_tools`); `DEBLOCK` is 1 (default). `hp_caps` reads 0001. The firmware ELF is the one the flow builds for the image (`build.ps1 -Image`): the deblocking request defaults to on (`encoder deblock`), the notification mode to interrupt (`encoder notify`), and the transform request to off (the 4x4 transform; `encoder transform8x8 auto` degrades silently to on, and on this netlist (`hp_caps` bits 1 and 2 are 0) there is no error line at start-up; `show encoder` prints `Transform 8x8   : not offered (hp_caps bit 1 is 0)`, `encoder transform8x8 on|auto` is refused with its named text, `off` is accepted).
+Flow changes made for this image: `RTLNET_UTIL_LIMIT` (environment variable, percent, default 80) and `RTLNET_RESUME_DCP` (continue from a routed checkpoint) in `build_bitstream.tcl`, the same as in the main tree; the arguments `hp_t8` and `hp_t8_auto`; and, for that image only, a methodology waiver for `SYNTH-9` (see below); the merged tree has no such waiver: the multiplier is a registered product in a DSP block (section 6.23).
+
+**Netlists** (`build_netlist.ps1 -Variant full|demo -Tools cabac`, post-synthesis at 90 MHz): `full_cabac` 2,691 LUT cells, 1,243 FF, 0 DSP, WNS +2.817 ns; `demo_cabac` 2,719 LUT, 1,295 FF, +2.817 ns (the private document section 5.4 has all six netlists). The encoder alone (two engines, `HIGH_PROFILE` 1, CABAC-only netlist, `DEBLOCK` 1, out of context, 90 MHz): **63,846 LUT, 42,439 FF, 42 RAMB36 + 6 RAMB18, 76 DSP, WNS +1.748 ns** (worst path the filter's `d1_reg` to its line store, 13 levels); the all-tools encoder with the filter is 82,968 LUT, 63,382 FF, 236 DSP, the Baseline encoder with the filter 58,597 LUT.
+
+**Build of `hp_full_cab_dbk`** (`build.ps1 -Network -HighProfile full -HpTools cabac -Tag hp_full_cab_dbk -Image`, Vivado 2026.1; a tag has at most 16 characters). Placer directive `AltSpreadLogic_high` (the one that closed 6.19), one attempt; the routed design met timing and a later gate stopped the flow, so the image was finished from the routed checkpoint.
+
+| Step | Result |
+|---|---|
+| Attempt 1 (`build/hp_full_cab_dbk/build_bitstream_attempt1.log`, 52 minutes) | after the router WNS -0.031 ns, after the post-route `phys_opt` **WNS +0.047 ns, WHS +0.012 ns, WPWS +0.131 ns, 0 failing endpoints**; the utilization gate then stopped the flow (exit 21): **Block RAM Tile 80.14 % (limit 80.0 %)** |
+| Resume 1 (`RTLNET_RESUME_DCP=build/hp_full_cab_dbk/post_route.dcp`, `RTLNET_UTIL_LIMIT=81`) | the methodology gate stopped it (exit 27): `SYNTH-9` (small multiplier) x20, the deblocking filter's `mb_total = cfg_mb_w * cfg_band_rows` (8 x 8 bits, implemented in LUTs, evaluated once per picture, 10 findings per engine); the log is `build_bitstream_stop1.log` |
+| Resume 2 (same checkpoint, waiver for `SYNTH-9` on `u_h264/u_regs/mb_total_reg[` in `build_bitstream.tcl`; removed again in the merged tree, section 6.23) | all gates pass, bitstream (289 s), XSA, firmware (66 s) and merge: `RTLNET_BUILD: PASS` |
+
+Two flow findings for the merge: the block RAM gate (80 %) is now exceeded by this image (the filter's two line stores, 16 KiB each, are 8 more RAMB36 tiles than the 284.5 of 6.19), and `SYNTH-9` needed a waiver in this image (the merged tree took the other way, `mb_total` as a registered product in a DSP block, section 6.23); neither changes the design of the image.
+
+| Gate | hp_full_cab_dbk (CABAC + filter, `AltSpreadLogic_high`) | hp_full of 6.19 (CABAC + 8x8 + adaptive, no filter, `AltSpreadLogic_high`) | default image |
+|---|---|---|---|
+| timing (WNS / WHS / WPWS), failing endpoints | +0.047 / +0.012 / +0.131 ns, 0 | +0.007 / +0.013 / +0.131 ns, 0 | +0.044 / +0.016 / +0.131 ns |
+| LUT | 99,591 (73.99 %) | 100,773 (75.32 %) | 83,786 (62.62 %) |
+| FF | 91,054 (33.82 %) | 95,368 (35.64 %) | 79,780 (29.81 %) |
+| Slices occupied | 31,894 (94.78 %) | 95 % | - |
+| Block RAM tiles | 292.5 (80.14 %: 255 RAMB36 + 75 RAMB18) | 284.5 (77.95 %) | 284.5 |
+| DSP | 82 (11.08 %) | 194 | 82 |
+| CDC | `fifo 10`, `axil_cdc 5`, `gray 6`, `sync 31`, `reset 8`, `rtlnet_cdc: PASS` (counted in attempt 1; the resume does not rerun the count) | same | same |
+| methodology | `PDRC-190` x12, `LUTAR-1` x3, `TIMING-9` x1, `TIMING-47` x4, `XDCB-5` x1, `ULMTCS-1` x1 (2,611 control sets, 7.76 %), **`SYNTH-9` x20 (new in this image, waived by name there; none in the merged tree)**, `REQP-1959` advisories (16), all waived by name in the flow | the same classes without `SYNTH-9` | same classes |
+
+(The percentages are against 134,600 LUT.) The image is 6.7 percentage points of LUT below the full image with 8x8 and adaptive choice (80.72 %), with the filter in it.
+**Constraint coverage** (`timing_coverage.tcl` on `build/hp_full_cab_dbk/post_route.dcp`, `build/hp_full_cab_dbk/coverage.txt`): `check_timing` 0 register or latch pins without a clock, 0 unconstrained internal endpoints, 0 multiple clocks, 0 combinational loops, 0 latch loops; 33 clocks listed (`clk_pll_i` 85,453 registers); the clock interaction table and the `report_exceptions` lists are in the file. A comparison with the coverage file of an earlier image was not made in this worktree.
+
+**The ten worst routed setup paths** (`reports/ten_worst_setup.rpt`, `reports/path_groups.txt`: 400 paths, one per endpoint, grouped by module):
+
+| Slack | Paths (endpoints) | Module | Levels |
+|---|---|---|---|
+| +0.047 ns | 8 of the ten worst endpoints: `u_arb/wr_err_pend_reg[2]` to `u_arb/wr_pend_reg[1..3][0..3]/CE` (24 endpoints in this class within +0.172 ns) | DDR3 arbiter `u_arb` | 15 |
+| +0.084 ns | 2 of the ten (6 endpoints): `u_search/pc_reg[1]` to `u_search/r_b_reg/R` of engine 0 | public encoder, motion search | 10 |
+| +0.094 to +0.205 ns | `u_arb/wr_err_pend_reg[2]` to `wr_inflight`, `wr_pend`, `wr_err_pend_reg[3]` | arbiter | 14 to 15 |
+| +0.215 ns | 84 endpoints inside the MicroBlaze V and its LMB RAM (`u_cpu/u_bd`) | MicroBlaze V | 8 |
+| +0.221 to +0.300 ns | the RGMII input and output flip-flops (`u_mac/u_rgmii_io`) | MAC pads | 1 to 2 |
+| +0.350 ns (engine 0), +0.353 ns (engine 1) | the deblocking filter `g_dbk.u_dbk` (26 endpoints) | public encoder, filter | 13 |
+
+None of the ten worst paths is in the High profile netlist, and the filter's worst path is 0.30 ns behind the worst.
+
+**How much margin the image has and what bounds it.** The routed margin is **+0.047 ns of setup slack (0.4 % of the 11.111 ns period)** and +0.012 ns of hold slack; it is the same order as the images of 6.18 and 6.19 (+0.024, +0.007 and +0.044 ns) and is set by the arbiter path `wr_err_pend` to `wr_pend` (15 logic levels, the engine write channels through the DDR3 arbiter), not by the encoder: the motion search and the MicroBlaze V to LMB RAM path follow at +0.084 and +0.215 ns. LUT use (73.99 %) is not the bound. The bounds are the **slice occupancy of 94.78 %** (placement is packed, which is why the result depends on the placer directive), the **block RAM tiles at 80.14 %** (above the flow's 80 % gate, which this build lifted to 81 % by environment variable) and the routing congestion in the DDR3 and CPU area that decides the MicroBlaze V and arbiter paths. The slack moved by 0.1 to 0.7 ns between directives and between the full and the demo variant, so any change of the design (an RTL change, a parameter) needs a new build and must expect that spread.
+
+**The demo image (`hp_demo_cab_dbk`, 30-minute license): not built, two attempts used.**
+
+| Run | Placer directive | Route | After post-route `phys_opt` | Failing setup endpoints | Where |
+|---|---|---|---|---|---|
+| 1 (`build/hp_demo_cab_dbk_run1_altspreadlogic_high`) | `AltSpreadLogic_high` | WNS -0.672 ns | **WNS -0.629 ns**, WHS +0.050 ns | 54 | MicroBlaze V to the LMB RAM (8 levels, -0.629 to -0.121 ns), arbiter `wr_err_pend` to `wr_pend` (-0.121 ns, 15 levels) |
+| 2 (`build/hp_demo_cab_dbk`) | `ExtraTimingOpt` | WNS -0.485 ns | **WNS -0.469 ns**, WHS +0.028 ns, WPWS +0.131 ns | 5 | three MicroBlaze V to LMB RAM paths (-0.469, -0.303, -0.061 ns, 8 levels), two arbiter `aw_rr_reg[0]_replica_1` to `wr_pend_reg[3][1..2]/CE` (-0.025 ns, 15 levels) |
+
+The failing paths are the same classes as in the open demo builds of 6.19; none is in the netlist, the filter or the CABAC logic. The netlist `demo_cabac` differs from `full_cabac` by the license timer only (28 LUT cells, 52 FF). The licence-end test of this image (High before, Constrained Baseline after, one forced IDR picture at 1,800 s) is not run on the board; its simulation form, the engine bench with the licence ending in picture 2 on the CABAC-only RTL with the filter on and off, passes (private document 10.7, part C). The demo image needs a third build attempt (another directive or a change of the arbiter path), which is outside the two attempts of this job.
+
+**Files for the board gates** (`build.ps1 -Image` output, this worktree): `boards/nexys_video/build/hp_full_cab_dbk/rtlnet_nexys_video.bit` (firmware merged; program it with `program.ps1 -Bit`), `rtlnet_nexys_video_hw.bit` (without firmware), `rtlnet_nexys_video.mmi`, `rtlnet_nexys_video.xsa`, `firmware.elf` (a copy of `microblaze/firmware/build/firmware.elf` as merged; that file is tracked and the build rewrote it), `build_info.txt`, `reports/`, `post_route.dcp`. No board, COM3 or JTAG was used for this section. The image build ran the firmware host demo (`TEST PASS: menu_demo checks=502`) and the rate control test (15 gates); the regression of the worktree passes (`RTLNET_REGRESSION: 176 passed, 0 failed`).
+
+Board gates open. They are: `program.ps1 -Bit build/hp_full_cab_dbk/rtlnet_nexys_video.bit`, `show encoder` (`tools CABAC (hp_caps 1)`, `Transform 8x8   : not offered`, deblocking on), `CLI_TEST`, `PHASE1_GATE`, `encoder irqtest`, the stream tests with the filter on and off and `-Profile baseline|high`, the 1080p throughput sweep with the filter, and the PSNR comparison; the licence-end test needs the demo image.
+
+### 6.23 Release images of the merged tree: arbiter in two clocks, filter multiplier in a DSP block (11-13-2026)
+
+Change: the tree is `OV5640` with `h264-deblock` merged (encoder interrupt, adaptive transform and pipeline stages of 6.20 and 6.21, the deblocking filter and the tool sets of 6.22; VERSION 0x11122C04), plus two changes made for these images:
+
+* **The DDR3 arbiter grants in two clocks** (`rtlnet_axi_arbiter.md` sections 2, 6 and 7): a register slice on every master's AW and AR channel (`ADDR_REG` 1, default) and a registered grant, so that no master signal reaches the grant, the counters and the memory-side registers in one clock. Latency from a master's valid to the memory-side valid: 3 clocks (1 before). Out-of-context synthesis of the arbiter in the board configuration (`testbench/arb_synth.tcl`, 90 MHz): worst path **14 levels before, 7 after**, 1,793 LUT and 1,225 FF before, 2,072 LUT and 1,957 FF after (1,857 and 1,237 with `ADDR_REG` 0). The arbiter regression passes (20 of 20: 16 configurations, 4 negative controls), the whole RTLNet regression passes (`RTLNET_REGRESSION: 183 passed, 0 failed`).
+* **The deblocking filter's macroblock-count multiplier is a registered product in a DSP block** (`rtlnet_h264_enc.md` section 19.7): `SYNTH-9` x20 before, none now, and no waiver for it in `build_bitstream.tcl`. DSP 82 before, 84 now.
+
+An earlier build of `rel_base_dbk` on the code before the DSP and arbiter changes was stopped and is not counted. All builds use `RTLNET_PLACE_DIRECTIVE=AltSpreadLogic_high` and `RTLNET_UTIL_LIMIT=81` (block RAM is 80.14 % with the filter, above the flow's default gate of 80 %; the flow was not stopped by any later gate, so no `RTLNET_RESUME_DCP` was needed). Build commands: `build.ps1 -Network -HighProfile none -Tag rel_base_dbk -Image`, `-HighProfile demo -HpTools cabac -Tag rel_demo_cab_dbk -Image`, `-HighProfile full -HpTools cabac -Tag rel_full_cab_dbk -Image` (Vivado 2026.1, build id 04591934 with the working tree dirty). **All three images met timing on the first attempt.**
+
+| | rel_base_dbk (Baseline + filter) | rel_demo_cab_dbk (demo, CABAC + filter) | rel_full_cab_dbk (full, CABAC + filter) |
+|---|---|---|---|
+| attempts, placer directive | 1, `AltSpreadLogic_high` | 1, `AltSpreadLogic_high` | 1, `AltSpreadLogic_high` |
+| WNS / WHS / WPWS, failing endpoints | +0.135 / +0.013 / +0.131 ns, 0 | +0.138 / +0.012 / +0.131 ns, 0 | +0.042 / +0.013 / +0.131 ns, 0 |
+| LUT | 94,457 (70.60 %) | 99,739 (74.54 %) | 99,799 (74.59 %) |
+| FF | 88,990 (33.25 %) | 91,701 (34.27 %) | 91,631 (34.24 %) |
+| slices occupied | 31,818 (95.12 %) | 32,180 (96.20 %) | 32,235 (96.37 %) |
+| block RAM tiles | 292.5 (80.14 %: 255 RAMB36 + 75 RAMB18) | 292.5 | 292.5 |
+| DSP | 84 (11.35 %) | 84 | 84 |
+| CDC | `fifo 10`, `axil_cdc 5`, `gray 6`, `sync 31`, `reset 8`, `rtlnet_cdc: PASS` | same | same |
+| methodology | `LUTAR-1` x3, `PDRC-190` x12, `TIMING-9` x1, `TIMING-47` x4, `XDCB-5` x1, `REQP-1959` x16 | the same classes and `ULMTCS-1` x1 (2,894 control sets, 8.65 %) | the same classes as the demo (`ULMTCS-1` x1, 2,707 control sets); no `SYNTH-9` in any image |
+| build log | `build/rel_base_dbk/build_bitstream.log` | `build/rel_demo_cab_dbk/build_bitstream.log` | `build/rel_full_cab_dbk/build_bitstream.log` |
+
+The earlier images (6.19, 6.22) had +0.007 to +0.047 ns, and the two demo attempts of 6.22 failed with WNS -0.629 and -0.469 ns; the failing paths were in `u_arb` and from the MicroBlaze V to the LMB RAM.
+
+**The ten worst routed setup paths and the 400 worst endpoints by module** (`build/<image>/reports/timing_worst.txt`, made by `timing_worst.tcl` on `post_route.dcp`):
+
+| Image | Worst endpoints | By module (endpoints of the 400 worst, worst slack, most logic levels) |
+|---|---|---|
+| rel_base_dbk | +0.135 ns: five paths from the MicroBlaze V AXI crossbar write FIFO to the AXI BRAM controller (1 level), then the classifier rule RAM writes (0 levels) | `u_cpu/u_bd` 69, +0.135 ns, 8 levels; `u_protocol` classifier 177, +0.156 ns, 0; `u_h264` engines 144, +0.183 ns, 13; `u_mac` RGMII pads 5, +0.221 ns, 2 |
+| rel_demo_cab_dbk | +0.138 ns: the MicroBlaze V instruction cache tag RAM (8 levels), then the RGMII input pads (+0.221 to +0.244 ns, 2 levels), the classifier RAM writes and the data cache tag RAM | `u_cpu/u_bd` 76, +0.138 ns, 8; `u_mac` 6, +0.221 ns, 2; `u_protocol` classifier 231, +0.230 ns, 1; `u_h264` engines 81, +0.359 ns, 13; `u_ddr` 1, +0.557 ns |
+| rel_full_cab_dbk | +0.042 ns: the MicroBlaze V instruction cache (`new_tag_addr` to the tag RAM, 0 levels), then the classifier RAM (+0.143 ns), the RGMII input pads, and the filter `d1_reg` to its line store (+0.238 ns, 13 levels) | `u_cpu/u_bd` 144, +0.042 ns, 10; `u_protocol` classifier 82, +0.143 ns, 1; `u_mac` 7, +0.221 ns, 2; `u_h264` engines 162, +0.238 ns, 13 |
+
+**`u_arb` has no endpoint among the 400 worst of any image**; the previous images had it at the top of the list. The paths that now bound the slack are in the MicroBlaze V block design (vendor IP: cache tag RAM and crossbar paths) and the classifier RAMs.
+
+**Board gates.** Board on COM3 and JTAG, never QSPI; `show ip` gave the DHCP lease 192.168.68.79 (1000 Mb/s link); every gate with the board lock. The stream gates are `release_stream_gates.ps1` (a run of `stream_test.ps1` per line, both modes 1080p30 and 720p30, 20 s, pattern `all` speed 4 unless noted, constant QP 28 unless noted, FFmpeg and JM clean, `-CcTolPct 0.01`, **0 dropped pictures required**; `stream_test.ps1` has the new options `-Deblock on|off` and `-SwitchDeblock`: on, `encoder deblock off` one third into the capture and on at two thirds):
+
+| Gate | rel_base_dbk | rel_full_cab_dbk | rel_demo_cab_dbk (within 30 min of the licence start) |
+|---|---|---|---|
+| program.ps1 | PASS (DONE high) | PASS | PASS (twice: the licence test reprograms) |
+| `PHASE1_GATE` | 19 of 19 at the fourth run, after the PC was idle again; the first three runs (one with one failed item, two others `b2 FRAME_COUNT` 30.387 and 30.323 fps against 30.0 +- 0.3 and `f3` 15.564 fps) ran while the PC was loaded by a regression and a Vivado build: the items are host timing measurements | 19 of 19 at the second run; the first run, right after programming, read -75 frames in `b2` (the frame counter restarted during the measurement) | 19 of 19 |
+| `cli_test.ps1` (updated for this tree) | 101 of 101 | 101 of 101 | 101 of 101 |
+| interrupt / polled, filter on / off (4 runs) | PASS 27/27 each | PASS 27/27 each | not run (see below) |
+| `-SwitchDeblock` mid-stream | PASS 29/29 | PASS 29/29 (CAVLC) and 31/31 (`-Profile high`) | PASS 31/31 (`-Profile high`) |
+| rate control 8,000 and 16,000 kb/s | PASS 33/33 both | PASS 33/33 and 32/32; `-Profile high` 8,000 kb/s PASS 35/35 | `-Profile high` 8,000 kb/s PASS 35/35 |
+| constant QP 24, 26, 28, 32, filter on and off, CAVLC | PASS 25/25, 8 runs | PASS 25/25, 8 runs | not run |
+| constant QP 24, 26, 28, 32, filter on and off, CABAC (`-Profile high`) | n/a | PASS 27/27, 8 runs | QP 24 on, QP 28 on and off: PASS 27/27 |
+| 10-minute soak, interrupt, filter on, 1080p30 | PASS 13/13: 18,002 pictures, 0 dropped, 27,539 kb/s, TS mux load 85.4 %, PSNR minimum 44.28 dB over 1,801 checked frames, 1 tolerated continuity error (Wi-Fi) | PASS 14/14 (`-Profile high`): 18,002 pictures, 0 dropped, 24,015 kb/s, TS mux load 75.7 %, PSNR minimum 44.20 dB over 1,801 checked frames, FFmpeg clean | not run |
+| `net_test.ps1 -Speed 1000` | PASS 18/18 (4 host checks blocked: the PC's Ethernet adapter is disconnected, so the `iperf -u` checks cannot run) | PASS 18/18 (4 host checks blocked as for the baseline image) | not run |
+| `tcp_test.ps1 -Board 192.168.68.79` | PASS 8/8 | PASS 8/8 | not run |
+| `hp_expiry_test.ps1` (30-minute licence end) | n/a | n/a | PASS, every gate (below) |
+
+The stream tests with the QP sweep use the pattern `scroll`: with the pattern `all` (it contains noise) QP 24 and QP 26 make 31 to 32 Mb/s at 1080p30, the TS mux of the MicroBlaze V reaches 99 % load and drops 13 to 16 pictures with the filter on and off alike (a CPU limit of the TS packetiser, not of the encoder or the filter; the first QP 24 runs of `rel_base_dbk` `phase2i_base_qp24.log` show it); at QP 28 the load is 85 to 87 % with no drop. **Deviation:** the QP sweep of the brief ran with the pattern `scroll` (bit rates 114 to 456 kb/s, so the PSNR figures are of an easy picture), the other runs with `all`.
+
+**Filter on against off** (measured on the board, FFmpeg decoded PSNR against the pattern model; pattern `all`, QP 28, 1080p30: bits per second and PSNR mean / minimum; the patterns are synthetic, the filter's effect on real content is in `rtlnet_h264_enc.md` section 19.4):
+
+| Run | bit rate on / off (kb/s) | PSNR mean on / off (dB) | PSNR minimum on / off (dB) |
+|---|---|---|---|
+| CAVLC, interrupt (`rel_base_dbk`) | 27,273 / 27,272 | 44.92 / 44.95 | 44.46 / 44.51 |
+| CAVLC, polled | 27,292 / 27,272 | 44.82 / 44.95 | 44.09 / 44.51 |
+| 720p30, interrupt | 18,166 / 18,166 | 43.42 / 43.51 | 42.98 / 43.01 |
+| `scroll` QP 24 CAVLC, 1080p30 | 441 / 441 | 61.19 / 76.84 | 56.42 / 56.84 |
+| `scroll` QP 28 CAVLC, 1080p30 | 442 / 422 | 50.48 / 51.13 | 48.85 / 50.77 |
+| `scroll` QP 32 CAVLC, 1080p30 | 426 / 437 | 50.12 / 50.88 | 48.70 / 47.67 |
+| `scroll` QP 28 CABAC (`rel_full_cab_dbk`), 1080p30 | 192 / 174 | 50.87 / 51.13 | 50.41 / 50.77 |
+
+(On these synthetic patterns the filter lowers the PSNR by 0.03 to 0.8 dB (15.7 dB on the nearly lossless QP 24 `scroll` picture, 76.8 dB without the filter) and the rate moves by up to 5 % either way: the patterns are flat areas with hard edges and noise that the filter smooths; the bit-rate saving of the filter on natural content is in 19.4. The rate-control runs at 8,000 and 16,000 kb/s are at 7,987 to 8,016 and 15,989 to 16,006 kb/s with 0 dropped pictures.)
+
+**Clocks per macroblock with the two-clock arbiter** (P pictures, budget 735 at 1080p30, `show encoder`, filter on, pattern `all`): `rel_base_dbk` 1080p30 560 to 571 (4,080 macroblocks per engine), 720p30 513 to 527; the TS-mux load 85 to 87 % at QP 28 and 47 % at 16,000 kb/s. The budget is kept with 164 clocks of margin or more.
+
+**`hp_expiry_test.ps1` (demo image, `-Profile high`, 1,980 s capture, interrupt mode)** passed every gate on the first run, no script change was needed for the merged tree: right after configuration present, licensed, time left 29 min 59 s (read 1.07 s after configuration), tools CABAC (`hp_caps` 1), `encoder profile high` accepted; the forced IDR picture at the licence end 1,799.82 s after configuration (1,800 s +- 5 s); the stream High (`profile_idc` 100, CABAC) from access unit 0 to 53,448 and Constrained Baseline (`profile_idc` 66, CAVLC) from the forced IDR picture at access unit 53,449; the board after the capture: licence ended, 2 forced IDR pictures; **interrupt counts of the licence end: 59,415 taken (0 with no enabled event), picture done 59,412, profile change 2, licence lost 1**; 59,404 pictures sent, 0 dropped; stream stop and start and a firmware `reload` do not restore the licence; reprogramming does (29 min 59 s). Files: `build/phase2i_demo_expiry_summary.txt`, `_pre.txt`, `_stream.txt`, `_1080p30_*.txt`.
+
+**Left open or changed.** The demo image did not run the interrupt/polled, filter on/off and CAVLC sweeps (the High profile runs listed above stay inside the 30-minute licence window; the CAVLC behaviour of the demo image is the one of the full image: the same encoder and filter). `rel_demo_cab_dbk` is on the board at the end of this work (programmed over JTAG, its 30-minute licence runs from that moment; the board lock is released).
+
 ## 7. Network integration (done 10-22-2026) and what remains
 
 Integrated: `u_mac`, `u_mdio`, `u_protocol` (every leaf, the CPU network path and its classifier), `u_echo` under
@@ -1551,11 +1684,14 @@ Open:
    for about 100 us. The 0x44A2_0000 main-ingress classifier window stays a stub.
 6. The LED behaviour of the RTL8211E (LINK steady, ACT blink) is configured and read back but was not observed.
 7. The classifier STALL_SEEN flag under load (section 6.5) is not analysed beyond the absence of any drop.
+8. Deblocking filter: board step open.
 
 ## 8. Revision history
 
 | Revision | Change |
 |---|---|
+| 11-13-2026 | Section 6.23: the three release images of the merged tree (`rel_base_dbk`, `rel_demo_cab_dbk`, `rel_full_cab_dbk`, each met timing on the first attempt with `AltSpreadLogic_high`), the DDR3 arbiter in two clocks, the filter's multiplier in a DSP block (no `SYNTH-9`, no waiver), board gates, `hp_expiry_test.ps1` of the demo image; sections 6.21 and 6.22 stay as the 6.21 of the interrupt merge and the CABAC-only image of the filter branch |
+| 11-12-2026 | Section 6.22: CABAC-only High profile image with the deblocking filter (`-HpTools cabac`, `hp_full_cab_dbk` built, `hp_demo_cab_dbk` two attempts without timing closure), RTLNET_UTIL_LIMIT, RTLNET_RESUME_DCP, SYNTH-9 waiver; section 6.20 VERSION corrected to 0x11122C04; board gates open |
 | 10-22-2026 | Initial version: CPU-only board top, build flow, bring-up |
 | 10-22-2026 | Network integration: RGMII XDC, CDC counts and waivers, network board bench, firmware network manager and driver-backed CLI, hardware results at 100 and 10 Mb/s |
 | 10-22-2026 | `microblaze/` folder; CPU core with AXI DMA, AXI BRAM, 512 KiB LMB; XSA export; BSP-based firmware with lwIP; CPU-only hardware checkpoint (section 6.3) |

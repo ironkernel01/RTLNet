@@ -8,6 +8,7 @@ Purpose: build and run the host test of the encoder session in both notification
 Usage: powershell -NoProfile -ExecutionPolicy Bypass -File microblaze/firmware/test/venc_irq_host_test.ps1
 Revision: 11-12-2026
   * 11-12-2026: initial version.
+  * 11-12-2026: the deblocking filter scenario (on and off between pictures, offsets, request kept across a restart, a core without the filter).
 -------------------------------------------------------------------------------
 #>
 $ErrorActionPreference = 'Stop'

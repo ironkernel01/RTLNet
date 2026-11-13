@@ -13,7 +13,10 @@
  *   * pipelined (frames arriving faster than pictures are coded, the encoder model finishing a picture between any two register accesses of the
  *     firmware, so the handler interrupts the main loop at every point): no error, every frame accounted for as sent or dropped, the picture
  *     queue drained, the handler started pictures, no interrupt register touched on the older core;
- *   * interrupt-specific: the self-test reaches the handler, events are counted per source, the mode in force is reported.
+ *   * interrupt-specific: the self-test reaches the handler, events are counted per source, the mode in force is reported;
+ *   * deblocking filter (CAPS bit 22 of the core model): on at the first picture, off and on again between pictures without an IDR picture or an error, the
+ *     offsets reach the core and are applied at the next picture, the request survives a stream restart (configure_mode writes it again), and a core
+ *     without the filter refuses "on" by name and keeps coding.
  * Prints "VENC_IRQ_TEST: PASS (...)" or "VENC_IRQ_TEST: FAIL" and returns 0 / 1. --neg: forces one failed check (the negative control).
  * Build: microblaze/firmware/test/venc_irq_host_test.ps1.
  */
@@ -23,6 +26,7 @@
 
 #include "host_platform.h"
 #include "rtlnet_csi2_rx.h"
+#include "rtlnet_h264_enc.h"       /* the deblocking filter register fields the model reports */
 #include "rtlnet_h264_enc_ctl.h"
 #include "rtlnet_mmio.h"
 #include "rtlnet_platform.h"
@@ -523,6 +527,62 @@ int main(int argc, char **argv)
         check(s.hp_forced_idr == 1u && s.errors == 0u, "license lost: the next picture is a forced IDR picture");
     }
     venc_stop();
+
+    /* 8b. Deblocking filter: the request defaults to on, changes between pictures are legal without an IDR picture, the offsets are applied at the next
+     *     picture, the request is written again by configure_mode at a stream restart, a core without the filter refuses on by name. */
+    for (uint32_t notify = 0u; notify < 2u; notify++) {
+        venc_status_t s;
+        const uint32_t dbk_on = RTLNET_H264_DBK_STATUS_PRESENT | RTLNET_H264_DBK_STATUS_APPLIED;
+
+        setup(1, 0);
+        check(venc_set_notify(notify) == VENC_OK, "deblock: venc_set_notify");
+        check(rtlnet_venc_deblock_wanted() == 1, "deblock: the request defaults to on");
+        check(venc_start(0xC0A80A0Au, 5004u) == VENC_OK, "deblock: start");
+        host_model_video_frames(BASE_FRAME + 1u);
+        check(run_until_sent(1u, 4000u), "deblock: first picture");
+        check(host_model_h264_dbk_status() == dbk_on, "deblock: the first picture was filtered, offsets 0");
+        check(rtlnet_venc_set_deblock(0) == 0 && rtlnet_venc_deblock_wanted() == 0, "deblock: off");
+        host_model_video_frames(BASE_FRAME + 2u);
+        check(run_until_sent(2u, 4000u), "deblock: picture with the filter off");
+        check(host_model_h264_dbk_status() == RTLNET_H264_DBK_STATUS_PRESENT, "deblock: the picture after off was not filtered");
+        venc_get_status(&s);
+        check(s.idr_pictures == 1u && s.hp_forced_idr == 0u && s.errors == 0u, "deblock: off needs no IDR picture and raises no error");
+        check(rtlnet_venc_set_deblock_offsets(-2, 3) == 0 && rtlnet_venc_set_deblock(1) == 0, "deblock: offsets -2 and +3, on");
+        check(rtlnet_venc_set_deblock_offsets(9, 0) == RTLNET_H264_CTL_DBK_ERR_RANGE, "deblock: offset 9 refused");
+        host_model_video_frames(BASE_FRAME + 3u);
+        check(run_until_sent(3u, 4000u), "deblock: picture with the filter on again");
+        check(host_model_h264_dbk_status() == (dbk_on | (0xEu << RTLNET_H264_DBK_STATUS_ALPHA_SHIFT) | (3u << RTLNET_H264_DBK_STATUS_BETA_SHIFT)),
+              "deblock: the picture applied alpha -2 and beta +3");
+        venc_get_status(&s);
+        check(s.idr_pictures == 1u && s.hp_forced_idr == 0u && s.errors == 0u, "deblock: on again needs no IDR picture and raises no error");
+        {
+            rtlnet_h264_ctl_dbk_t k;
+
+            check(rtlnet_venc_deblock_info(&k) == 0 && k.present == 1u && k.enable == 1u && k.applied == 1u && k.alpha_applied == -2 && k.beta_applied == 3 &&
+                  k.alpha_req == -2 && k.beta_req == 3, "deblock: venc_deblock_info");
+        }
+        venc_stop();
+        host_model_h264_dbk(1);   /* the core is reset: enable 1, offsets 0 */
+        check(rtlnet_venc_set_deblock(0) == 0, "deblock: off before the restart");
+        check(venc_start(0xC0A80A0Au, 5004u) == VENC_OK, "deblock: restart");
+        host_model_video_frames(BASE_FRAME + 1u);
+        check(run_until_sent(1u, 4000u), "deblock: first picture after the restart");
+        check(host_model_h264_dbk_ctrl() == ((0xEu << RTLNET_H264_DBK_CTRL_ALPHA_SHIFT) | (3u << RTLNET_H264_DBK_CTRL_BETA_SHIFT)) &&
+              host_model_h264_dbk_status() == (RTLNET_H264_DBK_STATUS_PRESENT | (0xEu << RTLNET_H264_DBK_STATUS_ALPHA_SHIFT) | (3u << RTLNET_H264_DBK_STATUS_BETA_SHIFT)),
+              "deblock: configure_mode wrote the request again (off, offsets -2 and +3) and the first picture used it");
+        venc_stop();
+        /* A build without the filter. */
+        setup(1, 0);
+        host_model_h264_dbk(0);
+        check(venc_set_notify(notify) == VENC_OK && venc_start(0xC0A80A0Au, 5004u) == VENC_OK, "deblock absent: start");
+        check(rtlnet_venc_set_deblock(1) == RTLNET_H264_CTL_DBK_ERR_NOT_PRESENT, "deblock absent: on refused by name");
+        check(rtlnet_venc_set_deblock_offsets(1, 1) == RTLNET_H264_CTL_DBK_ERR_NOT_PRESENT, "deblock absent: offsets refused by name");
+        host_model_video_frames(BASE_FRAME + 1u);
+        check(run_until_sent(1u, 4000u), "deblock absent: pictures are coded");
+        venc_get_status(&s);
+        check(s.errors == 0u && host_model_h264_dbk_status() == 0u && host_model_h264_dbk_ctrl() == 0u, "deblock absent: no error, the registers read 0");
+        venc_stop();
+    }
 
     /* 9. Pipelined, interrupt between any two register accesses; the stream is verified against the model. */
     for (uint32_t notify = 0u; notify < 2u; notify++) {

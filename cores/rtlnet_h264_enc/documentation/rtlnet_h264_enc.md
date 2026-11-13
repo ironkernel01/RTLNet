@@ -1,11 +1,11 @@
 # rtlnet_h264_enc: H.264 encoder core, phases 2b-2 to 2c-2 (Intra16x16, I_PCM fallback, P pictures with integer-pel motion search)
 
-Revision: 11-11-2026 (High profile seam, CABAC slice syntax, section 17; phase 2c-2: integer-pel motion search, section 16; phase 2c-1: P pictures without motion search, section 15; phase 2b-4: burst-only DDR3 access, section 14)
+Revision: 11-13-2026 (the filter's macroblock-count multiplier in a DSP block and the two-clock DDR3 arbiter, sections 19.7 and 19.8; interrupt, section 18; deblocking filter, section 19; High profile seam, CABAC slice syntax, section 17; phase 2c-2: integer-pel motion search, section 16; phase 2c-1: P pictures without motion search, section 15; phase 2b-4: burst-only DDR3 access, section 14)
 
 ## 1. Purpose and scope
 
 `cores/rtlnet_h264_enc` encodes one picture per start into an H.264 Constrained Baseline Annex B stream
-(ITU-T Rec. H.264 (06/2026), profile_idc 66, constraint_set1_flag 1, CAVLC, deblocking off). Phase 2b-1 proved the pipeline
+(ITU-T Rec. H.264 (06/2026), profile_idc 66, constraint_set1_flag 1, CAVLC, in-loop deblocking filter in the slice headers of the pictures it filters: section 19). Phase 2b-1 proved the pipeline
 with I_PCM macroblocks; phase 2b-2 adds the lossy coder: Intra16x16 luma prediction (vertical, horizontal, DC, plane) and
 chroma prediction by SAD, the 4x4 integer transform with the luma and chroma DC transforms, the quantizer, CAVLC residual
 coding and the rebuild loop (dequantizer, inverse transform, prediction add), so the rebuilt picture equals what a decoder
@@ -71,6 +71,8 @@ rtlnet_h264_top                      top: registers, the engine array, completio
       rtlnet_ram_core                upper-neighbour total_coeff line RAM
       rtlnet_ram_core                tile staging buffer (32 x 128 bits)
     rtlnet_h264_recon_wr             rebuilt-picture tiles: one 16-beat luma burst and one 8-beat chroma burst per macroblock
+    rtlnet_h264_deblock              DEBLOCK = 1 (instead of recon_wr): in-loop deblocking filter and the delayed tile write (section 19)
+      rtlnet_h264_dbk_line  x 4      one filter line (clause 8.7.2.3 and 8.7.2.4), two register stages
     rtlnet_h264_bitpack              ue/se, fields, start codes, trailing bits, emulation prevention
     rtlnet_h264_ring_wr              byte gather, word FIFO (rtlnet_ram_core), bursts, index entries, pointers
     rtlnet_h264_wr_master            ring / index record / rebuilt tile burst requests onto AW, W, B
@@ -189,7 +191,7 @@ on average. The driver therefore writes `max(QP, RTLNET_H264_QP_MIN_REALTIME)` i
 
 | Parameter | Default | Meaning |
 |---|---|---|
-| NUM_ENGINES | 2 | slice-band engines, 1..4 |
+| NUM_ENGINES | 2 | how many engines code slice bands in parallel, 1..4 (one engine carries 720p30, two carry 1080p30 at 90 MHz) |
 | MAX_MB_W, MAX_MB_H | 120, 68 | widest and tallest picture in macroblocks (1920x1088); range-checks and CAPS |
 | ADDR_W | 32 | only 32 supported (elaboration `$fatal`) |
 | ID_W | 4 | AXI ID width of each engine port |
@@ -204,7 +206,11 @@ on average. The driver therefore writes `max(QP, RTLNET_H264_QP_MIN_REALTIME)` i
 | LINE_KB | 4 | line RAM of stage A, KiB (two 16-byte words per macroblock column) |
 | FIFO_KB | 1 | ring word FIFO per engine, KiB (64 words of 16 bytes plus strobes) |
 | RAM_STYLE | "block" | `rtlnet_ram_core` style, "block" or "distributed" |
-| HIGH_PROFILE | 0 | 1 instances the High profile extension `rtlnet_h264_hp` (a netlist delivered separately) in every engine; 0 builds the Constrained Baseline encoder (section 17) |
+| DEBLOCK | 1 | 1 = include the in-loop deblocking filter `rtlnet_h264_deblock` in every engine (section 19); 0 = leave it out (the slice header then says the filter is off, `disable_deblocking_filter_idc` 1) |
+| DBK_LINE_KB | 16 | KiB per engine; memory of the deblocking filter for the rows above the current macroblock row (6 beats of 16 bytes for each of up to 128 macroblock columns); only with DEBLOCK = 1 |
+| HIGH_PROFILE | 0 | 0 = Constrained Baseline encoder with CAVLC entropy coding (the public core alone); 1 = the High profile netlist `rtlnet_h264_hp` (delivered separately) is added to every engine, and it always contains CABAC entropy coding. CABAC has no parameter of its own (section 17) |
+| HP_T8 | 1 | only with HIGH_PROFILE = 1 (ignored without it): 1 = include the 8x8 transform for inter macroblocks; 0 = leave it out (4x4 transform only) (section 17.9) |
+| HP_T8_AUTO | 1 | only with HP_T8 = 1: 1 = include the per-macroblock choice between the 4x4 and the 8x8 transform; 0 = leave it out (the 8x8 transform is then on or off for a whole picture, set by software). HP_T8_AUTO = 1 with HP_T8 = 0 stops the elaboration (section 17.9) |
 
 All memories are instances of `rtlnet_ram_core`. Frame size, band split, slice count and QP come from registers, not
 parameters, so one build codes both video modes.
@@ -234,14 +240,16 @@ remainder). Simulation assertions in `rtlnet_h264_wr_master` and `rtlnet_h264_en
 | Offset | Name | Access | Meaning |
 |---|---|---|---|
 | 0x000 | ID | RO | "H264" = 0x48323634 |
-| 0x004 | VERSION | RO | 0x11122C03 (11-12-2026: the interrupt registers; 0x11102C02 (11-10-2026, phase 2c-2: motion search, no register change; 0x11102C01 was phase 2c-1: P pictures; 0x11102026 the tiled rebuilt picture with 128-byte index records, all of them without the interrupt registers) |
-| 0x008 | CAPS | RO | [7:0] MAX_MB_W, [15:8] MAX_MB_H, [19:16] NUM_ENGINES, [20] HP_SEAM (HIGH_PROFILE build), [21] IRQ (the interrupt registers exist), [31:24] mask of the implemented interrupt sources |
+| 0x004 | VERSION | RO | 0x11122C04 (11-12-2026: the deblocking filter registers; 0x11122C03: the interrupt registers; 0x11102C02 (11-10-2026, phase 2c-2: motion search, no register change; 0x11102C01 was phase 2c-1: P pictures; 0x11102026 the tiled rebuilt picture with 128-byte index records, all of them without the interrupt registers) |
+| 0x008 | CAPS | RO | [7:0] MAX_MB_W, [15:8] MAX_MB_H, [19:16] NUM_ENGINES, [20] HP_SEAM (HIGH_PROFILE build), [21] IRQ (the interrupt registers exist), [22] DBK (the deblocking filter is present), [31:24] mask of the implemented interrupt sources |
 | 0x00C | CTRL | RW | bit 0 START (self-clearing), bit 1 RING_RESET (self-clearing), bit 8 IRQ_EN (the global interrupt enable, reset 0) |
 | 0x010 | STATUS | RW | bit 0 BUSY, bit 1 DONE (W1C), bit 2 ERR (W1C), bit 3 RING_STALL (live, any engine) |
 | 0x014 | ERR_CODE | RO | first error since the last ERR clear: 1 config, 2 AXI response, 3 read pointer, 4 start while busy |
 | 0x0C0 | HP_CTRL | RW | HIGH_PROFILE builds, else 0: bit 0 hp_enable (a write of 1 is ignored while hp_caps is 0; accepted when the module offers a tool), bit 1 hp_t8_enable (the 8x8 transform of inter macroblocks; a write of 1 is ignored while hp_caps bit 1 is 0), bit 2 hp_t8_auto (with bit 1: the module chooses the 4x4 or the 8x8 transform per macroblock, 17.7; a write of 1 is ignored without bit 1 or while hp_caps bit 2 is 0) |
 | 0x0C4 | HP_STATUS | RW | HIGH_PROFILE builds, else 0: [0] module present, [1] licensed, [2] active, [3] enable, [4] PROFILE_CHG (sticky, W1C), [5] 8x8 transform enable, [6] adaptive choice (hp_t8_auto), [11:8] hp_caps (bit 0 CABAC, bit 1 8x8 transform, bit 2 adaptive choice), [31:16] license seconds left (0xFFFF unlimited) |
 | 0x0C8 | HP_T8_COUNT | RO | HIGH_PROFILE builds, else 0: [15:0] macroblocks of the last picture coded with the 8x8 transform, [31:16] with the 4x4 transform (inter macroblocks with a coded luma block, the engines added) |
+| 0x0E0 | DBK_CTRL | RW | bit 0 filter enable (reset 1 with the filter present, else 0), [7:4] `alpha_c0_offset_div2`, [11:8] `beta_offset_div2` (4 bit two's complement, -6..+6, reset 0; a value outside the range leaves its field unchanged); latched at START (section 19.1) |
+| 0x0E4 | DBK_STATUS | RO | [0] filter present, [1] filter applied to the last started picture, [11:8] alpha and [15:12] beta offsets applied |
 | 0x0D0 | IRQ_STATUS | RW | sticky interrupt event bits, write 1 to clear (section 18) |
 | 0x0D4 | IRQ_ENABLE | RW | one enable bit per interrupt source, reset 0 |
 | 0x0D8 | IRQ_FORCE | WO | a written 1 sets the status bit (self-test) |
@@ -358,7 +366,7 @@ Per picture, engine 0 writes the access unit delimiter; every engine writes its 
   `frame_num` u(log2_max_frame_num), `idr_pic_id` ue(v) (IDR only), no POC fields (`pic_order_cnt_type` 2), for a P slice
   `num_ref_idx_active_override_flag` 0 (the PPS default is one reference) and `ref_pic_list_modification_flag_l0` 0,
   `dec_ref_pic_marking` (IDR: `no_output_of_prior_pics_flag` 0 and `long_term_reference_flag` 0; non-IDR: `adaptive_ref_pic_marking_mode_flag` 0:
-  the sliding window with `max_num_ref_frames` 1), `slice_qp_delta` se(v) = QP - 26, `disable_deblocking_filter_idc` ue(v) = 1. The P slice
+  the sliding window with `max_num_ref_frames` 1), `slice_qp_delta` se(v) = QP - 26, `disable_deblocking_filter_idc` ue(v) = 1 (2 with the deblocking filter on, followed by `slice_alpha_c0_offset_div2` se(v) and `slice_beta_offset_div2` se(v), section 19.1). The P slice
   header therefore has three zero bits after `frame_num`.
 * Macroblock layer (clause 7.3.5), Intra16x16 macroblock: `mb_type` ue(v) = 1 + prediction mode + 4 x cbp_chroma + 12 x (cbp_luma
   != 0) (Table 7-11), `intra_chroma_pred_mode` ue(v), `mb_qp_delta` se(v) = 0, `Intra16x16DCLevel` (always, nC of luma block 0),
@@ -407,6 +415,11 @@ rejections), including the 720p30 and 1080p30 modes and the bands (23/22 and 34/
 Since 11-12-2026 the driver folder also holds the control layer `rtlnet_h264_enc_ctl.{h,c}` (the code firmware calls: session, notification mode, picture start and
 turnaround, High profile controls, console view; section 18.4) and the H.264 rate controller `rtlnet_ratectl.{h,c}` (`rtlnet_ratectl.md`), with their host tests
 `testbench/test_rtlnet_h264_enc_ctl.c` and `testbench/test_rtlnet_ratectl.c`. Firmware outside the driver folder includes no register definition and makes no register access to this core.
+
+Deblocking filter (section 19): the driver has `rtlnet_h264_enc_set_deblock(base, on)` (`on` is refused with `RTLNET_H264_DBK_ERR_NOT_PRESENT` when CAPS bit 22 is 0, off is always accepted), `rtlnet_h264_enc_set_deblock_offsets(base, alpha_div2, beta_div2)`
+(-6..+6, else `RTLNET_H264_DBK_ERR_RANGE`; the enable bit is kept) and `rtlnet_h264_enc_deblock_status(base, &st)` (`rtlnet_h264_enc_dbk_t`: present, enable, applied, the offsets applied and requested); `caps.dbk` reports the filter. The control layer
+(`rtlnet_h264_ctl_set_deblock`, `_set_deblock_offsets`, `_deblock_wanted`, `_deblock_in_force`, `_deblock_info`) remembers the request (default on) and applies it in `set_mode`; the firmware (`rtlnet_venc_set_deblock`, `_set_deblock_offsets`, `_deblock_wanted`, `_deblock_info`)
+only calls it. CLI: `encoder deblock [on|off]`, `encoder deblock-offsets <alpha> <beta>` and the `Deblocking` line of `show encoder` (in force and offsets applied, or not present). The parameter sets do not change with the filter.
 
 ## 10. Verification flow (Verilator)
 
@@ -872,7 +885,7 @@ reference fetch and drives a search result (vector and cost) into the mode decis
 * Every inter macroblock has the vector (0,0): no search, no sub-sample vectors, no picture-edge rule (the co-located macroblock is always inside the picture).
 * P_Skip needs the skip vector (clause 8.4.1.1) to be (0,0), because its prediction would otherwise need that vector. The skip vector is computed in full (it is `mvp` unless A or B is
   unavailable or has the vector (0,0) with reference index 0). With every vector (0,0) it is always (0,0); stage 2c-2 lifts the restriction by predicting P_Skip from the skip vector.
-* One reference picture (the previous one), one slice type per picture (all slices P), no B slices, no weighted prediction, no deblocking (`disable_deblocking_filter_idc` 1), CAVLC only.
+* One reference picture (the previous one), one slice type per picture (all slices P), no B slices, no weighted prediction, CAVLC only; since 11-12-2026 the reference is the deblocked picture (section 19).
 * Intra macroblocks in P slices are Intra16x16 or I_PCM as in I slices; `constrained_intra_pred_flag` is 0.
 * The first picture of a stream, and the first picture after any decoder reset, is an IDR picture; the firmware (not the core) decides the GOP.
 
@@ -1156,13 +1169,13 @@ is its Constrained Baseline form). `encoder profile high` is accepted when the n
 | `full` | `HIGH_PROFILE` 1 with the netlist of the unlimited-license variant, taken from `H264HighProfile\netlist\full` (or `$env:H264_HIGHPROFILE_ROOT`) |
 | `demo` | `HIGH_PROFILE` 1 with the netlist of the variant whose license ends 30 minutes after FPGA configuration |
 
-The build stops when the netlist is missing. `build_info.txt` names the variant and the netlist's `netlist_info.txt`.
+The build stops when the netlist is missing. `build_info.txt` names the variant, the tool set (`hp_tools`) and the netlist's `netlist_info.txt`. `-HpTools cabac|t8|all` (default `all`, with `-HighProfile full|demo`) chooses the tool set: it picks the netlist (`netlist\<variant>` for `all`, `netlist\<variant>_<tools>` for the others) and sets `HP_T8` and `HP_T8_AUTO` of the encoder to match (section 17.9).
 
 ### 17.6 The 8x8 transform of inter luma (stage 3, 11-12-2026)
 
 With `hp_caps` bit 1 (the stage 3 netlist), `hp_t8_enable` (HP_CTRL bit 1) and the High profile in force, the luma residual of an inter macroblock (P_L0_16x16)
 is coded by the module with the 8x8 transform: `transform_size_8x8_flag` 1 and ctxBlockCat 5 blocks, the PPS with `transform_8x8_mode_flag` 1 (the SPS stays High, 100). Chroma, Intra16x16 and I_PCM keep the 4x4
-transform and their syntax. Without `hp_t8_auto` the decision is not per macroblock: every inter macroblock with luma residual uses it while it is on (17.7 describes the adaptive choice). The encoder's deblocking filter is off, so no filter edge depends on the flag.
+transform and their syntax. Without `hp_t8_auto` the decision is not per macroblock: every inter macroblock with luma residual uses it while it is on (17.7 describes the adaptive choice). The deblocking filter reads the flag per macroblock: an 8x8 transform macroblock filters the luma edges 0 and 2 only (section 19.2).
 
 - Ports of `rtlnet_h264_hp` (the stub and the black box carry them): inputs `hp_t8_enable` (the register bit) and `t8_sub` (the stage B descriptor: this macroblock submitted its luma residual); the reserved streams are used:
   `tf_req` (out) is high from `pic_start` to `pic_done` while the picture's inter macroblocks use the transform; `tf_res` (engine to module) carries the luma residual of the macroblock, four 8x8 blocks in raster order of the 8x8 groups, 8 beats per block,
@@ -1238,6 +1251,49 @@ State profile (`MB_PROF`, a bench define of `rtlnet_h264_mb_enc`: clocks per sta
 
 **Verification of the stage.** The benches of the changed units (`tb_rtlnet_h264_xform` with the latencies 10 and 9, `tb_rtlnet_h264_ipred` with the prediction three clocks after the query, `tb_rtlnet_h264_mvpred` and `tb_rtlnet_h264_search`) pass with their negative controls; the mutation of the single-neighbour rule moved to `rtlnet_h264_mvpred_s2.sv`. Streams: byte-identical to the stage 3a streams in CAVLC, CABAC 4x4, 8x8 and auto mode (40 of 40 comparisons: 9 QCIF configurations and one 720p configuration) and equal to the model (private regression 169 of 169); this repository's regression 162 of 162 on the same RTL; mutation 19 (single-neighbour rule) is caught in `rtlnet_h264_mvpred_s2.sv`.
 
+### 17.9 Feature options and tool sets (11-12-2026)
+
+The High profile tools are chosen at build time, in three sets. CABAC entropy coding is part of every set; the 8x8 transform and the per-macroblock choice between the 4x4 and the 8x8 transform are options.
+Each option is a parameter of `rtlnet_h264_top` (section 4) that includes the feature or leaves it out; a feature that is left out costs no logic.
+
+| Encoder | `HIGH_PROFILE` | `HP_T8` | `HP_T8_AUTO` | `hp_caps` | `build.ps1` switches (`boards/nexys_video`) |
+|---|---|---|---|---|---|
+| CAVLC Baseline | 0 | - | - | (no module) | none |
+| CABAC | 1 | 0 | 0 | 0001 | `-HighProfile full\|demo -HpTools cabac` |
+| CABAC + 8x8 transform | 1 | 1 | 0 | 0011 | `-HighProfile full\|demo -HpTools t8` |
+| CABAC + 8x8 transform + adaptive choice | 1 | 1 | 1 | 0111 | `-HighProfile full\|demo -HpTools all` (default) |
+
+Every row exists with `DEBLOCK` 1 (default) and with `DEBLOCK` 0 (section 19). `HP_T8` is ignored without `HIGH_PROFILE`. `HP_T8_AUTO` = 1 with `HP_T8` = 0 stops the elaboration of the top and of the engine with a message that names both parameters.
+
+**The netlist and the parameters match.** The netlist built in the High profile repository (`build_netlist.ps1 -Tools cabac|t8|all`, parameters `T8_EN` and `T8_AUTO_EN` of `rtlnet_h264_hp`) must contain the tool set that `HP_T8` and `HP_T8_AUTO` say. `build.ps1 -HpTools cabac|t8|all` selects both together: it picks the netlist folder
+(`netlist\<variant>` for `all`, `netlist\<variant>_<tools>` for the others) and sets the two parameters of the board top (`build_info.txt` has the line `hp_tools`). Software never has to know the parameters: it reads the tool set from `hp_caps` (`HP_STATUS` [11:8]: bit 0 CABAC,
+bit 1 8x8 transform, bit 2 adaptive choice), which the engine reports as the intersection of the netlist's tools and its own parameters. A mismatch therefore shows as the smaller set (netlist with 8x8 and `HP_T8` 0: `hp_caps` 0001; netlist CABAC-only and `HP_T8` 1: `hp_caps` 0001, the unused seam logic idles) and never as an error;
+`show encoder` prints it in the `High profile` line (`tools CABAC (hp_caps 1)`, `tools CABAC 8x8-transform (hp_caps 3)`, `tools CABAC 8x8-transform adaptive-choice (hp_caps 7)`) and says `Transform 8x8   : not offered (hp_caps bit 1 is 0)` for a set without the 8x8 transform.
+
+**What is removed.** `HP_T8` 0: in `rtlnet_h264_mb_enc` (`T8` = `HIGH_PROFILE && HP_T8`) the residual feeder (S_T8S), the rebuild (S_T8R), the discard (S_DRN), the summary registers and the rebuilt-RAM write path of the 8x8 transform; in the engine the macroblock counters of `HP_T8_COUNT`
+(both halves read 0); `hp_caps` bits 1 and 2 read 0. `HP_T8_AUTO` 0: the request beat on `tf_res`, the state S_T8L (the luma pass of a macroblock the module gave back to the 4x4 transform), the per-macroblock request and rejection flags, and `hp_t8a_q` (the picture's choice mode); `hp_caps` bit 2 reads 0.
+Registers read back consistently: `HP_CTRL` bit 1 (8x8 transform) is ignored and reads 0 without `hp_caps` bit 1, bit 2 (adaptive choice) is ignored and reads 0 without `hp_caps` bit 2; `HP_STATUS` bits 5 and 6 read the stored bits (0), `HP_T8_COUNT` reads 0 with `HP_T8` 0. The driver already follows `hp_caps`:
+`rtlnet_h264_enc_set_transform8x8` refuses on with `RTLNET_H264_HP_ERR_NO_T8` and auto with `RTLNET_H264_HP_ERR_NO_AUTO` (the firmware's default request, auto, degrades to on without bit 2 and to nothing without bit 1; no message at start-up), the PPS is written with `transform_8x8_mode_flag` 0, `encoder transform8x8 on|auto` prints its named refusal.
+
+**Cost of each option.** Out-of-context synthesis of the encoder (two engines, `enc_clk` 11.111 ns, `xc7a200tsbg484-1`, Vivado 2026.1, `encoder_synth.ps1` of the High profile repository), post-synthesis, with the netlists of the `full` variant:
+
+| Tool set | Netlist alone: LUT cells / FF / DSP | Encoder, `DEBLOCK` 0: LUT / FF / DSP | Encoder, `DEBLOCK` 1: LUT / FF / DSP | RAMB36 + RAMB18 (`DEBLOCK` 0 / 1) | Worst slack (`DEBLOCK` 0 / 1) |
+|---|---|---|---|---|---|
+| `HIGH_PROFILE` 0 (CAVLC Baseline, no netlist) | - | 46,773 / 34,892 / 76 | 58,597 / 39,835 / 76 | 34 + 6 / 42 + 6 | +1.992 / +1.748 ns |
+| CABAC (`HP_T8` 0, `HP_T8_AUTO` 0) | 2,691 / 1,243 / 0 | 52,032 / 37,497 / 76 | 63,846 / 42,439 / 76 | 34 + 6 / 42 + 6 | +1.874 / +1.748 ns |
+| CABAC + 8x8 transform (1, 0) | 8,869 / 9,735 / 56 | 65,365 / 55,172 / 188 | 77,085 / 60,124 / 188 | 34 + 6 / 42 + 6 | +1.874 / +1.748 ns |
+| CABAC + 8x8 + adaptive choice (1, 1) | 12,194 / 11,357 / 80 | 71,538 / 58,425 / 236 | 82,968 / 63,382 / 236 | 34 + 6 / 42 + 6 | +1.874 / +1.748 ns |
+
+The netlist column counts the primitives of one module (the encoder has two), the encoder columns are the slice LUTs of the report. The deblocking filter costs 11,430 to 11,824 LUT, 4,942 to 4,957 FF and 8 RAMB36 in every row (11,430 for the default all-tools encoder). Over the CAVLC Baseline encoder with the filter (58,597 LUT) CABAC adds 5,249 LUT and 2,604 FF, the 8x8 transform a further 13,239 LUT, 17,685 FF and 112 DSP, the adaptive choice a further 5,883 LUT, 3,258 FF and 48 DSP.
+The worst path of the `DEBLOCK` 1 rows is the filter's `d1_reg` to its line store (13 levels); without the filter it is the packer count to the CABAC context RAM write enable (11 levels, +1.874 ns), and the entropy path (`pk_cmd_*` register inputs) keeps its 6 levels in every row. These are estimates without placement.
+The CABAC-only encoder with the filter (63,846 LUT, 42,439 FF, 76 DSP, 42 + 6 RAMB) is 19,122 LUT below the all-tools encoder with the filter (82,968 LUT).
+
+**Default builds.** `HIGH_PROFILE` 0 with `DEBLOCK` 0 and 1: the utilization reports of the worktree before and after the edit are identical line for line (46,773 and 58,597 LUT, a `diff` shows the date and the tool header only), the worst paths and slacks are the same. `HIGH_PROFILE` 1 with all tools (the default parameters, the netlist rebuilt from the edited sources): 71,538 LUT and 58,425 FF with `DEBLOCK` 0 (before the edit, 71,541 and 58,425), 82,968 LUT and 63,382 FF with `DEBLOCK` 1 (before, 82,982 and 63,387); RAMB, DSP and every slack are equal. These are not line-for-line identical: 3 and 14 LUT, 0 and 5 FF fewer, which the mapper's choices explain (the rebuilt netlist alone is 1 LUT and, for `demo`, 1 FF smaller; the encoder with the edited sources and the old netlist gives 71,540 and 82,970 LUT, 63,382 FF with the filter).
+
+**Verification of this section** (all with the RTL of the High profile repository and the real engine): the RTLNet regression in the worktree on the final code, default parameters (`rtlnet_regression.ps1`): `RTLNET_REGRESSION: 176 passed, 0 failed`; the driver host test and the control layer test (`h264_driver_test.ps1`, in that regression) pass; `h264_lint.ps1` passes; the firmware host demo `TEST PASS: menu_demo checks=502`, `RATECTL_TEST: PASS (15 gates)`, the picture queue, transmit ring, transport stream mux and encoder interrupt host tests pass with their negative controls.
+Streams: for every tool set, filter off and on, QCIF, 720p and 1080p, I and P pictures, 1 and 2 engines, the slices are identical to the model, JM, OpenH264 and FFmpeg are identical to the encoder's reference picture, and the stream of the CABAC set is byte-identical to the all-tools build with the transform switched off (`HP_CTRL` 1), the stream of the 8x8 set to the all-tools build with the fixed 8x8 transform (`HP_CTRL` 3), both with the filter off and on (24 comparisons, all identical; the private document section 10.7). A mismatch between the netlist and the parameters (an encoder with all tools on a CABAC-only netlist, a CABAC-only encoder on a netlist with all tools, an 8x8-only encoder on a netlist with all tools) reports the smaller `hp_caps`, ignores the request bits and codes a valid stream.
+The driver host test checks the three tool sets (`hp_caps` 1, 3 and 7: `set_transform8x8` refusals `RTLNET_H264_HP_ERR_NO_T8` and `_NO_AUTO`, nothing written, the PPS flag), the firmware demo prints `Transform 8x8   : not offered (hp_caps bit 1 is 0)` for `hp_caps` 1 and refuses `encoder transform8x8 on|auto` with its named text; the control layer ignores the refusal of its default request (auto) silently, so no line is printed at start-up.
+
 ### 17.5 Verification in this repository
 
 The default build is covered by the existing regression, `h264_lint.ps1` and `h264_synth.tcl` (the latter with argument 4 = 1 synthesizes the
@@ -1273,7 +1329,7 @@ enable bit per source. IRQ_STATUS holds one sticky bit per source and reads the 
 | 5 | PIC_START | a start accepted while idle (`start` and not `busy`); a start while busy is the ERR source (ERR_CODE 4) instead |
 
 CAPS bit 21 reads 1 when these registers exist and CAPS [31:24] is the mask of the implemented sources (0x3F with `HIGH_PROFILE = 1`, 0x27 with 0).
-VERSION is 0x11122C03; software detects the capability from CAPS bit 21 together with that VERSION (the driver does, `caps.irq`) and keeps the polled method
+VERSION is 0x11122C03 or later; software detects the capability from CAPS bit 21 together with that VERSION (the driver does, `caps.irq`) and keeps the polled method
 on a core that reads 0x11102C02.
 
 Clear rules. An event sets its bit; a write of 1 clears it. An event in the same clock as a clear of its bit keeps the bit set (the event wins, so no event is
@@ -1292,7 +1348,7 @@ crossing and no extra pipeline stage.
 ### 18.3 Software sequences
 
 Interrupt mode (the driver does this):
-1. Probe: CAPS bit 21 and VERSION 0x11122C03. Acknowledge IRQ_STATUS (write 0xFF), write IRQ_ENABLE (PIC_DONE, ERR, RING_STALL, PROFILE_CHG, LICENSE_LOST; PIC_START
+1. Probe: CAPS bit 21 and VERSION 0x11122C03 or later. Acknowledge IRQ_STATUS (write 0xFF), write IRQ_ENABLE (PIC_DONE, ERR, RING_STALL, PROFILE_CHG, LICENSE_LOST; PIC_START
    stays off), set `CTRL.IRQ_EN`, unmask the interrupt controller input.
 2. In the handler: read IRQ_STATUS; write the bits read back (acknowledge; an event that arrived in between stays set and interrupts again); then act on
    them: on PIC_DONE read the index entries and the QP, clear STATUS.DONE, collect the picture, start the next picture; on ERR read ERR_CODE and clear STATUS.ERR.
@@ -1382,3 +1438,150 @@ The interrupt runs on the Nexys Video board with the merged tree (`rtlnet_nexys_
 - Who starts the pictures: at 8,000 kb/s the encoder is idle when the picture ends (about 15 ms of 33.3 ms), so the main loop starts every picture when the next frame arrives (1,811 of 1,811). Where the encoder is the limit (1080p30 `all` 4, QP 24, CABAC) the handler starts 408 (4x4), 457 (8x8) and 456 (auto) of about 460 pictures.
 - Cycle time and lag at begin (frame ready to picture begin): interrupt min 21.3, avg 33.3, max 33.9 ms, lag avg 21 us, max 546 us; polled min 23.0, avg 33.3, max 33.6 ms, lag avg 15 us, max 11,809 us. On the default image (no module) the lag is avg 4 us, max 14 us in interrupt mode and avg 17 us, max 10,004 us polled. The interrupt mode removes the long start delays of the polled loop; the cycle time and the CPU load (24.5 and 23.6 %) agree.
 - A switch of the mode while a picture is in flight takes effect at the next idle point of the encoder (`notify_pending`); the first CLI reply text for it was wrong and is corrected. 1,171 interrupts for 1,810 pictures in a run with the middle third polled.
+
+## 19. Deblocking filter (11-12-2026)
+
+The encoder filters its reconstruction with the in-loop deblocking filter of ITU-T Rec. H.264 clause 8.7. The reference picture written to memory is the filtered picture, so the
+encoder and a decoder hold the same reference. Intra prediction inside a picture keeps using the unfiltered samples (the filter acts on the picture after its reconstruction); the rebuilt-macroblock
+path of stage A is unchanged. The filter is the module `rtlnet_h264_deblock` (with `rtlnet_h264_dbk_line`), one per engine, behind the build parameter `DEBLOCK` (default 1; 0 removes it: the engine is
+the encoder of section 18, `rtlnet_h264_recon_wr` writes the tiles and the slice header has `disable_deblocking_filter_idc` 1).
+
+### 19.1 Control and syntax
+
+* Registers (section 6): `DBK_CTRL` (0x0E0) bit 0 enable (reset 1 with the filter present), [7:4] `alpha_c0_offset_div2` and [11:8] `beta_offset_div2` (4 bit two's complement, range -6..+6, reset 0; a
+  write of a value outside the range leaves that field unchanged); `DBK_STATUS` (0x0E4, read only) [0] filter present, [1] enable applied to the last started picture, [11:8] and [15:12] the alpha and beta offsets applied.
+  CAPS bit 22 is the filter-present bit and VERSION is 0x11122C04. The register block latches the state at the accepted START (`cfg_dbk_*`): a change while a picture runs takes effect with the next picture,
+  and switching the filter on or off between pictures needs no IDR picture and no new parameter sets.
+* Slice header: `disable_deblocking_filter_idc` ue(v) is 1 when the filter is off (the stream is then byte for byte that of the encoder without the filter), 2 when it is on; with 2 the header carries
+  `slice_alpha_c0_offset_div2` se(v) and `slice_beta_offset_div2` se(v) (the register fields). The PPS has had `deblocking_filter_control_present_flag` 1 since phase 2b.
+* **Why idc 2.** The engines code the bands of macroblock rows in parallel and each slice is whole macroblock rows, so with idc 2 (edges between slices are not filtered) a slice never needs a sample of
+  another slice or of another engine's band. **Cost in quality:** the horizontal edge between two slices (the top edge of the first macroblock row of every slice, so one edge row per slice and per engine band)
+  keeps its block edge unfiltered; with 2 engines and 1 slice per engine that is one edge row, in the middle of the picture, and one more for every additional slice. Vertical edges and every edge inside a slice are filtered.
+  **What idc 0 would need:** the top edge of the first row of a slice filters against the bottom three luma rows (and the bottom chroma row) of the slice above, as they stand after that slice's own filtering. With the
+  engines coding the bands in parallel that means the first row of every band but the first waits for the last row of the band above (the bands run in series), or a second pass over the
+  band boundaries after both engines have finished (re-read the rows, filter the edge row, re-write the reference tiles), or a row exchange between the engines. None of them is in this stage.
+
+### 19.2 Architecture
+
+* **Information from stage A** (`rtlnet_h264_mb_enc`, valid with `done`): `o_nz16`, the 4x4 luma blocks with non-zero levels (an 8x8 transform macroblock: the four blocks of each coded 8x8 block;
+  nothing for a dropped residual), `o_mv_x`, `o_mv_y` (the macroblock's vector in quarter samples, 0 for intra), and the intra / I_PCM / 8x8-transform flags. The engine keeps them per rebuilt bank.
+* **Boundary strength** (clause 8.7.2.1) per edge segment of 4 lines (a chroma segment has two bS values of two lines each, taken from the luma edge it corresponds to): 4 on a macroblock edge and 3 inside when
+  either side is intra (I_PCM included), else 2 when the 4x4 block (8x8 block for the 8x8 transform) on either side has non-zero levels, else 1 on a macroblock edge when the motion vectors differ by 4 or more quarter samples in
+  either component (computed on the full quarter-sample vectors, `|dx| >= 4 or |dy| >= 4`, so it stays right when the search yields sub-sample vectors), else 0. There is one reference picture, so no reference test.
+  qP is the slice QP, 0 for an I_PCM macroblock; the chroma qP is the clause 8.5.8 table of that value; indexA and indexB add `2 x offset_div2` and clip to 0..51 (8.7.2.2); alpha, beta and tC0 are Tables 8-16 and 8-17.
+  A macroblock with the 8x8 transform filters the luma edges 0 and 2 only; the chroma edges (x = 0 and 4, y = 0 and 4) are not affected by it.
+* **Order of work** per macroblock (clause 8.7): vertical luma edges left to right, horizontal luma edges top to bottom, then Cb and Cr (vertical, then horizontal); macroblocks in raster order inside the slice.
+  The sequencer issues one edge segment per clock (a luma horizontal segment per two clocks) to four filter lines (two register stages, `rtlnet_h264_dbk_line`: clauses 8.7.2.3 and 8.7.2.4, strong luma filter and
+  chroma filter included) and keeps at least four clocks between segments that touch the same words.
+* **Window RAM** (8 RAMs of 32 bit, distributed by default, `WIN_STYLE`): bank (row mod 4, column word mod 2), two sets (the current and the previous macroblock of the row). One clock reads the 8 words of a
+  vertical edge segment (4 rows, the words on both sides of the edge) and the 4 words of a chroma horizontal segment; a luma horizontal segment needs two clocks. The column word -1 of a macroblock is column word 3 (luma) or 1 (chroma) of the
+  previous set, filtered in place, so no column store is copied. The rows above the macroblock (4 luma rows, 2 rows per chroma plane) are loaded into the window from the line store.
+* **Line store** (`DBK_LINE_KB`, default 16 KiB per engine, block RAM, 128 bit): per macroblock column 6 beats (luma rows 12..15, the Cb and Cr beats of rows 6 and 7 in tile layout) of the macroblock row above, in the state in which
+  the macroblock to its right has filtered its left edge. It is written when a macroblock is retired (the previous macroblock after the current one has filtered its left edge; the last macroblock of a row at once).
+* **Timing of the reference write.** The samples of a tile are final in two steps: rows 0..12 (chroma rows 0..6) and all columns once the macroblock to the right has filtered its left edge, rows 13..15 (chroma row 7) once the macroblock
+  below has filtered its top edge (in the last macroblock row of a band: from the line store at the end of the band). A tile is therefore written twice, always in bursts of 8 beats or more with byte strobes (`rc_w_strb` of
+  `rtlnet_h264_wr_master`): the **main bursts** when the macroblock is retired (16 luma beats with beats 13..15 masked, 8 chroma beats with the row 7 bytes of beats 3 and 7 masked) and the **late bursts** after the macroblock below
+  (8 luma beats at tile + 128 with beats 0..4 masked, 8 chroma beats with only the row 7 bytes of beats 3 and 7 enabled). Every byte of a tile is written exactly once (the module bench checks it). A staging RAM (two sets of main beats and two of late beats,
+  128 bit, 128 words) decouples the bursts from the filter; a four entry job queue feeds the burst writer. The DDR3 rule of the project holds: the rebuilt-picture bursts are 16 and 8 beats (burst monitor histogram).
+* **Flow control.** The unit takes a macroblock when stage A has finished it (`rfull`), copies the 96 words of the rebuilt bank into the window (98 clocks), releases the bank, then filters, retires and writes behind stage A of the next
+  macroblock. The picture flush (E_FLUSH) waits for the unit's `idle` (band end: the late bursts of the last row, then all bursts written).
+* **Filter off.** With `DBK_CTRL.enable` 0 the unit does not filter: picture, stream and reference are those of the encoder without the filter (the write path is the delayed one; the bytes are the same).
+
+### 19.3 Verification
+
+* Reference model `testbench/h264_deblock_model.py` (clause 8.7 written from the text; its tables equal the JM tables: `h264_deblock_model.py <JM loop_filter.h>`). `testbench/h264_dbk_check.py` checks the model against the decoders: with only the slice header
+  fields in place (idc 2, the rebuilt picture still unfiltered) the encoder coded I pictures, the model filtered the unfiltered rebuilt pictures, and JM, OpenH264 and FFmpeg output was byte-identical to the model on 16 QCIF I pictures
+  (QP 18 to 51, 1 and 2 engines, 1 to 4 slices, offsets 0 and alpha 6 / beta -6). That fixed the model before the filter RTL was written.
+* Module bench `testbench/tb_rtlnet_h264_dbk.sv` (Verilator, `h264_dbk_run.ps1`): random and directed pictures from `h264_dbk_vec.py` (kinds rand, mv, intra, t8, slices, step, and filter off; 1x1 to 12x9 macroblocks; random slice
+  offsets; random acceptance of bursts and beats; random pauses between macroblocks) against the model: byte-for-byte tile memory, every byte written exactly once, burst shapes (INCR, 16 byte beats, 8 beats or more, aligned, inside 4 KiB).
+  The vectors cover bS 1 to 4 (luma and chroma), vector differences of 0 to 9 quarter samples (below 4: bS 0; 4 and above: bS 1), the strong and the weak bS 4 filter, every indexA range with the clipped indices, I_PCM,
+  macroblocks without levels, 8x8 transform macroblocks, picture edges and slice edges. `+INJECT_FAILURE` is the negative control; `h264_dbk_mutation.ps1` applies source mutations (tables, bS rules, thresholds, edge selection, strobes)
+  and requires the bench to fail.
+
+Unit tests of this section: module bench 132 vector sets (`+INJECT_FAILURE` negative control: 76 of 76 sets fail as required), mutations 25 of 25 caught (one equivalent mutant, the vector comparison on internal edges which never uses it, was removed from the list),
+register bench `tb_rtlnet_h264_regs` 95 checks (97 with `TB_HP`) including the offset range and the latching at the start, driver host test 712 checks, control layer test 123, CLI demo 502, `venc_irq_host_test` 229, firmware sources of the changed units compile
+with the RISC-V toolchain (`-fsyntax-only -Wall -Wextra -Werror -pedantic`; no link: the BSP is not in this worktree).
+
+### 19.4 Results (11-12-2026)
+
+**Streams with the filter in force** (`h264_harness.ps1`, Verilator, the real engine; JM, OpenH264 and FFmpeg decode every picture byte-identical to the encoder's filtered rebuilt picture, which is the next picture's reference):
+
+| Set | Configurations | Result |
+|---|---|---|
+| I pictures, QCIF | the default set: structure checks (1 and 3 slices, 2 engines with 2 and 4 slices, small ring with a slow consumer, 2 pictures), the pattern x QP matrix QP 0 to 51 (bars, checker, noise, gradient, gradnoise, zoneplate, edges, photo, zeros) | 74 of 74 |
+| P pictures and motion | `p_*`: static, pan, moving bars, noise, scene cut at QCIF (QP 12 to 51, 1 and 2 engines, 1 to 9 slices, GOP up to 20 pictures, ring stall), `p_720p_*`, `p_1080p_*`, and the QCIF motion sets `m_qcif_*` and `m_strip_*` (widths of 5, 13 and 18 macroblocks) | 84 of 84 (83 on the first run; `m_qcif_objs_q28` missed only its PSNR floor, before the floors of the filter-on streams were complete) |
+| Motion at 720p and 1080p | `m_720p_*`, `m_1080p_*` (pans, bounce, objects, noise; search range 0 and 16; 1 and 2 engines, 1 to 4 slices) | 9 of 9 |
+| Measurement | `d_720p_*`, `d_1080p_*` (pan and objects, QP 28, 36, 44, 2 engines), filter on and filter off | 24 of 24 |
+| On and off in one stream, offsets | `-DbkCtl 1101001011` (on and off between pictures: 3 configurations) and `-DbkCtl dcbaf9` (all offset codes, on and off: 3 configurations) | 6 of 6 |
+| `DEBLOCK` 0 build | `-NoDbk`: 5 configurations (I, P, 1 and 2 engines) | 5 of 5, streams byte-identical to the commit before this section (4 compared) |
+| High profile | private stream runs with the real engine and the module (`-T8Auto`): QCIF IPPPP and 720p 2 engines IPP, filter on: decoders identical; filter off (`TB_DBK_OFF`): slices identical to the private model; `hp_engine_check.ps1` (Active-HDL, licence expiry and forced IDR) | pass |
+
+PSNR floors with the filter in force are in `h264_psnr_floors_dbk.txt` (the filter smooths the true edges of the synthetic patterns: for `objs` at QCIF and QP 28 the picture PSNR is 39.3 dB with the filter, the floors of the
+filter-off streams stay in `h264_psnr_floors.txt`; both are selected by the harness).
+
+**Filter off is the old encoder.** With `DBK_CTRL.enable` 0, and with `DEBLOCK` 0, the stream of every configuration compared (QCIF I and P, 1 and 3 slices, 2 engines) is byte-identical to the stream of the commit before this section
+(SHA-256 of `stream.264`): the PPS flag was already 1 and idc 1 is the old header field.
+
+**PSNR and bits, filter on against off** (`h264_dbk_table.py`; 2 engines, 2 slices, one IDR picture and two P pictures, PSNR of the P pictures against the source, bits of the P pictures; the P pictures of these generated sequences are small, 3,700 to 9,300 bits,
+so the bits of a single configuration are noisy, the sums are the figure):
+
+| configuration | PSNR on / off (dB, pictures 1..2) | bits on / off (P pictures) | bits change | clocks per macroblock on / off (I, P) |
+|---|---|---|---|---|
+| d_1080p_e2_s2_objs_q28 | 45.02 / 44.89 (+0.12) | 2800 / 2768 | +1.2 % | I 387 / 387, P 390 / 390 |
+| d_1080p_e2_s2_objs_q36 | 43.89 / 43.53 (+0.36) | 3592 / 2776 | +29.4 % | I 387 / 387, P 390 / 390 |
+| d_1080p_e2_s2_objs_q44 | 41.58 / 41.23 (+0.35) | 4392 / 5576 | -21.2 % | I 387 / 387, P 396 / 397 |
+| d_1080p_e2_s2_pan_q28 | 44.34 / 44.22 (+0.12) | 7784 / 7728 | +0.7 % | I 387 / 387, P 390 / 390 |
+| d_1080p_e2_s2_pan_q36 | 43.25 / 42.97 (+0.28) | 3888 / 4848 | -19.8 % | I 387 / 387, P 390 / 390 |
+| d_1080p_e2_s2_pan_q44 | 41.08 / 40.77 (+0.30) | 3928 / 5024 | -21.8 % | I 387 / 387, P 399 / 399 |
+| d_720p_e2_s2_objs_q28 | 44.74 / 44.56 (+0.18) | 3792 / 3784 | +0.2 % | I 388 / 388, P 391 / 391 |
+| d_720p_e2_s2_objs_q36 | 43.30 / 42.73 (+0.56) | 3696 / 3688 | +0.2 % | I 388 / 388, P 391 / 391 |
+| d_720p_e2_s2_objs_q44 | 40.90 / 40.31 (+0.59) | 5008 / 4040 | +24.0 % | I 388 / 388, P 398 / 399 |
+| d_720p_e2_s2_pan_q28 | 43.82 / 43.66 (+0.15) | 8456 / 9344 | -9.5 % | I 388 / 388, P 390 / 390 |
+| d_720p_e2_s2_pan_q36 | 42.62 / 42.20 (+0.43) | 5720 / 6064 | -5.7 % | I 388 / 388, P 393 / 394 |
+| d_720p_e2_s2_pan_q44 | 40.49 / 40.01 (+0.48) | 3792 / 5072 | -25.2 % | I 388 / 388, P 403 / 403 |
+
+Summed over the configurations the filter changes the bits of the three pictures by -0.6 % (720p) and -0.5 % (1080p) and the mean PSNR by +0.42 dB (720p) and +0.27 dB (1080p).
+
+**Clocks per macroblock** (`PIC_CYC / MB_COUNT`, mean over the pictures and engines; "before" is the commit before this section, same configuration and bench): 720p and 1080p, QP 28, 1 and 2 engines: I pictures 386 to 388 (before 388), P pictures of smooth content 389 to 391 (before 388 to 389);
+at QCIF, where a row is 11 macroblocks, the retire at the end of every row is a larger share: I pictures 397 (before 390), P pictures +6 to +7 on smooth content, noise +2 to +3, QP 38 pan -3 (the coding differs). The most any measured
+configuration adds is 7 clocks per macroblock; 1080p30 needs at most 735.
+The unit works behind stage A and is not its limit at these sizes.
+
+**DDR3 write traffic of the rebuilt picture** (burst monitor, QCIF 2 engines): per macroblock one 16-beat and three 8-beat bursts, 40 beats against 24 (a 16-beat and an 8-beat burst) without the filter: 157 MB/s of writes at 1080p30 against 94 MB/s, no burst below 8 beats.
+
+### 19.5 Cost
+
+Out-of-context synthesis (`h264_synth.tcl`, `xc7a200tsbg484-1`, `enc_clk` 90 MHz = 11.111 ns, 2 engines, Vivado 2026.1, post-synthesis estimate), 11-12-2026:
+
+| Build | Slice LUT | of it distributed RAM | FF | RAMB36 + RAMB18 | DSP | WNS (ns) | Worst path |
+|---|---|---|---|---|---|---|---|
+| Before this section (stage 3c with the interrupt), `HIGH_PROFILE` 0 | 46,916 | 440 | 34,892 | 34 + 6 | 76 | +1.992 | `u_ipred` `pc_reg` to `q1_t_reg`, 9 levels |
+| `DEBLOCK` 0, `HIGH_PROFILE` 0 | 46,773 | 440 | 34,892 | 34 + 6 | 76 | +1.992 | the same |
+| `DEBLOCK` 1, `HIGH_PROFILE` 0 | 58,597 | 1,352 | 39,835 | 42 + 6 | 76 | +1.748 | `u_dbk` `d1_reg[pl]` to `u_line` `dp1_1_reg`, 13 levels |
+| `HIGH_PROFILE` 1 with the full netlist (stage 3c), no filter | 71,341 | | 58,418 | 34 + 6 | 236 | +1.881 | `u_pack` `cnt_reg` to the CABAC context RAM write enable (module) |
+| `DEBLOCK` 1, `HIGH_PROFILE` 1 with the full netlist | 82,982 | 2,728 | 63,387 | 42 + 6 | 236 | +1.748 | `u_dbk`, as above (the entropy path `pk_cmd_*` +5.085 ns, the module's transform paths +4.275 ns) |
+
+The filter adds 11,824 LUT, 4,943 FF and 8 RAMB36 for two engines: **5,912 LUT, 2,472 FF and 4 RAMB36 per engine** (456 LUT of it distributed RAM: the window and the information RAM), no DSP block. The `DEBLOCK` 0 build is the encoder of
+section 18 (same flip-flops, same worst path, 143 LUT fewer than the earlier report: the synthesis result of the unchanged logic differs by that much between runs of different file sets). In the `HIGH_PROFILE` 1 build the filter adds
+11,641 LUT and 4,969 FF. Post-route figures are not in this report; the post-synthesis estimate uses estimated net delays, and the failing paths of earlier board builds were dominated by routing, so the board build confirms the slack.
+The board builds and gates of the filter are in the board document, sections 6.22 and 6.23.
+
+### 19.6 Not in this stage
+
+* `disable_deblocking_filter_idc` 0 (filtering across slice boundaries, section 19.1), the field-mode and MBAFF cases of the clause (the encoder codes frames), the chroma formats other than 4:2:0, the deblocking of B-slice and of multi-reference edges (one reference picture, no B slices).
+* The board build with the filter is done (`encoder deblock on|off` is in the firmware; board document sections 6.22 and 6.23).
+
+### 19.7 The macroblock-count multiplier in a DSP block (11-13-2026)
+
+The filter needs the number of macroblocks of a band, `w_p * band_p` (the picture width in macroblocks times the band height in macroblock rows, 8 x 8 bits), once per picture, to find the last macroblock of the band. Implemented as a plain product it
+was a multiplier of 8 x 8 bits in LUTs, which the methodology check reports as `SYNTH-9` (20 findings in the board image of 6.22, ten per engine) and which the earlier image waived by name. Since 11-13-2026 the product is a registered product that maps into one DSP block:
+
+* `band_p` is latched with `w_p` at `pic_start`; `mb_prod` (attribute `(* use_dsp = "yes" *)`) is the product of the two registers and `mb_total` the second product register, both free-running without a reset (a pure function of `w_p` and `band_p`).
+* Timing of the consumer: `mb_total` is valid 3 clocks after `pic_start`. It is compared with the macroblock counter at the end of the first macroblock of the band, which is at least 96 clocks after `pic_start` (the line-store copy of that macroblock reads 96 words before the state machine can retire it), so the value is always valid when used. Checked by the filter bench with pictures of
+  1 x 1 macroblock (the shortest case: the first macroblock is the last one): `tb_rtlnet_h264_dbk` 140 sets pass, the negative control fails 86 of 86 sets, the mutation run catches 25 of 25 mutants, and the harness runs with the filter on, off and mid-stream pass.
+* The behaviour is the same for every vendor (a registered 8 x 8 product with the attribute as a hint; a tool that ignores the hint builds it from LUTs and the function does not change).
+* Result: out-of-context synthesis of two engines, `DEBLOCK` 1, `HIGH_PROFILE` 0, 90 MHz: 58,463 LUT (was 58,597), 39,803 FF (was 39,835), 42 + 6 RAMB, **78 DSP (was 76: one DSP block per engine)**, WNS +1.748 ns (unchanged). In the three release board images (board document 6.23) the methodology check has **no `SYNTH-9` finding (20 before), and `build_bitstream.tcl` has no waiver for it**; the image DSP count is 84 (82 before).
+
+### 19.8 The DDR3 arbiter in two clocks (11-13-2026)
+
+The worst routed paths of the board images of 6.19 to 6.22 were not in the encoder: the DDR3 arbiter `u_arb` (the write grant `wr_err_pend` / `aw_rr` to `wr_pend` and the memory-side AW registers, 12 to 15 logic levels; the read grant from the encoder's `arvalid`) and the MicroBlaze V to LMB RAM paths set a slack of +0.007 to +0.047 ns, and the two demo images did not close (WNS -0.629 and -0.469 ns). `rtlnet_axi_arbiter` now registers each master's AW and AR channel (parameter `ADDR_REG` 1, `rtlnet_axi_arbiter_slice`) and grants in two clocks (a registered grant, then the fire). `rtlnet_axi_arbiter.md` sections 2, 6 and 7 describe the design, the latency (3 clocks from a master's valid to the memory-side valid, 1 before) and the verification. Effect on the encoder: every burst address takes 2 clocks more; the encoder bursts are 8 beats or more, and the clocks per macroblock stay inside the budget: **561 and 560 clocks per macroblock (1080p30, 4,080 macroblocks per engine, pattern all, QP 28, filter on, P picture) and 513 and 522 (720p30)**, budget 735 (the measured range with the filter in the release image `rel_base_dbk`, 513 to 571). The routed images close timing with the arbiter out of the worst paths (board document 6.23).

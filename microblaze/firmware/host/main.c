@@ -986,6 +986,66 @@ static void demo_video(void)
     host_capture_clear();
     demo_type("encoder profile high\r");
     demo_check(demo_has("% Profile high refused: the High profile netlist is not in this build (simulation stub)"), "encoder profile high: refused, stub");
+    /* Deblocking filter (CAPS bit 22, on by default): the Deblocking line, encoder deblock on|off, encoder deblock-offsets, the refusals. */
+    host_model_h264_dbk(1);
+    demo_type("encoder deblock on\r");   /* the request of the sessions above may be off: start from on */
+    host_capture_clear();
+    demo_type("show encoder\r");
+    demo_check(demo_has("  Deblocking      : on (in force: last picture not filtered, alpha 0, beta 0)"), "show encoder: Deblocking line, on, no picture yet");
+    host_capture_clear();
+    demo_type("encoder deblock off\r");
+    demo_check(demo_has("Deblock off, effective at the next picture") && (host_model_h264_dbk_ctrl() == 0u), "encoder deblock off: DBK_CTRL enable cleared");
+    host_capture_clear();
+    demo_type("show encoder\r");
+    demo_check(demo_has("  Deblocking      : off (in force: last picture not filtered, alpha 0, beta 0)"), "show encoder: Deblocking line, off");
+    host_capture_clear();
+    demo_type("encoder deblock on\r");
+    demo_check(demo_has("Deblock on, effective at the next picture (in-loop filter, filtered inside each slice, not across slice boundaries)") &&
+               (host_model_h264_dbk_ctrl() == 1u), "encoder deblock on: DBK_CTRL enable set");
+    host_capture_clear();
+    demo_type("encoder deblock maybe\r");
+    demo_check(demo_has("state (on or off)") && (host_model_h264_dbk_ctrl() == 1u), "encoder deblock: bad word rejected, nothing written");
+    host_capture_clear();
+    demo_type("encoder deblock-offsets -3 4\r");
+    demo_check(demo_has("Deblock offsets alpha -3, beta 4, effective at the next picture") && (host_model_h264_dbk_ctrl() == (1u | (0xDu << 4) | (4u << 8))),
+               "encoder deblock-offsets -3 4: DBK_CTRL fields written, enable kept");
+    host_capture_clear();
+    demo_type("show encoder\r");
+    demo_check(demo_has("  Deblocking      : on (in force: last picture not filtered, alpha 0, beta 0; next picture alpha -3, beta 4)"),
+               "show encoder: Deblocking line, requested offsets differ from the applied ones");
+    host_capture_clear();
+    demo_type("encoder deblock-offsets 7 0\r");
+    demo_check(demo_has("Invalid deblock offsets \"7 0\" (alpha and beta -6..6)") && (host_model_h264_dbk_ctrl() == (1u | (0xDu << 4) | (4u << 8))),
+               "encoder deblock-offsets 7 0: refused, nothing written");
+    host_capture_clear();
+    demo_type("encoder deblock-offsets 0 -7\r");
+    demo_check(demo_has("Invalid deblock offsets \"0 -7\" (alpha and beta -6..6)"), "encoder deblock-offsets 0 -7: refused");
+    host_capture_clear();
+    demo_type("encoder deblock-offsets x 1\r");
+    demo_check(demo_has("Invalid deblock offsets \"x 1\" (alpha and beta -6..6)"), "encoder deblock-offsets x 1: refused");
+    host_capture_clear();
+    demo_type("encoder deblock-offsets -6 6\r");
+    demo_check(demo_has("Deblock offsets alpha -6, beta 6") && (host_model_h264_dbk_ctrl() == (1u | (0xAu << 4) | (6u << 8))), "encoder deblock-offsets -6 6: the limits are accepted");
+    host_capture_clear();
+    demo_type("encoder deblock-offsets 0 0\r");
+    demo_check(host_model_h264_dbk_ctrl() == 1u, "encoder deblock-offsets 0 0: back to the defaults");
+    host_model_h264_dbk(0);                  /* a build without the filter (DEBLOCK = 0, CAPS bit 22 clear) */
+    host_capture_clear();
+    demo_type("show encoder\r");
+    demo_check(demo_has("  Deblocking      : not present (this build has no deblocking filter)"), "show encoder: Deblocking line, not present");
+    host_capture_clear();
+    demo_type("encoder deblock on\r");
+    demo_check(demo_has("% Deblock on refused: this build has no deblocking filter (CAPS bit 22 is 0)") && (host_model_h264_dbk_ctrl() == 0u),
+               "encoder deblock on: refused by name without the filter");
+    host_capture_clear();
+    demo_type("encoder deblock-offsets 1 1\r");
+    demo_check(demo_has("% Deblock offsets refused: this build has no deblocking filter (CAPS bit 22 is 0)"), "encoder deblock-offsets: refused by name without the filter");
+    host_capture_clear();
+    demo_type("encoder deblock off\r");
+    demo_check(demo_has("Deblock off, effective at the next picture"), "encoder deblock off: always accepted");
+    host_model_h264_dbk(1);
+    host_capture_clear();
+    demo_type("encoder deblock on\r");   /* leave the request on for the sessions after this one */
     host_model_h264_set(1, 0);               /* no seam in the build */
     host_capture_clear();
     demo_type("show encoder\r");

@@ -196,4 +196,18 @@ int rtlnet_venc_transform8x8_wanted(void);
 int rtlnet_venc_transform8x8_in_force(void);
 int rtlnet_venc_transform8x8_counts(uint32_t *n8, uint32_t *n4);
 
+/*
+ * In-loop deblocking filter of the core (CAPS bit 22). The request defaults to on and is written to the core at every configure_mode (stream
+ * start, mode change) and at once when it changes; the core takes the register state at each picture start, so a change is effective at the next
+ * picture without an IDR picture or new parameter sets. rtlnet_venc_set_deblock: on != 0 enables, 0 disables; returns 0, or
+ * RTLNET_H264_CTL_DBK_ERR_NOT_PRESENT for on when the build has no filter (off is always accepted). rtlnet_venc_set_deblock_offsets: alpha and
+ * beta, each -6..+6 (slice_alpha_c0_offset_div2, slice_beta_offset_div2); returns 0, RTLNET_H264_CTL_DBK_ERR_RANGE or _NOT_PRESENT, and writes
+ * nothing on an error. rtlnet_venc_deblock_wanted: the request (1 on, 0 off). rtlnet_venc_deblock_info: 0 and the state (request, last picture
+ * and offsets applied), or RTLNET_H264_CTL_DBK_ERR_NOT_PRESENT.
+ */
+int rtlnet_venc_set_deblock(int on);
+int rtlnet_venc_set_deblock_offsets(int alpha_div2, int beta_div2);
+int rtlnet_venc_deblock_wanted(void);
+int rtlnet_venc_deblock_info(rtlnet_h264_ctl_dbk_t *out);
+
 #endif /* RTLNET_VENC_H */

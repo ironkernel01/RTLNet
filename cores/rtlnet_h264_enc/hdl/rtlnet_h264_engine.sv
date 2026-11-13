@@ -86,7 +86,11 @@ module rtlnet_h264_engine #(
   parameter int    SR         = 16,    // search range in whole samples (at most 16)
   parameter bit    EMIT_AUD  = 1'b1,   // this engine writes the access unit delimiter (engine 0)
   parameter string RAM_STYLE = "block",
-  parameter bit    HIGH_PROFILE = 1'b0   // 1: instantiate rtlnet_h264_hp (the High profile netlist) and multiplex the entropy path
+  parameter bit    HIGH_PROFILE = 1'b0,  // 1: instantiate rtlnet_h264_hp (the High profile netlist) and multiplex the entropy path
+  parameter bit    HP_T8       = 1'b1,   // only with HIGH_PROFILE = 1: 1 = include the 8x8 transform for inter macroblocks; 0 = leave it out (4x4 only)
+  parameter bit    HP_T8_AUTO  = 1'b1,   // only with HP_T8 = 1: 1 = include the per-macroblock choice of 4x4 or 8x8 transform; 0 = leave it out
+  parameter int    DBK_LINE_KB = 16,     // deblocking filter line store, KiB
+  parameter bit    DEBLOCK     = 1'b1    // 1: in-loop deblocking filter (slice header idc 2 while cfg_dbk_en)
 )(
   // Clock and synchronous active-low reset.
   input  logic              clk,
@@ -125,6 +129,11 @@ module rtlnet_h264_engine #(
   input  logic [15:0]       cfg_pic_no,
   input  logic [7:0]        band_first_row,
   input  logic [7:0]        band_rows,
+
+  // Deblocking filter state of the picture, clk domain (latched by the register block at the accepted start).
+  input  logic              cfg_dbk_en,
+  input  logic signed [3:0] cfg_dbk_a,
+  input  logic signed [3:0] cfg_dbk_b,
 
   // High profile seam, clk domain. hp_enable: the register-block enable bit. The status outputs come from rtlnet_h264_hp and are 0 when
   // HIGH_PROFILE = 0: hp_present, hp_licensed, hp_seconds_left (0xFFFF unlimited), hp_caps (bit 0 CABAC, bit 1 8x8 transform, bit 2 adaptive transform choice), hp_active
@@ -202,6 +211,9 @@ module rtlnet_h264_engine #(
 
   import rtlnet_h264_pkg::*;
 
+  if (HP_T8_AUTO && !HP_T8) begin : g_bad_auto
+    $fatal(1, "rtlnet_h264_engine: HP_T8_AUTO = 1 needs HP_T8 = 1; set HP_T8 to 1 or HP_T8_AUTO to 0 (the choice between the 4x4 and the 8x8 transform needs the 8x8 transform)");
+  end
   localparam int BANK_WORDS = 32;
   localparam int RAM_AW     = $clog2(MB_BUF_KB * 1024 / 16);
   localparam int MI         = $clog2(RD_STRIP_MB);
@@ -237,6 +249,8 @@ module rtlnet_h264_engine #(
   localparam logic [4:0] E_DONE   = 5'd21;
   localparam logic [4:0] E_DRAIN  = 5'd22;
   localparam logic [4:0] E_SKR    = 5'd23;   // mb_skip_run of the trailing skipped macroblocks
+  localparam logic [4:0] E_HA     = 5'd24;   // slice_alpha_c0_offset_div2 (deblocking on)
+  localparam logic [4:0] E_HB     = 5'd25;   // slice_beta_offset_div2
 
   // Fetch sequencer states.
   localparam logic [1:0] F_IDLE = 2'd0;
@@ -244,6 +258,7 @@ module rtlnet_h264_engine #(
   localparam logic [1:0] F_RUN  = 2'd2;
 
   logic [4:0]        st;
+  logic              dbk_on;
   logic [1:0]        ft;
   logic              cfg_ok;
   logic              cfg_ok_q;
@@ -319,6 +334,22 @@ module rtlnet_h264_engine #(
   logic              a_inter;
   logic              a_skip;
   logic [3:0]        a_cbp4;
+  // Deblocking filter (DEBLOCK = 1): per rebuilt bank, the information the filter needs, captured when stage A finishes the macroblock.
+  logic [7:0]        di_x [2];
+  logic              di_avt [2];
+  logic              di_intra [2];
+  logic              di_pcm [2];
+  logic              di_t8 [2];
+  logic [15:0]       di_nz [2];
+  logic signed [13:0] di_mvx [2];
+  logic signed [13:0] di_mvy [2];
+  logic              dbk_ready;
+  logic              dbk_taken;
+  logic              dbk_idle;
+  logic              dbk_pic_start;
+  logic [15:0]       a_nz16;
+  logic signed [13:0] a_mv_x;
+  logic signed [13:0] a_mv_y;
   logic signed [15:0] a_mvdx;
   logic signed [15:0] a_mvdy;
   logic [15:0]       b_skip_run;
@@ -498,6 +529,7 @@ module rtlnet_h264_engine #(
   logic              rc_pop;
   logic              rc_w_valid;
   logic [127:0]      rc_w_data;
+  logic [15:0]       rc_w_strb;
   logic              rc_w_pop;
   logic              ev_b_ring;
   logic              ev_b_idx;
@@ -517,6 +549,7 @@ module rtlnet_h264_engine #(
   logic              slice_is_last;
   logic [7:0]        rows_next;
 
+  assign dbk_on      = DEBLOCK && cfg_dbk_en;
   assign busy        = (st != E_IDLE);
   assign m_arid      = ref_busy ? ID_W'(1) : '0;
   // AR and R channels: the strip DMA and the reference DMA own them one at a time.
@@ -558,7 +591,7 @@ module rtlnet_h264_engine #(
   assign win_go    = win_req && !rd_busy && !rd_start && !ref_busy && !strip_req;
   assign b_go  = ((st == E_MB) || (st == E_DRAIN)) && !b_run && cfull[bb];
   assign hp_active = hp_act;
-  assign rec_start = !rec_run && rfull[rr] && (st != E_IDLE);
+  assign rec_start = !rec_run && rfull[rr] && (st != E_IDLE) && (!DEBLOCK || dbk_ready);
 
   // Configuration check: sizes in range, bases and strides aligned, strides wide enough.
   always_comb begin
@@ -588,7 +621,7 @@ module rtlnet_h264_engine #(
   assign err_busy = start && busy;
 
   // ---------------------------------------------------------------------------
-  // High profile seam. HIGH_PROFILE = 0: stage B's outputs feed the engine directly. HIGH_PROFILE = 1: rtlnet_h264_hp shares the
+  // High profile seam (HP_T8 / HP_T8_AUTO select the seam-side 8x8 transform and adaptive-choice logic; HP_T8_AUTO needs HP_T8). HIGH_PROFILE = 0: stage B's outputs feed the engine directly. HIGH_PROFILE = 1: rtlnet_h264_hp shares the
   // macroblock descriptor, the coefficient read port and the packer command path with stage B, selected by hp_act (constant for a
   // picture); a changed hp_licensed or hp_enable at a picture start turns that picture into a forced IDR picture.
   // ---------------------------------------------------------------------------
@@ -598,6 +631,8 @@ module rtlnet_h264_engine #(
       if (CRAM_AW > 10) begin : g_bad_cram
         $fatal(1, "rtlnet_h264_engine: CRAM_AW=%0d, the rtlnet_h264_hp seam carries 10 bits", CRAM_AW);
       end
+      logic [3:0]        hp_caps_n;       // the netlist's tool set; hp_caps is its intersection with the tools this build has seam-side logic for
+      assign hp_caps = hp_caps_n & {1'b0, HP_T8 && HP_T8_AUTO, HP_T8, 1'b1};
 
       logic              hp_lic_q;        // hp_licensed and hp_enable applied at the last picture start
       logic              hp_en_q;
@@ -655,7 +690,7 @@ module rtlnet_h264_engine #(
             hp_t8a_q <= hp_t8_now && hp_t8_auto && hp_caps[2];
             t8n8_c   <= 16'd0;
             t8n4_c   <= 16'd0;
-          end else if (a_done && a_inter && !a_skip && !a_pcm && (a_cbp4 != 4'd0)) begin
+          end else if (HP_T8 && a_done && a_inter && !a_skip && !a_pcm && (a_cbp4 != 4'd0)) begin
             if (a_t8use) t8n8_c <= t8n8_c + 16'd1;
             else         t8n4_c <= t8n4_c + 16'd1;
           end
@@ -717,7 +752,7 @@ module rtlnet_h264_engine #(
       rtlnet_h264_hp u_hp (
         .clk(clk), .resetn(resetn),
         .hp_enable(hp_enable), .hp_t8_enable(hp_t8_enable), .hp_present(hp_present), .hp_licensed(hp_licensed), .hp_seconds_left(hp_seconds_left),
-        .hp_caps(hp_caps), .hp_active(hp_act),
+        .hp_caps(hp_caps_n), .hp_active(hp_act),
         .pic_start(hp_pic_start), .pic_done(done), .slice_start(st == E_H0), .slice_end(st == E_SLEND),
         .mb_start(b_go && hp_act), .mb_x(bi_x[bb]), .av_top(bi_avt[bb]), .av_left(bi_avl[bb]), .pcm(bi_pcm[bb]),
         .i16_mode(bi_mode[bb]), .cbp_chroma(bi_cbpc[bb]), .cbp_luma(bi_cbpl[bb]), .chroma_mode(bi_cm[bb]),
@@ -814,7 +849,10 @@ module rtlnet_h264_engine #(
       // High profile P slice: cabac_init_idc 0 = ue(0) = one bit '1' behind the three marking bits.
       E_H7: begin seq_op = PK_FIELD; seq_val = hp_cab_p ? 32'd1 : 32'd0; seq_len = hp_cab_p ? 6'd4 : (e_idr ? 6'd2 : (e_p ? 6'd3 : 6'd1)); end
       E_H8: begin seq_op = PK_SE; seq_val = 32'(signed'({1'b0, cfg_qp}) - 7'sd26); end
-      E_H9: begin seq_op = PK_UE; seq_val = 32'd1; end
+      // disable_deblocking_filter_idc: 1 off, 2 on (filter inside each slice); with idc 2 the two offsets follow.
+      E_H9: begin seq_op = PK_UE; seq_val = dbk_on ? 32'd2 : 32'd1; end
+      E_HA: begin seq_op = PK_SE; seq_val = 32'(signed'(cfg_dbk_a)); end
+      E_HB: begin seq_op = PK_SE; seq_val = 32'(signed'(cfg_dbk_b)); end
       E_SKR:  begin seq_op = PK_UE; seq_val = 32'(b_skip_run); end
       E_SLEND: begin seq_op = PK_END; end
       default: seq_valid = 1'b0;
@@ -892,6 +930,14 @@ module rtlnet_h264_engine #(
       b_run          <= 1'b0;
       rec_run        <= 1'b0;
       for (int i = 0; i < 2; i++) begin
+        di_x[i]     <= '0;
+        di_avt[i]   <= 1'b0;
+        di_intra[i] <= 1'b0;
+        di_pcm[i]   <= 1'b0;
+        di_t8[i]    <= 1'b0;
+        di_nz[i]    <= '0;
+        di_mvx[i]   <= '0;
+        di_mvy[i]   <= '0;
         bi_mode[i] <= '0;
         bi_cm[i]   <= '0;
         bi_cbpc[i] <= '0;
@@ -996,7 +1042,7 @@ module rtlnet_h264_engine #(
             st       <= EMIT_AUD ? E_AUD0 : E_H0;
           end
         end
-        E_AUD0, E_AUD1, E_AUD2, E_AUD3, E_H0, E_H1, E_H2, E_H3, E_H4, E_H5, E_H7, E_H8, E_H9, E_SKR, E_SLEND: begin
+        E_AUD0, E_AUD1, E_AUD2, E_AUD3, E_H0, E_H1, E_H2, E_H3, E_H4, E_H5, E_H7, E_H8, E_H9, E_HA, E_HB, E_SKR, E_SLEND: begin
           if (pk_in_ready && !hp_hold) begin
             case (st)
               E_AUD0:  st <= E_AUD1;
@@ -1011,7 +1057,9 @@ module rtlnet_h264_engine #(
               E_H5:    st <= e_idr ? E_H6 : E_H7;
               E_H7:    st <= E_H8;
               E_H8:    st <= E_H9;
-              E_H9:    st <= E_MB;
+              E_H9:    st <= dbk_on ? E_HA : E_MB;
+              E_HA:    st <= E_HB;
+              E_HB:    st <= E_MB;
               E_SKR:   st <= E_SLEND;
               default: st <= E_SLWAIT;
             endcase
@@ -1062,7 +1110,7 @@ module rtlnet_h264_engine #(
         E_FLUSH: begin
           if (ring_idle && pk_idle && (wm_out == 5'd0) && !wm_busy && (ft == F_IDLE) && srch_idle && !me_active && !ref_busy &&
               (mb_out == 3'd0) && !rec_run &&
-              !rfull[0] && !rfull[1]) st <= E_DONE;
+              !rfull[0] && !rfull[1] && (!DEBLOCK || dbk_idle)) st <= E_DONE;
         end
         E_DONE: begin
           done <= 1'b1;
@@ -1091,6 +1139,14 @@ module rtlnet_h264_engine #(
           xfull[xc]  <= 1'b0;
           xc         <= ~xc;
         end
+        di_x[rb]     <= bi_x[ab];
+        di_avt[rb]   <= bi_avt[ab];
+        di_intra[rb] <= !a_inter;
+        di_pcm[rb]   <= a_pcm;
+        di_t8[rb]    <= a_t8use;
+        di_nz[rb]    <= a_nz16;
+        di_mvx[rb]   <= a_mv_x;
+        di_mvy[rb]   <= a_mv_y;
         cfull[ab]    <= 1'b1;
         bi_inter[ab] <= a_inter;
         bi_skip[ab]  <= a_skip;
@@ -1254,7 +1310,7 @@ module rtlnet_h264_engine #(
 
   rtlnet_h264_mb_enc #(
     .MAX_MB_W(MAX_MB_W), .LINE_KB(LINE_KB), .RAM_STYLE(RAM_STYLE), .SRC_AW(RAM_AW), .REC_AW(REC_AW), .CRAM_AW(CRAM_AW),
-    .REF_AW(REF_AW), .MV_LINE_KB(MV_LINE_KB), .T8(HIGH_PROFILE)
+    .REF_AW(REF_AW), .MV_LINE_KB(MV_LINE_KB), .T8(HIGH_PROFILE && HP_T8), .T8_AUTO(HP_T8_AUTO)
   ) u_mb_enc (
     .clk(clk), .resetn(resetn),
     .start(a_go), .pcm_mode(cfg_mb_pcm), .p_pic(e_p), .mb_x(a_x), .av_top(!a_first_row), .av_left(a_x != 8'd0),
@@ -1263,7 +1319,7 @@ module rtlnet_h264_engine #(
     .mv_in_x(xmv_x[xc]), .mv_in_y(xmv_y[xc]), .src_lock(a_src_lock),
     .busy(a_busy), .done(a_done),
     .o_i16_mode(a_i16), .o_chroma_mode(a_cm), .o_cbp_chroma(a_cbpc), .o_cbp_luma(a_cbpl), .o_pcm(a_pcm),
-    .o_inter(a_inter), .o_skip(a_skip), .o_cbp4(a_cbp4), .o_mvd_x(a_mvdx), .o_mvd_y(a_mvdy),
+    .o_inter(a_inter), .o_skip(a_skip), .o_cbp4(a_cbp4), .o_nz16(a_nz16), .o_mv_x(a_mv_x), .o_mv_y(a_mv_y), .o_mvd_x(a_mvdx), .o_mvd_y(a_mvdy),
     .t8_en(t8_req), .t8_auto(t8_auto_pic), .o_t8sub(a_t8sub), .o_t8use(a_t8use), .tf_res_valid(tf_res_v), .tf_res_last(tf_res_l), .tf_res_ready(tf_res_r),
     .tf_res_data(tf_res_d),
     .tf_rec_valid(tf_rec_v), .tf_rec_ready(tf_rec_r), .tf_rec_data(tf_rec_d), .tf_sum_valid(tf_sum_v), .tf_sum_data(tf_sum_d[26:0]),
@@ -1285,13 +1341,47 @@ module rtlnet_h264_engine #(
     .cmd_valid(cav_valid), .cmd_ready(pk_in_ready), .cmd_op(cav_op), .cmd_val(cav_val), .cmd_len(cav_len)
   );
 
-  rtlnet_h264_recon_wr #(.ADDR_W(ADDR_W), .RAM_AW(REC_AW), .RAM_STYLE(RAM_STYLE)) u_recon (
-    .clk(clk), .resetn(resetn),
-    .start(rec_start), .base(reb_base_r), .y_addr(ry_ptr), .c_addr(ru_ptr), .busy(rec_busy), .done(rec_done),
-    .ram_rd_en(rec_ram_en), .ram_rd_addr(rec_ram_addr), .ram_rd_data(rec_ram_data),
-    .rc_valid(rc_valid), .rc_addr(rc_addr), .rc_len(rc_len), .rc_pop(rc_pop),
-    .rc_w_valid(rc_w_valid), .rc_w_data(rc_w_data), .rc_w_pop(rc_w_pop)
-  );
+  generate
+    if (DEBLOCK) begin : g_dbk
+      if ((MAX_MB_W * 8 > DBK_LINE_KB * 64) || (MAX_MB_W > 128)) begin : g_bad_line
+        $fatal(1, "rtlnet_h264_engine: DBK_LINE_KB=%0d holds fewer than 8 beats of 16 bytes for each of the %0d macroblock columns (at most 128)", DBK_LINE_KB, MAX_MB_W);
+      end
+      // One start pulse per accepted picture, a clock late so that the register block's latched filter state is valid.
+      logic pic_go;
+      always_ff @(posedge clk) begin
+        if (!resetn) pic_go <= 1'b0;
+        else         pic_go <= (st == E_IDLE) && start && cfg_ok_q;
+      end
+      assign dbk_pic_start = pic_go;
+      assign rec_busy = 1'b0;
+      assign rec_done = dbk_taken;
+      rtlnet_h264_deblock #(.ADDR_W(ADDR_W), .LINE_KB(DBK_LINE_KB), .REC_AW(REC_AW), .RAM_STYLE(RAM_STYLE)) u_dbk (
+        .clk(clk), .resetn(resetn),
+        .pic_start(dbk_pic_start), .cfg_mb_w(cfg_mb_w), .cfg_band_rows(band_rows), .cfg_en(cfg_dbk_en), .cfg_a(cfg_dbk_a), .cfg_b(cfg_dbk_b),
+        .cfg_qp(cfg_qp),
+        .mb_start(rec_start), .mb_ready(dbk_ready), .mb_taken(dbk_taken), .mb_x(di_x[rr]), .mb_avt(di_avt[rr]), .mb_intra(di_intra[rr]),
+        .mb_pcm(di_pcm[rr]), .mb_t8(di_t8[rr]), .mb_nz(di_nz[rr]), .mb_mvx(di_mvx[rr]), .mb_mvy(di_mvy[rr]),
+        .mb_ty(ry_ptr), .mb_tc(ru_ptr), .mb_base(reb_base_r),
+        .ram_rd_en(rec_ram_en), .ram_rd_addr(rec_ram_addr), .ram_rd_data(rec_ram_data),
+        .rc_valid(rc_valid), .rc_addr(rc_addr), .rc_len(rc_len), .rc_pop(rc_pop),
+        .rc_w_valid(rc_w_valid), .rc_w_data(rc_w_data), .rc_w_strb(rc_w_strb), .rc_w_pop(rc_w_pop),
+        .idle(dbk_idle)
+      );
+    end else begin : g_nodbk
+      assign dbk_pic_start = 1'b0;
+      assign dbk_ready = 1'b0;
+      assign dbk_taken = 1'b0;
+      assign dbk_idle  = 1'b1;
+      assign rc_w_strb = 16'hFFFF;
+      rtlnet_h264_recon_wr #(.ADDR_W(ADDR_W), .RAM_AW(REC_AW), .RAM_STYLE(RAM_STYLE)) u_recon (
+        .clk(clk), .resetn(resetn),
+        .start(rec_start), .base(reb_base_r), .y_addr(ry_ptr), .c_addr(ru_ptr), .busy(rec_busy), .done(rec_done),
+        .ram_rd_en(rec_ram_en), .ram_rd_addr(rec_ram_addr), .ram_rd_data(rec_ram_data),
+        .rc_valid(rc_valid), .rc_addr(rc_addr), .rc_len(rc_len), .rc_pop(rc_pop),
+        .rc_w_valid(rc_w_valid), .rc_w_data(rc_w_data), .rc_w_pop(rc_w_pop)
+      );
+    end
+  endgenerate
 
   rtlnet_h264_bitpack #(.ALIGN_ONES(HIGH_PROFILE)) u_pack (
     .clk(clk), .resetn(resetn),
@@ -1324,7 +1414,7 @@ module rtlnet_h264_engine #(
     .rg_w_valid(rg_w_valid), .rg_w_data(rg_w_data), .rg_w_strb(rg_w_strb), .rg_w_pop(rg_w_pop),
     .ix_valid(ix_valid), .ix_addr(ix_addr), .ix_data(ix_data), .ix_ack(ix_ack),
     .rc_valid(rc_valid), .rc_addr(rc_addr), .rc_len(rc_len), .rc_pop(rc_pop),
-    .rc_w_valid(rc_w_valid), .rc_w_data(rc_w_data), .rc_w_pop(rc_w_pop),
+    .rc_w_valid(rc_w_valid), .rc_w_data(rc_w_data), .rc_w_strb(rc_w_strb), .rc_w_pop(rc_w_pop),
     .awid(m_awid), .awaddr(m_awaddr), .awlen(m_awlen), .awsize(m_awsize), .awburst(m_awburst),
     .awvalid(m_awvalid), .awready(m_awready),
     .wdata(m_wdata), .wstrb(m_wstrb), .wlast(m_wlast), .wvalid(m_wvalid), .wready(m_wready),

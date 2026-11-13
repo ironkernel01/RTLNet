@@ -7,6 +7,15 @@
 //   * All data ports run on clk (the controller user clock). Ports are packed
 //     vectors, master i at [i*W +: W]. The master-port ID is ID_W + IDX_W bits
 //     wide, IDX_W = max(1, clog2(NUM_MASTERS)), master index in the upper bits.
+//   * Address channels (AW and AR) take two steps (11-12-2026, timing): with ADDR_REG 1 each master's AW and AR first pass a register slice
+//     (rtlnet_axi_arbiter_slice, full throughput, no combinational path from the master's valid or address fields into the grant logic); then the
+//     grant is made in two clocks. Clock 1: the request mask and pick() choose the master and the burst legality of every master is evaluated
+//     in parallel; the winner's index and its legality flags are registered. Clock 2: the registered grant is fired when the in-flight limit, the
+//     W-order queue and the master-side register allow it: counters, error state and the m_axi_* output registers load from the winner's fields,
+//     and the slice (or the master, ADDR_REG 0) gets its ready. A registered grant that cannot fire is chosen again every clock, so a master of
+//     the high-priority group that arrives meanwhile still wins; the round-robin pointer moves at the fire, as before. After a fire the next
+//     grant needs the clock-1 step again (one address per two clocks per direction; every burst is 8 beats or more in this design, the CPU
+//     caches excepted). Latency from the master's valid to the master-side valid: 3 clocks with ADDR_REG 1, 2 with ADDR_REG 0 (1 before).
 //   * Write path: AW arbitration per transaction (fixed priority group first,
 //     lowest index wins; then round robin over the rest, the pointer moves past
 //     each round-robin grant). The granted AW is registered into the master-side
@@ -49,7 +58,8 @@
 //     entry 0), deliberately not a RAM: it is a handful of bits read in the
 //     same clock it is written.
 // Language: SystemVerilog-2012.
-// Revision: 11-09-2026
+// Revision: 11-12-2026
+//   * 11-12-2026: ADDR_REG parameter and the two-clock grant (register slices on the AW and AR channels, registered grant); timing of the address path.
 //   * 11-09-2026: initial version.
 //   * 11-09-2026: NARROW_MASK parameter, narrow transfers for selected masters.
 //   * 11-09-2026: WRAP_MASK parameter (legal WRAP bursts), sticky first-illegal-burst capture registers.
@@ -67,6 +77,9 @@ module rtlnet_axi_arbiter #(
   parameter logic [NUM_MASTERS-1:0] NARROW_MASK     = '0,   // masters that may issue sizes below the full width
   parameter logic [NUM_MASTERS-1:0] WRAP_MASK       = '0,   // masters that may issue legal WRAP bursts
   parameter int                     MAX_OUTSTANDING = 8,    // per direction, whole arbiter
+  // 1 = put a register slice on every master's AW and AR channel (one clock more latency per burst address; it cuts the timing paths from the
+  // masters into the grant logic); 0 = leave the slices out (the grant still takes two clocks).
+  parameter bit                     ADDR_REG        = 1'b1,
   // Derived, not for override: master-index bits and the master-side ID width.
   localparam int                    IDX_W           = (NUM_MASTERS > 1) ? $clog2(NUM_MASTERS) : 1,
   localparam int                    MID_W           = ID_W + IDX_W
@@ -202,9 +215,7 @@ module rtlnet_axi_arbiter #(
   localparam int SIZE_FULL  = $clog2(STRB_W);       // AxSIZE of a full-width beat
   localparam int CNT_W      = $clog2(MAX_OUTSTANDING + 1);
 
-  localparam int BOUNDARY_BYTES = 4096;             // AXI burst boundary
   localparam int BOUNDARY_BITS  = 12;
-  localparam int SPAN_W         = 14;               // offset + burst bytes, at most 4095 + 4096
 
   localparam logic [1:0] BURST_INCR  = 2'b01;
   localparam logic [1:0] BURST_WRAP  = 2'b10;
@@ -212,7 +223,6 @@ module rtlnet_axi_arbiter #(
   localparam int         FAIL_SIZE   = 1;           //   size
   localparam int         FAIL_4K     = 2;           //   4 KiB boundary
   localparam logic [1:0] RESP_SLVERR = 2'b10;
-  localparam int         LEN_BIAS    = 1;           // AxLEN counts beats minus one
 
   localparam logic [3:0] CONST_CACHE = 4'b0011;     // bufferable, modifiable
   localparam logic [2:0] CONST_PROT  = 3'b000;
@@ -289,8 +299,11 @@ module rtlnet_axi_arbiter #(
   function automatic logic [2:0] burst_fail(input logic [11:0] addr_low, input logic [7:0] len,
                                             input logic [2:0] size, input logic [1:0] burst,
                                             input logic narrow, input logic wrap_ok);
-    logic [SPAN_W-1:0] bytes;
-    logic [SPAN_W-1:0] span;
+    logic [14:0]       lenshift;
+    /* verilator lint_off UNUSEDSIGNAL */
+    logic [12:0]       last_off;           // only the carry bit 12 is used
+    /* verilator lint_on UNUSEDSIGNAL */
+    logic              pg_cross;
     logic [11:0]       start_aligned;
     logic              size_ok;
     logic              is_wrap;
@@ -298,9 +311,13 @@ module rtlnet_axi_arbiter #(
     logic              aligned;
     logic              wrap_legal;
     logic [2:0]        f;
-    bytes       = (SPAN_W'(len) + SPAN_W'(LEN_BIAS)) << size;
+    // span > 4096 is the same as: the last byte's offset in the page is 4096 or more. That offset is start_aligned + (len << size) + (2^size - 1);
+    // start_aligned and (len << size) have zero bits below `size`, so adding the last term sets those bits and carries nothing: the page is
+    // crossed when the 13-bit sum start_aligned + (len << size) has bit 12 set or (len << size) itself reaches 4096.
+    lenshift    = 15'(len) << size;
     start_aligned = addr_low & ~((12'd1 << size) - 12'd1);
-    span        = SPAN_W'(start_aligned) + bytes;
+    last_off    = 13'(start_aligned) + 13'(lenshift[11:0]);
+    pg_cross       = last_off[12] || (lenshift[14:12] != 3'd0);
     size_ok     = narrow ? (size <= 3'(SIZE_FULL)) : (size == 3'(SIZE_FULL));
     is_wrap     = (burst == BURST_WRAP);
     wrap_len_ok = (len == 8'd1) || (len == 8'd3) || (len == 8'd7) || (len == 8'd15);
@@ -308,7 +325,7 @@ module rtlnet_axi_arbiter #(
     wrap_legal  = wrap_ok && is_wrap && wrap_len_ok && aligned;
     f[FAIL_BURST] = !((burst == BURST_INCR) || wrap_legal);
     f[FAIL_SIZE]  = !size_ok;
-    f[FAIL_4K]    = !is_wrap && (span > SPAN_W'(BOUNDARY_BYTES));
+    f[FAIL_4K]    = !is_wrap && pg_cross;
     return f;
   endfunction
 
@@ -363,7 +380,20 @@ module rtlnet_axi_arbiter #(
   // ---------------------------------------------------------------------------
   logic [NUM_MASTERS-1:0] aw_req;
   logic                   aw_found;
+  logic [IDX_W-1:0]       aw_pick;
+  logic [NUM_MASTERS-1:0] aw_cand_fail [3];
+  logic [2:0]             aw_pick_fail;
+  logic                   g1_aw_valid;
+  logic [IDX_W-1:0]       g1_aw_idx;
+  logic [2:0]             g1_aw_fail;
   logic [IDX_W-1:0]       aw_idx;
+  logic [NUM_MASTERS-1:0] a_awvalid;
+  logic [NUM_MASTERS-1:0] a_awready;
+  logic [NUM_MASTERS*ID_W-1:0]   a_awid;
+  logic [NUM_MASTERS*ADDR_W-1:0] a_awaddr;
+  logic [NUM_MASTERS*8-1:0]      a_awlen;
+  logic [NUM_MASTERS*3-1:0]      a_awsize;
+  logic [NUM_MASTERS*2-1:0]      a_awburst;
   logic [IDX_W-1:0]       aw_rr;
   logic                   aw_space;
   logic                   aw_slot_free;
@@ -406,7 +436,20 @@ module rtlnet_axi_arbiter #(
   // ---------------------------------------------------------------------------
   logic [NUM_MASTERS-1:0] ar_req;
   logic                   ar_found;
+  logic [IDX_W-1:0]       ar_pick;
+  logic [NUM_MASTERS-1:0] ar_cand_fail [3];
+  logic [2:0]             ar_pick_fail;
+  logic                   g1_ar_valid;
+  logic [IDX_W-1:0]       g1_ar_idx;
+  logic [2:0]             g1_ar_fail;
   logic [IDX_W-1:0]       ar_idx;
+  logic [NUM_MASTERS-1:0] a_arvalid;
+  logic [NUM_MASTERS-1:0] a_arready;
+  logic [NUM_MASTERS*ID_W-1:0]   a_arid;
+  logic [NUM_MASTERS*ADDR_W-1:0] a_araddr;
+  logic [NUM_MASTERS*8-1:0]      a_arlen;
+  logic [NUM_MASTERS*3-1:0]      a_arsize;
+  logic [NUM_MASTERS*2-1:0]      a_arburst;
   logic [IDX_W-1:0]       ar_rr;
   logic                   ar_space;
   logic                   ar_slot_free;
@@ -572,35 +615,86 @@ module rtlnet_axi_arbiter #(
   // ---------------------------------------------------------------------------
   // Write path: AW arbitration
   // ---------------------------------------------------------------------------
-  // A master whose illegal write is still unanswered is not arbitrated.
+  // AW channel input: register slices (ADDR_REG 1) or direct connection (ADDR_REG 0).
+  generate
+    for (genvar i = 0; i < NUM_MASTERS; i++) begin : g_aw_in
+      if (ADDR_REG) begin : g_slice
+        rtlnet_axi_arbiter_slice #(.W(ID_W + ADDR_W + 8 + 3 + 2)) u_slice (
+          .clk     (clk),
+          .resetn  (resetn),
+          .s_valid (s_awvalid[i]),
+          .s_ready (s_awready[i]),
+          .s_data  ({s_awid[i * ID_W +: ID_W], s_awaddr[i * ADDR_W +: ADDR_W], s_awlen[i * 8 +: 8], s_awsize[i * 3 +: 3],
+                     s_awburst[i * 2 +: 2]}),
+          .m_valid (a_awvalid[i]),
+          .m_ready (a_awready[i]),
+          .m_data  ({a_awid[i * ID_W +: ID_W], a_awaddr[i * ADDR_W +: ADDR_W], a_awlen[i * 8 +: 8], a_awsize[i * 3 +: 3],
+                     a_awburst[i * 2 +: 2]})
+        );
+      end else begin : g_direct
+        assign a_awvalid[i]                    = s_awvalid[i];
+        assign a_awid[i * ID_W +: ID_W]        = s_awid[i * ID_W +: ID_W];
+        assign a_awaddr[i * ADDR_W +: ADDR_W]  = s_awaddr[i * ADDR_W +: ADDR_W];
+        assign a_awlen[i * 8 +: 8]             = s_awlen[i * 8 +: 8];
+        assign a_awsize[i * 3 +: 3]            = s_awsize[i * 3 +: 3];
+        assign a_awburst[i * 2 +: 2]           = s_awburst[i * 2 +: 2];
+        assign s_awready[i]                    = a_awready[i];
+      end
+    end
+  endgenerate
+
+  // Clock 1: a master whose illegal write is still unanswered is not arbitrated. The legality of every master's offered burst is evaluated beside
+  // the pick; the winner's flags are registered with its index.
   always_comb begin
+    logic [2:0] f;
     for (int i = 0; i < NUM_MASTERS; i++) begin
-      aw_req[i] = s_awvalid[i] && !wr_err_pend[i];
+      aw_req[i] = a_awvalid[i] && !wr_err_pend[i];
+      f = burst_fail(a_awaddr[i * ADDR_W +: BOUNDARY_BITS], a_awlen[i * 8 +: 8], a_awsize[i * 3 +: 3], a_awburst[i * 2 +: 2],
+                     NARROW_MASK[i], WRAP_MASK[i]);
+      for (int b = 0; b < 3; b++) aw_cand_fail[b][i] = f[b];
     end
   end
 
-  assign {aw_found, aw_idx} = pick(aw_req, aw_rr);
+  assign {aw_found, aw_pick} = pick(aw_req, aw_rr);
+  always_comb begin
+    for (int b = 0; b < 3; b++) aw_pick_fail[b] = aw_cand_fail[b][aw_pick];
+  end
 
-  assign g_awid    = s_awid[aw_idx * ID_W +: ID_W];
-  assign g_awaddr  = s_awaddr[aw_idx * ADDR_W +: ADDR_W];
-  assign g_awlen   = s_awlen[aw_idx * 8 +: 8];
-  assign g_awsize  = s_awsize[aw_idx * 3 +: 3];
-  assign g_awburst = s_awburst[aw_idx * 2 +: 2];
-  assign aw_fail   = burst_fail(g_awaddr[BOUNDARY_BITS-1:0], g_awlen, g_awsize, g_awburst, NARROW_MASK[aw_idx],
-                                WRAP_MASK[aw_idx]);
+  // Clock 2 state: the registered grant (index and legality flags), held while it cannot fire and chosen again every clock.
+  always_ff @(posedge clk) begin
+    if (!resetn) begin
+      g1_aw_valid <= 1'b0;
+      g1_aw_idx   <= '0;
+      g1_aw_fail  <= '0;
+    end else if (aw_fire) begin
+      g1_aw_valid <= 1'b0;
+    end else begin
+      g1_aw_valid <= aw_found;
+      g1_aw_idx   <= aw_pick;
+      g1_aw_fail  <= aw_pick_fail;
+    end
+  end
+
+  assign aw_idx    = g1_aw_idx;
+  assign aw_fail   = g1_aw_fail;
   assign aw_legal  = (aw_fail == 3'b000);
+  assign g_awid    = a_awid[aw_idx * ID_W +: ID_W];
+  assign g_awaddr  = a_awaddr[aw_idx * ADDR_W +: ADDR_W];
+  assign g_awlen   = a_awlen[aw_idx * 8 +: 8];
+  assign g_awsize  = a_awsize[aw_idx * 3 +: 3];
+  assign g_awburst = a_awburst[aw_idx * 2 +: 2];
 
   assign wq_full      = (wq_count == CNT_W'(MAX_OUTSTANDING));
   assign wq_nonempty  = (wq_count != '0);
-  assign aw_space     = !wq_full && (wr_inflight != CNT_W'(MAX_OUTSTANDING));
-  assign aw_slot_free = !m_axi_awvalid || m_axi_awready;
-  assign aw_fire      = aw_found && aw_space && aw_slot_free;
+  assign aw_space      = !wq_full && (wr_inflight != CNT_W'(MAX_OUTSTANDING));
+  assign aw_slot_free  = !m_axi_awvalid || m_axi_awready;
+  assign aw_fire       = g1_aw_valid && aw_space && aw_slot_free;
   assign aw_fire_legal = aw_fire && aw_legal;
   assign aw_fire_ill   = aw_fire && !aw_legal;
 
   always_comb begin
     for (int i = 0; i < NUM_MASTERS; i++) begin
-      s_awready[i]   = aw_fire && (aw_idx == IDX_W'(i));
+      a_awready[i]   = aw_fire && (aw_idx == IDX_W'(i));
       ev_aw_burst[i] = aw_fire_legal && (aw_idx == IDX_W'(i));
       ev_err_wr[i]   = aw_fire_ill && (aw_idx == IDX_W'(i));
     end
@@ -762,32 +856,84 @@ module rtlnet_axi_arbiter #(
   // ---------------------------------------------------------------------------
   // Read path: AR arbitration
   // ---------------------------------------------------------------------------
+  // AR channel input: register slices (ADDR_REG 1) or direct connection (ADDR_REG 0).
+  generate
+    for (genvar i = 0; i < NUM_MASTERS; i++) begin : g_ar_in
+      if (ADDR_REG) begin : g_slice
+        rtlnet_axi_arbiter_slice #(.W(ID_W + ADDR_W + 8 + 3 + 2)) u_slice (
+          .clk     (clk),
+          .resetn  (resetn),
+          .s_valid (s_arvalid[i]),
+          .s_ready (s_arready[i]),
+          .s_data  ({s_arid[i * ID_W +: ID_W], s_araddr[i * ADDR_W +: ADDR_W], s_arlen[i * 8 +: 8], s_arsize[i * 3 +: 3],
+                     s_arburst[i * 2 +: 2]}),
+          .m_valid (a_arvalid[i]),
+          .m_ready (a_arready[i]),
+          .m_data  ({a_arid[i * ID_W +: ID_W], a_araddr[i * ADDR_W +: ADDR_W], a_arlen[i * 8 +: 8], a_arsize[i * 3 +: 3],
+                     a_arburst[i * 2 +: 2]})
+        );
+      end else begin : g_direct
+        assign a_arvalid[i]                    = s_arvalid[i];
+        assign a_arid[i * ID_W +: ID_W]        = s_arid[i * ID_W +: ID_W];
+        assign a_araddr[i * ADDR_W +: ADDR_W]  = s_araddr[i * ADDR_W +: ADDR_W];
+        assign a_arlen[i * 8 +: 8]             = s_arlen[i * 8 +: 8];
+        assign a_arsize[i * 3 +: 3]            = s_arsize[i * 3 +: 3];
+        assign a_arburst[i * 2 +: 2]           = s_arburst[i * 2 +: 2];
+        assign s_arready[i]                    = a_arready[i];
+      end
+    end
+  endgenerate
+
+  // Clock 1: a master whose illegal read is still unanswered is not arbitrated. The legality of every master's offered burst is evaluated beside
+  // the pick; the winner's flags are registered with its index.
   always_comb begin
+    logic [2:0] f;
     for (int i = 0; i < NUM_MASTERS; i++) begin
-      ar_req[i] = s_arvalid[i] && !rd_err_pend[i];
+      ar_req[i] = a_arvalid[i] && !rd_err_pend[i];
+      f = burst_fail(a_araddr[i * ADDR_W +: BOUNDARY_BITS], a_arlen[i * 8 +: 8], a_arsize[i * 3 +: 3], a_arburst[i * 2 +: 2],
+                     NARROW_MASK[i], WRAP_MASK[i]);
+      for (int b = 0; b < 3; b++) ar_cand_fail[b][i] = f[b];
     end
   end
 
-  assign {ar_found, ar_idx} = pick(ar_req, ar_rr);
+  assign {ar_found, ar_pick} = pick(ar_req, ar_rr);
+  always_comb begin
+    for (int b = 0; b < 3; b++) ar_pick_fail[b] = ar_cand_fail[b][ar_pick];
+  end
 
-  assign g_arid    = s_arid[ar_idx * ID_W +: ID_W];
-  assign g_araddr  = s_araddr[ar_idx * ADDR_W +: ADDR_W];
-  assign g_arlen   = s_arlen[ar_idx * 8 +: 8];
-  assign g_arsize  = s_arsize[ar_idx * 3 +: 3];
-  assign g_arburst = s_arburst[ar_idx * 2 +: 2];
-  assign ar_fail   = burst_fail(g_araddr[BOUNDARY_BITS-1:0], g_arlen, g_arsize, g_arburst, NARROW_MASK[ar_idx],
-                                WRAP_MASK[ar_idx]);
+  // Clock 2 state: the registered grant (index and legality flags), held while it cannot fire and chosen again every clock.
+  always_ff @(posedge clk) begin
+    if (!resetn) begin
+      g1_ar_valid <= 1'b0;
+      g1_ar_idx   <= '0;
+      g1_ar_fail  <= '0;
+    end else if (ar_fire) begin
+      g1_ar_valid <= 1'b0;
+    end else begin
+      g1_ar_valid <= ar_found;
+      g1_ar_idx   <= ar_pick;
+      g1_ar_fail  <= ar_pick_fail;
+    end
+  end
+
+  assign ar_idx    = g1_ar_idx;
+  assign ar_fail   = g1_ar_fail;
   assign ar_legal  = (ar_fail == 3'b000);
+  assign g_arid    = a_arid[ar_idx * ID_W +: ID_W];
+  assign g_araddr  = a_araddr[ar_idx * ADDR_W +: ADDR_W];
+  assign g_arlen   = a_arlen[ar_idx * 8 +: 8];
+  assign g_arsize  = a_arsize[ar_idx * 3 +: 3];
+  assign g_arburst = a_arburst[ar_idx * 2 +: 2];
 
   assign ar_space      = (rd_inflight != CNT_W'(MAX_OUTSTANDING));
   assign ar_slot_free  = !m_axi_arvalid || m_axi_arready;
-  assign ar_fire       = ar_found && ar_space && ar_slot_free;
+  assign ar_fire       = g1_ar_valid && ar_space && ar_slot_free;
   assign ar_fire_legal = ar_fire && ar_legal;
   assign ar_fire_ill   = ar_fire && !ar_legal;
 
   always_comb begin
     for (int i = 0; i < NUM_MASTERS; i++) begin
-      s_arready[i]   = ar_fire && (ar_idx == IDX_W'(i));
+      a_arready[i]   = ar_fire && (ar_idx == IDX_W'(i));
       ev_ar_burst[i] = ar_fire_legal && (ar_idx == IDX_W'(i));
       ev_err_rd[i]   = ar_fire_ill && (ar_idx == IDX_W'(i));
     end
@@ -885,7 +1031,7 @@ module rtlnet_axi_arbiter #(
   // ---------------------------------------------------------------------------
   always_comb begin
     for (int i = 0; i < NUM_MASTERS; i++) begin
-      ev_wait[i] = (s_awvalid[i] && !s_awready[i]) || (s_arvalid[i] && !s_arready[i]);
+      ev_wait[i] = (a_awvalid[i] && !a_awready[i]) || (a_arvalid[i] && !a_arready[i]);
     end
   end
 

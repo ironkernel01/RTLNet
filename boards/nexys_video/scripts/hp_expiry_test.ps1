@@ -17,7 +17,8 @@ Overview:
   * Output: boards/nexys_video/build/<prefix>_summary.txt; the last line is "HP_EXPIRY_TEST: PASS" or "HP_EXPIRY_TEST: FAIL <n>".
 Usage:
   powershell -NoProfile -ExecutionPolicy Bypass -File boards/nexys_video/scripts/hp_expiry_test.ps1 [-Seconds 1980] [-PollSeconds 180] [-Prefix phase2e_hp_expiry]
-Revision: 11-12-2026
+Revision: 11-13-2026
+  * 11-13-2026: first run, on the demo CABAC-only image of the merged tree (-Profile high): every gate passed, no change to the script was needed (forced IDR picture 1,799.82 s after configuration, licence lost 1, 0 dropped pictures).
   * 11-12-2026: -Transform8x8 and -Notify (passed to stream_test), hp_caps 1, 3 or 7, the interrupt counts of the license end (license lost, profile change).
   * 11-11-2026: initial version.
 -------------------------------------------------------------------------------

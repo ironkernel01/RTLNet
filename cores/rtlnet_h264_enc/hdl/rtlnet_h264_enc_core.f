@@ -22,6 +22,8 @@ cores/rtlnet_h264_enc/hdl/rtlnet_h264_mvctx.sv
 cores/rtlnet_h264_enc/hdl/rtlnet_h264_search.sv
 cores/rtlnet_h264_enc/hdl/rtlnet_h264_mb_enc.sv
 cores/rtlnet_h264_enc/hdl/rtlnet_h264_recon_wr.sv
+cores/rtlnet_h264_enc/hdl/rtlnet_h264_dbk_line.sv
+cores/rtlnet_h264_enc/hdl/rtlnet_h264_deblock.sv
 cores/rtlnet_h264_enc/hdl/rtlnet_h264_wr_master.sv
 cores/rtlnet_h264_enc/hdl/rtlnet_h264_ring_wr.sv
 cores/rtlnet_h264_enc/hdl/rtlnet_h264_engine.sv

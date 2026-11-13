@@ -4,7 +4,7 @@
 //   encoder pipeline with I_PCM macroblocks, from the packed YUYV 4:2:2 input frame in memory to the
 //   Annex B stream in a compressed ring, the index ring and the rebuilt 4:2:0 picture.
 // Overview:
-//   * NUM_ENGINES engines, one per slice band (default 2: two engines at 100 MHz carry 1080p30). The picture size,
+//   * NUM_ENGINES engines, one per slice band (default 2: two engines at 90 MHz carry 1080p30). The picture size,
 //     the slice count and the QP are registers, so one build codes 720p30 (80x45 macroblocks, bands of 23 and 22 rows)
 //     and 1080p30 (120x68, bands of 34 and 34 rows). The first NUM_ENGINES-1 engines take ceil(MB_H / NUM_ENGINES) rows,
 //     the last engine the rest. Each engine codes SLICES / NUM_ENGINES slices and writes its own compressed ring and index
@@ -22,8 +22,28 @@
 //   * HIGH_PROFILE (default 0): 1 instantiates rtlnet_h264_hp (the High profile extension, a separately delivered netlist) in every
 //     engine; the registers HP_CTRL and HP_STATUS and CAPS bit 20 describe it. With 0 no reference to the module exists and the
 //     logic is that of the Constrained Baseline encoder.
+//   * Feature options (compile time). Each option includes a feature in the build or leaves it out; a feature that is left out costs no logic.
+//     - HIGH_PROFILE: 0 = Constrained Baseline encoder with CAVLC entropy coding (the public core alone). 1 = the High profile netlist is added to every engine; it always
+//       contains CABAC entropy coding. CABAC has no parameter of its own: HIGH_PROFILE = 1 is what includes it.
+//     - HP_T8: only with HIGH_PROFILE = 1 (ignored without it). 1 = include the 8x8 transform for inter macroblocks. 0 = leave it out (4x4 transform only).
+//     - HP_T8_AUTO: only with HP_T8 = 1. 1 = include the per-macroblock choice between the 4x4 and the 8x8 transform. 0 = leave it out (the 8x8 transform is then
+//       either on or off for a whole picture, set by software).
+//     - DEBLOCK: 1 = include the in-loop deblocking filter. 0 = leave it out.
+//     - NUM_ENGINES: how many engines code slice bands in parallel (one engine carries 720p30, two carry 1080p30 at 90 MHz).
+//     Legal combinations (and the build.ps1 switches of boards/nexys_video that produce them):
+//       Encoder                         HIGH_PROFILE  HP_T8  HP_T8_AUTO   build.ps1 switches
+//       CAVLC Baseline                  0             -      -            (none)
+//       CABAC                           1             0      0            -HighProfile full|demo -HpTools cabac
+//       CABAC + 8x8 transform           1             1      0            -HighProfile full|demo -HpTools t8
+//       CABAC + 8x8 + adaptive choice   1             1      1            -HighProfile full|demo -HpTools all
+//     Every row exists with DEBLOCK 1 (default) and with DEBLOCK 0. HP_T8_AUTO = 1 with HP_T8 = 0 stops the elaboration.
+//     The High profile netlist built in the private repository must contain the same tool set as HP_T8 and HP_T8_AUTO say: build.ps1 -HpTools selects the netlist and sets
+//     both parameters together. Software reads the real tool set from hp_caps (HP_STATUS [11:8]: bit 0 CABAC, bit 1 8x8 transform, bit 2 adaptive choice), which is the
+//     intersection of the netlist's tools and these parameters; a mismatch therefore shows as the smaller set and never as an error.
+//   * DEBLOCK (default 1): the in-loop deblocking filter rtlnet_h264_deblock in every engine (documentation section 19), DBK_LINE_KB its line store; registers DBK_CTRL, DBK_STATUS, CAPS bit 22.
 // Language: SystemVerilog-2012.
 // Revision: 11-12-2026
+//   * 11-12-2026: DEBLOCK and DBK_LINE_KB parameters, the filter state of the register block to the engines.
 //   * 11-12-2026: irq from the IRQ_STATUS / IRQ_ENABLE registers.
 //   * 11-11-2026: HIGH_PROFILE parameter and the hp seam to the registers.
 //   * 11-09-2026: initial version.
@@ -34,25 +54,29 @@
 // -----------------------------------------------------------------------------
 module rtlnet_h264_top #(
   parameter bit    AXIL_SYNC = 1'b0,   // 1: s_axi_aclk is clk (register window without a clock crossing)
-  parameter int    NUM_ENGINES = 2,      // slice-band engines, 1..4 (two carry 1080p30 at 100 MHz)
+  parameter int    NUM_ENGINES = 2,      // engines that code slice bands in parallel, 1..4 (one carries 720p30, two carry 1080p30 at 90 MHz)
   parameter int    MAX_MB_W    = 120,    // widest picture in macroblocks (1920 / 16)
   parameter int    MAX_MB_H    = 68,     // tallest picture in macroblocks (1088 / 16)
-  parameter int    ADDR_W      = 32,
-  parameter int    ID_W        = 4,
+  parameter int    ADDR_W      = 32,     // memory address width in bits (only 32 is supported)
+  parameter int    ID_W        = 4,      // AXI ID width of each engine's memory port, bits
   parameter int    RD_STRIP_MB = 4,      // macroblocks per input-read burst strip: row bursts of 2 * RD_STRIP_MB beats (2, 4 or 8)
-  parameter int    MB_BUF_KB   = 4,      // strip buffer: two halves of RD_STRIP_MB macroblock banks of 32 words (needs >= RD_STRIP_MB KiB)
-  parameter int    REC_BUF_KB  = 1,      // rebuilt macroblock buffer: two banks of 96 words of 4 samples
-  parameter int    COEF_BUF_KB = 1,      // coefficient buffer: two banks of 102 words of 48 bits (needs 1)
-  parameter int    LINE_KB     = 4,      // rebuilt bottom-row line buffer: 2 x 16 bytes per macroblock column
-  parameter int    FIFO_KB     = 1,      // compressed-ring word FIFO
-  parameter int    REF_BUF_KB  = 1,      // prediction buffer (P pictures): two banks of 32 words of 16 bytes
-  parameter int    WIN_KB      = 4,      // each of the two motion search window RAMs (P pictures), KiB
+  parameter int    MB_BUF_KB   = 4,      // KiB; buffer for the strips of the input frame read from memory: two halves of RD_STRIP_MB macroblocks (needs >= RD_STRIP_MB)
+  parameter int    REC_BUF_KB  = 1,      // KiB; buffer for the rebuilt (decoded) macroblock before it is written to memory: two banks of 96 words of 4 samples
+  parameter int    COEF_BUF_KB = 1,      // KiB; buffer for the quantised levels of a macroblock between the transform and the entropy coder: two banks of 102 words of 48 bits (needs 1)
+  parameter int    LINE_KB     = 4,      // KiB; buffer for the bottom row of rebuilt samples of the macroblock row above, used for intra prediction: 2 x 16 bytes per macroblock column
+  parameter int    FIFO_KB     = 1,      // KiB; FIFO in front of the compressed-stream ring in memory (64 words of 16 bytes)
+  parameter int    REF_BUF_KB  = 1,      // KiB; buffer for the motion-compensated prediction of a macroblock (P pictures): two banks of 32 words of 16 bytes
+  parameter int    WIN_KB      = 4,      // KiB; each of the two motion search window RAMs (P pictures; at least 4)
   parameter int    SR          = 16,     // motion search range in whole samples, 0 .. 16 (0: only the vector (0, 0), the phase 2c-1 behaviour)
-  parameter int    MV_LINE_KB  = 1,      // motion vector line RAM (P pictures): one 32-bit word per macroblock column
-  parameter string RAM_STYLE   = "block", // "block" | "distributed", for every engine memory (RAM instancing rule)
-  parameter bit    HIGH_PROFILE = 1'b0    // 1: High profile extension (rtlnet_h264_hp) in every engine
+  parameter int    MV_LINE_KB  = 1,      // KiB; line RAM of the motion vectors of the macroblock row above (P pictures): one 32-bit word per macroblock column, at least MAX_MB_W + 1 words
+  parameter string RAM_STYLE   = "block", // memory style of every engine RAM: "block" (block RAM) or "distributed" (LUT RAM)
+  parameter bit    HIGH_PROFILE = 1'b0,   // 0 = CAVLC Baseline encoder; 1 = add the High profile netlist (CABAC entropy coding) to every engine
+  parameter bit    HP_T8       = 1'b1,    // only with HIGH_PROFILE = 1: 1 = include the 8x8 transform for inter macroblocks; 0 = leave it out (4x4 only)
+  parameter bit    HP_T8_AUTO  = 1'b1,    // only with HP_T8 = 1: 1 = include the per-macroblock choice of 4x4 or 8x8 transform; 0 = leave it out (set per picture)
+  parameter int    DBK_LINE_KB = 16,     // KiB per engine; memory for the deblocking filter (the rows above the current macroblock row); only with DEBLOCK = 1
+  parameter bit    DEBLOCK     = 1'b1    // 1 = include the in-loop deblocking filter; 0 = leave it out
 )(
-  // Engine clock (MIG ui_clk, 100 MHz) and its reset (synchronous, active low); the register clock and its
+  // Engine clock (MIG ui_clk, 90 MHz on the board) and its reset (synchronous, active low); the register clock and its
   // reset (synchronous, active low, released with enc_resetn from the same assertion).
   input  logic              enc_clk,
   input  logic              enc_resetn,
@@ -169,6 +193,9 @@ module rtlnet_h264_top #(
   logic        cfg_p;
   logic [31:0] cfg_refy_base;
   logic [31:0] cfg_refu_base;
+  if (HP_T8_AUTO && !HP_T8) begin : g_bad_auto
+    $fatal(1, "rtlnet_h264_top: HP_T8_AUTO = 1 needs HP_T8 = 1; set HP_T8 to 1 or HP_T8_AUTO to 0 (the choice between the 4x4 and the 8x8 transform needs the 8x8 transform)");
+  end
   logic [5:0]  cfg_qp;
   logic        cfg_mb_pcm;
   logic [15:0] cfg_frame_num;
@@ -187,6 +214,9 @@ module rtlnet_h264_top #(
 
   // High profile seam: enable from the registers; status of the engines' modules (engine 0 reports present, seconds left and
   // caps; licensed and caps are the AND over the engines, active the OR, the change pulse the OR).
+  logic                      dbk_en;
+  logic signed [3:0]         dbk_a;
+  logic signed [3:0]         dbk_b;
   logic                      hp_enable;
   logic                      hp_t8_enable;
   logic                      hp_t8_auto;
@@ -324,7 +354,7 @@ module rtlnet_h264_top #(
     .reg_rd_en(reg_rd_en), .reg_rd_addr(reg_rd_addr), .reg_rd_data(reg_rd_data)
   );
 
-  rtlnet_h264_enc_regs #(.MAX_MB_W(MAX_MB_W), .MAX_MB_H(MAX_MB_H), .NUM_ENGINES(NUM_ENGINES), .HIGH_PROFILE(HIGH_PROFILE)) u_regs (
+  rtlnet_h264_enc_regs #(.MAX_MB_W(MAX_MB_W), .MAX_MB_H(MAX_MB_H), .NUM_ENGINES(NUM_ENGINES), .HIGH_PROFILE(HIGH_PROFILE), .DEBLOCK(DEBLOCK)) u_regs (
     .clk(enc_clk), .resetn(enc_resetn),
     .reg_wr_en(reg_wr_en), .reg_wr_addr(reg_wr_addr), .reg_wr_data(reg_wr_data),
     .reg_rd_en(reg_rd_en), .reg_rd_addr(reg_rd_addr), .reg_rd_data(reg_rd_data),
@@ -341,6 +371,7 @@ module rtlnet_h264_top #(
     .rptr_wr(rptr_wr), .rptr_val(rptr_val), .idx_rptr_wr(idx_rptr_wr), .idx_rptr_val(idx_rptr_val),
     .hp_enable(hp_enable), .hp_t8_enable(hp_t8_enable), .hp_t8_auto(hp_t8_auto), .hp_t8_n8(hp_t8_n8), .hp_t8_n4(hp_t8_n4), .hp_present(&eng_hp_present), .hp_licensed(&eng_hp_licensed), .hp_active(|eng_hp_active),
     .hp_caps(hp_caps_all), .hp_seconds_left(eng_hp_seconds[15:0]), .hp_chg(|eng_hp_chg),
+    .cfg_dbk_en(dbk_en), .cfg_dbk_a(dbk_a), .cfg_dbk_b(dbk_b),
     .busy(busy_all), .done(done_all), .slice_pulse(|eng_slice),
     .err_cfg(|eng_err_cfg), .err_axi(|eng_err_axi), .err_rptr(|eng_err_rp), .err_busy(|eng_err_bsy),
     .ring_stall(eng_stall), .ring_wptr(eng_wptr), .ring_fill(eng_fill), .idx_wptr(eng_iwptr),
@@ -356,8 +387,9 @@ module rtlnet_h264_top #(
         .ADDR_W(ADDR_W), .ID_W(ID_W), .MAX_MB_W(MAX_MB_W), .MAX_MB_H(MAX_MB_H), .MB_BUF_KB(MB_BUF_KB), .RD_STRIP_MB(RD_STRIP_MB),
         .REC_BUF_KB(REC_BUF_KB), .COEF_BUF_KB(COEF_BUF_KB), .LINE_KB(LINE_KB), .FIFO_KB(FIFO_KB), .REF_BUF_KB(REF_BUF_KB),
         .MV_LINE_KB(MV_LINE_KB), .WIN_KB(WIN_KB), .SR(SR), .EMIT_AUD(e == 0), .RAM_STYLE(RAM_STYLE),
-        .HIGH_PROFILE(HIGH_PROFILE)
+        .HIGH_PROFILE(HIGH_PROFILE), .HP_T8(HP_T8), .HP_T8_AUTO(HP_T8_AUTO), .DBK_LINE_KB(DBK_LINE_KB), .DEBLOCK(DEBLOCK)
       ) u_engine (
+        .cfg_dbk_en(dbk_en), .cfg_dbk_a(dbk_a), .cfg_dbk_b(dbk_b),
         .clk(enc_clk), .resetn(enc_resetn),
         .hp_enable(hp_enable), .hp_t8_enable(hp_t8_enable), .hp_t8_auto(hp_t8_auto), .hp_t8_n8(eng_t8_n8[e*16 +: 16]), .hp_t8_n4(eng_t8_n4[e*16 +: 16]),
         .hp_present(eng_hp_present[e]), .hp_licensed(eng_hp_licensed[e]),

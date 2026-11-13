@@ -26,6 +26,7 @@ REVISION:11-12-2026:8x8 transform (High profile stage 3): encoder transform8x8 o
 REVISION:11-12-2026:Adaptive transform (High profile stage 3a): encoder transform8x8 on|off|auto (default auto), macroblock counts in show encoder
 REVISION:11-12-2026:Transform default: encoder transform8x8 starts at off (the 4x4 transform); on, off and auto stay
 REVISION:11-12-2026:Encoder interrupt: encoder notify interrupt|polled (default interrupt), encoder irqtest, notification and interrupt lines in show stream and show encoder
+REVISION:11-12-2026:Deblocking filter: encoder deblock on|off (default on), encoder deblock-offsets <alpha> <beta> (-6..6), Deblocking line in show encoder
 
 # ---------------------------------------------------------------------------
 # Modes
@@ -118,6 +119,8 @@ cli_encoder_profile:priv:ENCODER PROFILE [PROFILE]:Stream profile: baseline (Con
 cli_encoder_notify:priv:ENCODER NOTIFY [MODE]:How the end of a picture reaches the firmware: interrupt (default, the encoder interrupt starts the next picture) or polled (the main loop reads STATUS)
 cli_encoder_irqtest:priv:ENCODER IRQTEST:Interrupt self-test: force an event in the encoder core and check that the interrupt handler counts it (needs a stream in interrupt mode)
 cli_encoder_transform8x8:priv:ENCODER TRANSFORM8X8 [STATE]:Transform of inter macroblocks: off (default, 4x4), on (8x8 always) or auto (the module chooses per macroblock); used in the High profile when the netlist offers it
+cli_encoder_deblock:priv:ENCODER DEBLOCK [STATE]:In-loop deblocking filter of the encoder core: on (default) or off; effective at the next picture, no IDR picture needed; refused when the build has no filter
+cli_encoder_deblock_offsets:priv:ENCODER DEBLOCK-OFFSETS [ALPHA] [BETA]:Deblocking filter offsets (slice_alpha_c0_offset_div2, slice_beta_offset_div2), each -6..6 (default 0 0); effective at the next picture
 cli_debug_read:priv:DEBUG READ [ADDR]:Read a 32-bit word (hex 0x... or decimal address)
 cli_debug_write:priv:DEBUG WRITE [ADDR] [VALUE]:Write a 32-bit word
 cli_phy_read:priv:PHY READ [REG]:Read a PHY register (0..31) over MDIO

@@ -20,7 +20,8 @@
 #     hardware platform (XSA, write_hw_platform -fixed, the input of the
 #     firmware BSP flow microblaze/firmware/build.ps1), build_info.txt.
 #   * High profile: `highprofile full|demo hp_netlist <dir>` (build.ps1 -HighProfile) reads the black box hp/rtlnet_h264_hp_bb.sv and the EDIF
-#     <dir>/rtlnet_h264_hp.edf instead of the stand-in module and sets the generic HIGH_PROFILE 1; `none` (default) leaves the flow unchanged.
+#     <dir>/rtlnet_h264_hp.edf instead of the stand-in module and sets the generic HIGH_PROFILE 1 (and HP_T8, HP_T8_AUTO from `hp_t8 0|1 hp_t8_auto 0|1`, default 1 1:
+#     the tool set the netlist contains, build.ps1 -HpTools); `none` (default) leaves the flow unchanged.
 #   * Gates (each its own exit code; nothing is written past a failed gate):
 #       99 bad arguments            11 missing source, filelist or XDC
 #       12 block design failure     10 synthesis error or critical warning
@@ -65,6 +66,7 @@
 #     cpu_clk to enc_clk (still one rtlnet_axil_cdc); no new Gray or axil_cdc instance. cpu_clk is 90 MHz.
 #   * 11-12-2026: RTLNET_RESUME_DCP environment variable continues from a routed checkpoint.
 #   * 11-12-2026: RTLNET_UTIL_LIMIT environment variable raises the utilization ceiling (default 80.0 %).
+#   * 11-12-2026: hp_t8 and hp_t8_auto arguments (HP_T8 and HP_T8_AUTO of the board top); the deblocking filter's mb_total multiplier is a registered product mapped to a DSP block (no SYNTH-9 finding, no waiver).
 #   * 11-09-2026: RTLNET_PLACE_DIRECTIVE environment variable selects the place_design directive (default Explore).
 #   * 11-09-2026: Phase 2b-3 u_h264 (rtlnet_h264_top, register window cpu_clk to ui_clk through its one rtlnet_axil_cdc): expected
 #     rtlnet_axil_cdc +1 in both builds (network 9 to 10, CPU-only 4 to 5); the engines and their masters are all on ui_clk, so no
@@ -100,9 +102,11 @@ set opt(dirty)    ""
 set opt(tag)      ""
 set opt(highprofile) none
 set opt(hp_netlist)  ""
+set opt(hp_t8)       1
+set opt(hp_t8_auto)  1
 set toks {}
 foreach a $argv { foreach t [split $a ",="] { if {$t ne ""} { lappend toks $t } } }
-if {[llength $toks] % 2 != 0} { puts "usage: \[network 0|1\] \[build_id XXXXXXXX\] \[dirty 0|1\] \[tag name\] \[highprofile none|full|demo hp_netlist <dir>\]"; exit 99 }
+if {[llength $toks] % 2 != 0} { puts "usage: \[network 0|1\] \[build_id XXXXXXXX\] \[dirty 0|1\] \[tag name\] \[highprofile none|full|demo hp_netlist <dir> hp_t8 0|1 hp_t8_auto 0|1\]"; exit 99 }
 foreach {k v} $toks {
   set k [string tolower $k]
   if {![info exists opt($k)]} { puts "rtlnet_build: unknown argument '$k'"; exit 99 }
@@ -233,7 +237,7 @@ foreach x $xdc_list {
 set synth_args [list -top $TOP -part $PART -include_dirs $::incdirs \
   -generic BUILD_ID=32'h$BUILD_ID_HEX -generic BUILD_DIRTY=1'b$opt(dirty)]
 if {$NETWORK} { lappend synth_args -verilog_define RTLNET_WITH_NETWORK }
-if {$::HP_NETLIST ne ""} { lappend synth_args -generic HIGH_PROFILE=1'b1 }
+if {$::HP_NETLIST ne ""} { lappend synth_args -generic HIGH_PROFILE=1'b1 -generic HP_T8=1'b$opt(hp_t8) -generic HP_T8_AUTO=1'b$opt(hp_t8_auto) }
 if {[catch {synth_design {*}$synth_args} err]} { nv_exit 10 "synth_design: $err" }
 set crit_synth [get_msg_config -count -severity {CRITICAL WARNING}]
 if {$crit_synth > 0} { nv_exit 10 "$crit_synth critical warning(s) up to synthesis (see the log)" }
@@ -606,6 +610,7 @@ puts $fh "git_dirty     $opt(dirty)"
 puts $fh "network       $NETWORK"
 if {$::HP_NETLIST ne ""} {
   puts $fh "high_profile  $opt(highprofile)"
+  puts $fh "hp_tools      HP_T8 $opt(hp_t8), HP_T8_AUTO $opt(hp_t8_auto)"
   if {[file exists [file join $::HP_NETLIST netlist_info.txt]]} {
     set nf [open [file join $::HP_NETLIST netlist_info.txt] r]
     foreach l [split [string trim [read $nf]] "\n"] { puts $fh "hp_netlist    $l" }

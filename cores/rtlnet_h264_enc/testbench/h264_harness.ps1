@@ -63,6 +63,9 @@ param(
     [switch]$ListConfigs,
     [switch]$Pcm,
     [switch]$Irq,
+    [string]$DbkCtl = '',
+    [switch]$NoDbk,
+    [string]$Tag = '',
     [switch]$Measure,
     [int]$Threads = 1,
     [switch]$NoPng,
@@ -225,6 +228,14 @@ Add-PCfg 'm_1080p_e2_s2_panh12_q28_sr0' 1920 1088 1080 2 2 $g9 'panh12' 28 @{ Sr
 Add-PCfg 'm_1080p_e1_s1_pand16_q20'  1920 1088 1080 1 1 $g9 'pand16' 20 @{ ExpMv = @(16, 16) }
 Add-PCfg 'm_1080p_e2_s4_objs_q51'    1920 1088 1080 2 4 $g9 'objs'   51
 Add-PCfg 'm_1080p_e2_s2_noise_q28'   1920 1088 1080 2 2 $g9 'noise_p' 28
+# Deblocking filter measurements (d_*): moving sequences at 720p and 1080p on two engines, QP 28, 36 and 44, one IPP group; run once with the filter in
+# force and once with -DbkCtl 0 -Tag off for the PSNR / bits / clocks tables of documentation section 19.
+foreach ($q in @(28, 36, 44)) {
+    foreach ($sq in @('pan', 'objs')) {
+        Add-PCfg "d_720p_e2_s2_${sq}_q$q"  1280  720  720 2 2 'IPP' $sq $q
+        Add-PCfg "d_1080p_e2_s2_${sq}_q$q" 1920 1088 1080 2 2 'IPP' $sq $q
+    }
+}
 $Config = @($Config | ForEach-Object { $_ -split ',' } | Where-Object { $_ -ne '' })
 if ($Config.Count -gt 0) {
     $Configs = @($Configs | Where-Object { $n = $_.Name; @($Config | Where-Object { $n -like $_ }).Count -gt 0 })
@@ -263,7 +274,10 @@ if (-not (Test-Path -LiteralPath $SpsTool) -or ((Get-Item -LiteralPath $SpsTool)
 $HasMbMode = (Select-String -Path "$Repo/cores/rtlnet_h264_enc/hdl/rtlnet_h264_enc_regs.sv" -Pattern 'MB_MODE' -Quiet)
 $PcmChecks = $Pcm.IsPresent -or (-not $HasMbMode)
 if (-not $HasMbMode) { Write-Output 'NOTE: RTL has no MB_MODE register (I_PCM-only encoder): running the I_PCM checks (exact rebuilt picture, no PSNR floors)' }
+# The floors of the filter-off stream and of the streams with the deblocking filter in force at any picture (the filter smooths true edges of the
+# synthetic patterns: lower PSNR, fewer bits).
 $Floors = "$Tb/h264_psnr_floors.txt"
+if ((-not $NoDbk) -and (($DbkCtl -eq '') -or ($DbkCtl -match '[1-9a-fA-F]'))) { $Floors = "$Tb/h264_psnr_floors_dbk.txt" }
 $Measured = "$Sim/floors_measured.txt"
 
 if ($BuildToolsOnly) { Write-Output 'TOOLS READY'; exit 0 }
@@ -273,7 +287,7 @@ $VlExtra = '--unroll-count 8 --unroll-stmts 500 --output-split 5000'
 $allOk = $true
 foreach ($c in $Configs) {
     $name = $c.Name
-    $label = if ($InjectBurst) { "${name}_burstneg" } elseif ($InjectBurstRef) { "${name}_burstrefneg" } elseif ($Inject) { "${name}_neg" } elseif ($Irq) { "${name}_irq" } else { $name }
+    $label = if ($Tag -ne '') { "${name}_$Tag" } elseif ($InjectBurst) { "${name}_burstneg" } elseif ($InjectBurstRef) { "${name}_burstrefneg" } elseif ($Inject) { "${name}_neg" } elseif ($Irq) { "${name}_irq" } else { $name }
     $dir = "$Sim/$label"
     if (Test-Path -LiteralPath $dir) { Remove-Item -LiteralPath $dir -Recurse -Force }
     New-Item -ItemType Directory -Force -Path $dir, "$dir/png" | Out-Null
@@ -308,12 +322,14 @@ foreach ($c in $Configs) {
     $defs = @("TB_MBW=$($c.W / 16)", "TB_MBH=$($c.H / 16)", "TB_SLICES=$($c.S)", "TB_ENGINES=$($c.E)", "TB_PICS=$($c.P)", "TB_RING_KB=$($c.Ring)",
               "TB_CONSUMER_DELAY=$($c.Delay)", "TB_MEM_LOG2=$($c.Mem)", "TB_GAP=$Gap", "TB_LAT=$Lat", "TB_QP=$($c.Qp)")
     if ($Pcm -and $HasMbMode) { $defs += 'TB_PCM=1' }
+    if ($NoDbk) { $defs += 'TB_DEBLOCK=0' }
     if ($c.ContainsKey('Stall')) { $defs += 'TB_EXPECT_STALL=1' }
     if ($c.ContainsKey('Sr')) { $defs += "TB_SR=$($c.Sr)" }
     $fdir = $dir.Replace([string][char]92, '/')
     $pa = @("INPFX=$fdir/in", "OUT=$fdir/o", "GOP=$($c.Gop)")
     if ($Inject) { $pa += 'INJECT' }
     if ($Irq) { $pa += 'IRQ' }
+    if ($DbkCtl -ne '') { $pa += "DBKCTL=$DbkCtl" }
     if ($InjectBurst) { $pa += 'INJECT_BURST' }
     if ($InjectBurstRef) { $pa += 'INJECT_BURST_REF' }
     if ($c.ContainsKey('ExpMv')) { $pa += "EXPMV_X=$($c.ExpMv[0])"; $pa += "EXPMV_Y=$($c.ExpMv[1])" }
@@ -449,6 +465,11 @@ foreach ($c in $Configs) {
             if ($decRes[$d].Err -or -not $decRes[$d].Match) { $fails += "decoder $d" }
         }
         if ($fails.Count -eq 0) { Write-Output "TEST PASS: rtlnet_h264_top_$label (JM, OpenH264, FFmpeg identical to the rebuilt picture, $([int]$sw.Elapsed.TotalSeconds) s total, bench $([int]$simSecs) s)" }
+        # A passed run keeps its logs and results: the Verilator object tree and the bulky YUV / hex intermediates go (disk rule of the project).
+        if ($fails.Count -eq 0) {
+            foreach ($sub in 'obj', 'tmp') { $q = "$Repo/.sim/verilator/tb_rtlnet_h264_top_$label/$sub"; if (Test-Path -LiteralPath $q) { Remove-Item -LiteralPath $q -Recurse -Force -ErrorAction SilentlyContinue } }
+            Get-ChildItem -LiteralPath $dir -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in '.yuv', '.hex' -and $_.Length -gt 2MB } | Remove-Item -Force -ErrorAction SilentlyContinue
+        }
         else { Write-Output "TEST FAIL: rtlnet_h264_top_$label ($($fails -join ', '))"; $allOk = $false }
     }
 }
