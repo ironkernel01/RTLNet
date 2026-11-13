@@ -38,8 +38,8 @@ This demo is a prebuilt bitstream of the IronKernel RTLNet H.264 Constrained Bas
 ### Highlights
 
 - 1080p30 and 720p30 H.264 Constrained Baseline from two engines: 560 to 571 clocks per macroblock at 1080p30 against a budget of 735
-- 10-minute soak at 1080p30: 18,002 pictures, 0 dropped, 27,539 kb/s, PSNR 44.28 dB or better over 1,801 checked frames
-- Constant bit rate within 0.2 % of the setting: 7,987 to 8,016 kb/s at 8,000 and 15,989 to 16,006 kb/s at 16,000, with 0 dropped pictures
+- 10-minute soak at 1080p30: 18,002 pictures, 0 dropped, 27.54 Mb/s, PSNR 44.28 dB or better over 1,801 checked frames
+- Constant bit rate within 0.2 % of the setting: 7.99 to 8.02 Mb/s at a setting of 8 Mb/s and 15.99 to 16.01 Mb/s at 16 Mb/s, with 0 dropped pictures
 - FFmpeg decodes every stream without an error line, JM decodes every access unit; the deblocking filter switches on or off in the middle of a stream without an IDR picture
 - MPEG-TS over UDP port 5004, played directly by VLC or ffplay; no build needed, the free Vivado license programs the board over JTAG
 - Source-available: the encoder RTL is in the repository, and this image has no time limit
@@ -52,7 +52,7 @@ This demo is a prebuilt bitstream of the IronKernel RTLNet H.264 Constrained Bas
 | Item | Value |
 |---|---|
 | Picture sizes | 1920 x 1080 and 1280 x 720, 30 pictures/s |
-| Stream bit rate tested | 426 to 31,789 kb/s (1080p30, 6.17 and 6.23) |
+| Stream bit rate tested | 0.43 to 31.79 Mb/s (1080p30, 6.17 and 6.23) |
 | Compression ratio | 11 : 1 to 1,752 : 1 (test patterns) |
 | Profile | Constrained Baseline (profile_idc 66), CAVLC |
 | Tools | I and P, one reference, whole-sample search +-16, deblocking filter |
@@ -100,7 +100,7 @@ A Nexys Video with its 12 V supply (JP4 on JTAG), two micro-USB cables (PROG, UA
 
 <table style="width:100%; border:none; margin:0; padding:0;">
 <tr>
-<td style="border:none; padding:0; width:38%; vertical-align:top; white-space:normal;"><img src="images/test_pattern_all_1080p.png" alt="Test pattern all: scrolled color bars, noise band and a checkered box" style="width:100%;"><br><strong>Figure 2.</strong> Pattern all, speed 4, decoded from the board's stream, 1080p30, 27,273 kb/s, QP 28, image rel_base_dbk, 11-13-2026</td>
+<td style="border:none; padding:0; width:38%; vertical-align:top; white-space:normal;"><img src="images/test_pattern_all_1080p.png" alt="Test pattern all: scrolled color bars, noise band and a checkered box" style="width:100%;"><br><strong>Figure 2.</strong> Pattern all, speed 4, decoded from the board's stream, 1080p30, 27.27 Mb/s, QP 28, image rel_base_dbk, 11-13-2026</td>
 <td style="border:none; padding:0 0 0 12px; width:20%; vertical-align:top; white-space:normal;"><img src="images/test_pattern_bars_1080p.png" alt="Test pattern bars: eight vertical color bars" style="width:100%;"><br><strong>Figure 3.</strong> Pattern bars, decoded from the board's stream, 1080p30; capture of 11-11-2026</td>
 </tr>
 </table>
@@ -119,21 +119,21 @@ Board runs, pattern `all` speed 4 unless noted, GOP 30, FFmpeg decode, PSNR agai
 Clocks per macroblock are measured against a budget of 735 at 1080p30 and 1,666 at 720p30 (two engines, 90 MHz). Board document 6.17, 6.18 and 6.23; rows marked no filter come from images built before the deblocking filter was added.
 
 <table class="num">
-<thead><tr><th>Size</th><th>Pattern, setting</th><th>Bit rate, kb/s</th><th>Ratio</th><th>PSNR min / mean, dB</th><th>Dropped</th><th>Clocks per MB</th></tr></thead>
+<thead><tr><th>Size</th><th>Pattern, setting</th><th>Bit rate, Mb/s</th><th>Ratio</th><th>PSNR min / mean, dB</th><th>Dropped</th><th>Clocks per MB</th></tr></thead>
 <tbody>
-<tr><td>1080p30</td><td>all, QP 28</td><td>27,273</td><td>27 : 1</td><td>44.46 / 44.92</td><td>0</td><td>560 to 571</td></tr>
-<tr><td>720p30</td><td>all, QP 28</td><td>18,166</td><td>18 : 1</td><td>42.98 / 43.42</td><td>0</td><td>513 to 527</td></tr>
-<tr><td>1080p30</td><td>scroll, QP 28</td><td>442</td><td>1,689 : 1</td><td>48.85 / 50.48</td><td>0</td><td>-</td></tr>
-<tr><td>1080p30</td><td>scroll, QP 32</td><td>426</td><td>1,752 : 1</td><td>48.70 / 50.12</td><td>0</td><td>-</td></tr>
-<tr><td>1080p30</td><td>all, 8,000 kb/s</td><td>7,987 to 8,016</td><td>93 : 1</td><td>-</td><td>0</td><td>-</td></tr>
-<tr><td>1080p30</td><td>all, 16,000 kb/s</td><td>15,989 to 16,006</td><td>47 : 1</td><td>-</td><td>0</td><td>-</td></tr>
-<tr><td>1080p30</td><td>all, QP 48, no filter</td><td>8,421</td><td>89 : 1</td><td>-</td><td>0</td><td>-</td></tr>
-<tr><td>1080p30</td><td>all, QP 40, no filter</td><td>15,798</td><td>47 : 1</td><td>-</td><td>0</td><td>-</td></tr>
-<tr><td>1080p30</td><td>all, QP 32, no filter</td><td>23,297</td><td>32 : 1</td><td>-</td><td>0</td><td>-</td></tr>
-<tr><td>1080p30</td><td>all, QP 24, no filter</td><td>31,789</td><td>23 : 1</td><td>-</td><td>0</td><td>-</td></tr>
-<tr><td>720p30</td><td>all, QP 32, no filter</td><td>15,456</td><td>21 : 1</td><td>-</td><td>0</td><td>-</td></tr>
-<tr><td>720p30</td><td>all, QP 24, no filter</td><td>21,174</td><td>16 : 1</td><td>-</td><td>0</td><td>-</td></tr>
-<tr><td>720p30</td><td>all, QP 16, no filter</td><td>29,856</td><td>11 : 1</td><td>-</td><td>0</td><td>-</td></tr>
+<tr><td>1080p30</td><td>all, QP 28</td><td>27.27</td><td>27 : 1</td><td>44.46 / 44.92</td><td>0</td><td>560 to 571</td></tr>
+<tr><td>720p30</td><td>all, QP 28</td><td>18.17</td><td>18 : 1</td><td>42.98 / 43.42</td><td>0</td><td>513 to 527</td></tr>
+<tr><td>1080p30</td><td>scroll, QP 28</td><td>0.44</td><td>1,689 : 1</td><td>48.85 / 50.48</td><td>0</td><td>-</td></tr>
+<tr><td>1080p30</td><td>scroll, QP 32</td><td>0.43</td><td>1,752 : 1</td><td>48.70 / 50.12</td><td>0</td><td>-</td></tr>
+<tr><td>1080p30</td><td>all, 8 Mb/s</td><td>7.99 to 8.02</td><td>93 : 1</td><td>-</td><td>0</td><td>-</td></tr>
+<tr><td>1080p30</td><td>all, 16 Mb/s</td><td>15.99 to 16.01</td><td>47 : 1</td><td>-</td><td>0</td><td>-</td></tr>
+<tr><td>1080p30</td><td>all, QP 48, no filter</td><td>8.42</td><td>89 : 1</td><td>-</td><td>0</td><td>-</td></tr>
+<tr><td>1080p30</td><td>all, QP 40, no filter</td><td>15.80</td><td>47 : 1</td><td>-</td><td>0</td><td>-</td></tr>
+<tr><td>1080p30</td><td>all, QP 32, no filter</td><td>23.30</td><td>32 : 1</td><td>-</td><td>0</td><td>-</td></tr>
+<tr><td>1080p30</td><td>all, QP 24, no filter</td><td>31.79</td><td>23 : 1</td><td>-</td><td>0</td><td>-</td></tr>
+<tr><td>720p30</td><td>all, QP 32, no filter</td><td>15.46</td><td>21 : 1</td><td>-</td><td>0</td><td>-</td></tr>
+<tr><td>720p30</td><td>all, QP 24, no filter</td><td>21.17</td><td>16 : 1</td><td>-</td><td>0</td><td>-</td></tr>
+<tr><td>720p30</td><td>all, QP 16, no filter</td><td>29.86</td><td>11 : 1</td><td>-</td><td>0</td><td>-</td></tr>
 </tbody>
 </table>
 
@@ -149,7 +149,7 @@ Ratio = raw rate / stream rate; 8-bit 4:2:0 at 30 pictures per second is 746.5 M
 | Prediction | Intra16x16 (vertical, horizontal, DC, plane) with I_PCM fallback; one 16 x 16 partition, P_Skip, whole-sample vectors within +-16; two engines, one slice per band |
 | Transform, entropy | 4x4 integer transform, luma and chroma DC transforms, QP 0 to 51 (driver minimum 12); CAVLC |
 | Deblocking filter | in-loop (clause 8.7), one per engine, idc 2 on and 1 off, offsets -6 to +6, switchable between pictures without an IDR picture |
-| Rate control | constant QP (default 28) or constant bit rate 0 to 100,000 kb/s, virtual buffer 100 to 2,000 ms (default 500), QP range 12 to 51, at most 2 QP steps per picture, start QP 48 |
+| Rate control | constant QP (default 28) or constant bit rate 0 to 100 Mb/s, virtual buffer 100 to 2,000 ms (default 500), QP range 12 to 51, at most 2 QP steps per picture, start QP 48 |
 
 Not coded: B pictures, several reference pictures, partitions below 16 x 16, sub-sample motion search, Intra 4x4 and 8x8, QP per macroblock, rate-distortion mode decision, interlaced coding, CABAC and the 8x8 transform (High profile extension, paid).
 
@@ -158,7 +158,7 @@ Not coded: B pictures, several reference pictures, partitions below 16 x 16, sub
 | Command | Effect |
 |---|---|
 | `camera mode 720p30\|1080p30`, `camera pattern <bars\|scroll\|box\|noise\|all> [speed]` | picture size and rate; test pattern and speed, -32 to 32, default 4 |
-| `encoder bitrate <kb/s>` | constant bit rate, 0 to 100,000; 0 returns to constant QP |
+| `encoder bitrate <kb/s>` | constant bit rate; the value is in kb/s (8000 is 8 Mb/s), 0 to 100,000; 0 returns to constant QP |
 | `encoder qp <n>`, `encoder buffer <ms>`, `encoder qprange <min> <max>` | constant QP (default 28); rate-control buffer 100 to 2,000 ms (default 500); QP range 12 to 51 |
 | `encoder gop <n>`, `encoder notify interrupt\|polled` | IDR picture every n pictures (1 to 255, default 30); how the end of a picture reaches the firmware (default interrupt) |
 | `encoder deblock on\|off`, `encoder deblock-offsets <alpha> <beta>` | in-loop filter on or off (default on); offsets -6 to 6 |

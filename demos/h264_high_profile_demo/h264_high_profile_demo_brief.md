@@ -38,9 +38,9 @@ This demo is a prebuilt bitstream, with its firmware inside, of the IronKernel R
 ### Highlights
 
 - CABAC against CAVLC at the same QP: 12.5 % fewer bits on pattern `all` at QP 28, 18.3 % at QP 40, 46.0 % on `box` and 52.3 % on `scroll` at QP 28, with equal PSNR
-- At 8,000 kb/s on pattern `all`, CABAC runs at a lower QP (average 46.5 against 48.7) and gains 1.54 dB minimum and 1.86 dB mean PSNR
+- At 8 Mb/s on pattern `all`, CABAC runs at a lower QP (average 46.5 against 48.7) and gains 1.54 dB minimum and 1.86 dB mean PSNR
 - License end measured on the demo image: one IDR picture 1,799.82 s after configuration, High (profile_idc 100, CABAC) before it and Constrained Baseline (profile_idc 66, CAVLC) after it, 59,404 pictures sent and 0 dropped over the 1,980 s capture
-- 10-minute soak at 1080p30 with CABAC: 18,002 pictures, 0 dropped, 24,015 kb/s against 27,539 kb/s with CAVLC, multiplexer load 75.7 %, PSNR 44.20 dB or better
+- 10-minute soak at 1080p30 with CABAC: 18,002 pictures, 0 dropped, 24.02 Mb/s against 27.54 Mb/s with CAVLC, multiplexer load 75.7 %, PSNR 44.20 dB or better
 - FFmpeg decodes every stream without an error line, JM decodes every access unit and ffprobe reports High; VLC or ffplay play the MPEG-TS on UDP port 5004
 - Bitstream only: no source or simulation model of the extension is included; use in a design needs a paid license
 
@@ -52,7 +52,7 @@ This demo is a prebuilt bitstream, with its firmware inside, of the IronKernel R
 | Item | Value |
 |---|---|
 | Picture sizes | 1920 x 1080 and 1280 x 720, 30 pictures/s |
-| Stream bit rate tested | 192 to 24,015 kb/s with CABAC (1080p30, 6.18 and 6.23) |
+| Stream bit rate tested | 0.19 to 24.02 Mb/s with CABAC (1080p30, 6.18 and 6.23) |
 | Compression ratio | 31 : 1 to 3,888 : 1 with CABAC (test patterns) |
 | Profile | High (profile_idc 100), CABAC; Constrained Baseline after 30 min |
 | Tools | I and P, one reference, whole-sample search +-16, deblocking filter |
@@ -100,13 +100,13 @@ A Nexys Video with its 12 V supply (JP4 on JTAG), two micro-USB cables (PROG, UA
 
 <table style="width:100%; border:none; margin:0; padding:0;">
 <tr>
-<td style="border:none; padding:0; width:38%; vertical-align:top; white-space:normal;"><img src="images/test_pattern_all_1080p.png" alt="Test pattern all: scrolled color bars, noise band and a checkered box" style="width:100%;"><br><strong>Figure 2.</strong> Pattern all, speed 4, decoded from the board's stream, 1080p30, 8,000 kb/s, demo image, 11-13-2026</td>
+<td style="border:none; padding:0; width:38%; vertical-align:top; white-space:normal;"><img src="images/test_pattern_all_1080p.png" alt="Test pattern all: scrolled color bars, noise band and a checkered box" style="width:100%;"><br><strong>Figure 2.</strong> Pattern all, speed 4, decoded from the board's stream, 1080p30, 8 Mb/s, demo image, 11-13-2026</td>
 <td style="border:none; padding:0 0 0 12px; width:20%; vertical-align:top; white-space:normal;"><img src="images/test_pattern_bars_1080p.png" alt="Test pattern bars: eight vertical color bars" style="width:100%;"><br><strong>Figure 3.</strong> Pattern bars, decoded from the board's stream, 1080p30; capture of 11-11-2026</td>
 </tr>
 </table>
 
 The generator (`rtlnet_csi2_rx_pattern`) makes every frame from the pattern, the speed and the frame counter, with no frame memory and no multiplier. `camera pattern all 4` stacks three layers at 4 pixels per frame, the upper covering the lower:
-a 64 x 64 box over a 64-line noise band over eight 75 % color bars that scroll right and wrap. Figure 2 shows the shifted bars, the noise band across the middle and the checkered box at the upper left; every frame is new. The soft smearing near the box and in the bars below the noise band is coding loss at 8,000 kb/s.
+a 64 x 64 box over a 64-line noise band over eight 75 % color bars that scroll right and wrap. Figure 2 shows the shifted bars, the noise band across the middle and the checkered box at the upper left; every frame is new. The soft smearing near the box and in the bars below the noise band is coding loss at 8 Mb/s.
 
 Patterns: `bars` (0) static bars on macroblock boundaries; `scroll` (1) the bars moving right with wrap-around; `box` (2) a 64 x 64 checkerboard box moving (speed, speed div 2) pixels per frame and bouncing at the edges over the bars;
 `noise` (3) the bars with a 64-row noise band from a 32-bit LFSR, new seed every frame; `all` (4) the three combined.
@@ -119,13 +119,13 @@ CAVLC against CABAC at the same QP, board runs, GOP 30, FFmpeg decode, PSNR agai
 Clocks per macroblock are measured against a budget of 735 at 1080p30 and 1,666 at 720p30 (two engines, 90 MHz). Board document 6.18 and 6.23.
 
 <table class="num">
-<thead><tr><th>Size</th><th>Pattern, setting</th><th>CAVLC, kb/s</th><th>CABAC, kb/s</th><th>Saving</th><th>Ratio CAVLC / CABAC</th><th>PSNR min / mean, dB</th><th>Clocks per MB</th></tr></thead>
+<thead><tr><th>Size</th><th>Pattern, setting</th><th>CAVLC, Mb/s</th><th>CABAC, Mb/s</th><th>Saving</th><th>Ratio CAVLC / CABAC</th><th>PSNR min / mean, dB</th><th>Clocks per MB</th></tr></thead>
 <tbody>
-<tr><td>1080p30</td><td>all, QP 28</td><td>27,227</td><td>23,830</td><td>12.5 %</td><td>27 : 1 / 31 : 1</td><td>44.27 / 44.89</td><td>494 / 569</td></tr>
-<tr><td>1080p30</td><td>all, QP 40</td><td>15,827</td><td>12,936</td><td>18.3 %</td><td>47 : 1 / 58 : 1</td><td>33.69 / 33.92</td><td>493 / 571</td></tr>
-<tr><td>1080p30</td><td>scroll, QP 28</td><td>523</td><td>250</td><td>52.3 %</td><td>1,427 : 1 / 2,986 : 1</td><td>48.01 / 50.03</td><td>482 / 484</td></tr>
-<tr><td>1080p30</td><td>scroll, QP 28, filter on</td><td>442</td><td>192</td><td>56.6 %</td><td>1,689 : 1 / 3,888 : 1</td><td>48.85 / 50.48; 50.41 / 50.87</td><td>-</td></tr>
-<tr><td>1080p30</td><td>all, QP 28, 10-minute soak</td><td>27,539</td><td>24,015</td><td>12.8 %</td><td>27 : 1 / 31 : 1</td><td>min 44.28; 44.20</td><td>-</td></tr>
+<tr><td>1080p30</td><td>all, QP 28</td><td>27.23</td><td>23.83</td><td>12.5 %</td><td>27 : 1 / 31 : 1</td><td>44.27 / 44.89</td><td>494 / 569</td></tr>
+<tr><td>1080p30</td><td>all, QP 40</td><td>15.83</td><td>12.94</td><td>18.3 %</td><td>47 : 1 / 58 : 1</td><td>33.69 / 33.92</td><td>493 / 571</td></tr>
+<tr><td>1080p30</td><td>scroll, QP 28</td><td>0.52</td><td>0.25</td><td>52.3 %</td><td>1,427 : 1 / 2,986 : 1</td><td>48.01 / 50.03</td><td>482 / 484</td></tr>
+<tr><td>1080p30</td><td>scroll, QP 28, filter on</td><td>0.44</td><td>0.19</td><td>56.6 %</td><td>1,689 : 1 / 3,888 : 1</td><td>48.85 / 50.48; 50.41 / 50.87</td><td>-</td></tr>
+<tr><td>1080p30</td><td>all, QP 28, 10-minute soak</td><td>27.54</td><td>24.02</td><td>12.8 %</td><td>27 : 1 / 31 : 1</td><td>min 44.28; 44.20</td><td>-</td></tr>
 </tbody>
 </table>
 
@@ -142,7 +142,7 @@ Runs: board document 6.18 (rows 1 to 3) and 6.23 (rows 4 and 5).
 | Prediction | Intra16x16 (vertical, horizontal, DC, plane) with I_PCM fallback; one 16 x 16 partition, P_Skip, whole-sample vectors within +-16; two engines, one slice per band |
 | Transform, entropy | 4x4 integer transform, luma and chroma DC transforms, QP 0 to 51 (driver minimum 12); CABAC from the High profile extension |
 | Deblocking filter | in-loop (clause 8.7), one per engine, idc 2 on and 1 off, offsets -6 to +6, switchable between pictures without an IDR picture |
-| Rate control | constant QP (default 28) or constant bit rate 0 to 100,000 kb/s, virtual buffer 100 to 2,000 ms (default 500), QP range 12 to 51, at most 2 QP steps per picture, start QP 48 |
+| Rate control | constant QP (default 28) or constant bit rate 0 to 100 Mb/s, virtual buffer 100 to 2,000 ms (default 500), QP range 12 to 51, at most 2 QP steps per picture, start QP 48 |
 
 Not coded: B pictures, several reference pictures, partitions below 16 x 16, sub-sample motion search, Intra 4x4 and 8x8, QP per macroblock, rate-distortion mode decision, interlaced coding, the 8x8 transform and the adaptive transform choice (not in this image).
 
@@ -151,7 +151,7 @@ Not coded: B pictures, several reference pictures, partitions below 16 x 16, sub
 | Command | Effect |
 |---|---|
 | `camera mode 720p30\|1080p30`, `camera pattern <bars\|scroll\|box\|noise\|all> [speed]` | picture size and rate; test pattern and speed, -32 to 32, default 4 |
-| `encoder bitrate <kb/s>` | constant bit rate, 0 to 100,000; 0 returns to constant QP |
+| `encoder bitrate <kb/s>` | constant bit rate; the value is in kb/s (8000 is 8 Mb/s), 0 to 100,000; 0 returns to constant QP |
 | `encoder qp <n>`, `encoder buffer <ms>`, `encoder qprange <min> <max>` | constant QP (default 28); rate-control buffer 100 to 2,000 ms (default 500); QP range 12 to 51 |
 | `encoder gop <n>`, `encoder notify interrupt\|polled` | IDR picture every n pictures (1 to 255, default 30); how the end of a picture reaches the firmware (default interrupt) |
 | `encoder deblock on\|off`, `encoder deblock-offsets <alpha> <beta>` | in-loop filter on or off (default on); offsets -6 to 6 |
