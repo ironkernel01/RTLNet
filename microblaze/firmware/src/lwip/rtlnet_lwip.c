@@ -212,6 +212,56 @@ void rtlnet_lwip_set_link(int up)
 }
 
 /*
+ * rtlnet_lwip_arp_resolve -- make the ARP entry of the next hop to a destination exist.
+ * Steps:
+ *   1. lwIP not running: return 0. A broadcast, multicast or unspecified destination needs no entry: return 1.
+ *   2. Next hop: the destination when it is on the netif's subnet, else the gateway (none: return 0).
+ *   3. Until an entry for the next hop is stable or timeout_ms has passed: send an ARP request now and every
+ *      RTLNET_LWIP_ARP_RETRY_MS, and service lwIP (the reply is received and stored by the netif service).
+ * The datagrams of a stream then leave without waiting in lwIP's ARP queue; the first datagram of a new
+ * destination is the one an unresolved entry costs.
+ * Returns: 1 when the entry exists (or none is needed), 0 on timeout or when lwIP is off.
+ */
+int rtlnet_lwip_arp_resolve(uint32_t ip, uint32_t timeout_ms)
+{
+    ip4_addr_t dst;
+    ip4_addr_t hop;
+    struct eth_addr *eth = NULL;
+    const ip4_addr_t *ipr = NULL;
+    uint32_t t0;
+    uint32_t last;
+
+    if (!g_running) {
+        return 0;
+    }
+    ip4_from_host(&dst, ip);
+    if (ip4_addr_isany_val(dst) || ip4_addr_isbroadcast(&dst, &g_netif) || ip4_addr_ismulticast(&dst)) {
+        return 1;
+    }
+    hop = ip4_addr_netcmp(&dst, netif_ip4_addr(&g_netif), netif_ip4_netmask(&g_netif)) ? dst : *netif_ip4_gw(&g_netif);
+    if (ip4_addr_isany_val(hop)) {
+        return 0;
+    }
+    t0 = plat_uptime_ms();
+    last = t0 - RTLNET_LWIP_ARP_RETRY_MS;   /* the first request goes out at once */
+    for (;;) {
+        uint32_t now;
+        if (etharp_find_addr(&g_netif, &hop, &eth, &ipr) >= 0) {
+            return 1;
+        }
+        now = plat_uptime_ms();
+        if ((now - t0) >= timeout_ms) {
+            return 0;
+        }
+        if ((now - last) >= RTLNET_LWIP_ARP_RETRY_MS) {
+            (void)etharp_request(&g_netif, &hop);
+            last = now;
+        }
+        rtlnet_lwip_poll();
+    }
+}
+
+/*
  * rtlnet_lwip_status -- netif identity and InitLWIP() history.
  * Returns: nothing; *out filled.
  */
