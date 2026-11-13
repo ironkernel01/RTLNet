@@ -102,3 +102,6 @@ desktop.ini
 
 # Diagram tooling (npm install in diagrams/)
 node_modules/
+
+# Local-only files: never committed, never pushed
+local_only/

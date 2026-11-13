@@ -13,17 +13,19 @@ has to be built.
 | `demos.md` | this guide |
 | `LICENSE_DEMO.md` | evaluation license of the High profile demonstration package |
 | `demorelease.bat` | maintainer script: copies freshly built images into the demo folders (section 6) |
+| `build_brief_pdf.ps1` | maintainer script: builds the PDF of a demo brief (section 6) |
 | `<demo name>/<board>/` | one demo on one board |
 | `<demo name>/<board>/README.md` | the steps to run that demo |
 | `<demo name>/<board>/rtlnet_<board>.bit` | the bitstream, firmware included |
 | `<demo name>/<board>/build_info.txt` | source revision, timing result and utilization of the image |
+| `<demo name>/<demo name>_brief.md` and `.pdf` | the demo brief: what the demo shows, data path, test pattern, measured results, build variants, utilization and limits |
 
 ## 2. Demos available now
 
-| Demo folder | Board | What it shows | Time limit | License |
-|---|---|---|---|---|
-| `h264_baseline/nexys_video` | Nexys Video | H.264 video encoder, Constrained Baseline profile, with the in-loop deblocking filter. The board makes moving test patterns at 1080p30 or 720p30, encodes them and sends them as an MPEG-TS stream over Ethernet to VLC or ffplay. | none | `LICENSE.md` in the repository root |
-| `h264_high_profile_demo/nexys_video` | Nexys Video | The same encoder with the High profile extension (CABAC entropy coding), which lowers the bit rate at the same picture quality. | High profile runs for 30 minutes after each programming; the stream then continues in Constrained Baseline | `LICENSE_DEMO.md` |
+| Demo folder | Board | What it shows | Time limit | License | Brief |
+|---|---|---|---|---|---|
+| `h264_baseline/nexys_video` | Nexys Video | H.264 video encoder, Constrained Baseline profile, with the in-loop deblocking filter. The board makes moving test patterns at 1080p30 or 720p30, encodes them and sends them as an MPEG-TS stream over Ethernet to VLC or ffplay. | none | `LICENSE.md` in the repository root | [`h264_baseline/h264_baseline_brief.pdf`](h264_baseline/h264_baseline_brief.pdf) |
+| `h264_high_profile_demo/nexys_video` | Nexys Video | The same encoder with the High profile extension (CABAC entropy coding), which lowers the bit rate at the same picture quality. | High profile runs for 30 minutes after each programming; the stream then continues in Constrained Baseline | `LICENSE_DEMO.md` | [`h264_high_profile_demo/h264_high_profile_demo_brief.pdf`](h264_high_profile_demo/h264_high_profile_demo_brief.pdf) |
 
 Both images contain the complete RTLNet design for the board: the gigabit Ethernet stack, the MicroBlaze V processor
 with its command-line console, the DDR3 memory path and the two-engine H.264 encoder, all on one 90 MHz clock.
@@ -94,11 +96,21 @@ It copies the bitstream and `build_info.txt` of every demo in its list from `boa
 ends with `DEMORELEASE: PASS`, or with `DEMORELEASE: FAIL` when a source file is missing. It builds nothing and does not
 touch the board.
 
+The PDF of a demo brief is built from `demos/<demo name>/<demo name>_brief.md` with one line (needs Chrome or Edge and an internet connection for the page scripts):
+
+```
+powershell -NoProfile -ExecutionPolicy Bypass -File demosuild_brief_pdf.ps1 h264_baseline
+```
+
+The script uses the page head and foot of `documentation/pdf`, prints with headless Chrome next to the `.md` so the relative image paths resolve, and removes its temporary `render.html`.
+The drawings of the briefs are in `diagrams/src/demo-h264.js` (render with `diagrams/tools/render.ps1`).
+
 To add a demo:
 
 1. Add one `call :image <demo name> <board> <build tag>` line to the list in `demorelease.bat`.
 2. Write `demos/<demo name>/<board>/README.md` with the steps to run it.
 3. Add a row to the table in section 2.
+4. Write `demos/<demo name>/<demo name>_brief.md` and build its PDF with the line above.
 
 The demos are bitstreams only. No netlist of the High profile extension and no High profile image without the time
 limit goes into this folder; both belong to the paid feature (`licensing.md` in the repository root).
