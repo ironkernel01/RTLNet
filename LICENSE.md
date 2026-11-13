@@ -63,7 +63,7 @@ Product. Paid licenses carry no royalty and no per-unit fee.
 
 The Paid Features are not licensed by this text. A demonstration form of a Paid Feature
 that IronKernel distributes for evaluation (for example a time-limited netlist) comes with
-its own evaluation terms (`demos/LICENSE_DEMO.md`). You may not remove, bypass or extend the time limit of a
+its own evaluation terms (`demos/LICENSE_DEMO.md` on the branch that holds the demonstration package). You may not remove, bypass or extend the time limit of a
 demonstration form, and You may not ship it in a Product.
 
 ## 6. Conditions for every use

@@ -47,7 +47,8 @@ Usage: powershell -NoProfile -ExecutionPolicy Bypass -File h264_harness.ps1 [-Co
     `MVSTAT pic<n> interior=<I> true=<T>` per P picture (macroblocks whose block at the expected vector lies inside the picture, and those among
     them coded as inter with exactly that vector), and the harness requires T >= 90 % of I for every P picture. Sr = n sets the core's search
     range (TB_SR; Sr 0 is the phase 2c-1 behaviour, the baseline of the bits gate, see h264_check.py bitsratio).
-Revision: 11-12-2026
+Revision: 11-13-2026
+  * 11-13-2026: the SPS/PPS tool start is tried again (the tool folder is shared by every checkout on the machine).
   * 11-12-2026: -Irq: the bench takes the picture end from the irq output (IRQ_ENABLE, CTRL.IRQ_EN) instead of polling STATUS; the streams must be byte-identical to the polled run.
   * 11-09-2026: initial version; QP/pattern configuration table, PSNR floors, bits per picture, -Pcm and -Measure.
   * 11-10-2026: phase 2c-1: GOP and sequence configurations (p_*), one input buffer reloaded per picture, -InjectBurstRef.
@@ -315,7 +316,13 @@ foreach ($c in $Configs) {
     $toolArgs = @("$($c.W)", "$($c.H)", "$($c.W)", "$($c.DH)", '30', '4', "$dir/sps.bin")
     if ($c.W -eq 1280) { $toolArgs = @('mode', '0', '4', "$dir/sps.bin") }
     if ($c.W -eq 1920) { $toolArgs = @('mode', '1', '4', "$dir/sps.bin") }
-    $rc = Invoke-Tool $SpsTool $toolArgs $dir "$dir/sps_tool.log"
+    # The tool lives in the tool folder shared by every checkout on this machine; a harness of another checkout can be
+    # rebuilding it at this moment (the file is then missing or locked for an instant), so a failed start is tried again.
+    $rc = 1
+    for ($try = 0; $try -lt 5 -and $rc -ne 0; $try++) {
+        if ($try -gt 0) { Start-Sleep -Seconds 2 }
+        try { $rc = Invoke-Tool $SpsTool $toolArgs $dir "$dir/sps_tool.log" } catch { $rc = 1 }
+    }
     if ($rc -ne 0) { throw "SPS/PPS tool failed: $(Read-Text "$dir/sps_tool.log.err")" }
 
     # Encode in Verilator.
