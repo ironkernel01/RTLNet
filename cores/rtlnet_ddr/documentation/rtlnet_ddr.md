@@ -1,7 +1,5 @@
 # rtlnet_ddr — DDR3 memory controller core
 
-> Paths under `boards/`, `microblaze/` and `demos/` in this guide, and the board results it quotes, are on the `nexys_video_h264_baseline` branch; `main` holds the board-independent cores only.
-
 | Item | Value |
 |---|---|
 | Core | `rtlnet_ddr` (wrapper), `rtlnet_ddr_amd` (AMD 7-series implementation), `rtlnet_ddr_sim` (simulation model) |
@@ -30,7 +28,7 @@ Contents: 1 files, 2 interface, 3 clocks and resets, 4 the MIG project, 5 simula
 | `ip/rtlnet_ddr_mig.tcl` | `rtlnet_ddr_mig_create <dir> <prj>`: generates the MIG IP from the board's project file into a build tree |
 | `testbench/rtlnet_ddr_sim.sv` | simulation model: AXI4 memory (`rtlnet_tb_axi4_mem`) with a calibration delay |
 
-The generated IP (RTL, constraints, XCI) is never committed; every build recreates it under `boards/<board>/build/ip` of the board branch.
+The generated IP (RTL, constraints, XCI) is never committed; every build recreates it under `boards/<board>/build/ip`.
 
 ---
 
@@ -75,7 +73,7 @@ master that needs read-after-write waits for the write response first (the CPU f
 
 ## 4. The MIG project
 
-The MIG project file (pinout, part and timing) belongs to the board and is passed to `rtlnet_ddr_mig_create`; the core has no default. On the `nexys_video_h264_baseline` branch it is `boards/nexys_video/ip/rtlnet_ddr_mig.prj`, the Digilent Nexys Video MIG project (board files A.0 1.2, `mig.prj`) with these edits only:
+The MIG project file (pinout, part and timing) belongs to the board and is passed to `rtlnet_ddr_mig_create`; the core has no default. For the Nexys Video it is `boards/nexys_video/ip/rtlnet_ddr_mig.prj`, the Digilent Nexys Video MIG project (board files A.0 1.2, `mig.prj`) with these edits only:
 
 | Edit | Reason |
 |---|---|

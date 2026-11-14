@@ -101,7 +101,7 @@ whole frames.
 
 ## Measured on hardware
 
-Reference design on the Nexys Video (the `nexys_video_h264_baseline` branch of the repository; `main` holds the board-independent cores), 100 Mb/s link to a PC wired NIC, iperf 2.2.2, 10 s runs. The 100 Mb/s ceiling for
+Reference design on the Nexys Video (`boards/nexys_video/` of the repository), 100 Mb/s link to a PC wired NIC, iperf 2.2.2, 10 s runs. The 100 Mb/s ceiling for
 1470-byte UDP payloads is 95.6 Mbit/s.
 
 | Traffic | Result |

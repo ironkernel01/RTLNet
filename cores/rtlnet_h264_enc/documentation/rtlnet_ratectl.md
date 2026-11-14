@@ -1,7 +1,5 @@
 # rtlnet_ratectl: H.264 rate control (Phase 2d)
 
-> Paths under `boards/`, `microblaze/` and `demos/` in this guide, and the board results it quotes, are on the `nexys_video_h264_baseline` branch; `main` holds the board-independent cores only.
-
 Copyright (C) 2026 IronKernel. All rights reserved.
 
 Revision: 11-11-2026 (start QP, Phase 2e)

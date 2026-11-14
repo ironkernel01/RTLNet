@@ -75,12 +75,13 @@ RTLNet/
   scripts/                        shared simulation and constraint scripts
 ```
 
-`microblaze/`, `boards/` and `demos/` exist on the board branches only (`nexys_video_h264_baseline` and the branch stacked on
-it); `main` holds `cores/`, `scripts/`, `documentation/` and `diagrams/`. Paths of those three folders in this document, and the
-board results quoted from them, refer to the `nexys_video_h264_baseline` branch (branch rules: `rtlnet_contributing.md` section 8).
+The repository has one branch, `main`; folders separate the parts. `cores/` is board-independent and does not depend on
+`boards/`, `microblaze/` or `demos/`; `boards/<board>/` holds one board design (today `boards/nexys_video/`); `microblaze/` holds the
+CPU block design and firmware; `demos/` holds the released demo bitstreams. The board results quoted in this document are results
+on the Nexys Video (layout rules: `rtlnet_contributing.md` section 8).
 
 Generated output (Vivado runs, Active-HDL work directories, firmware objects, bitstreams) is never committed;
-release bitstreams go in `releases/`.
+released bitstreams go in `demos/`.
 
 ---
 
@@ -730,4 +731,5 @@ and between the DMA MM2S stream and `u_cpu_tx_fifo` (TX).
 | 11-09-2026 | MicroBlaze V block design without the JTAG UART: the MDM address 0x4140_0000 is unmapped |
 | 11-09-2026 | DDR3 (Phase 0 stage 1): `rtlnet_ddr` (MIG, 512 MiB) and `rtlnet_axi_arbiter` in the board top; MicroBlaze V caches (8 KiB I, 8 KiB write-through D over `0x8000_0000..0x9FFF_FFFF`), SmartConnect and the exported 128-bit `M_AXI_DDR`; arbiter window `0x44A0_4000`; `ui_clk` domain; firmware `show ddr`, `ddr test`; the CPU's `M_AXI_DDR` runs on `cpu_clk` and crosses to `ui_clk` in the board top's `rtlnet_axi_cdc` (`u_ddr_cdc`), so the SmartConnect has one clock |
 | 11-09-2026 | DDR3 controller `sys_clk` is MMCM CLKOUT6 through a BUFG (`ddr_sys_clk`); the arbiter's CPU master sets `NARROW_MASK` for the write-through data cache's 32-bit stores |
-| 11-13-2026 | Repository split into `main` and board branches: the MIG project file moved to `boards/nexys_video/ip/` and is an argument of `rtlnet_ddr_mig_create`; section 2 notes where each folder lives |
+| 11-13-2026 | The MIG project file moved to `boards/nexys_video/ip/` and is an argument of `rtlnet_ddr_mig_create`; section 2 notes where each folder lives |
+| 11-13-2026 | The repository is one branch, `main`; board-independent code and a board are separated by folder (`cores/`, `boards/<board>/`, `microblaze/`, `demos/`), layout rules in `rtlnet_contributing.md` section 8 |

@@ -1,7 +1,5 @@
 # rtlnet_axi_arbiter — N:1 AXI4 arbiter for the DDR3 port
 
-> Paths under `boards/`, `microblaze/` and `demos/` in this guide, and the board results it quotes, are on the `nexys_video_h264_baseline` branch; `main` holds the board-independent cores only.
-
 | Item | Value |
 |---|---|
 | Core | `rtlnet_axi_arbiter` |

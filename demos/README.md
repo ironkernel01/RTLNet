@@ -26,7 +26,7 @@ Exactly what is in a demo folder `demos/<demo name>/`:
 
 `demorelease.bat` copies the bitstream and `build_info.txt` from `boards/<board>/build/<build tag>/` (the folder that
 `boards/<board>/scripts/build.ps1 -Tag <build tag> -Image` writes) into `<board>/`. List the folders of `demos` to see
-which demos this branch has; the README and the brief of each demo say what the demo shows and under which license it is.
+which demos there are; the README and the brief of each demo say what the demo shows and under which license it is.
 
 License: `LICENSE.md` in the repository root for RTLNet. A demo that is under other terms names its license file in its
 README and brief.

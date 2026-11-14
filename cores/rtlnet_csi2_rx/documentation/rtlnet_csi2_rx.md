@@ -1,7 +1,5 @@
 # rtlnet_csi2_rx — CSI-2 capture core, Phase 1: color bars and source switch
 
-> Paths under `boards/`, `microblaze/` and `demos/` in this guide, and the board results it quotes, are on the `nexys_video_h264_baseline` branch; `main` holds the board-independent cores only.
-
 | Item | Value |
 |---|---|
 | Core | `rtlnet_csi2_rx` |

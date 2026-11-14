@@ -1700,7 +1700,7 @@ Board results (JTAG, PC on Wi-Fi, link 1000 Mb/s unless stated):
 
 In the runs that failed once the board counts 0 dropped pictures and 0 UDP drops, and the PC reports datagrams out of order; the PC is on Wi-Fi. The cause is not established. A first run of `hp_expiry_test.ps1` without `-Profile high` reports one failed gate (it expects 1 forced IDR picture; the CABAC image counts 2 with the profile command of the test): `-Profile high` is the correct call for this image.
 
-No build output is tracked in git from this revision on: `boards/nexys_video/build/rtlnet_nexys_video.bit`, `.mmi`, `.xsa` and `microblaze/firmware/build/firmware.elf` are build outputs only. The released images are `demos/h264_baseline/nexys_video/` and, on `nexys_video_h264_highprofile`, `demos/h264_high_profile_demo/nexys_video/`.
+No build output is tracked in git from this revision on: `boards/nexys_video/build/rtlnet_nexys_video.bit`, `.mmi`, `.xsa` and `microblaze/firmware/build/firmware.elf` are build outputs only. The released images are `demos/h264_baseline/nexys_video/` and `demos/h264_high_profile_demo/nexys_video/`. The two branches were merged into `main` afterwards on 11-13-2026 and deleted; both build commits (6fc46373 and f4f7d4b1) are in the history of `main`.
 
 ## 7. Network integration (done 10-22-2026) and what remains
 

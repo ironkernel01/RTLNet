@@ -1,7 +1,5 @@
 # rtlnet_eth_mac — 10/100/1000 Mb/s RGMII Ethernet MAC
 
-> Paths under `boards/`, `microblaze/` and `demos/` in this guide, and the board results it quotes, are on the `nexys_video_h264_baseline` branch; `main` holds the board-independent cores only.
-
 | Item | Value |
 |---|---|
 | Core | `rtlnet_eth_mac` |

@@ -1,8 +1,8 @@
 # RTLNet on the Digilent Nexys Video
 
 This folder is the board design for the Digilent Nexys Video (Artix-7 XC7A200T-1SBG484C, Realtek RTL8211E RGMII PHY,
-512 MiB DDR3L). It is on the `nexys_video_h264_baseline` branch and the branches stacked on it; `main` holds only the
-board-independent cores.
+512 MiB DDR3L). The board-independent cores are under `cores/`; this folder is the only
+board design today.
 
 The design is the RTLNet Ethernet stack, the MicroBlaze V network path running lwIP, the DDR3 path, the test-pattern
 video source and the two-engine H.264 Constrained Baseline encoder, on one 90 MHz clock. The board guide with the design,
@@ -19,7 +19,7 @@ the measurements and the build log is `documentation/rtlnet_nexys_video.md`.
 | `testbench/` | board benches and `regression.txt` (picked up by `scripts/rtlnet_regression.ps1`) |
 | `documentation/` | the board guide |
 
-Other folders of this branch: `microblaze/` (CPU block design, firmware, host tests) and `demos/` (ready-to-run
+Related folders: `microblaze/` (CPU block design, firmware, host tests) and `demos/` (ready-to-run
 bitstreams, see `demos/README.md`).
 
 ## Build, program, outputs
@@ -79,7 +79,7 @@ The first form programs `build/rtlnet_nexys_video.bit`, the image of an untagged
 | `release_stream_gates.ps1` | `build/phase2i_<label>_gates_summary.txt` |
 | `tcp_test.ps1`, `offload_bench.ps1`, `offload_profile.ps1` | the console only |
 | `stream_check_selftest.ps1` | the console (`STREAM_CHECK_SELFTEST: PASS`); it is a regression entry |
-| `hp_expiry_test.ps1` | `build/<prefix>_summary.txt` and the files named in its header (highprofile branch only) |
+| `hp_expiry_test.ps1` | `build/<prefix>_summary.txt` and the files named in its header (High profile demo image only) |
 
 Simulation results of the board benches go to `.sim/<bench>/` like every bench (root README).
 

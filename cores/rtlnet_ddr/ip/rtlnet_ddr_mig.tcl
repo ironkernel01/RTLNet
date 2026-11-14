@@ -10,8 +10,8 @@
 #     products (global synthesis: no IP checkpoint, the controller is
 #     synthesized with the top) and returns the .xci path. Nothing generated
 #     is committed: the build tree <ip_dir> is recreated by every build.
-#   * Example of a project file: the ip folder of the Nexys Video board (rtlnet_ddr_mig.prj) on the
-#     nexys_video_h264_baseline branch, the Digilent Nexys Video MIG project (board files
+#   * Example of a project file: the ip folder of the Nexys Video board (boards/nexys_video/ip/rtlnet_ddr_mig.prj),
+#     the Digilent Nexys Video MIG project (board files
 #     A.0 1.2: MT41K256M16, retimed to 2778 ps / 360 MHz, 4:1, 16-bit, input 100 MHz in the .prj (the wizard turns it into the 102.857 MHz the board feeds from u_mmcm2),
 #     AXI, 512 MiB, pins unchanged) with five edits, documented in
 #     documentation/rtlnet_ddr.md section 4: module name rtlnet_ddr_mig,

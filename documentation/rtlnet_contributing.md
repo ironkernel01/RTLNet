@@ -3,7 +3,7 @@
 | Item | Value |
 |---|---|
 | Document revision | 11-13-2026 |
-| Applies to | every file under `cores/`, `scripts/`, and on the board branches `microblaze/`, `boards/`, `demos/` |
+| Applies to | every file under `cores/`, `scripts/`, `microblaze/`, `boards/` and `demos/` |
 
 Read `documentation/rtlnet_architecture.md` first (bus, register conventions, address map, leaf contract,
 section 15 port lists). This page lists the rules a core must follow to be accepted.
@@ -81,7 +81,7 @@ section 15 port lists). This page lists the rules a core must follow to be accep
 - Run: `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rtlnet_run_sim.ps1 -Bench <tb> -Filelist <f>`.
   The runner serializes the single Active-HDL seat machine-wide; just call it. Do not start the Active-HDL GUI.
 - Prove each new check can fail (perturb the bench once, see TEST FAIL, restore).
-- **Board-level benches never simulate the processor.** (They live on the board branches.) The CPU core is replaced by `microblaze/rtlnet_microblaze_sim_stub.sv`
+- **Board-level benches never simulate the processor.** (They live under `boards/`.) The CPU core is replaced by `microblaze/rtlnet_microblaze_sim_stub.sv`
   (same ports): scripted AXI4-Lite register sequences do what firmware does, and frame source/sink tasks stand in for
   the DMA streams. Firmware (lwIP, CLI) is verified on hardware and by the host-side harnesses.
 
@@ -106,31 +106,31 @@ reset values, access), design (state machines, data path, latency), clocks/reset
 (benches, what each proves, recorded results with date and check count), synthesis results, limitations,
 revision history.
 
-## 8. Branches
+## 8. Repository layout
 
-The repository is split into layers, one branch each:
+The repository has one branch, `main`; all work is committed on it. Folders keep the board-independent code apart from a board:
 
-| Branch | Holds |
+| Folder | Holds |
 |---|---|
-| `main` | all board-independent RTL: `cores/`, generic `scripts/`, generic `documentation/`, `diagrams/` of the generic documents, `LICENSE.md`, `README.md` |
-| `nexys_video_h264_baseline` | `main` plus the Nexys Video design with the public Constrained Baseline encoder: `boards/nexys_video/`, `microblaze/`, `demos/`, the board scripts |
-| `nexys_video_h264_highprofile` | `nexys_video_h264_baseline` plus the High profile demonstration material (demo bitstream, brief, test scripts); never High profile sources or a netlist |
-| further board branches | one per board, branched from `main` the same way |
+| `cores/` | all board-independent RTL, drivers, benches and core documents |
+| `scripts/` | generic scripts (simulation, regression, synthesis check, tool discovery) |
+| `documentation/`, `diagrams/` | the generic documents and drawings |
+| `boards/<board>/` | one board design per folder (top, constraints, MIG project file, build and test scripts, board bench, board guide); today `boards/nexys_video/`, a second board (Arty A7-100) is planned as `boards/arty_a7_100/` |
+| `microblaze/` | the CPU block design and firmware (written for the Nexys Video today) |
+| `demos/` | released demonstration bitstreams |
 
 Rules:
 
-1. **Core work is done on `main`.** A change to anything under `cores/`, to a generic script or to a generic document is made
-   on `main` and reaches the board branches by merge.
-2. **Board work is done on the board branch**: board top, constraints, MIG project file, build and test scripts, firmware,
-   demos. Work on the High profile demonstration is done on `nexys_video_h264_highprofile`.
-3. **Merges go one way**: `main` into `nexys_video_h264_baseline`, `nexys_video_h264_baseline` into
-   `nexys_video_h264_highprofile`; never the other way. A change made on a lower layer is merged up before the work goes on.
-4. **A file belongs to exactly one layer.** A path that exists on two layers has identical content on both; if a board needs a
-   different version of a file, the board gets its own file under `boards/<board>/` instead of a variant of the shared one.
-5. **Nothing board-specific on `main`**: no board path, pin, part or board address in core RTL, drivers, benches, generic
-   scripts or filelists. The cores take such data as parameters or arguments (for example `rtlnet_ddr_mig_create <dir> <prj>`
-   takes the MIG project file of the board). A default part in a script is a documented parameter default.
-6. `scripts/rtlnet_regression.ps1` is the same on every branch: it runs `cores/` and, when they exist, `microblaze/` and
-   `boards/<board>/testbench`. `main` must pass it alone.
-7. Documents on `main` that mention board results or board paths say that the paths are on the `nexys_video_h264_baseline`
-   branch.
+1. **`cores/` and generic `scripts/` never depend on `boards/`, `microblaze/` or `demos/`.** The regression of the cores
+   (`scripts/rtlnet_regression.ps1`) runs with those folders absent; it runs `microblaze/` and `boards/<board>/testbench`
+   when they exist.
+2. **Board-specific files live under `boards/<board>/`**: board top, constraints, MIG project file, build and test scripts.
+   No board path, pin, part or board address in core RTL, drivers, benches, generic scripts or filelists. The cores take
+   such data as parameters or arguments (for example `rtlnet_ddr_mig_create <dir> <prj>` takes the MIG project file of the
+   board). A default part in a script is a documented parameter default. If a board needs a different version of a shared
+   file, the board gets its own file under `boards/<board>/` instead of a variant of the shared one.
+3. **Demos**: one folder per demo under `demos/` with a `release.txt`; bitstreams only. A demo folder never holds a High
+   profile netlist or source, and never an image without its time limit.
+4. **No build output is tracked in git** (bitstreams, `.mmi`, `.xsa`, firmware images, reports). The released images are the
+   files under `demos/`.
+5. **Work is committed on `main`.**

@@ -1,7 +1,5 @@
 # rtlnet_h264_enc: H.264 encoder core, phases 2b-2 to 2c-2 (Intra16x16, I_PCM fallback, P pictures with integer-pel motion search)
 
-> Paths under `boards/`, `microblaze/` and `demos/` in this guide, and the board results it quotes, are on the `nexys_video_h264_baseline` branch; `main` holds the board-independent cores only.
-
 Revision: 11-13-2026 (the filter's macroblock-count multiplier in a DSP block and the two-clock DDR3 arbiter, sections 19.7 and 19.8; interrupt, section 18; deblocking filter, section 19; High profile seam, CABAC slice syntax, section 17; phase 2c-2: integer-pel motion search, section 16; phase 2c-1: P pictures without motion search, section 15; phase 2b-4: burst-only DDR3 access, section 14)
 
 ## 1. Purpose and scope

@@ -2,7 +2,7 @@
 -------------------------------------------------------------------------------
 File: rtlnet_regression.ps1
 Purpose: run every bench listed in scripts/rtlnet_regression.txt and in each
-  core's cores/<core>/testbench/regression.txt and, when the folders exist (board branches), in every regression.txt under
+  core's cores/<core>/testbench/regression.txt and, when the folders exist, in every regression.txt under
   microblaze/ and boards/ (same line format) through
   rtlnet_run_sim.ps1, sequentially (one Active-HDL seat), and fail if any
   bench fails.
@@ -11,7 +11,7 @@ Purpose: run every bench listed in scripts/rtlnet_regression.txt and in each
   remaining fields as arguments and passes on exit code 0 (decoder harness, driver host test).
 Usage: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rtlnet_regression.ps1 [-Match <regex>]
 Revision: 11-13-2026
-  * 11-13-2026: microblaze/ and boards/ are optional (the script is the same on main and on the board branches).
+  * 11-13-2026: microblaze/ and boards/ are optional folders, so that the regression of the cores runs without them.
   * 11-09-2026: sim=verilator and threads=N tokens (rtlnet_run_verilator.ps1).
   * 10-22-2026: initial version.
 -------------------------------------------------------------------------------

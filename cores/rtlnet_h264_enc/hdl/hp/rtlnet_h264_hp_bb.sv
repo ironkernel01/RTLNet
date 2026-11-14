@@ -4,7 +4,7 @@
 //   that takes the module from a separately delivered netlist (rtlnet_h264_top with HIGH_PROFILE = 1).
 // Overview:
 //   * Declares the ports only; the netlist supplies the logic. rtlnet_h264_enc.f does not list this file: the board build adds
-//     it together with the netlist (the build script of a board branch with -HighProfile full|demo).
+//     it together with the netlist (the board build script, for example boards/nexys_video/scripts/build.ps1 with -HighProfile full|demo).
 //   * The port list is the seam of the High profile extension: macroblock descriptor of rtlnet_h264_mb_cavlc, packer command
 //     output, 8x8 transform streams, picture events and status. rtlnet_h264_hp_stub.sv has the same ports.
 // Language: SystemVerilog-2012.
