@@ -21,8 +21,12 @@ Overview:
     updatemem succeeded and the output exists.
 Usage:
   powershell -NoProfile -ExecutionPolicy Bypass -File boards/nexys_video/scripts/merge_elf.ps1 `
-    [-Elf <elf>] [-Mmi <mmi>] [-Bit <bit>] [-Out <bit>]
+    [-Elf <elf>] [-Mmi <mmi>] [-Bit <bit>] [-Out <bit>] [-ProcPath <instance path>] [-LmbBytes <bytes>] [-WorkDir <dir>]
+  * -ProcPath, -LmbBytes and -WorkDir (defaults: the H.264 design's processor path, 524288 bytes and build/) let another design merge
+    its firmware (build_ethernet.ps1): the processor instance path in the MMI, the size of its LMB address space, and the
+    folder for the updatemem log and side files.
 Revision: 11-14-2026
+  * 11-14-2026: -ProcPath, -LmbBytes and -WorkDir parameters (defaults unchanged).
   * 11-14-2026: moved to cpu/microblaze_v_h264/ (was microblaze/).
   * 10-22-2026: initial version.
   * 10-22-2026: 512 KiB LMB (128 RAMB36); further address spaces allowed.
@@ -33,7 +37,10 @@ param(
     [string]$Elf = '',
     [string]$Mmi = '',
     [string]$Bit = '',
-    [string]$Out = ''
+    [string]$Out = '',
+    [string]$ProcPath = 'u_cpu/u_bd/rtlnet_cpu_i/microblaze_0',
+    [int64]$LmbBytes = 524288,
+    [string]$WorkDir = ''
 )
 $ErrorActionPreference = 'Stop'
 $Board = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
@@ -45,7 +52,8 @@ if (-not $Bit) { $Bit = Join-Path $Build 'rtlnet_nexys_video_hw.bit' }
 if (-not $Out) { $Out = Join-Path $Build 'rtlnet_nexys_video.bit' }
 . (Join-Path $Repo 'scripts\rtlnet_tools.ps1')
 $UpdateMem = (Resolve-RtlnetXilinx).Vivado + '/bin/updatemem.bat'
-$ExpectProc = 'u_cpu/u_bd/rtlnet_cpu_i/microblaze_0'
+$ExpectProc = $ProcPath
+if (-not $WorkDir) { $WorkDir = $Build }
 
 function Fail([string]$m) { Write-Output "RTLNET_MERGE: FAIL $m"; exit 1 }
 function Describe([string]$label, [string]$p) {
@@ -67,20 +75,22 @@ $endian = $procs[0].Endianness
 if ($endian -notin @('Little', 'Big')) { Fail "MMI endianness '$endian', expected Little or Big" }
 $spaces = @($procs[0].AddressSpace)
 $space = @($spaces | Where-Object { [int64]$_.Begin -eq 0 })[0]
-if (-not $space -or [int64]$space.End -ne 524287) { Fail "MMI has no LMB address space 0..524287" }
+$lmbEnd = $LmbBytes - 1
+if (-not $space -or [int64]$space.End -ne $lmbEnd) { Fail "MMI has no LMB address space 0..$lmbEnd" }
 foreach ($s in $spaces) { Write-Output ("RTLNET_MERGE: MMI address space {0} {1}..{2}" -f $s.Name, $s.Begin, $s.End) }
 $lanes = @($space.SelectNodes('.//BitLane'))
 $ramb  = @($lanes | Where-Object { $_.MemType -eq 'RAMB36' })
-if ($lanes.Count -ne 128 -or $ramb.Count -ne 128) { Fail "MMI LMB space has $($lanes.Count) bit lanes ($($ramb.Count) RAMB36), expected 128 RAMB36" }
-Write-Output "RTLNET_MERGE: MMI processor $proc, LMB 0..524287, $($ramb.Count) RAMB36 lanes"
+$wantLanes = [int]($LmbBytes / 4096)   # one RAMB36 holds 4 KiB of the 32-bit LMB
+if ($lanes.Count -ne $wantLanes -or $ramb.Count -ne $wantLanes) { Fail "MMI LMB space has $($lanes.Count) bit lanes ($($ramb.Count) RAMB36), expected $wantLanes RAMB36" }
+Write-Output "RTLNET_MERGE: MMI processor $proc, LMB 0..$lmbEnd, $($ramb.Count) RAMB36 lanes"
 Describe 'elf' $Elf
 Describe 'mmi' $Mmi
 Describe 'bit (hw)' $Bit
 
 if (Test-Path -LiteralPath $Out) { Remove-Item -LiteralPath $Out -Force }
-$log = Join-Path $Build 'merge_elf.log'
-# updatemem writes side files into its working directory: run it in build/.
-Push-Location $Build
+$log = Join-Path $WorkDir 'merge_elf.log'
+# updatemem writes side files into its working directory: run it in build/ (or -WorkDir).
+Push-Location $WorkDir
 try {
     & $UpdateMem -force -meminfo $Mmi -data $Elf -bit $Bit -proc $proc -out $Out *> $log
     $rc = $LASTEXITCODE

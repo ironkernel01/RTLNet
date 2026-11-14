@@ -62,6 +62,7 @@ you run it.
 | Core documents | `cores/<core>/documentation/<core>.md` |
 | Board document and board guide | `boards/nexys_video/documentation/rtlnet_nexys_video.md`, `boards/nexys_video/README.md`; CPU documents in `cpu/microblaze_v_h264/documentation/` |
 | Drawings (PowerPoint and PNG) | `diagrams/out/`, `diagrams/out/png/`; sources in `diagrams/src/` |
+| Ethernet demo (10/100/1000, DHCP, ARP, ping, UDP, lwIP TCP): board top, build, CPU, firmware and hardware tests | `boards/nexys_video/hdl/rtlnet_nexys_video_eth_top.sv`, `boards/nexys_video/scripts/build_ethernet.ps1`, `cpu/microblaze_v_ethernet/` (guide `cpu/microblaze_v_ethernet/documentation/rtlnet_cpu_eth.md`, tests `cpu/microblaze_v_ethernet/test/`) |
 | Board test scripts and their output | scripts in `boards/nexys_video/scripts/`; transcripts and captures in `boards/nexys_video/build/` (names in `boards/nexys_video/README.md`) |
 | License | `LICENSE.md` |
 
@@ -71,7 +72,7 @@ you run it.
 |---|---|
 | `cores/` | the board-independent cores above, each with `hdl/`, `driver/`, `testbench/`, `documentation/`; it targets no board |
 | `boards/` | one folder per board design; today `boards/nexys_video/` (top, constraints, MIG project file, build and test scripts, board bench, board guide); a second board, an Arty A7-100, is planned as `boards/arty_a7_100/` |
-| `cpu/` | one folder per CPU, each independent with its own block design, driver, firmware, CLI, tests and documents; today `cpu/microblaze_v_h264/` (the MicroBlaze V CPU of the H.264 demos: block design, driver, documents, and the firmware with CLI, lwIP application and host tests; written for the Nexys Video today) |
+| `cpu/` | one folder per CPU, each independent with its own block design, driver, firmware, CLI, tests and documents; today `cpu/microblaze_v_h264/` (the MicroBlaze V CPU of the H.264 demos: block design, driver, documents, and the firmware with CLI, lwIP application and host tests; written for the Nexys Video today) and `cpu/microblaze_v_ethernet/` (the board-independent MicroBlaze V of the Ethernet demo: no DDR3, no caches, no video; firmware, CLI, host tests and hardware tests shared by every board) |
 | `demos/` | released demonstration bitstreams, one folder per demo with its brief, `release.txt` and the license of a time-limited demo (`demos/LICENSE_DEMO.md`) |
 | `scripts/` | simulation runner, regression, synthesis/timing checks, CDC constraints, Vivado launcher, name check, tool discovery (`rtlnet_tools.ps1`) |
 | `documentation/` | `rtlnet_architecture.md` (the system contract: stream and register conventions, address map, port lists), `rtlnet_contributing.md` (rules and repository layout rules), `rtlnet_product_brief.md` and its PDF |

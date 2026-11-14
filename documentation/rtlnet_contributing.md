@@ -116,7 +116,7 @@ The repository has one branch, `main`; all work is committed on it. Folders keep
 | `scripts/` | generic scripts (simulation, regression, synthesis check, tool discovery) |
 | `documentation/`, `diagrams/` | the generic documents and drawings |
 | `boards/<board>/` | one board design per folder (top, constraints, MIG project file, build and test scripts, board bench, board guide); today `boards/nexys_video/`, a second board (Arty A7-100) is planned as `boards/arty_a7_100/` |
-| `cpu/` | one folder per CPU, each independent with its own block design, driver, firmware, CLI, tests and documents; today `cpu/microblaze_v_h264/` (written for the Nexys Video today) |
+| `cpu/` | one folder per CPU, each independent with its own block design, driver, firmware, CLI, tests and documents; today `cpu/microblaze_v_h264/` (written for the Nexys Video today) and the board-independent `cpu/microblaze_v_ethernet/` (names no board, pin, part or PHY type; board facts come from its system registers and the PHY ID) |
 | `demos/` | released demonstration bitstreams |
 
 Rules:

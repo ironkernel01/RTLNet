@@ -83,6 +83,20 @@ The first form programs `build/rtlnet_nexys_video.bit`, the image of an untagged
 
 Simulation results of the board benches go to `.sim/<bench>/` like every bench (root README).
 
+## Ethernet demo design
+
+A second, small design for the same board: 10/100/1000 Ethernet with a simple MicroBlaze V and firmware for DHCP, ARP, ping, UDP and
+lwIP TCP; no DDR3, MIG, camera, video or H.264. Top `hdl/rtlnet_nexys_video_eth_top.sv` (filelist `hdl/rtlnet_nexys_video_eth.f`), pins
+`constraints/rtlnet_nexys_video_eth.xdc` with the shared `rtlnet_nexys_video_rgmii.xdc`, bench `testbench/tb_rtlnet_nexys_video_eth.sv`,
+CPU and firmware `cpu/microblaze_v_ethernet/` (board independent, shared with the Arty A7-100 later). The H.264 flow above is not touched.
+
+```powershell
+# bitstream, firmware and merge; output boards/nexys_video/build/<tag>/rtlnet_nexys_video_eth.bit (and .mmi, .xsa, build_info.txt)
+powershell -NoProfile -ExecutionPolicy Bypass -File boards/nexys_video/scripts/build_ethernet.ps1 -Tag eth_dev [-Program]
+# hardware tests of the board-independent set (console on <COM port>, PC adapter <name>)
+powershell -NoProfile -ExecutionPolicy Bypass -File cpu/microblaze_v_ethernet/test/run_all.ps1 -Port <COM port> -Nic <adapter> -LinkMbps 1000
+```
+
 ## Measured on hardware (100 Mb/s link)
 
 | Traffic | Rate |

@@ -1,0 +1,8 @@
+# Ethernet CPU firmware host tests: <name> script:<host script path> [arguments]   (passes on exit code 0)
+# The CLI desktop harness with its scripted session (TEST PASS, negative control first), the DMA netif for every zero-copy
+# combination, the lwIP iperf server loopback, the console transmit ring and the PHY driver selection (mock MDIO bus).
+eth_cli_host_demo     script:cpu/microblaze_v_ethernet/firmware/build.ps1 -NoFirmware -Demo
+eth_netif_host_test   script:cpu/microblaze_v_ethernet/firmware/build.ps1 -NoFirmware -NetifTest
+eth_lwiperf_loopback  script:cpu/microblaze_v_ethernet/firmware/build.ps1 -NoFirmware -LwipTest
+eth_txring_host_test  script:cpu/microblaze_v_ethernet/firmware/test/txring_host_test.ps1
+eth_phy_host_test     script:cpu/microblaze_v_ethernet/firmware/test/phy_host_test.ps1
