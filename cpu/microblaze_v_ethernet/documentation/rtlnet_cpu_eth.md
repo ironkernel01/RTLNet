@@ -278,6 +278,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File cpu/microblaze_v_ethernet/fi
 | Hardware tests | `test/run_all.ps1 -Port <COM> -Nic <adapter> -LinkMbps 10|100|1000` | results table `test/out/results_<speed>.txt` and `.csv` |
 | Board bench modes | `tb_rtlnet_nexys_video_eth`: `COMMON_CLK` 2 (tags g10, g100, g1000, neg), 0 (g10mc, g100mc, g1000mc) | 154 checks each, 155 with `INJECT_FAILURE` (expected failure) |
 | Hardware suite on the final image `eth_cc100c` | `run_all.ps1 -LinkMbps 10`, `100`, `1000` | ETH_SUITE: PASS 8/8 scripts at each speed |
+| Release campaign on `eth_rel` (11-14-2026, Nexys Video through a switch) | `run_all.ps1 -LinkMbps 1000`, `100`, `10`; `flood_test.ps1 -Rate 1000` (all kinds) and `-Rate 20000` (four kinds) | `ETH_SUITE: PASS 8/8 scripts` at each speed; `FLOOD_TEST: PASS 95/95` and `PASS 50/50`; TCP iperf (mean of 3 x 10 s) PC to board / board to PC 349.7 / 283.3 Mb/s at 1000, 94.7 / 94.6 at 100, 9.5 / 9.5 at 10 Mb/s; UDP iperf 942.0 / 944.0 (71 of 401242 datagrams lost board to PC) at 1000, 94.1 / 94.4 at 100, 9.4 / 9.4 at 10, zero loss otherwise; UDP echo 64 B mean 0.163 ms at 100 and 1000, 1.287 ms at 10; TCP echo 64 B mean 0.198 / 0.231 / 1.350 ms at 1000 / 100 / 10; with ACK coalescing off board to PC reads 257.7 and with receive batching 30 us PC to board reads 314.7 Mb/s; details in `demos/ethernet/ethernet_brief.md` |
 | Arty A7-100T board bench, 10 and 100 Mb/s with negative control | `boards/arty_a7_100/testbench/tb_rtlnet_arty_a7_100_eth.sv` (`regression.txt`: `m100`, `m10`, `neg`) | 338 checks per speed, 339 with `INJECT_FAILURE` (expected failure) |
 | Arty A7-100T build `arty_dev`, firmware `-LmbKb 256 -BufKb 64` | `boards/arty_a7_100/scripts/build_ethernet.ps1 -Tag arty_dev` | timing met (WNS +0.290 ns), 105.5 of 135 block RAM tiles, `RTLNET_FW: PASS`, `RTLNET_BUILD_ETH: PASS`; hardware suite not run (no board) |
 
@@ -289,8 +290,8 @@ image uses about 250 KiB of the 256 KiB LMB. Measured on the Nexys Video at 1000
 
 | Firmware | TCP iperf PC -> board | TCP iperf board -> PC | TCP echo (4 + 8 connections) |
 |---|---|---|---|
-| 512 KiB profile (default) | 311 Mbit/s | 106 Mbit/s | PASS, 8 connections 0.03 s |
-| 256 KiB small-memory profile | 176 Mbit/s | 106 Mbit/s | PASS, 8 connections 1.02 s |
+| 512 KiB profile (default) | 311 Mb/s | 106 Mb/s | PASS, 8 connections 0.03 s |
+| 256 KiB small-memory profile | 176 Mb/s | 106 Mb/s | PASS, 8 connections 1.02 s |
 
 Block RAM of the dev image (`post_route_utilization_hier.rpt`, 212.5 tiles of 365; Arty A7-100 has 135):
 
@@ -341,16 +342,16 @@ core warning, recorded in the MAC document, section 13.4. Nothing of this has ru
 
 | # | Attempt | Result |
 |---|---|---|
-| 0 | baseline: 512 KiB LMB, hardware checksum insert and verify on, receive zero-copy on, transmit zero-copy off, `-O2` on the frame path | 311 / 106 Mbit/s |
+| 0 | baseline: 512 KiB LMB, hardware checksum insert and verify on, receive zero-copy on, transmit zero-copy off, `-O2` on the frame path | 311 / 106 Mb/s |
 | - | `show offload` after a 5 s run each way: TX frames 113013, ip and l4 patched 113012 (skipped 0); RX frames 157925, verified 157916, bad 0, lwIP flags GEN/CHECK hw for ip, udp, tcp | hardware checksum is in use in both directions; no software checksum |
 | 1 | transmit zero-copy on (`-DRTLNET_NETIF_ZERO_COPY_TX=1`) | does not link: lwIP's heap (64 KiB) must live in the 64 KiB AXI BRAM that also holds the frame buffers (overflow 36992 bytes); earlier measurements on the H.264 design had it slower; not pursued |
-| 2 | small-memory profile (section 6a) | 176 / 106 Mbit/s (cost of the smaller window and pool) |
+| 2 | small-memory profile (section 6a) | 176 / 106 Mb/s (cost of the smaller window and pool) |
 | 3 | board to PC limit, from the code: every transmitted frame is copied once into the AXI BRAM by `axi_put_chain` (word writes, about 16 cycles per 32-bit access over `M_AXI_DP`, 365 words per 1460-byte segment, about 5800 cycles of about 11000 per frame at 100 MHz) | the remaining cost is the CPU's AXI access latency, not a checksum or an extra memcpy; the lever is hardware (a wider or LMB-attached transmit buffer, or a faster CPU clock) |
 
-| 4 | hardware: `-CpuOpt 2` (Frequency pipeline), `-CpuBtc 4` (branch target cache size 4), CPU clock 125 MHz (tag `eth_f125`; the same firmware) | WNS +0.009 ns, WHS +0.009 ns, WPWS +0.264 ns, LUT 22784, FF 31294, BRAM 212.5; 333 / 132 Mbit/s (+7 % / +25 %); timing met with no margin (post-route WNS -0.101 ns, recovered by the post-route phys_opt) |
+| 4 | hardware: `-CpuOpt 2` (Frequency pipeline), `-CpuBtc 4` (branch target cache size 4), CPU clock 125 MHz (tag `eth_f125`; the same firmware) | WNS +0.009 ns, WHS +0.009 ns, WPWS +0.264 ns, LUT 22784, FF 31294, BRAM 212.5; 333 / 132 Mb/s (+7 % / +25 %); timing met with no margin (post-route WNS -0.101 ns, recovered by the post-route phys_opt) |
 | 5 | same options at 100 MHz, other BTC sizes, `cpu_muldiv` 2 | not built |
-| 6 | one 100 MHz system clock (`COMMON_CLK` 2: CPU, protocol and MAC client side on one clock; `cpu_opt` 0, the same firmware as `eth_dev`) | 314 / 106 Mbit/s; hardware UDP iperf 940 / 944; UDP echo 64 B mean 0.174 ms (`eth_dev` multi-clock: 309 / 106, 942 / 944, 0.173 ms): the clock tree changes nothing measurable, it removes the 62.5 and 50 MHz domains |
-| 7 | dual-port frame buffer RAM on the data-side LMB (128 KiB, section 2) and zero-copy transmit on (final image `eth_cc100c`) | 347 / 191 Mbit/s (+10 % / +80 % over 6); UDP iperf 943 / 944; UDP echo 64 B mean 0.165 ms; `show offload` counters in 6d |
+| 6 | one 100 MHz system clock (`COMMON_CLK` 2: CPU, protocol and MAC client side on one clock; `cpu_opt` 0, the same firmware as `eth_dev`) | 314 / 106 Mb/s; hardware UDP iperf 940 / 944; UDP echo 64 B mean 0.174 ms (`eth_dev` multi-clock: 309 / 106, 942 / 944, 0.173 ms): the clock tree changes nothing measurable, it removes the 62.5 and 50 MHz domains |
+| 7 | dual-port frame buffer RAM on the data-side LMB (128 KiB, section 2) and zero-copy transmit on (final image `eth_cc100c`) | 347 / 191 Mb/s (+10 % / +80 % over 6); UDP iperf 943 / 944; UDP echo 64 B mean 0.165 ms; `show offload` counters in 6d |
 
 CPU configuration options of `rtlnet_cpu_eth_bd_create` (`cpu_opt`, `cpu_btc`, `cpu_muldiv`; queried from the 2026.1 IP: `C_OPTIMIZATION` 0 Performance, 1 Area,
 2 Frequency; `C_BRANCH_TARGET_CACHE_SIZE` 0..7; `C_USE_MULDIV` 0..2), exposed as `build_ethernet.ps1 -CpuOpt -CpuBtc -CpuMuldiv`. See the hand-back for the variant builds.
@@ -376,6 +377,7 @@ Builds of the tree (post-route, `build_ethernet.ps1`, 100 MHz single clock unles
 |---|---|---|---|---|---|
 | `eth_dev` | multi-clock, CPU 100 MHz (before this work) | +0.221 ns | +0.013 ns | +0.264 ns | 22505 / 31258 / 212.5 / 6 |
 | `eth_cc100c` | single clock, 128 KiB dual-port frame buffer on the LMB, zero-copy transmit, the core changes above (final tree) | +0.037 ns | +0.013 ns | +0.264 ns | 22179 / 31720 / 228.5 / 6 |
+| `eth_rel` (release, git 2c2c686b, tree clean) | the release image of `demos/ethernet`: single clock, 512 KiB LMB, 128 KiB dual-port frame buffer, ACK coalescing on at boot, protection profile | +0.154 ns | +0.012 ns | +0.264 ns | 23891 / 33968 / 228.5 / 6 |
 | `arty_dev` (xc7a100t, Arty A7-100T, section 6a) | single 100 MHz clock, MII, 256 KiB LMB, 64 KiB frame buffer, classifier in distributed RAM | +0.290 ns | +0.005 ns | +3.000 ns | 24986 / 36050 / 105.5 / 6 |
 
 Intermediate builds with a subset of the core changes failed by -1.478, -0.154 and -0.107 ns (each time the paths named in the table). The margin of the final build is thin (below +0.15 ns); a build with another placer directive (`RTLNET_PLACE_DIRECTIVE`) was not run. CDC census of the build: FIFO 10, Gray 6, AXI4-Lite bridges 5, reset synchronizers 5, level synchronizers 28; `report_cdc`: only the Gray-code waivers.
@@ -392,7 +394,7 @@ Intermediate builds with a subset of the core changes failed by -1.478, -0.154 a
 | Frames sent in place (zero-copy transmit) / copied | 0 / 0 | 74702 / 81912 (one counter over both directions: the in-place frames are the pure ACKs of the PC to board run, the copies are the data segments of the board to PC run, section 6f) |
 | DMA receive no-pbuf / errors, DMA transmit timeouts / errors | 0 | 0 |
 
-With the small-memory firmware (`-LmbKb 256`, same hardware) at `speed 100`: TCP iperf 94.5 Mbit/s PC to board and 94.9 Mbit/s board to PC (line rate, as measured
+With the small-memory firmware (`-LmbKb 256`, same hardware) at `speed 100`: TCP iperf 94.5 Mb/s PC to board and 94.9 Mb/s board to PC (line rate, as measured
 with the first image of the 100 Mb/s test).
 
 
@@ -404,7 +406,7 @@ Both work on the receive trailer, so `offload rx` must be on; `offload ack-coale
 shows state, configuration and counters. Measured on image `eth_m1` (the firmware before section 6f, 1000 Mb/s through a switch, iperf 2, 10 s runs,
 mean of 3, `clear counters` before the last run; ACK limit 8 and batch limit 16 frames; echo: 2000 TCP requests of 64 bytes, mean round trip):
 
-| Setting | PC to board (Mbit/s) | Board to PC (Mbit/s) | TCP echo 64 B mean (ms) |
+| Setting | PC to board (Mb/s) | Board to PC (Mb/s) | TCP echo 64 B mean (ms) |
 |---|---:|---:|---:|
 | both off | 344.7 (repeat 344.3) | 194 (repeat 194) | 0.200 |
 | ACK coalescing 200 us | 347.7 | 218 | |
@@ -417,8 +419,8 @@ mean of 3, `clear counters` before the last run; ACK limit 8 and batch limit 16 
 | batching 300 us | 204.7 | 195 | |
 | ACK coalescing 500 us and batching 30 us | 313.3 | 226 | 0.236 |
 
-Result and recommendation: ACK coalescing at 500 microseconds raises board to PC throughput by 17 % (194 to 227 Mbit/s) with no change of PC to
-board throughput or latency and no error; shorter timers give less, and 1000 microseconds collapses it (146 Mbit/s, the held ACKs stall the sender's
+Result and recommendation: ACK coalescing at 500 microseconds raises board to PC throughput by 17 % (194 to 227 Mb/s) with no change of PC to
+board throughput or latency and no error; shorter timers give less, and 1000 microseconds collapses it (146 Mb/s, the held ACKs stall the sender's
 window). It is therefore on at boot with 500 microseconds and the default limit. Receive batching never raises throughput: from 30 microseconds
 it costs 10 to 40 % of the PC to board throughput, and every setting adds 0.03 to 0.10 ms to the round trip; it is off at boot and stays available
 through the CLI. The ACK counters after one 10 s board to PC run (500 us): 107535 candidates, 90679 dropped, 16856 forwarded (15932 by the timer).
@@ -440,7 +442,7 @@ over the data-side LMB (1 to 2 clocks per word) instead of word by word into the
 small-memory profile keeps the references (its 24 KiB heap cannot hold a full send queue of copies). Same image, same setup, ACK coalescing 500 us
 (the boot default):
 
-| Image | PC to board (Mbit/s, 3 runs) | Board to PC (Mbit/s, 3 runs) | Frames sent in place / copied, board to PC run |
+| Image | PC to board (Mb/s, 3 runs) | Board to PC (Mb/s, 3 runs) | Frames sent in place / copied, board to PC run |
 |---|---|---|---|
 | references (before) | 347, 349, 348 | 223, 223, 223 | 3 / 190972 |
 | copy by `tcp_write` (after) | 349, 348, 345 | 285, 284, 282 | 242397 / 0 |
@@ -458,6 +460,7 @@ scatter-gather DMA; the simple-mode DMA of the design sends one contiguous buffe
 
 ## 8. Revision history
 
+* 11-14-2026: release build `eth_rel` and the release campaign results (sections 6 and 6c); the demo documents are in `demos/ethernet/`.
 * 11-14-2026: ACK coalescing on at boot (500 us), receive batching off (CLI section, measured matrix in 6e); data segments of the iperf server copied into one pbuf in the frame buffer RAM and sent in place (6f); flood test criteria, default thread count and measured table (5a).
 * 11-14-2026: Arty A7-100T build-out: second board, `ARTY` board ID, DP83848 row of the PHY table, section 6a changed from an estimate to the measured `arty_dev` build (105.5 of 135 tiles), verification and build rows.
 * 11-14-2026: clock tree section 2a (`COMMON_CLK`), dual-port frame buffer RAM on the data-side LMB with its address map, processor options, the 125 MHz study (6c), the Arty estimate with the classifier kept (6a).

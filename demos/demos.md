@@ -1,6 +1,6 @@
 # RTLNet Demos
 
-Revision 11-13-2026
+Revision 11-14-2026
 
 This folder holds the ready-to-run demonstration images of RTLNet. Each demo is a prebuilt FPGA bitstream with the
 firmware inside it: program the board, type a few commands on the serial console and the result is on the PC. Nothing
@@ -31,10 +31,14 @@ The H.264 images contain the complete RTLNet design for the board: the gigabit E
 with its command-line console, the DDR3 memory path and the H.264 encoder, all on one 90 MHz clock.
 
 The Ethernet demo (`ethernet/`) is the network stack alone: 10/100/1000 Mb/s RGMII, ARP, ping, DHCP, UDP echo and UDP
-iperf 2 in FPGA fabric, lwIP TCP echo (port 7) and TCP iperf 2 server (port 5001) on a small 100 MHz MicroBlaze V, and a
-console on the UART. It has no DDR3, no camera, no video and no H.264; its image is `ethernet/nexys_video/rtlnet_nexys_video_eth.bit`
-and it has no time limit. Its steps are in `ethernet/nexys_video/README.md`: program the board as in section 4 with that
-file, then `ping` the address that `show ip` prints. It needs no player and no UDP port 5004 rule; its tests use iperf 2.
+iperf 2 in FPGA fabric, lwIP TCP echo (port 7) and TCP iperf 2 server (port 5001) on a small 100 MHz MicroBlaze V in block RAM,
+a classifier with per-class policers that holds a flood away from the CPU, and a console on the UART. It has no DDR3, no camera,
+no video and no H.264; its image is `ethernet/nexys_video/rtlnet_nexys_video_eth.bit` (release image `eth_rel`) and it has no
+time limit. Its brief (`ethernet/ethernet_brief.pdf`) holds the measured results: at 1000 Mb/s UDP iperf 942 and 944 Mb/s and
+TCP iperf 350 and 283 Mb/s (PC to board, board to PC), at 100 Mb/s 94 to 95 Mb/s for both, and the flood test. Its steps
+are in `ethernet/nexys_video/README.md`: program the board as in section 4 with that file, then `ping` the address that
+`show ip` prints. It needs no player and no UDP port 5004 rule; its tests use iperf 2 and the PowerShell scripts of
+`cpu/microblaze_v_ethernet/test/`.
 
 ## 3. What you need
 
@@ -129,10 +133,10 @@ These demonstrations are planned and are not in the folder yet. Each one gets it
 | D1 | Camera to VLC, latency measured | Pcam 5C camera to H.264 to MPEG-TS to VLC, ffplay or OBS on a PC; glass-to-glass latency measured with an LED timer in the camera's view | Nexys Video, Pcam 5C, FMC Pcam Adapter |
 | D2 | Narrow-link video | 720p at 0.3 to 1 Mb/s under rate control; one slice per macroblock row, so a lost datagram damages one stripe; a link emulator on the PC adds loss and delay | Nexys Video |
 | D3 | Motion metadata camera | the encoder's motion vectors sent as a per-macroblock activity map next to the video; a PC viewer draws motion boxes on the live picture with no separate vision processor | Nexys Video |
-| D4 | Line-rate network tester | the RTL iperf and UDP paths at 944 Mbit/s with no CPU load; a throughput, loss and latency test run from the console | Nexys Video |
+| D4 | Line-rate network tester | the RTL iperf and UDP paths at 944 Mb/s with no CPU load; a throughput, loss and latency test run from the console | Nexys Video |
 | D5 | Ten-minute start | prebuilt image, one script, color bars streaming to VLC | Nexys Video |
 | D6 | Hardware firewall and storm control | classifier rules and policers drop a broadcast flood at line rate while the CPU and the video stream keep running | Nexys Video |
-| D7 | UDP data-acquisition streamer | a test-pattern data source at several hundred Mbit/s through the RTL UDP socket with no CPU in the path; a Python receiver plots it live | Nexys Video |
+| D7 | UDP data-acquisition streamer | a test-pattern data source at several hundred Mb/s through the RTL UDP socket with no CPU in the path; a Python receiver plots it live | Nexys Video |
 | D8 | Web dashboard | an HTTP server on the board with live link, encoder and classifier counters and settings changed from a browser | Nexys Video |
 | D9 | Audio and video over IP | test pattern or camera with line-in audio in one MPEG-TS stream | Nexys Video |
 | D10 | Stream recorder | an ffmpeg recording on the PC with timestamps, segment files and a one-hour stability log | Nexys Video |

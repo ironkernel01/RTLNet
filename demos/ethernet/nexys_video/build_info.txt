@@ -1,0 +1,19 @@
+design        rtlnet_nexys_video_eth_top
+part          xc7a200tsbg484-1
+git_hash      2c2c686b
+git_dirty     0
+common_clk    2
+cpu_clk_hz    100000000
+lmb_kb        512
+cpu_options   opt 0 btc 0 muldiv 1
+frame_buffer  lmb_buf 1 buf_kb 128
+tool          2026.1
+built         2026-11-14 18:02:16 -0500
+wns_ns        0.154
+whs_ns        0.012
+wpws_ns       0.264
+utilization   lut=23891 (17.86%), ff=33968 (12.69%), bram=228.5 (62.60%), dsp=6 (0.81%)
+cdc_classes   fifo {10 96} sync {28 110} axil_cdc {5 344} gray {6 192} reset {5 20}
+bitstream_hw  rtlnet_nexys_video_eth_hw.bit
+mmi           rtlnet_nexys_video_eth.mmi
+xsa           rtlnet_nexys_video_eth.xsa
