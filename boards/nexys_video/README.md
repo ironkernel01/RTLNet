@@ -44,17 +44,17 @@ Prefix of every command: `powershell -NoProfile -ExecutionPolicy Bypass -File`.
 
 | File | Content |
 |---|---|
-| `rtlnet_nexys_video.bit` | bitstream with the firmware merged in (untagged builds and `-Image` builds); the untagged one is tracked in git |
+| `rtlnet_nexys_video.bit` | bitstream with the firmware merged in (untagged builds and `-Image` builds) |
 | `rtlnet_nexys_video_hw.bit` | bitstream without firmware (the BRAM holds no program yet) |
-| `rtlnet_nexys_video.mmi` | memory map of the LMB BRAM, used by the merge; tracked for the untagged build |
-| `rtlnet_nexys_video.xsa` | hardware platform for the firmware BSP; tracked for the untagged build |
+| `rtlnet_nexys_video.mmi` | memory map of the LMB BRAM, used by the merge |
+| `rtlnet_nexys_video.xsa` | hardware platform for the firmware BSP (a firmware build needs it, so a new checkout builds the bitstream once first) |
 | `build_info.txt` | source revision, dirty flag, tool version, build time, timing (WNS, WHS, WPWS), utilization, CDC census |
 | `build_bitstream.log` | the Vivado log of the build |
 | `reports/` | `post_synth_utilization.rpt`, `post_route_utilization.rpt`, `post_route_utilization_hier.rpt`, `post_route_timing_summary.rpt`, `post_route_cdc.rpt`, `post_route_methodology.rpt`, `post_route_drc.rpt`, `post_route_clock_networks.rpt`, `post_route_clock_interaction.rpt`, `post_route_io.rpt`, `post_route_check_timing.rpt`; `failing_setup.rpt` and `failing_hold.rpt` only when a path fails |
 | `post_synth.dcp`, `post_route.dcp` | design checkpoints |
 | `bd/`, `ip/` | the generated MicroBlaze block design and the generated DDR3 controller IP (from `ip/rtlnet_ddr_mig.prj`) |
 
-The firmware build writes into `microblaze/firmware/build/`: `firmware.elf` (the image merged into the bitstream; tracked),
+The firmware build writes into `microblaze/firmware/build/`: `firmware.elf` (the image merged into the bitstream),
 `firmware_ddr.elf` (`build.ps1 -Ddr` in `microblaze/firmware/`, loaded with `scripts/jtag_load_elf.ps1`), `menu.exe` (CLI
 desktop harness), `ws/` (the generated BSP), `ratectl_test.log`.
 
@@ -66,7 +66,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File boards/nexys_video/scripts/p
 powershell -NoProfile -ExecutionPolicy Bypass -File boards/nexys_video/scripts/program.ps1 -Bit demos/<demo name>/nexys_video/rtlnet_nexys_video.bit
 ```
 
-The first form programs `build/rtlnet_nexys_video.bit`. The image goes to the FPGA only; a power cycle removes it.
+The first form programs `build/rtlnet_nexys_video.bit`, the image of an untagged build; it exists after such a build (no build output is tracked in git, the released images are under `demos/`). The image goes to the FPGA only; a power cycle removes it.
 
 ### Where the test scripts write
 
