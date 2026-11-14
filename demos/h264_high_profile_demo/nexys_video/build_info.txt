@@ -1,7 +1,7 @@
 design        rtlnet_nexys_video_top
 part          xc7a200tsbg484-1
-git_hash      04591934
-git_dirty     1
+git_hash      f4f7d4b1
+git_dirty     0
 network       1
 high_profile  demo
 hp_tools      HP_T8 0, HP_T8_AUTO 0
@@ -11,18 +11,18 @@ hp_netlist    limit_minutes  30
 hp_netlist    part           xc7a200tsbg484-1
 hp_netlist    clock_mhz      90
 hp_netlist    tool           Vivado 2026.1
-hp_netlist    git_hash       30f184e (hdl changes not committed)
+hp_netlist    git_hash       5c4f768
 hp_netlist    sources_sha256 e1d67cd18c164b98
-hp_netlist    date           2026-11-12 22:21:22
+hp_netlist    date           2026-11-13 18:07:24
 hp_netlist    luts           2719
 hp_netlist    ffs            1295
 hp_netlist    post_synth_wns_ns 2.817
 tool          2026.1
-built         2026-11-13 01:53:49 -0500
-wns_ns        0.138
-whs_ns        0.012
+built         2026-11-13 18:40:26 -0500
+wns_ns        0.167
+whs_ns        0.013
 wpws_ns       0.131
-utilization   lut=99739 (74.54%), ff=91701 (34.27%), bram=292.5 (80.14%), dsp=84 (11.35%)
+utilization   lut=99700 (74.51%), ff=91680 (34.26%), bram=292.5 (80.14%), dsp=84 (11.35%)
 cdc_classes   fifo {10 96} sync {31 123} axil_cdc {5 331} gray {6 192} reset {8 32}
 bitstream_hw  rtlnet_nexys_video_hw.bit
 mmi           rtlnet_nexys_video.mmi

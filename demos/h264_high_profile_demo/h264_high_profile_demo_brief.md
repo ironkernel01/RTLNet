@@ -59,8 +59,8 @@ This demo is a prebuilt bitstream, with its firmware inside, of the IronKernel R
 | Engines, rate control | 2, constant bit rate or constant QP |
 | Clock | 90 MHz, encoder, DDR3 path and CPU |
 | FPGA | xc7a200tsbg484-1 |
-| Utilization | LUT 74.54 % / FF 34.27 % / block RAM 80.14 % / DSP 11.35 % |
-| Routed timing | WNS +0.138 ns |
+| Utilization | LUT 74.51 % / FF 34.26 % / block RAM 80.14 % / DSP 11.35 % |
+| Routed timing | WNS +0.167 ns |
 | Ethernet | 10/100/1000 Mb/s RGMII |
 | Time limit | High profile 30 min after each programming |
 | License | `LICENSE_DEMO.md`; paid license for use in a product |
@@ -214,15 +214,15 @@ Post-route result of this image on the XC7A200T.
 <table class="num">
 <thead><tr><th></th><th>LUTs</th><th>Flip-flops</th><th>Slices</th><th>Block RAM tiles</th><th>DSP blocks</th></tr></thead>
 <tbody>
-<tr><td>Used</td><td>99,739</td><td>91,701</td><td>32,180</td><td>292.5 (255 RAMB36 + 75 RAMB18)</td><td>84</td></tr>
-<tr><td>Share of the device</td><td>74.54 %</td><td>34.27 %</td><td>96.20 %</td><td>80.14 %</td><td>11.35 %</td></tr>
+<tr><td>Used</td><td>99,700</td><td>91,680</td><td>32,152</td><td>292.5 (255 RAMB36 + 75 RAMB18)</td><td>84</td></tr>
+<tr><td>Share of the device</td><td>74.51 %</td><td>34.26 %</td><td>96.12 %</td><td>80.14 %</td><td>11.35 %</td></tr>
 </tbody>
 </table>
 
 Clocks: `ui_clk` = `cpu_clk` 90.000 MHz (MicroBlaze V, DDR3 arbiter, video DMA, pattern generator, both encoder engines); DDR3 memory clock 360 MHz;
 `clk125` and `clk125_90` 125 MHz (Ethernet MAC, RGMII); `axis_clk` 62.5 MHz (AXI4-Stream paths); `proto_clk` 50 MHz (protocol wrapper).
 
-Routed timing: WNS +0.138 ns, WHS +0.012 ns, WPWS +0.131 ns, 0 failing endpoints, first build attempt, `rtlnet_cdc: PASS`.
+Routed timing: WNS +0.167 ns, WHS +0.013 ns, WPWS +0.131 ns, 0 failing endpoints, first build attempt, `rtlnet_cdc: PASS`.
 
 ## Ethernet link
 
