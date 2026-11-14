@@ -8,6 +8,11 @@ tb_rtlnet_eth_protocol  cores/rtlnet_eth_protocol/testbench/tb_rtlnet_eth_protoc
 tb_rtlnet_eth_protocol  cores/rtlnet_eth_protocol/testbench/tb_rtlnet_eth_protocol.f  nocpu    defines=TB_NO_CPU_PATH
 tb_rtlnet_eth_protocol  cores/rtlnet_eth_protocol/testbench/tb_rtlnet_eth_protocol.f  nooffload defines=TB_NO_OFFLOAD
 tb_rtlnet_eth_protocol  cores/rtlnet_eth_protocol/testbench/tb_rtlnet_eth_protocol.f  neg      plusargs=INJECT_FAILURE  expectfail
+# CPU path with u_cpu_classifier built: block RAM defaults, distributed RAM at the default sizes, the small-FPGA profile
+# (distributed, 8/8 entries, 1 rule, 4 policers).
+tb_rtlnet_eth_protocol  cores/rtlnet_eth_protocol/testbench/tb_rtlnet_eth_protocol.f  cls_block  defines=TB_CLS_BLOCK
+tb_rtlnet_eth_protocol  cores/rtlnet_eth_protocol/testbench/tb_rtlnet_eth_protocol.f  cls_dist   defines=TB_CLS_DIST
+tb_rtlnet_eth_protocol  cores/rtlnet_eth_protocol/testbench/tb_rtlnet_eth_protocol.f  cls_small  defines=TB_CLS_SMALL
 # CPU network path with every leaf (classifier not built: CPU_CLASSIFIER_ENABLE 0).
 tb_rtlnet_eth_protocol_cpu  cores/rtlnet_eth_protocol/testbench/tb_rtlnet_eth_protocol_cpu.f  p62_50   plusargs=CLKPAIR=1
 tb_rtlnet_eth_protocol_cpu  cores/rtlnet_eth_protocol/testbench/tb_rtlnet_eth_protocol_cpu.f  p156_50  plusargs=CLKPAIR=2

@@ -17,6 +17,7 @@
 
 REVISION:11-14-2026:Initial command set of the Ethernet demo
 REVISION:11-14-2026:OFFLOAD takes ack-coalesce and rx-batch with optional timer and limit
+REVISION:11-14-2026:SHOW CLASSIFIER and CLASSIFIER POLICER (classifier protection profile)
 
 # ---------------------------------------------------------------------------
 # Modes
@@ -66,6 +67,7 @@ cli_show_counters:exec:SHOW COUNTERS:Frame counters of every core
 cli_show_tcp:exec:SHOW TCP:lwIP interface, TCP echo server, connections and counters
 cli_show_cpu_path:exec:SHOW CPU-PATH:CPU network path: DMA frames and errors, wrapper CPU-path counters
 cli_show_offload:exec:SHOW OFFLOAD:Checksum offload: discovery, CTRL, lwIP flags, counters, zero-copy options
+cli_show_classifier:exec:SHOW CLASSIFIER:CPU-path classifier: built sizes, mode, protection profile with per-class limits and counters
 
 # ---------------------------------------------------------------------------
 # Privileged exec
@@ -99,6 +101,7 @@ cli_tcp_echo_enable:config:TCP ECHO ENABLE:Enable the TCP echo server
 cli_tcp_echo_disable:config:TCP ECHO DISABLE:Disable the TCP echo server (open connections stay)
 cli_tcp_echo_port:config:TCP ECHO PORT [PORT]:TCP echo server port (default 7)
 cli_offload:config:OFFLOAD [WHAT] [STATE] {TIMER} {LIMIT}:Checksum offload (tx-ip, tx-l4, rx, all) and receive features (ack-coalesce, rx-batch) on or off, as far as the build has them; TIMER in microseconds, LIMIT ACKs or frames
+cli_classifier_policer:config:CLASSIFIER POLICER [CLASS] [FRAMES] [WINDOW_MS]:Frames per window the CPU path passes for a traffic class: broadcast, udp, arp or icmp
 
 # ---------------------------------------------------------------------------
 # Interface configuration (eth0)

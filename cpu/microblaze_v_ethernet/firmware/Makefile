@@ -22,7 +22,7 @@ DRV_SRCS := $(wildcard ../../../cores/rtlnet_eth_mac/driver/*.c ../../../cores/r
             ../../../cores/rtlnet_udp_echo/driver/*.c ../../../cores/rtlnet_classifier/driver/*.c \
             ../../../cores/rtlnet_tcp_offload/driver/*.c)
 HOST_SRCS := host/main.c host/host_platform.c host/host_lwip_stub.c src/rtlnet_board.c src/rtlnet_fmt.c src/rtlnet_phy.c \
-             src/rtlnet_netmgr.c src/rtlnet_cpupath.c src/rtlnet_offload.c cli/menu.c cli/menu_table.c cli/cli_commands.c $(DRV_SRCS)
+             src/rtlnet_netmgr.c src/rtlnet_cpupath.c src/rtlnet_protect.c src/rtlnet_offload.c cli/menu.c cli/menu_table.c cli/cli_commands.c $(DRV_SRCS)
 TARGET   := build/menu.exe
 
 .PHONY: all clean run demo firmware check

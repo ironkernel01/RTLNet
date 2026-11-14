@@ -20,6 +20,9 @@
 //   * CPU-path classifier (protocol sub-map 0x8000): drop-all after reset; the stand-in's cls_config_bcast_storm
 //     configures a limit of 3 broadcasts per 2 ms; a unicast datagram still reaches the CPU; a burst of 8 broadcasts
 //     passes exactly 3 byte-exact and drops 5.
+//   * CPU-path protection profile (the firmware's rtlnet_classifier_config_protect, stand-in cls_config_protect): broadcast, UDP,
+//     ARP and ICMP classes each sent above their limit while unicast TCP segments to the board keep passing; exactly the
+//     limit of each class and every TCP segment reach the CPU, byte-exact and in order; counters per policer and per table.
 //   * CPU network path (cpu_axis_ethernet_stream) through the simulation stand-in's DMA tasks: claimed frames never
 //     reach the CPU; an unclaimed UDP datagram arrives byte-exact; a frame the CPU sends leaves on the PHY unchanged
 //     (padded to 60); the wrapper's CPU counters agree.
@@ -59,6 +62,17 @@ module tb_rtlnet_nexys_video_eth;
   localparam int          STORM_LIMIT  = 3;                            // broadcasts passed per window
   localparam int          STORM_WINDOW = 2;                            // window in ms (policer tick from 100 MHz)
   localparam int          STORM_BURST  = 8;                            // broadcasts sent in one burst
+  localparam int          PROT_WINDOW    = 50;                         // protection profile window in ms
+  localparam int          PROT_LIM_BCAST = 3;                          // profile limits per window (frames passed)
+  localparam int          PROT_LIM_UDP   = 2;
+  localparam int          PROT_LIM_ARP   = 2;
+  localparam int          PROT_LIM_ICMP  = 2;
+  localparam int          PROT_N_BCAST   = 6;                          // frames sent per class in the profile phase
+  localparam int          PROT_N_UDP     = 5;
+  localparam int          PROT_N_ARP     = 5;
+  localparam int          PROT_N_ICMP    = 5;
+  localparam int          PROT_N_TCP     = 8;                          // unicast TCP segments, never policed
+  localparam int          PROT_N_TOTAL   = PROT_N_BCAST + PROT_N_UDP + PROT_N_ARP + PROT_N_ICMP + PROT_N_TCP;
   localparam logic [47:0] BOARD_MAC  = 48'h02_49_4B_52_4E_01;   // rtlnet_pkg default
   localparam logic [31:0] BOARD_IP   = 32'hC0A9_01DC;          // 192.169.1.220
   localparam logic [47:0] HOST_MAC   = 48'h02_00_00_00_00_32;
@@ -724,6 +738,102 @@ module tb_rtlnet_nexys_video_eth;
       tb_check(r == 2'b00, $sformatf("offload batch disable resp %b", r));
     end
 
+    // CPU-path protection profile (rtlnet_classifier_config_protect register sequence): four classes with
+    // their own policers (0 broadcast, 1 UDP, 2 ARP, 3 ICMP) while unicast TCP keeps flowing. Every class is
+    // sent above its limit, interleaved with unicast TCP segments to the board: exactly the limit of each class
+    // passes, every TCP segment passes byte-exact, and a frame in several classes is counted once (an ARP
+    // request is broadcast too, but the ARP rule has priority over the MAC table).
+    begin
+      bytes_t exp_q [$];
+      bytes_t cpu_f;
+      bit     cpu_ok;
+      string  why;
+      logic [1:0] r;
+      logic [31:0] c_now;
+      int     base_rx;
+      int     n_pass;
+      int     polls_p;
+      int     bad_order;
+      dut.u_cpu.cls_config_protect(CLS, PROT_LIM_BCAST, PROT_LIM_UDP, PROT_LIM_ARP, PROT_LIM_ICMP, PROT_WINDOW, r);
+      tb_check(r == 2'b00, $sformatf("protection profile configuration resp %b", r));
+      wr(CLS + 32'h00C, 32'h0001_0001);                       // CNT_CLEAR, MODE stays PASS_ALL
+      rd(CLS + 32'h010, d);
+      tb_check((d & 32'h0000_0301) == 32'h0000_0100, $sformatf("classifier STATUS 0x%08x: MODE pass-all after the profile", d));
+      rd(PROT + 32'h054, d);
+      base_rx = int'(d);
+      n_pass = 0;
+      for (int i = 0; i < PROT_N_TCP; i++) begin
+        if (i < PROT_N_BCAST) begin
+          // Broadcast TCP segment: only the broadcast class.
+          f = tcp_frame(48'hFFFF_FFFF_FFFF, HOST_MAC, HOST_IP, BOARD_IP, 16'd41000 + 16'(i), 16'd9998, rand_bytes(seed, 20), 1'b1);
+          u_phy.inject(f);
+          if (i < PROT_LIM_BCAST) begin exp_q.push_back(f); n_pass++; end
+        end
+        if (i < PROT_N_UDP) begin
+          // Unicast UDP to a port no hardware leaf owns: the UDP class.
+          f = udp_frame(BOARD_MAC, HOST_MAC, HOST_IP, BOARD_IP, 16'd41100 + 16'(i), 16'd9999, rand_bytes(seed, 20));
+          u_phy.inject(f);
+          if (i < PROT_LIM_UDP) begin exp_q.push_back(f); n_pass++; end
+        end
+        if (i < PROT_N_ARP) begin
+          // ARP request for another host (the ARP leaf answers only its own address): broadcast and ARP.
+          f = pad60(arp_request(HOST_MAC, HOST_IP, SRV_IP + 32'(i) + 32'd10));
+          u_phy.inject(f);
+          if (i < PROT_LIM_ARP) begin exp_q.push_back(f); n_pass++; end
+        end
+        if (i < PROT_N_ICMP) begin
+          // ICMP type 0 (echo reply) to the board: no leaf claims it, the ICMP class.
+          f = echo_request(BOARD_MAC, HOST_MAC, HOST_IP, BOARD_IP, 16'h2222, 16'(i), rand_bytes(seed, 20));
+          f[34] = 8'd0;
+          u_phy.inject(f);
+          if (i < PROT_LIM_ICMP) begin exp_q.push_back(f); n_pass++; end
+        end
+        // Unicast TCP-like segment to the board during the burst: never policed.
+        f = tcp_frame(BOARD_MAC, HOST_MAC, HOST_IP, BOARD_IP, 16'd40100 + 16'(i), 16'd5001, rand_bytes(seed, 20), 1'b1);
+        u_phy.inject(f);
+        exp_q.push_back(f);
+        n_pass++;
+      end
+      // Wait until the wrapper has committed every frame of the burst to the CPU queue and the classifier judged it.
+      polls_p = 0;
+      do begin
+        #(20_000);
+        rd(PROT + 32'h054, d);
+        rd(CLS + 32'h080, c_now);
+        polls_p++;
+      end while ((int'(d) - base_rx < PROT_N_TOTAL || int'(c_now) < PROT_N_TOTAL) && polls_p < 400);
+      tb_check(int'(d) - base_rx == PROT_N_TOTAL, $sformatf("CPU_RX_FRAMES advanced %0d, expected %0d", int'(d) - base_rx, PROT_N_TOTAL));
+      // The CPU receives exactly the passing frames, in order, byte-exact.
+      bad_order = 0;
+      for (int k = 0; k < exp_q.size(); k++) begin
+        dut.u_cpu.eth_get(cpu_f, 200_000, cpu_ok);
+        if (!cpu_ok || !bytes_equal(cpu_f, exp_q[k], why)) bad_order++;
+      end
+      tb_check(bad_order == 0, $sformatf("protection profile: %0d of %0d passing frames missing or different (in order)", bad_order, exp_q.size()));
+      dut.u_cpu.eth_get(cpu_f, 40_000, cpu_ok);
+      tb_check(!cpu_ok, "protection profile: no frame beyond a class limit reaches the CPU");
+      // Policer counters: SEEN = sent, PASSED = limit, DROPPED = the rest, per class.
+      check_reg(CLS + 32'h100 + 32'h0C, PROT_N_BCAST, "profile broadcast policer SEEN (broadcast TCP only, ARP counted as ARP)");
+      check_reg(CLS + 32'h100 + 32'h10, PROT_LIM_BCAST, "profile broadcast policer PASSED");
+      check_reg(CLS + 32'h100 + 32'h14, PROT_N_BCAST - PROT_LIM_BCAST, "profile broadcast policer DROPPED");
+      check_reg(CLS + 32'h120 + 32'h0C, PROT_N_UDP, "profile UDP policer SEEN");
+      check_reg(CLS + 32'h120 + 32'h10, PROT_LIM_UDP, "profile UDP policer PASSED");
+      check_reg(CLS + 32'h120 + 32'h14, PROT_N_UDP - PROT_LIM_UDP, "profile UDP policer DROPPED");
+      check_reg(CLS + 32'h140 + 32'h0C, PROT_N_ARP, "profile ARP policer SEEN");
+      check_reg(CLS + 32'h140 + 32'h10, PROT_LIM_ARP, "profile ARP policer PASSED");
+      check_reg(CLS + 32'h140 + 32'h14, PROT_N_ARP - PROT_LIM_ARP, "profile ARP policer DROPPED");
+      check_reg(CLS + 32'h160 + 32'h0C, PROT_N_ICMP, "profile ICMP policer SEEN");
+      check_reg(CLS + 32'h160 + 32'h10, PROT_LIM_ICMP, "profile ICMP policer PASSED");
+      check_reg(CLS + 32'h160 + 32'h14, PROT_N_ICMP - PROT_LIM_ICMP, "profile ICMP policer DROPPED");
+      check_reg(CLS + 32'h080, PROT_N_TOTAL, "classifier FRAMES in the profile phase");
+      check_reg(CLS + 32'h084, n_pass, "classifier PASSED in the profile phase");
+      check_reg(CLS + 32'h090, PROT_N_TOTAL - n_pass, "classifier POLICE_DROPPED in the profile phase");
+      check_reg(CLS + 32'h088, PROT_N_TOTAL - n_pass, "classifier DROPPED in the profile phase (all by policers)");
+      check_reg(CLS + 32'h0AC, PROT_N_ARP, "RULE_HIT[0]: the ARP rule");
+      check_reg(CLS + 32'h094, PROT_N_BCAST + PROT_N_ARP, "MAC table hits: broadcast TCP and the broadcast ARP requests");
+      check_reg(CLS + 32'h0A8, PROT_N_UDP + PROT_N_ICMP, "tuple table hits: UDP and ICMP");
+    end
+
     // DHCP with the bench as server.
     wr(DHCP + 32'h00C, 32'h1);
     expect_frame(empty, "DHCP DISCOVER", got);
@@ -775,7 +885,8 @@ module tb_rtlnet_nexys_video_eth;
 
     // Counters and PHY-side timing.
     rd(MAC + 32'h020, d);
-    tb_check(d - rx_good0 == 7 + 1 + STORM_BURST + 3 + 7, $sformatf("MAC RX_GOOD advanced %0d, expected %0d", d - rx_good0, 7 + 1 + STORM_BURST + 3 + 7));
+    tb_check(d - rx_good0 == 7 + 1 + STORM_BURST + 3 + 7 + PROT_N_TOTAL,
+             $sformatf("MAC RX_GOOD advanced %0d, expected %0d", d - rx_good0, 7 + 1 + STORM_BURST + 3 + 7 + PROT_N_TOTAL));
     rd(MAC + 32'h024, d);
     tb_check(d == 0, $sformatf("MAC RX_BAD %0d", d));
     rd(MAC + 32'h02C, d);

@@ -81,6 +81,7 @@ static uint32_t g_nr = 2u;
 static uint32_t g_np = 4u;
 static uint32_t g_lanes = 2u;
 static uint32_t g_mdb = 64u;
+static uint32_t g_dist;                  /* 1 = RAM_STYLE "distributed" */
 
 static uint32_t model_stride(void)
 {
@@ -94,7 +95,7 @@ static uint32_t model_stride(void)
 
 static uint32_t model_caps(void)
 {
-    return g_te | (g_tu << 5) | (g_nr << 10) | (g_np << 13) | (g_lanes << 16) | ((g_mdb / 8u) << 21);
+    return g_te | (g_tu << 5) | (g_nr << 10) | (g_np << 13) | (g_lanes << 16) | ((g_mdb / 8u) << 21) | (g_dist << 27);
 }
 
 static void model_clear(void)
@@ -286,6 +287,7 @@ static void init_ok(void)
 static void test_init(void)
 {
     rtlnet_classifier_t c;
+    uint32_t nr0;
 
     model_reset();
     check(rtlnet_classifier_init(NULL, TB_BASE) == RTLNET_CLS_ERR_ARG, "init NULL");
@@ -302,7 +304,10 @@ static void test_init(void)
           g_ctx.num_policers == g_np && g_ctx.table_lanes == g_lanes && g_ctx.match_depth_bytes == g_mdb,
           "CAPS decoded");
     check(g_ctx.rule_stride == 0x100u, "rule stride 0x100 at 64 bytes");
-    check(g_ctx.delay_beats == 8u + 23u && g_ctx.verdict_latency == 23u, "LATENCY decoded");
+    check(g_ctx.ram_distributed == g_dist, "RAM style decoded from CAPS");
+    check(g_ctx.verdict_latency == ((g_te > g_tu) ? g_te : g_tu) / g_lanes + 15u &&
+          g_ctx.delay_beats == 8u + g_ctx.verdict_latency, "LATENCY decoded");
+    nr0 = g_nr;
     g_mdb = 128u;
     g_nr = 2u;
     init_ok();
@@ -312,7 +317,7 @@ static void test_init(void)
     model_reset();
     check(rtlnet_classifier_init(&c, TB_BASE) == RTLNET_CLS_ERR_ID, "impossible CAPS rejected");
     g_mdb = 64u;
-    g_nr = 2u;
+    g_nr = nr0;
     init_ok();
 }
 
@@ -508,7 +513,7 @@ static void test_counters(void)
     for (i = 0u; i < 6u; i++) {
         check(c.table_hit[i] == 1005u + i, "table hit counters");
     }
-    check(c.rule_hit[0] == 1011u && c.rule_hit[1] == 1012u && c.rule_hit[2] == 0u && c.rule_hit[3] == 0u,
+    check(c.rule_hit[0] == 1011u && c.rule_hit[1] == ((g_nr > 1u) ? 1012u : 0u) && c.rule_hit[2] == 0u && c.rule_hit[3] == 0u,
           "rule hit counters of built rules only");
     (void)rtlnet_classifier_set_mode(&g_ctx, RTLNET_CLS_MODE_PASS_ON_MATCH);
     check(rtlnet_classifier_clear_counters(&g_ctx) == RTLNET_CLS_OK && g_cnt_clear_count == 1u && g_cnt[0] == 0u,
@@ -623,10 +628,151 @@ static void test_bcast_storm(void)
     check(rtlnet_classifier_config_bcast_storm(NULL, 10u, 100u) == RTLNET_CLS_ERR_ARG, "bcast storm NULL");
 }
 
-int main(int argc, char **argv)
+static void test_build_and_bounds(void)
 {
-    int inject = (argc > 1 && strcmp(argv[1], "--inject-failure") == 0);
+    rtlnet_cls_build_t b;
+    rtlnet_cls_entry_t e = {0};
+    rtlnet_cls_tuple_t x = {0};
+    static const uint8_t mac[6] = {0x02u, 0x00u, 0x00u, 0x00u, 0x00u, 0x01u};
 
+    init_ok();
+    check(rtlnet_classifier_get_build(&g_ctx, &b) == RTLNET_CLS_OK, "get_build");
+    check(b.table_entries == g_te && b.tuple_entries == g_tu && b.num_rules == g_nr && b.num_policers == g_np &&
+          b.table_lanes == g_lanes && b.match_depth_bytes == g_mdb && b.ram_distributed == g_dist &&
+          b.delay_beats == g_mdb / 8u + (((g_te > g_tu) ? g_te : g_tu) / g_lanes + 15u) &&
+          b.verdict_latency == ((g_te > g_tu) ? g_te : g_tu) / g_lanes + 15u, "build sizes and RAM style");
+    check(rtlnet_classifier_get_build(&g_ctx, NULL) == RTLNET_CLS_ERR_ARG, "get_build NULL");
+    check(rtlnet_classifier_get_build(NULL, &b) == RTLNET_CLS_ERR_ARG, "get_build no context");
+
+    /* One past the built sizes is an error in every add function, and nothing is written. */
+    e.valid = 1u;
+    check(rtlnet_classifier_table_entry_set(&g_ctx, RTLNET_CLS_TABLE_IP, g_te, &e) == RTLNET_CLS_ERR_RANGE,
+          "entry index past the table");
+    check(rtlnet_classifier_table_entry_get(&g_ctx, RTLNET_CLS_TABLE_IP, g_te, &e) == RTLNET_CLS_ERR_RANGE,
+          "entry get past the table");
+    check(rtlnet_classifier_table_entry_set(&g_ctx, RTLNET_CLS_TABLE_IP, 0u, &e) == RTLNET_CLS_OK,
+          "last-index-safe entry set");
+    check(rtlnet_classifier_table_entry_set(&g_ctx, RTLNET_CLS_TABLE_IP, g_te - 1u, &e) == RTLNET_CLS_OK,
+          "last entry of the table");
+    check(rtlnet_classifier_tuple_set(&g_ctx, g_tu, &x) == RTLNET_CLS_ERR_RANGE, "tuple index past the table");
+    check(rtlnet_classifier_tuple_set(&g_ctx, g_tu - 1u, &x) == RTLNET_CLS_OK, "last tuple");
+    check(rtlnet_classifier_rule_mode(&g_ctx, g_nr, 1, 0, 0, 0, 0u) == RTLNET_CLS_ERR_RANGE, "rule past the build");
+    check(rtlnet_classifier_rule_byte(&g_ctx, g_nr, 0u, 0u, RTLNET_CLS_OP_EQ, 0u) == RTLNET_CLS_ERR_RANGE,
+          "rule byte on a rule past the build");
+    check(rtlnet_classifier_policer_set(&g_ctx, g_np, 1, 1u, 1u) == RTLNET_CLS_ERR_RANGE, "policer past the build");
+    check(rtlnet_classifier_mac_filter(&g_ctx, g_te, mac, RTLNET_CLS_SIDE_DST, RTLNET_CLS_ACT_GATE) ==
+          RTLNET_CLS_ERR_RANGE, "mac_filter past the table");
+    check(rtlnet_classifier_acl_add(&g_ctx, g_tu, 6u, 0u, 0u, 0u, 0u, 0u, 65535u, 0u, 65535u, RTLNET_CLS_ACT_GATE) ==
+          RTLNET_CLS_ERR_RANGE, "acl_add past the table");
+
+    /* A policer the build does not have is an error, not a silently disabled policer. */
+    if (g_np < RTLNET_CLS_MAX_POLICERS) {
+        e.police_en = 1u;
+        e.policer = (uint8_t)g_np;
+        check(rtlnet_classifier_table_entry_set(&g_ctx, RTLNET_CLS_TABLE_IP, 0u, &e) == RTLNET_CLS_ERR_RANGE,
+              "entry with a missing policer");
+        check(rtlnet_classifier_mac_filter(&g_ctx, 0u, mac, RTLNET_CLS_SIDE_DST, RTLNET_CLS_ACT_POLICE(g_np)) ==
+              RTLNET_CLS_ERR_RANGE, "helper with a missing policer");
+        check(rtlnet_classifier_rule_mode(&g_ctx, 0u, 1, 0, 1, 1, g_np) == RTLNET_CLS_ERR_RANGE,
+              "rule with a missing policer");
+    }
+}
+
+/* Reads the policer limit/window/enable registers of policer p. */
+static int policer_is(uint32_t p, uint32_t limit, uint32_t window)
+{
+    return mreg(RTLNET_CLS_REG_POLICER(p) + RTLNET_CLS_POL_CTRL) == 1u &&
+           mreg(RTLNET_CLS_REG_POLICER(p) + RTLNET_CLS_POL_LIMIT) == limit &&
+           mreg(RTLNET_CLS_REG_POLICER(p) + RTLNET_CLS_POL_WINDOW) == window;
+}
+
+static void test_protect(void)
+{
+    rtlnet_cls_protect_t pr;
+    rtlnet_cls_policer_t ps;
+    uint32_t base;
+    uint32_t ctrl;
+
+    init_ok();
+    rtlnet_classifier_protect_defaults(&pr);
+    check(pr.limit_pkts[0] == 10u && pr.limit_pkts[1] == 10u && pr.limit_pkts[2] == 20u && pr.limit_pkts[3] == 10u &&
+          pr.window_ms[0] == 100u && pr.window_ms[3] == 100u, "protect defaults");
+    /* Leftover configuration that the profile must remove. */
+    (void)rtlnet_classifier_table_mode(&g_ctx, RTLNET_CLS_TABLE_IP, 1, 0, RTLNET_CLS_CMP_SINGLE, 0, 0);
+    check(rtlnet_classifier_config_protect(&g_ctx, NULL) == RTLNET_CLS_OK, "config_protect(defaults)");
+    check(g_clear_count == 1u && g_mode == (uint32_t)RTLNET_CLS_MODE_PASS_ALL, "profile starts from CLEAR, ends PASS_ALL");
+    check(mreg(RTLNET_CLS_REG_TABLE_MODE(3u)) == 0u && mreg(RTLNET_CLS_REG_TABLE_MODE(1u)) == 0u, "other tables off");
+    /* Rule 0: EtherType 08 06 at bytes 12..13, classify-only, policer 2. */
+    check(mreg(RTLNET_CLS_REG_RULE_MODE(0u)) == (RTLNET_CLS_RM_ENABLE | RTLNET_CLS_RM_CLASSIFY | RTLNET_CLS_RM_POLICE_EN |
+                                                  (2u << RTLNET_CLS_RM_POLICER_SHIFT)), "ARP rule mode");
+    check(mreg(RTLNET_CLS_REG_RULE_BASE + 4u * 12u) == 0xFF000808u && mreg(RTLNET_CLS_REG_RULE_BASE + 4u * 13u) == 0xFF000806u &&
+          mreg(RTLNET_CLS_REG_RULE_BASE + 4u * 11u) == 0u && mreg(RTLNET_CLS_REG_RULE_BASE + 4u * 14u) == 0u,
+          "ARP rule bytes 12..13, the rest don't-care");
+    /* Tuple 0: protocol 1, any ports, policer 3, classify-only. */
+    check(mreg(RTLNET_CLS_REG_TABLE_MODE(5u)) == (RTLNET_CLS_TM_ENABLE | RTLNET_CLS_TM_CLASSIFY), "tuple table classify");
+    base = RTLNET_CLS_REG_TUPLE(0u);
+    ctrl = mreg(base);
+    check(ctrl == (RTLNET_CLS_TUP_VALID | RTLNET_CLS_TUP_PROTO_EN | RTLNET_CLS_TUP_POLICE_EN | (3u << 8) | 1u), "ICMP tuple control");
+    check(mreg(base + RTLNET_CLS_TUP_SPORT) == 0xFFFF0000u && mreg(base + RTLNET_CLS_TUP_DPORT) == 0xFFFF0000u &&
+          mreg(base + RTLNET_CLS_TUP_SRC_MASK) == 0u && mreg(base + RTLNET_CLS_TUP_DST_MASK) == 0u, "ICMP tuple any address, any port");
+    /* Tuple 1: protocol 17, any ports, policer 1. */
+    check(mreg(RTLNET_CLS_REG_TUPLE(1u)) == (RTLNET_CLS_TUP_VALID | RTLNET_CLS_TUP_PROTO_EN | RTLNET_CLS_TUP_POLICE_EN |
+                                              (1u << 8) | 17u), "UDP tuple control");
+    /* MAC table, single compare: entry 0 destination broadcast (policer 0), classify-only. */
+    check(mreg(RTLNET_CLS_REG_TABLE_MODE(0u)) == (RTLNET_CLS_TM_ENABLE | RTLNET_CLS_TM_CLASSIFY), "MAC table classify");
+    check(mreg(RTLNET_CLS_REG_ENTRY(0u, 0u) + RTLNET_CLS_ENT_CTRL) ==
+          (RTLNET_CLS_ENT_VALID | RTLNET_CLS_ENT_DST_EN | RTLNET_CLS_ENT_POLICE_EN | 0xFFFFu), "broadcast entry control");
+    check(mreg(RTLNET_CLS_REG_ENTRY(0u, 0u) + RTLNET_CLS_ENT_DST_LO) == 0xFFFFFFFFu &&
+          mreg(RTLNET_CLS_REG_ENTRY(0u, 0u) + RTLNET_CLS_ENT_DST_HI) == 0xFFFFu, "broadcast destination");
+    check(mreg(RTLNET_CLS_REG_ENTRY(0u, 1u) + RTLNET_CLS_ENT_CTRL) == 0u, "no other MAC entry in use");
+    check(policer_is(0u, 10u, 100u) && policer_is(1u, 10u, 100u) && policer_is(2u, 20u, 100u) && policer_is(3u, 10u, 100u),
+          "four policers at the default limits");
+
+    /* Change one class; the others stay. */
+    check(rtlnet_classifier_protect_limit(&g_ctx, RTLNET_CLS_PROT_ARP, 50u, 250u) == RTLNET_CLS_OK, "protect_limit");
+    check(policer_is(2u, 50u, 250u) && policer_is(0u, 10u, 100u), "protect_limit changes one policer");
+    g_pol_cnt[2][0] = 9u;
+    g_pol_cnt[2][1] = 6u;
+    g_pol_cnt[2][2] = 3u;
+    check(rtlnet_classifier_protect_get(&g_ctx, RTLNET_CLS_PROT_ARP, &ps) == RTLNET_CLS_OK && ps.limit_pkts == 50u &&
+          ps.window_ms == 250u && ps.seen == 9u && ps.passed == 6u && ps.dropped == 3u, "protect_get");
+    check(rtlnet_classifier_protect_limit(&g_ctx, (rtlnet_cls_prot_class_t)4, 1u, 1u) == RTLNET_CLS_ERR_ARG, "class past the profile");
+    check(rtlnet_classifier_protect_limit(&g_ctx, RTLNET_CLS_PROT_ICMP, 1u, 0u) == RTLNET_CLS_ERR_ARG, "window 0");
+    check(rtlnet_classifier_protect_get(&g_ctx, (rtlnet_cls_prot_class_t)4, &ps) == RTLNET_CLS_ERR_ARG, "protect_get class");
+
+    /* A custom profile and the argument checks (nothing written on error). */
+    pr.limit_pkts[0] = 0u;
+    pr.window_ms[1] = 0u;
+    g_clear_count = 0u;
+    check(rtlnet_classifier_config_protect(&g_ctx, &pr) == RTLNET_CLS_ERR_ARG && g_clear_count == 0u, "window 0 rejected, nothing written");
+    pr.window_ms[1] = 7u;
+    check(rtlnet_classifier_config_protect(&g_ctx, &pr) == RTLNET_CLS_OK && policer_is(0u, 0u, 100u) && policer_is(1u, 10u, 7u),
+          "custom profile");
+    check(rtlnet_classifier_config_protect(NULL, &pr) == RTLNET_CLS_ERR_ARG, "config_protect no context");
+
+    /* A build too small for the profile is refused before anything is written. */
+    {
+        uint32_t tu = g_tu;
+        uint32_t nr = g_nr;
+        uint32_t np = g_np;
+
+        g_tu = 1u;
+        init_ok();
+        g_clear_count = 0u;
+        check(rtlnet_classifier_config_protect(&g_ctx, NULL) == RTLNET_CLS_ERR_RANGE && g_clear_count == 0u, "1 tuple: too small");
+        g_tu = tu;
+        g_np = 3u;
+        init_ok();
+        check(rtlnet_classifier_config_protect(&g_ctx, NULL) == RTLNET_CLS_ERR_RANGE, "3 policers: too small");
+        g_np = np;
+        g_tu = tu;
+        g_nr = nr;
+        init_ok();
+    }
+}
+
+static void run_suite(void)
+{
     test_init();
     test_mode();
     test_table_mode();
@@ -638,6 +784,30 @@ int main(int argc, char **argv)
     test_clear_all();
     test_helpers();
     test_bcast_storm();
+    test_build_and_bounds();
+    test_protect();
+}
+
+/* Builds the suite runs against: the defaults, the defaults with distributed RAM, the small-FPGA profile. */
+static void set_build(uint32_t te, uint32_t tu, uint32_t nr, uint32_t np, uint32_t dist)
+{
+    g_te = te;
+    g_tu = tu;
+    g_nr = nr;
+    g_np = np;
+    g_dist = dist;
+}
+
+int main(int argc, char **argv)
+{
+    int inject = (argc > 1 && strcmp(argv[1], "--inject-failure") == 0);
+
+    set_build(16u, 16u, 2u, 4u, 0u);
+    run_suite();
+    set_build(16u, 16u, 2u, 4u, 1u);
+    run_suite();
+    set_build(8u, 8u, 1u, 4u, 1u);
+    run_suite();
     check(g_protocol_violations == 0, "update protocol: no entry or rule word written while enabled");
     if (inject) {
         check(0, "INJECT_FAILURE negative control");

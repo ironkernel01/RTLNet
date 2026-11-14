@@ -37,6 +37,12 @@
 //     is claimed (claims = REPLIES_SENT + ECHO_REPLIES).
 //   * +define+TB_NO_OFFLOAD builds CPU_TCP_OFFLOAD_ENABLE = 0: CPU_CAPS bits 17/18 read 0 and
 //     the 0x9000 window reads 0 (default build: bits 17/18 set, window answers ID "TCPO").
+//   * +define+TB_CLS_BLOCK / TB_CLS_DIST / TB_CLS_SMALL build u_cpu_classifier (CPU_CLASSIFIER_ENABLE 1) with the
+//     classifier's defaults, with RAM_STYLE "distributed" at the default sizes, or with the small-FPGA profile (distributed RAM,
+//     8 table and 8 tuple entries, 1 rule, 4 policers, 64 bytes): CPU_CAPS bit 16 set, the 0x8000 window answers the
+//     classifier ID and its CAPS equal the built sizes (RAM style included); the bench sets MODE pass-all (the classifier
+//     powers up drop-all), after which every check of the default build holds and the classifier's FRAMES and PASSED
+//     equal CPU_RX_FRAMES.
 //   * +define+TB_NO_CPU_PATH builds CPU_PATH_ENABLE = 0: CAPS bit 5 and
 //     CPU_CAPS read 0, CTRL bit 1 reads 0, m_axis_cpu_eth_tvalid stays 0 and
 //     s_axis_cpu_eth_tready 1.
@@ -84,6 +90,38 @@ module tb_rtlnet_eth_protocol;
 `else
   localparam int          CPU_PATH     = 1;
 `endif
+`ifdef TB_CLS_SMALL
+  localparam int          CLS_ON       = 1;
+  localparam int          CLS_TE       = 8;
+  localparam int          CLS_TU       = 8;
+  localparam int          CLS_NR       = 1;
+  localparam int          CLS_NP       = 4;
+  localparam string       CLS_RS       = "distributed";
+`elsif TB_CLS_DIST
+  localparam int          CLS_ON       = 1;
+  localparam int          CLS_TE       = 16;
+  localparam int          CLS_TU       = 16;
+  localparam int          CLS_NR       = 2;
+  localparam int          CLS_NP       = 4;
+  localparam string       CLS_RS       = "distributed";
+`elsif TB_CLS_BLOCK
+  localparam int          CLS_ON       = 1;
+  localparam int          CLS_TE       = 16;
+  localparam int          CLS_TU       = 16;
+  localparam int          CLS_NR       = 2;
+  localparam int          CLS_NP       = 4;
+  localparam string       CLS_RS       = "block";
+`else
+  localparam int          CLS_ON       = 0;
+  localparam int          CLS_TE       = 16;
+  localparam int          CLS_TU       = 16;
+  localparam int          CLS_NR       = 2;
+  localparam int          CLS_NP       = 4;
+  localparam string       CLS_RS       = "block";
+`endif
+  // Classifier CAPS of the build: sizes, 2 lanes, 64 bytes, RAM style bit 27.
+  localparam logic [31:0] CLS_CAPS     = 32'(CLS_TE) | (32'(CLS_TU) << 5) | (32'(CLS_NR) << 10) | (32'(CLS_NP) << 13) |
+                                         (32'd2 << 16) | (32'd8 << 21) | ((CLS_RS == "distributed") ? 32'h0800_0000 : 32'h0);
 `ifdef TB_NO_OFFLOAD
   localparam int          OFFLOAD      = 0;
 `else
@@ -219,7 +257,12 @@ module tb_rtlnet_eth_protocol;
     .IPERF_ENABLE    (0),
     .UDP_ENABLE      (0),
     .CPU_PATH_ENABLE       (CPU_PATH),
-    .CPU_CLASSIFIER_ENABLE (0),
+    .CPU_CLASSIFIER_ENABLE (CLS_ON),
+    .CLS_TABLE_ENTRIES     (CLS_TE),
+    .CLS_TUPLE_ENTRIES     (CLS_TU),
+    .CLS_NUM_RULES         (CLS_NR),
+    .CLS_NUM_POLICERS      (CLS_NP),
+    .CLS_RAM_STYLE         (CLS_RS),
     .CPU_TCP_OFFLOAD_ENABLE (OFFLOAD)
   ) dut (
     .axis_clk          (axis_clk),
@@ -532,9 +575,22 @@ module tb_rtlnet_eth_protocol;
     axi_expect(R_ID, 32'h50524F54, "ID");
     axi_expect(R_VERSION, 32'h10222026, "VERSION");
     axi_expect(R_CAPS, CAPS_VALUE, "CAPS (ICMP, ARP present, CPU path per build; 16/8 KB; 0 sockets)");
-    axi_expect(R_CPU_CAPS, (CPU_PATH == 0) ? 32'h0 : ((OFFLOAD != 0) ? 32'h0006_0810 : 32'h0000_0810),
-               "CPU_CAPS (CPU RX 16 KB, TX 8 KB, offload TX+RX bits 17/18 when built, classifier bit 16 clear)");
-    axi_expect(16'h8000, 32'h0, "classifier window (not built) reads 0");
+    axi_expect(R_CPU_CAPS, (CPU_PATH == 0) ? 32'h0 : (((OFFLOAD != 0) ? 32'h0006_0810 : 32'h0000_0810) | ((CLS_ON != 0) ? 32'h0001_0000 : 32'h0)),
+               "CPU_CAPS (CPU RX 16 KB, TX 8 KB, offload TX+RX bits 17/18 when built, classifier bit 16 when built)");
+    if (CLS_ON != 0) begin
+      axi_expect(16'h8000, 32'h434C_5346, "classifier window ID");
+      axi_expect(16'h8008, CLS_CAPS, "classifier CAPS (built sizes and RAM style)");
+      // Power-up drop-all: the bench sets pass-all once the clear sequence is over, like the firmware's profile does.
+      for (int w = 0; w < 4000; w++) begin
+        axi_rd(16'h8010, v);
+        if (v[0] == 1'b0) break;
+      end
+      tb_check(v[0] == 1'b0, "classifier clear sequence ended");
+      axi_wr(16'h800C, 32'h0000_0001);
+      axi_expect(16'h8010, 32'h0000_0100, "classifier STATUS: pass-all, not clearing");
+    end else begin
+      axi_expect(16'h8000, 32'h0, "classifier window (not built) reads 0");
+    end
     axi_expect(16'h9000, (CPU_PATH != 0 && OFFLOAD != 0) ? 32'h5443_504F : 32'h0, "offload window ID (0 when not built)");
     axi_expect(16'h9004, (CPU_PATH != 0 && OFFLOAD != 0) ? 32'h1022_2026 : 32'h0, "offload window VERSION (0 when not built)");
     axi_expect(R_CTRL, CTRL_DEFAULT, "CTRL");
@@ -790,6 +846,11 @@ module tb_rtlnet_eth_protocol;
              u_cpu_sink.frame_count));
     if (CPU_PATH != 0) tb_check(v > 0, "unanswered frames reached the CPU");
     else               tb_check(u_cpu_sink.frame_count == 0, "no CPU path: nothing reached the CPU");
+    if (CLS_ON != 0) begin
+      axi_expect(16'h8080, v, "classifier FRAMES = CPU_RX_FRAMES");
+      axi_expect(16'h8084, v, "classifier PASSED = CPU_RX_FRAMES (pass-all, no policer)");
+      axi_expect(16'h8088, 32'h0, "classifier DROPPED");
+    end
 
     // ---- CNT_CLEAR: the four counters restart from 0 together.
     axi_wr(R_CTRL, CTRL_DEFAULT | 32'h0001_0000);

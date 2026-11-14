@@ -14,6 +14,7 @@
 #include "rtlnet_arp.h"
 #include "rtlnet_board.h"
 #include "rtlnet_cpupath.h"
+#include "rtlnet_protect.h"
 #include "rtlnet_dhcp.h"
 #include "rtlnet_eth_mac.h"
 #include "rtlnet_eth_protocol.h"
@@ -35,6 +36,7 @@
 
 static netmgr_config_t  g_cfg;
 static netmgr_present_t g_present;
+static int              g_protect_rc;   /* protect_install() result (PROTECT_*) */
 static netmgr_link_t    g_link;
 static rtlnet_mdio_t    g_mdio;
 static uint32_t         g_next_poll_ms;
@@ -404,6 +406,8 @@ void netmgr_init(void)
      * default) before lwIP sees any frame; then the DMA netif. */
     rtlnet_features_discover();
     g_present.cpupath_rc = cpupath_init();
+    /* The protection profile replaces the broadcast storm default; a classifier too small for it keeps the default. */
+    g_protect_rc = (g_present.cpupath_rc == CPUPATH_OK) ? protect_install() : PROTECT_ABSENT;
     g_present.cls = cpupath_cls_present();
     g_present.dma = (rtlnet_netif_hw_init() == 0);
     netmgr_apply_tcp_echo();
@@ -435,7 +439,9 @@ void netmgr_init(void)
                    g_present.phy ? g_present.phy_driver->name : "none",
                    (unsigned)g_present.phy_id, g_present.prot ? "ok" : "absent");
         fmt_printf("CPU path: DMA %s, classifier %s, lwIP %s\n", g_present.dma ? "ok" : "absent",
-                   g_present.cls ? ((g_present.cpupath_rc == CPUPATH_OK) ? "broadcast storm limit 10/100 ms" :
+                   g_present.cls ? ((g_present.cpupath_rc == CPUPATH_OK) ?
+                                    ((g_protect_rc == PROTECT_OK) ? "protection profile (arp, icmp, udp, broadcast policed)" :
+                                                                    "broadcast storm limit 10/100 ms") :
                                     cpupath_result_text(g_present.cpupath_rc)) : "absent",
                    (g_present.lwip_rc >= 0) ? "up (TCP echo, TCP iperf)" : "not started");
     } else {

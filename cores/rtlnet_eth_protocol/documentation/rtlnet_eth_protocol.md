@@ -3,7 +3,7 @@
 | Item | Value |
 |---|---|
 | Core | `rtlnet_eth_protocol` |
-| Document revision | 10-22-2026 |
+| Document revision | 11-14-2026 |
 | Language | SystemVerilog-2012 |
 | Contract | `documentation/rtlnet_architecture.md` sections 4, 5, 6.1, 7.4-7.6, 9, 12, 13, 15.3, 15.4 |
 | Sources | `hdl/rtlnet_eth_protocol.sv` (top), `hdl/rtlnet_eth_protocol_ingress.sv` (axis_clk ingress), `hdl/rtlnet_eth_protocol_regs.sv` (register file), `hdl/rtlnet_eth_protocol.f` |
@@ -70,6 +70,8 @@ The application streams belong to the UDP socket leaf; with `UDP_ENABLE = 0` the
 | `CPU_TCP_OFFLOAD_RX_BATCH` | 0 | `u_cpu_offload` builds the receive batcher (`RX_BATCH`): consecutive CPU receive frames, each with its trailer, in one DMA transfer |
 | `CPU_TCP_OFFLOAD_ACK_FLOWS` | 4 | coalescer flow table entries; `CPU_AXIS_CLK_HZ` also sets the core's microsecond tick (`CLK_HZ`) |
 | `CPU_AXIS_CLK_HZ` | 100 000 000 | `cpu_axis_clk` frequency, passed to the classifier as `AXIS_CLK_HZ` (policer millisecond tick) |
+| `CLS_TABLE_ENTRIES`, `CLS_TUPLE_ENTRIES`, `CLS_TABLE_LANES`, `CLS_NUM_RULES`, `CLS_NUM_POLICERS`, `CLS_MATCH_DEPTH_BYTES` | 16, 16, 2, 2, 4, 64 | passed to `u_cpu_classifier` (`TABLE_ENTRIES`, `TUPLE_ENTRIES`, `TABLE_LANES`, `NUM_RULES`, `NUM_POLICERS`, `MATCH_DEPTH_BYTES`); the defaults are the classifier's own, so an instance that sets none of them is unchanged. Small FPGAs: `cores/rtlnet_classifier/documentation` section 12 |
+| `CLS_RAM_STYLE` | `"block"` | `u_cpu_classifier` `RAM_STYLE`; `"distributed"` removes the classifier's 30 block RAM tiles (4686 LUTs with the small profile, classifier document 12.3). Independent of `RAM_STYLE` |
 | `RAM_STYLE` | `"block"` | every buffer (queues and leaf buffers) |
 
 Until `cores/rtlnet_classifier` lands, build and simulate with `CPU_CLASSIFIER_ENABLE = 0` (the enabled branch is
@@ -393,6 +395,12 @@ Bench sensitivity proven by mutation: comparing only two of the three 16-bit MAC
 wrong-unicast and per-byte cases (20 failing checks); not counting first-beat drops fails the burst and
 the identity; a dequeue gap of 8 fails the 16-clock monitor.
 
+With `+define+TB_CLS_BLOCK`, `TB_CLS_DIST` or `TB_CLS_SMALL` the bench builds `u_cpu_classifier` (`CPU_CLASSIFIER_ENABLE` 1) with the classifier
+defaults, with `CLS_RAM_STYLE` `"distributed"` at the default sizes, or with the small-FPGA profile (distributed, `CLS_TABLE_ENTRIES` 8,
+`CLS_TUPLE_ENTRIES` 8, `CLS_NUM_RULES` 1, `CLS_NUM_POLICERS` 4). It then checks `CPU_CAPS` bit 16, the classifier ID at 0x8000 and its `CAPS`
+(the built sizes and the RAM style bit), waits for the clear sequence, sets `MODE` pass-all, and requires every other check of the default
+build to hold plus classifier `FRAMES` = `PASSED` = `CPU_RX_FRAMES` and `DROPPED` 0. `regression.txt` entries `cls_block`, `cls_dist`, `cls_small`.
+
 ### 5.2 `tb_rtlnet_eth_protocol_cpu` (every leaf and the CPU network path)
 
 The wrapper with ARP, ICMP, DHCP, iperf and the UDP socket leaf and the CPU path (`CPU_CLASSIFIER_ENABLE` 0), driven
@@ -522,3 +530,4 @@ classifier window is `RTLNET_PROTO_WIN_CLASSIFIER` (0x8000); its registers belon
 | 10-22-2026 | Initial version |
 | 10-22-2026 | Checksum offload on the CPU path: `u_cpu_offload` (`CPU_TCP_OFFLOAD_ENABLE`) on both CPU streams, window 0x9000 (decoder `N` 3 with null slaves for absent windows), `CPU_CAPS` bits 16..18, driver `rtlnet_eth_protocol_get_cpu_features`, benches check CPU_CAPS and the window for builds with and without each block |
 | 10-22-2026 | Leaf `claim` inputs; CPU network path (`u_cpu_rx_fifo` with the claim verdict, `u_cpu_tx_fifo` as arbiter source 5, CTRL bit 1, CAPS bit 5, CPU_CAPS, STATUS bits 20-22, DELIVERED and six CPU counters); `u_cpu_classifier` hook with its 0x8000 window (`CPU_CLASSIFIER_ENABLE`, `CPU_AXIS_CLK_HZ`); `tb_rtlnet_eth_protocol_cpu`; claim monitor; driver CPU-path functions |
+| 11-14-2026 | Pass-through parameters `CLS_TABLE_ENTRIES`, `CLS_TUPLE_ENTRIES`, `CLS_TABLE_LANES`, `CLS_NUM_RULES`, `CLS_NUM_POLICERS`, `CLS_MATCH_DEPTH_BYTES`, `CLS_RAM_STYLE` for `u_cpu_classifier` (defaults equal the classifier's); bench builds `TB_CLS_BLOCK`, `TB_CLS_DIST`, `TB_CLS_SMALL` |

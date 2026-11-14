@@ -80,6 +80,7 @@ static int       g_reloads;
 static clock_t   g_t0;
 static int       g_cls_on;                    /* the classifier model answers at RTLNET_PLAT_CLS_BASE */
 static uint32_t  g_cls_mode;                  /* CTRL.MODE */
+static uint32_t  g_cls_caps;                  /* CAPS word, 0 = HOST_CLS_CAPS */
 static uint32_t  g_cls_mem[HOST_CLS_WORDS];   /* every other register word as written */
 
 /* Protocol wrapper CAPS / CPU_CAPS model. */
@@ -415,7 +416,7 @@ static uint32_t host_cls_read(uint32_t off)
     switch (off) {
     case RTLNET_CLS_REG_ID:      return RTLNET_CLS_ID_VALUE;
     case RTLNET_CLS_REG_VERSION: return RTLNET_CLS_VERSION_VALUE;
-    case RTLNET_CLS_REG_CAPS:    return HOST_CLS_CAPS;
+    case RTLNET_CLS_REG_CAPS:    return (g_cls_caps != 0u) ? g_cls_caps : HOST_CLS_CAPS;
     case RTLNET_CLS_REG_CTRL:    return g_cls_mode;
     case RTLNET_CLS_REG_STATUS:  return g_cls_mode << RTLNET_CLS_STATUS_MODE_SHIFT;
     case RTLNET_CLS_REG_LATENCY: return HOST_CLS_LATENCY;
@@ -438,6 +439,17 @@ static void host_cls_write(uint32_t off, uint32_t value)
             g_cls_mode = 0u;
         } else {
             g_cls_mode = value & RTLNET_CLS_CTRL_MODE_MASK;
+        }
+        if ((value & RTLNET_CLS_CTRL_CNT_CLEAR) != 0u) {
+            /* CNT_CLEAR: the counters (0x080..0x0BC) and every policer SEEN, PASSED, DROPPED. */
+            for (uint32_t w = 0x080u / 4u; w < 0x0C0u / 4u; w++) {
+                g_cls_mem[w] = 0u;
+            }
+            for (uint32_t p = 0u; p < RTLNET_CLS_MAX_POLICERS; p++) {
+                g_cls_mem[(RTLNET_CLS_REG_POLICER(p) + RTLNET_CLS_POL_SEEN) / 4u] = 0u;
+                g_cls_mem[(RTLNET_CLS_REG_POLICER(p) + RTLNET_CLS_POL_PASSED) / 4u] = 0u;
+                g_cls_mem[(RTLNET_CLS_REG_POLICER(p) + RTLNET_CLS_POL_DROPPED) / 4u] = 0u;
+            }
         }
     } else if (off >= RTLNET_CLS_REG_TABLE_MODE(0u)) {
         g_cls_mem[(off / 4u) % HOST_CLS_WORDS] = value;
@@ -463,6 +475,16 @@ uint32_t host_model_cls_peek(uint32_t offset)
 void host_model_cls_poke(uint32_t offset, uint32_t value)
 {
     g_cls_mem[(offset / 4u) % HOST_CLS_WORDS] = value;
+}
+
+/**
+ * @brief Set the classifier CAPS word the model reports (sizes of the built classifier).
+ * @param caps CAPS value, 0 for the default build.
+ * @return None.
+ */
+void host_model_cls_set_caps(uint32_t caps)
+{
+    g_cls_caps = caps;
 }
 
 /**

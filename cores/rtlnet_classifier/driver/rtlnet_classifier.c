@@ -184,6 +184,16 @@ static void apply_action(uint32_t action, rtlnet_cls_entry_t *e)
 }
 
 /*
+ * action_ok -- check that the policer a helper action selects exists in the build (an index at or above
+ * NUM_POLICERS would act as a disabled policer in hardware, silently).
+ * Returns: 1 when the action is usable, 0 otherwise.
+ */
+static int action_ok(const rtlnet_classifier_t *ctx, uint32_t action)
+{
+    return ((action & RTLNET_CLS_ACT_POLICE_FLAG) == 0u) || (RTLNET_CLS_ACT_POLICER(action) < ctx->num_policers);
+}
+
+/*
  * helper_table_mode -- enable a table for a helper: keep EXCLUDE and
  * VLAN_AWARE, set COMPARE, set CLASSIFY from the action.
  * Returns: the new TABLE_MODE value.
@@ -251,6 +261,7 @@ int rtlnet_classifier_init(rtlnet_classifier_t *ctx, uintptr_t base)
     ctx->num_policers = RTLNET_CLS_CAPS_NUM_POLICERS(caps);
     ctx->table_lanes = RTLNET_CLS_CAPS_TABLE_LANES(caps);
     ctx->match_depth_bytes = 8u * RTLNET_CLS_CAPS_MATCH_BEATS(caps);
+    ctx->ram_distributed = RTLNET_CLS_CAPS_RAM_DIST(caps);
     ctx->delay_beats = RTLNET_CLS_LAT_DELAY_BEATS(lat);
     ctx->verdict_latency = RTLNET_CLS_LAT_VERDICT(lat);
     stride = RTLNET_CLS_MIN_RULE_STRIDE;
@@ -418,7 +429,8 @@ int rtlnet_classifier_table_entry_set(const rtlnet_classifier_t *ctx, rtlnet_cls
     if ((uint32_t)table >= (uint32_t)RTLNET_CLS_TABLE_TUPLE || entry == NULL) {
         return RTLNET_CLS_ERR_ARG;
     }
-    if (index >= ctx->table_entries) {
+    if (index >= ctx->table_entries ||
+        (entry->police_en != 0u && (uint32_t)entry->policer >= ctx->num_policers)) {
         return RTLNET_CLS_ERR_RANGE;
     }
     mode = table_disable(ctx, (uint32_t)table);
@@ -488,6 +500,9 @@ int rtlnet_classifier_tuple_set(const rtlnet_classifier_t *ctx, uint32_t index,
         return RTLNET_CLS_ERR_ARG;
     }
     if (index >= ctx->tuple_entries) {
+        return RTLNET_CLS_ERR_RANGE;
+    }
+    if (tuple->police_en != 0u && (uint32_t)tuple->policer >= ctx->num_policers) {
         return RTLNET_CLS_ERR_RANGE;
     }
     base = RTLNET_CLS_REG_TUPLE(index);
@@ -571,6 +586,9 @@ int rtlnet_classifier_rule_mode(const rtlnet_classifier_t *ctx, uint32_t rule, i
     }
     if (policer >= RTLNET_CLS_MAX_POLICERS) {
         return RTLNET_CLS_ERR_ARG;
+    }
+    if (police_en != 0 && policer >= ctx->num_policers) {
+        return RTLNET_CLS_ERR_RANGE;
     }
     m = (enable != 0) ? RTLNET_CLS_RM_ENABLE : 0u;
     m |= (exclude != 0) ? RTLNET_CLS_RM_EXCLUDE : 0u;
@@ -807,6 +825,9 @@ int rtlnet_classifier_mac_filter(const rtlnet_classifier_t *ctx, uint32_t index,
     if (index >= ctx->table_entries) {
         return RTLNET_CLS_ERR_RANGE;
     }
+    if (!action_ok(ctx, action)) {
+        return RTLNET_CLS_ERR_RANGE;
+    }
     for (i = 0u; i < RTLNET_CLS_MAC_BYTES; i++) {
         v = (v << 8) | (uint64_t)mac[i];
     }
@@ -844,6 +865,9 @@ int rtlnet_classifier_ethertype_filter(const rtlnet_classifier_t *ctx, uint32_t 
     if (2u * index + 1u >= ctx->table_entries) {
         return RTLNET_CLS_ERR_RANGE;
     }
+    if (!action_ok(ctx, action)) {
+        return RTLNET_CLS_ERR_RANGE;
+    }
     even.valid = 1u;
     even.src_en = 1u;
     even.src_value = lo;
@@ -876,6 +900,9 @@ int rtlnet_classifier_ipv4_filter(const rtlnet_classifier_t *ctx, uint32_t index
         return RTLNET_CLS_ERR_ARG;
     }
     if (2u * index + 1u >= ctx->table_entries) {
+        return RTLNET_CLS_ERR_RANGE;
+    }
+    if (!action_ok(ctx, action)) {
         return RTLNET_CLS_ERR_RANGE;
     }
     even.valid = 1u;
@@ -912,6 +939,9 @@ int rtlnet_classifier_port_filter(const rtlnet_classifier_t *ctx, uint32_t index
         return RTLNET_CLS_ERR_ARG;
     }
     if (2u * index + 1u >= ctx->table_entries) {
+        return RTLNET_CLS_ERR_RANGE;
+    }
+    if (!action_ok(ctx, action)) {
         return RTLNET_CLS_ERR_RANGE;
     }
     even.valid = 1u;
@@ -1019,4 +1049,161 @@ int rtlnet_classifier_bcast_storm_enable(const rtlnet_classifier_t *ctx, int on)
     }
     wr(ctx, RTLNET_CLS_REG_POLICER(0u) + RTLNET_CLS_POL_CTRL, (on != 0) ? RTLNET_CLS_POL_CTRL_ENABLE : 0u);
     return RTLNET_CLS_OK;
+}
+
+/*
+ * rtlnet_classifier_get_build -- copy the built sizes read at init.
+ * Returns: RTLNET_CLS_OK, RTLNET_CLS_ERR_ARG, RTLNET_CLS_ERR_NOT_INIT.
+ */
+int rtlnet_classifier_get_build(const rtlnet_classifier_t *ctx, rtlnet_cls_build_t *build)
+{
+    int rc = ready(ctx);
+
+    if (rc != RTLNET_CLS_OK) {
+        return rc;
+    }
+    if (build == NULL) {
+        return RTLNET_CLS_ERR_ARG;
+    }
+    build->table_entries = ctx->table_entries;
+    build->tuple_entries = ctx->tuple_entries;
+    build->num_rules = ctx->num_rules;
+    build->num_policers = ctx->num_policers;
+    build->table_lanes = ctx->table_lanes;
+    build->match_depth_bytes = ctx->match_depth_bytes;
+    build->ram_distributed = ctx->ram_distributed;
+    build->delay_beats = ctx->delay_beats;
+    build->verdict_latency = ctx->verdict_latency;
+    return RTLNET_CLS_OK;
+}
+
+/*
+ * rtlnet_classifier_protect_defaults -- fill a profile with the default limits
+ * (RTLNET_CLS_PROT_*_DEFAULT frames per RTLNET_CLS_PROT_WINDOW_MS_DEFAULT).
+ */
+void rtlnet_classifier_protect_defaults(rtlnet_cls_protect_t *profile)
+{
+    uint32_t c;
+
+    if (profile == NULL) {
+        return;
+    }
+    profile->limit_pkts[RTLNET_CLS_PROT_BROADCAST] = RTLNET_CLS_PROT_BROADCAST_DEFAULT;
+    profile->limit_pkts[RTLNET_CLS_PROT_UDP] = RTLNET_CLS_PROT_UDP_DEFAULT;
+    profile->limit_pkts[RTLNET_CLS_PROT_ARP] = RTLNET_CLS_PROT_ARP_DEFAULT;
+    profile->limit_pkts[RTLNET_CLS_PROT_ICMP] = RTLNET_CLS_PROT_ICMP_DEFAULT;
+    for (c = 0u; c < (uint32_t)RTLNET_CLS_PROT_CLASSES; c++) {
+        profile->window_ms[c] = RTLNET_CLS_PROT_WINDOW_MS_DEFAULT;
+    }
+}
+
+/*
+ * rtlnet_classifier_config_protect -- install the protection profile: every
+ * frame passes (MODE = PASS_ALL) except what the four class policers limit.
+ * Steps:
+ *   1. Check the build holds the profile (1 MAC-table entry, 2 tuples, 1
+ *      rule of 14 bytes, 4 policers) and every window is 1 ms or more;
+ *      nothing is written when it does not.
+ *   2. Clear everything (power-up state, MODE DROP_ALL).
+ *   3. Rule 0: EtherType 0x0806 at bytes 12..13, classify-only, policer ARP.
+ *   4. Tuple 0: IPv4 protocol 1, any addresses and ports, classify-only,
+ *      policer ICMP.
+ *   5. Tuple 1: IPv4 protocol 17, any addresses and ports, classify-only,
+ *      policer UDP.
+ *   6. MAC table entry 0: destination FF:FF:FF:FF:FF:FF, classify-only,
+ *      policer BROADCAST.
+ *   7. Policers 0..3 = the class limits and windows.
+ *   8. MODE = PASS_ALL.
+ * The hardware picks the policer in the order rule, tuple, MAC table, so a
+ * frame in several classes is counted once: ARP first, then ICMP, UDP,
+ * broadcast.
+ * Returns: RTLNET_CLS_OK, RTLNET_CLS_ERR_ARG, RTLNET_CLS_ERR_RANGE (the
+ * build is too small), RTLNET_CLS_ERR_NOT_INIT, or a failing step's code.
+ */
+int rtlnet_classifier_config_protect(const rtlnet_classifier_t *ctx, const rtlnet_cls_protect_t *profile)
+{
+    static const uint8_t bcast[RTLNET_CLS_MAC_BYTES] = {0xFFu, 0xFFu, 0xFFu, 0xFFu, 0xFFu, 0xFFu};
+    static const uint8_t arp_type[2] = {0x08u, 0x06u};
+    static const uint8_t arp_mask[2] = {0xFFu, 0xFFu};
+    rtlnet_cls_protect_t dflt;
+    uint32_t c;
+    int rc = ready(ctx);
+
+    if (rc != RTLNET_CLS_OK) {
+        return rc;
+    }
+    if (profile == NULL) {
+        rtlnet_classifier_protect_defaults(&dflt);
+        profile = &dflt;
+    }
+    for (c = 0u; c < (uint32_t)RTLNET_CLS_PROT_CLASSES; c++) {
+        if (profile->window_ms[c] == 0u) {
+            return RTLNET_CLS_ERR_ARG;
+        }
+    }
+    if (ctx->table_entries < RTLNET_CLS_PROT_MIN_TABLE_ENTRIES || ctx->tuple_entries < RTLNET_CLS_PROT_MIN_TUPLES ||
+        ctx->num_rules < RTLNET_CLS_PROT_MIN_RULES || ctx->num_policers < RTLNET_CLS_PROT_MIN_POLICERS ||
+        ctx->match_depth_bytes < RTLNET_CLS_PROT_MIN_MATCH_BYTES) {
+        return RTLNET_CLS_ERR_RANGE;
+    }
+    rc = rtlnet_classifier_clear_all(ctx);
+    if (rc == RTLNET_CLS_OK) {
+        rc = rtlnet_classifier_rule_pattern(ctx, 0u, RTLNET_CLS_PROT_ARP_ETYPE_OFFSET, 2u, arp_type, arp_mask);
+    }
+    if (rc == RTLNET_CLS_OK) {
+        rc = rtlnet_classifier_rule_mode(ctx, 0u, 1, 0, 1, 1, (uint32_t)RTLNET_CLS_PROT_ARP);
+    }
+    if (rc == RTLNET_CLS_OK) {
+        rc = rtlnet_classifier_acl_add(ctx, 0u, (uint8_t)RTLNET_CLS_PROT_ICMP_PROTO, 0u, 0u, 0u, 0u, 0u, 0xFFFFu, 0u,
+                                       0xFFFFu, RTLNET_CLS_ACT_CLASSIFY | RTLNET_CLS_ACT_POLICE(RTLNET_CLS_PROT_ICMP));
+    }
+    if (rc == RTLNET_CLS_OK) {
+        rc = rtlnet_classifier_acl_add(ctx, 1u, (uint8_t)RTLNET_CLS_PROT_UDP_PROTO, 0u, 0u, 0u, 0u, 0u, 0xFFFFu, 0u,
+                                       0xFFFFu, RTLNET_CLS_ACT_CLASSIFY | RTLNET_CLS_ACT_POLICE(RTLNET_CLS_PROT_UDP));
+    }
+    if (rc == RTLNET_CLS_OK) {
+        rc = rtlnet_classifier_mac_filter(ctx, 0u, bcast, RTLNET_CLS_SIDE_DST,
+                                          RTLNET_CLS_ACT_CLASSIFY | RTLNET_CLS_ACT_POLICE(RTLNET_CLS_PROT_BROADCAST));
+    }
+    for (c = 0u; rc == RTLNET_CLS_OK && c < (uint32_t)RTLNET_CLS_PROT_CLASSES; c++) {
+        rc = rtlnet_classifier_policer_set(ctx, c, 1, profile->limit_pkts[c], profile->window_ms[c]);
+    }
+    if (rc == RTLNET_CLS_OK) {
+        rc = rtlnet_classifier_set_mode(ctx, RTLNET_CLS_MODE_PASS_ALL);
+    }
+    return rc;
+}
+
+/*
+ * rtlnet_classifier_protect_limit -- change the limit and window of one class
+ * of an installed profile (enables its policer, restarts its window).
+ * Returns: RTLNET_CLS_OK, RTLNET_CLS_ERR_ARG (class or window 0),
+ * RTLNET_CLS_ERR_RANGE, RTLNET_CLS_ERR_NOT_INIT.
+ */
+int rtlnet_classifier_protect_limit(const rtlnet_classifier_t *ctx, rtlnet_cls_prot_class_t cls,
+                                    uint32_t limit_pkts, uint32_t window_ms)
+{
+    int rc = ready(ctx);
+
+    if (rc != RTLNET_CLS_OK) {
+        return rc;
+    }
+    if ((uint32_t)cls >= (uint32_t)RTLNET_CLS_PROT_CLASSES || window_ms == 0u) {
+        return RTLNET_CLS_ERR_ARG;
+    }
+    return rtlnet_classifier_policer_set(ctx, (uint32_t)cls, 1, limit_pkts, window_ms);
+}
+
+/*
+ * rtlnet_classifier_protect_get -- limit, window and counters of one class.
+ * Returns: RTLNET_CLS_OK, RTLNET_CLS_ERR_ARG, RTLNET_CLS_ERR_RANGE,
+ * RTLNET_CLS_ERR_NOT_INIT.
+ */
+int rtlnet_classifier_protect_get(const rtlnet_classifier_t *ctx, rtlnet_cls_prot_class_t cls,
+                                  rtlnet_cls_policer_t *state)
+{
+    if ((uint32_t)cls >= (uint32_t)RTLNET_CLS_PROT_CLASSES) {
+        return RTLNET_CLS_ERR_ARG;
+    }
+    return rtlnet_classifier_policer_get(ctx, (uint32_t)cls, state);
 }
