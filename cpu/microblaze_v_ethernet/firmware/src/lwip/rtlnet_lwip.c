@@ -146,6 +146,7 @@ int InitLWIP(void)
         g_netif_added = 1;
         rtlnet_features_discover();
         (void)rtlnet_offload_apply(rtlnet_offload_request());
+        (void)rtlnet_offload_boot_features();   /* ACK coalescing on at boot when the build has it */
         netif_set_default(&g_netif);
         netif_set_up(&g_netif);
         if (!g_link_down) {

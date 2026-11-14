@@ -52,6 +52,9 @@
  *    the trailer, so rx must be on (RTLNET_OFFLOAD_ERR_NEED_RX otherwise); rtlnet_offload_apply() switches them off
  *    before it turns rx off. rx batching changes the DMA transfers into batches: the netif owns the matching buffer
  *    geometry (rtlnet_netif_set_rx_batch), the CLI calls both in the order that keeps the transfers within the buffer.
+ *    Boot defaults (rtlnet_offload_boot_features, called by InitLWIP after rtlnet_offload_apply): ACK coalescing ON with
+ *    RTLNET_OFFLOAD_ACK_BOOT_TIMER_US and the core's default limit when the build has it; receive batching OFF. The running
+ *    configuration lists only what differs from these defaults.
  *
  * Host harness: the lwIP hooks (rtlnet_lwip_set_checksum_ctrl / _get_) are
  * provided by host/host_lwip_stub.c or the offload test, the register
@@ -96,6 +99,10 @@
 #define RTLNET_OFFLOAD_FEAT_ACK     0x1u    /* ACK coalescing */
 #define RTLNET_OFFLOAD_FEAT_BATCH   0x2u    /* receive batching */
 #define RTLNET_OFFLOAD_KEEP         0xFFFFFFFFu   /* "keep the current value" for a timer or limit argument */
+/* Boot default of ACK coalescing (switched on by rtlnet_offload_boot_features when the build has it): this timer, the
+ * core's default limit. Measured: 500 us raises board to PC TCP throughput with no latency cost; 1000 us collapses it. */
+#define RTLNET_OFFLOAD_ACK_BOOT_TIMER_US   500u
+#define RTLNET_OFFLOAD_ACK_BOOT_LIMIT      RTLNET_TXO_ACK_LIMIT_DEFAULT
 #define RTLNET_OFFLOAD_ERR_NEED_RX  (-3)    /* the feature works on the receive trailer: rx offload is not on */
 #define RTLNET_OFFLOAD_ERR_ABSENT   (-4)    /* the build does not have the feature */
 #define RTLNET_OFFLOAD_ERR_ARG      (-5)    /* a value outside the register range */
@@ -185,6 +192,7 @@ uint32_t                    rtlnet_offload_buffer_kb(void);
 void                        rtlnet_offload_reset_stats(void);
 
 const rtlnet_offload_feat_t *rtlnet_offload_feat(void);
+int                         rtlnet_offload_boot_features(void);
 int                         rtlnet_offload_ack_set(int on, uint32_t timer_us, uint32_t limit);
 int                         rtlnet_offload_batch_set(int on, uint32_t timer_us, uint32_t max_frames, uint32_t max_bytes);
 int                         rtlnet_offload_feat_counters(rtlnet_txo_feat_counters_t *out);

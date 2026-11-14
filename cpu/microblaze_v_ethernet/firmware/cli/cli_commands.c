@@ -1080,9 +1080,15 @@ int cli_show_running(const MenuCommandContext *ctx)
     if ((rtlnet_offload_request() & RTLNET_OFFLOAD_RX) == 0u) {
         fmt_printf("offload rx off\n");
     }
-    if ((rtlnet_offload_feat()->on & RTLNET_OFFLOAD_FEAT_ACK) != 0u) {
-        fmt_printf("offload ack-coalesce on %u %u\n", (unsigned)rtlnet_offload_feat()->ack_timer_us,
-                   (unsigned)rtlnet_offload_feat()->ack_limit);
+    /* ACK coalescing is on at boot (500 us, default limit): list it when it is off or configured differently. */
+    if ((rtlnet_offload_feat()->present & RTLNET_OFFLOAD_FEAT_ACK) != 0u) {
+        if ((rtlnet_offload_feat()->on & RTLNET_OFFLOAD_FEAT_ACK) == 0u) {
+            fmt_printf("offload ack-coalesce off\n");
+        } else if (rtlnet_offload_feat()->ack_timer_us != RTLNET_OFFLOAD_ACK_BOOT_TIMER_US ||
+                   rtlnet_offload_feat()->ack_limit != RTLNET_OFFLOAD_ACK_BOOT_LIMIT) {
+            fmt_printf("offload ack-coalesce on %u %u\n", (unsigned)rtlnet_offload_feat()->ack_timer_us,
+                       (unsigned)rtlnet_offload_feat()->ack_limit);
+        }
     }
     if ((rtlnet_offload_feat()->on & RTLNET_OFFLOAD_FEAT_BATCH) != 0u) {
         fmt_printf("offload rx-batch on %u %u\n", (unsigned)rtlnet_offload_feat()->bat_timer_us,
@@ -2150,9 +2156,10 @@ int cli_show_offload(const MenuCommandContext *ctx)
                (unsigned)st->rx_unverified, (unsigned)st->rx_drop_ip, (unsigned)st->rx_drop_l4,
                (unsigned)st->rx_no_trailer, (unsigned)st->rx_raw);
     fmt_printf("  Build options   : zero-copy RX %s (%u buffers of %u bytes), zero-copy TX %s; frames sent in place %u, "
-               "copied %u, rx no buffer %u\n", RTLNET_NETIF_ZERO_COPY_RX ? "on" : "off", (unsigned)RTLNET_NETIF_RX_BUFS,
+               "copied %u (chained pbufs %u, outside the buffer RAM %u), rx no buffer %u\n", RTLNET_NETIF_ZERO_COPY_RX ? "on" : "off", (unsigned)RTLNET_NETIF_RX_BUFS,
                (unsigned)RTLNET_NETIF_BUF_BYTES, RTLNET_NETIF_ZERO_COPY_TX ? "on" : "off", (unsigned)ns->tx_zero_copy,
-               (unsigned)ns->tx_copied, (unsigned)ns->rx_no_buf);
+               (unsigned)ns->tx_copied, (unsigned)ns->tx_copy_chained, (unsigned)ns->tx_copy_outside,
+               (unsigned)ns->rx_no_buf);
     cli_show_offload_features();
     return 0;
 }

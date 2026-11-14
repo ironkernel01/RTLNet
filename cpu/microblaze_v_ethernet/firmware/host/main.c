@@ -616,6 +616,8 @@ static void demo_offload(void)
     demo_check(strstr(host_capture_text(), "% This build has no such feature") != NULL, "offload rx-batch: refused without the hardware");
     demo_type("offload tx-ip on 5\r");
     demo_check(strstr(host_capture_text(), "belong to ack-coalesce and rx-batch") != NULL, "offload tx-ip: the timer argument is for the features");
+    demo_check(rtlnet_offload_boot_features() == RTLNET_OFFLOAD_ERR_ABSENT && host_model_txo_ctrl() == RTLNET_OFFLOAD_ALL,
+               "boot defaults: no ACK coalescing hardware, nothing written");
     demo_type("end\r");
     demo_build(1, 1, 0x00070000u | DEMO_CPU_QUEUES, 1, DEMO_CAPS_BOTH | RTLNET_TXO_CAPS_ACK_COALESCE | RTLNET_TXO_CAPS_RX_BATCH);
     demo_check(rtlnet_offload_feat()->present == (RTLNET_OFFLOAD_FEAT_ACK | RTLNET_OFFLOAD_FEAT_BATCH) &&
@@ -626,7 +628,28 @@ static void demo_offload(void)
     demo_type("offload ack-coalesce on\r");
     demo_check(strstr(host_capture_text(), "turn the receive offload on first") != NULL && host_model_txo_ctrl() == 0u,
                "offload ack-coalesce: needs rx on");
+    demo_check(rtlnet_offload_boot_features() == RTLNET_OFFLOAD_ERR_NEED_RX, "boot defaults: refused while rx offload is off");
     demo_check(rtlnet_offload_apply(RTLNET_OFFLOAD_ALL) == RTLNET_OFFLOAD_OK, "features: apply(all)");
+    /* Boot defaults: ACK coalescing on at 500 us with the default limit, batching untouched; the running configuration
+     * lists nothing for them, lists "ack-coalesce off" when it is switched off, and a changed setting with its values. */
+    demo_check(rtlnet_offload_boot_features() == RTLNET_OFFLOAD_OK && (host_model_txo_ctrl() & RTLNET_TXO_CTRL_ACK_COALESCE) != 0u &&
+               (host_model_txo_ctrl() & RTLNET_TXO_CTRL_RX_BATCH) == 0u && host_model_txo_cfg(0) == 500u &&
+               host_model_txo_cfg(1) == RTLNET_TXO_ACK_LIMIT_DEFAULT && rtlnet_offload_feat()->on == RTLNET_OFFLOAD_FEAT_ACK,
+               "boot defaults: ACK coalescing on at 500 us, receive batching off");
+    demo_type("end\r");
+    host_capture_clear();
+    demo_type("show running-config\r");
+    demo_check(strstr(host_capture_text(), "ack-coalesce") == NULL && strstr(host_capture_text(), "rx-batch") == NULL,
+               "running-config: the boot defaults are not listed");
+    demo_type("configure terminal\r");
+    demo_type("offload ack-coalesce off\r");
+    demo_check((host_model_txo_ctrl() & RTLNET_TXO_CTRL_ACK_COALESCE) == 0u && rtlnet_offload_feat()->on == 0u,
+               "offload ack-coalesce off: bit cleared");
+    demo_type("end\r");
+    host_capture_clear();
+    demo_type("show running-config\r");
+    demo_check(strstr(host_capture_text(), "offload ack-coalesce off") != NULL, "running-config lists ack-coalesce when it is off");
+    demo_type("configure terminal\r");
     host_capture_clear();
     demo_type("offload ack-coalesce on 250 5\r");
     demo_check((host_model_txo_ctrl() & RTLNET_TXO_CTRL_ACK_COALESCE) != 0u && host_model_txo_cfg(0) == 250u &&

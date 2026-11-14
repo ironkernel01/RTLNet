@@ -185,6 +185,13 @@ auto-negotiates. There is no duplex, autoneg or advertise command.
 | `ip dhcp` | `start`, `stop`, `renew`, `auto`, `no auto` |
 | `socket <n>` | `open`, `close`, `remote`, `connect-on-receive` |
 
+Boot defaults of the receive features of the checksum offload core (`offload ack-coalesce|rx-batch <on|off> [timer-us] [limit]`, section 6e):
+ACK coalescing is on at boot with a 500 microsecond timer and the core's default limit of 8 ACKs, when the build has the feature (CAPS bit);
+receive batching is off at boot and stays available through the command. `InitLWIP` calls `rtlnet_offload_boot_features` after the
+checksum offload request; a build without the feature writes nothing, and a build without the receive offload leaves it off. `show running-config`
+lists only what differs from these defaults: `offload ack-coalesce off`, or `offload ack-coalesce on <timer> <limit>` for another setting, and
+`offload rx-batch on <timer> <frames>` while batching is on; `show offload` always shows the state, timer, limit and counters.
+
 ### 5a. Protection profile of the CPU path
 
 The classifier on the CPU receive stream stays in `MODE` pass-all (no whitelist: the protocol ingress filter admits only the
@@ -215,10 +222,38 @@ Hardware test: `test/flood_test.ps1 -Port <COM> -Nic <adapter> [-Board <ip>] [-K
 sockets (Python standard library, iphlpapi through ctypes): UDP to the board (closed port, echo port), UDP broadcast (limited and subnet),
 UDP multicast to a group the board never joined, ICMP echo (to the board and to the subnet broadcast) and ARP (SendARP), while one TCP echo
 connection exchanges data, the board is pinged and the console answers `show classifier` and `show system`. Pass per flood: frames sent, no TCP
-error, every console answer within `-ConsoleBoundMs` (3000), ping loss within `-MaxPingLossPct` (20), uptime advanced (no reset), the policed
-class (udp, icmp) shows drops, the other classes drop at most `-OtherDropTolerance`; multicast is counted as filtered and in no class. The
-`broadcast` class (broadcast that is not ARP, ICMP or UDP) cannot be exercised with sockets; `udp-echo` and `icmp-board` are answered by hardware;
-`arp` is reported, not required (SendARP blocks per call and the request on the wire is not verified), unless `-RequireArp`.
+error, every console answer within `-ConsoleBoundMs` (3000), ping loss within `-MaxPingLossPct` (40), uptime advanced (no reset), the policed
+class (udp, icmp) shows drops when the frames that reached the board exceed its policer rate (otherwise the row reads "generator below policer
+limit: not exercised" and passes), the other classes drop at most `-OtherDropTolerance`. Multicast: no class counts it, and every multicast frame
+the MAC received is counted as `filtered` (the MAC rx-good delta of `show counters` minus the delta of `ingress`, the frames that passed the
+filter, equals the `filtered` delta, and is above zero). For the multicast and broadcast kinds the test reports frames sent against frames that
+reached the board. `icmp-bcast` runs 32 sender threads by default (4 stay below the policer). The `broadcast` class (broadcast that is not ARP,
+ICMP or UDP) cannot be exercised with sockets; `udp-echo` and `icmp-board` are answered by hardware; `arp` is reported, not required (SendARP
+blocks per call and the request on the wire is not verified), unless `-RequireArp`.
+
+Measured on the Nexys Video (image `eth_m1` with the firmware of section 6e, 1000 Mb/s through a switch, 10 s per flood, one TCP echo connection
+running, policer limits of section 5a). Both passes end with `FLOOD_TEST: PASS` (95 of 95 rows at 1000 frames per second, 50 of 50 at 20000 for
+udp-closed, udp-bcast-net, mcast and icmp-bcast); every TCP echo byte exact, console answers within 250 ms, no reset:
+
+| Kind | Rate offered | Frames sent | Reached the board | Policed class: passed / dropped |
+|---|---:|---:|---:|---|
+| udp-closed (unicast, closed port) | 1000 per s | 10000 | 10001 | udp: 1011 / 8990 |
+| udp-closed | 20000 per s | 200000 | 199602 | udp: 1010 / 198592 |
+| udp-bcast-lim (255.255.255.255) | 1000 per s | 10000 | 5051 | udp: 598 / 4453 |
+| udp-bcast-net (subnet broadcast) | 1000 per s | 10000 | 4868 | udp: 579 / 4289 |
+| udp-bcast-net | 20000 per s | 200000 | 4998 | udp: 280 / 4718 |
+| mcast (group the board never joined) | 1000 per s | 10000 | 5049 | none: `filtered` +5049, MAC rx good +26613, ingress +21564 |
+| mcast | 20000 per s | 200000 | 5401 | none: `filtered` +5401, MAC rx good +26646, ingress +21245 |
+| icmp-bcast (32 threads) | 1000 per s | 672 | 672 | icmp: 309 / 363 |
+| icmp-bcast (32 threads) | 20000 per s | 800 | 800 | icmp: 292 / 508 |
+
+Observation of this network: broadcast and multicast frames arrive at the board at about 500 to 550 frames per second whatever the offered rate
+(1000 or 20000 per second give 4900 to 5400 frames in 10 s), while a unicast flood arrives at the full rate. The limit is upstream of the board (the
+switch or the PC adapter); the board's counters show exactly what arrived. The same upstream limit shows as ping loss of 11 to 33 % during a 20000
+per second multicast or broadcast flood, including the multicast flood that the board discards at the ingress filter, so that loss does not come from
+the CPU path (hence the `-MaxPingLossPct` default of 40). A broadcast ICMP echo flood needs 32 sender threads to exceed the policer rate (at 4
+threads the 88 frames of a 10 s run all pass: reported as not exercised). With about 500 frames per second arriving against a policer rate of 100 per
+second (10 per 100 ms), the udp class drops 88 to 94 % of the broadcast frames that reach it.
 
 ### Build
 
@@ -238,7 +273,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File cpu/microblaze_v_ethernet/fi
 | CLI tables | `firmware/cli/check_menu.py` | `CHECK PASS` |
 | CLI desktop session | `firmware/build.ps1 -NoFirmware -Demo` | `TEST PASS` (385 checks, including the protection profile on the default, the small and a too-small classifier, `show classifier`, `classifier policer`, running-config, clear counters) |
 | Protection profile on the board top | `boards/nexys_video/testbench/tb_rtlnet_nexys_video_eth.sv` (stand-in task `cls_config_protect`) | broadcast, UDP, ARP and ICMP classes each above their limit with unicast TCP segments interleaved: exactly the limits and every TCP segment reach the CPU, byte-exact and in order; per-policer and per-table counters |
-| Protection profile on the board | `test/flood_test.ps1` | written and syntax-checked, not run (needs the board) |
+| Protection profile on the board | `test/flood_test.ps1` on `eth_m1`, section 5a | `FLOOD_TEST: PASS 95/95` at 1000 frames per second (all kinds), `PASS 50/50` at 20000 (udp-closed, udp-bcast-net, mcast, icmp-bcast) |
 | DMA netif, lwiperf loopback, txring | `firmware/test/regression.txt` | `NETIF_HOST`, `LWIPERF_LOOPBACK`, `TXRING_TEST`, `PHY_HOST_TEST` (25 checks, mock MDIO bus) PASS |
 | Hardware tests | `test/run_all.ps1 -Port <COM> -Nic <adapter> -LinkMbps 10|100|1000` | results table `test/out/results_<speed>.txt` and `.csv` |
 | Board bench modes | `tb_rtlnet_nexys_video_eth`: `COMMON_CLK` 2 (tags g10, g100, g1000, neg), 0 (g10mc, g100mc, g1000mc) | 154 checks each, 155 with `INJECT_FAILURE` (expected failure) |
@@ -354,12 +389,65 @@ Intermediate builds with a subset of the core changes failed by -1.478, -0.154 a
 | TX frames / ip patched / l4 patched / skipped / malformed | 0 / 0 / 0 / 0 / 0 | 156614 / 156614 / 156614 / 0 / 0 (every transmitted frame got its checksums from the hardware) |
 | RX frames / verified / ip bad / l4 bad / unverified | 0 / 0 / 0 / 0 / 0 | 190450 / 190436 / 0 / 0 / 14 (the 14 unverified frames are not TCP/UDP) |
 | lwIP checksum flags | GEN ip, udp, tcp hw; icmp sw; CHECK ip, udp, tcp hw; icmp sw | unchanged: no software checksum for IP, TCP or UDP |
-| Frames sent in place (zero-copy transmit) / copied | 0 / 0 | 74702 / 81912 (the copies are chained pbufs: header and data in separate pbufs, ARP, ICMP) |
+| Frames sent in place (zero-copy transmit) / copied | 0 / 0 | 74702 / 81912 (one counter over both directions: the in-place frames are the pure ACKs of the PC to board run, the copies are the data segments of the board to PC run, section 6f) |
 | DMA receive no-pbuf / errors, DMA transmit timeouts / errors | 0 | 0 |
 
 With the small-memory firmware (`-LmbKb 256`, same hardware) at `speed 100`: TCP iperf 94.5 Mbit/s PC to board and 94.9 Mbit/s board to PC (line rate, as measured
 with the first image of the 100 Mb/s test).
 
+
+## 6e. Receive features: ACK coalescing and receive batching (Nexys Video, 1000 Mb/s)
+
+The checksum offload core can hold back and merge the pure TCP ACKs on the receive path (ACK coalescing: per flow, a timer in microseconds and a
+limit of ACKs per forwarded ACK) and deliver received frames to the CPU in batches (receive batching: a timer, a frame limit and a byte limit).
+Both work on the receive trailer, so `offload rx` must be on; `offload ack-coalesce|rx-batch on|off [timer-us] [limit]` switches them, `show offload`
+shows state, configuration and counters. Measured on image `eth_m1` (the firmware before section 6f, 1000 Mb/s through a switch, iperf 2, 10 s runs,
+mean of 3, `clear counters` before the last run; ACK limit 8 and batch limit 16 frames; echo: 2000 TCP requests of 64 bytes, mean round trip):
+
+| Setting | PC to board (Mbit/s) | Board to PC (Mbit/s) | TCP echo 64 B mean (ms) |
+|---|---:|---:|---:|
+| both off | 344.7 (repeat 344.3) | 194 (repeat 194) | 0.200 |
+| ACK coalescing 200 us | 347.7 | 218 | |
+| ACK coalescing 300 us | 347.7 | 224 | |
+| ACK coalescing 500 us | 346.0 | 227 | 0.200 |
+| ACK coalescing 1000 us | 346.0 | 146 | |
+| batching 10 us | 346.0 | 195 | 0.234 |
+| batching 30 us | 311.7 | 195 | 0.232 |
+| batching 100 us | 267.0 | 195 | 0.301 |
+| batching 300 us | 204.7 | 195 | |
+| ACK coalescing 500 us and batching 30 us | 313.3 | 226 | 0.236 |
+
+Result and recommendation: ACK coalescing at 500 microseconds raises board to PC throughput by 17 % (194 to 227 Mbit/s) with no change of PC to
+board throughput or latency and no error; shorter timers give less, and 1000 microseconds collapses it (146 Mbit/s, the held ACKs stall the sender's
+window). It is therefore on at boot with 500 microseconds and the default limit. Receive batching never raises throughput: from 30 microseconds
+it costs 10 to 40 % of the PC to board throughput, and every setting adds 0.03 to 0.10 ms to the round trip; it is off at boot and stays available
+through the CLI. The ACK counters after one 10 s board to PC run (500 us): 107535 candidates, 90679 dropped, 16856 forwarded (15932 by the timer).
+
+## 6f. Zero-copy transmit of TCP data (board to PC)
+
+`netif_linkoutput` sends a frame in place only when it is one pbuf inside the frame buffer RAM (`p->next == NULL`, simple-mode DMA, one contiguous
+buffer); everything else is copied into a transmit buffer. lwIP's heap lies in that RAM (map file of `eth_m1`: `.axi_bram` at 0x00100000, 0x19080 bytes,
+`rtlnet_lwip_heap` at its start), so the cause of the copies was not the heap placement. The iperf server queued its data segments by reference
+(`tcp_write` without `TCP_WRITE_FLAG_COPY`, payload a constant array in the LMB): each segment is a chain of a header pbuf (heap) and a payload
+reference (ROM), never one buffer. The netif counters tell the two reasons apart (`show offload`: "copied N (chained pbufs a, outside the buffer RAM b)").
+One 10 s board to PC run on the earlier image: frames sent in place 3, copied 190972, of them chained pbufs 190972, outside the buffer RAM 0. The
+code was not changed by the receive-feature merge; the earlier "half in place" figure (section 6d) was a counter over both directions of a run, where
+the PC to board ACKs are single pbufs.
+
+The data segments of the iperf server are now copied by `tcp_write` (`TCP_WRITE_FLAG_COPY`, option `RTLNET_LWIPERF_TX_COPY`, on with zero-copy
+transmit and the 512 KiB profile) into one contiguous pbuf in the heap, and the frame is sent from there: the copy is made once, by the CPU
+over the data-side LMB (1 to 2 clocks per word) instead of word by word into the transmit buffer, and a retransmission needs no copy. The
+small-memory profile keeps the references (its 24 KiB heap cannot hold a full send queue of copies). Same image, same setup, ACK coalescing 500 us
+(the boot default):
+
+| Image | PC to board (Mbit/s, 3 runs) | Board to PC (Mbit/s, 3 runs) | Frames sent in place / copied, board to PC run |
+|---|---|---|---|
+| references (before) | 347, 349, 348 | 223, 223, 223 | 3 / 190972 |
+| copy by `tcp_write` (after) | 349, 348, 345 | 285, 284, 282 | 242397 / 0 |
+| copy by `tcp_write`, final image, repeat | 343, 340, 344 | 283, 282, 282 | 242875 / 0 |
+
+The PC to board run sends only pure ACKs (single pbufs): in place 147687 and copied 0 after, 149034 and 0 before. A gather transmit would need a
+scatter-gather DMA; the simple-mode DMA of the design sends one contiguous buffer.
 
 ## 7. Limitations
 
@@ -370,6 +458,7 @@ with the first image of the 100 Mb/s test).
 
 ## 8. Revision history
 
+* 11-14-2026: ACK coalescing on at boot (500 us), receive batching off (CLI section, measured matrix in 6e); data segments of the iperf server copied into one pbuf in the frame buffer RAM and sent in place (6f); flood test criteria, default thread count and measured table (5a).
 * 11-14-2026: Arty A7-100T build-out: second board, `ARTY` board ID, DP83848 row of the PHY table, section 6a changed from an estimate to the measured `arty_dev` build (105.5 of 135 tiles), verification and build rows.
 * 11-14-2026: clock tree section 2a (`COMMON_CLK`), dual-port frame buffer RAM on the data-side LMB with its address map, processor options, the 125 MHz study (6c), the Arty estimate with the classifier kept (6a).
 * 11-14-2026: first version (derived from the H.264 demo CPU with the DDR3 path, caches and video removed).

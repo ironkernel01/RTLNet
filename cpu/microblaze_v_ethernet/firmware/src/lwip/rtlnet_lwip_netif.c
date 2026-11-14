@@ -464,6 +464,11 @@ static err_t netif_linkoutput(struct netif *nif, struct pbuf *p)
     } else {
         g_tx_idx = (g_tx_idx + 1u) % RTLNET_NETIF_TX_BUFS;
         g_st.tx_copied++;
+        if (p->next != NULL) {
+            g_st.tx_copy_chained++;
+        } else {
+            g_st.tx_copy_outside++;
+        }
     }
     g_st.tx_frames++;
     g_st.tx_bytes += len;

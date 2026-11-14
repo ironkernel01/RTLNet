@@ -132,6 +132,8 @@ typedef struct {
     uint32_t rx_no_buf;       /* polls that found no free receive buffer to arm (zero-copy receive) */
     uint32_t tx_zero_copy;    /* frames sent from the pbuf in place */
     uint32_t tx_copied;       /* frames copied into a transmit buffer */
+    uint32_t tx_copy_chained; /* ... of those: the pbuf was a chain (header pbuf plus a payload reference) */
+    uint32_t tx_copy_outside; /* ... of those: a single pbuf outside the frame buffer RAM (pool, ROM, LMB) */
     uint32_t rx_budget_hits;  /* polls that used the whole frame budget (more frames were waiting) */
     uint32_t rx_batches;      /* receive batching: transfers walked (a single frame is a batch of one) */
     uint32_t rx_batch_frames; /* frames taken out of them */

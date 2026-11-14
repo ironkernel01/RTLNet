@@ -206,7 +206,10 @@
  * pbufs (default on: with the receive offload it halves the CPU load of bulk receive, 81% -> 35% busy at
  * 94.8 Mbit/s); lwIP's heap sits in the dual-port frame buffer RAM so a single-pbuf frame is sent in place (default ON
  * with the Ethernet design: the CPU reaches that RAM over the data-side LMB, 1-2 clocks per access; with the buffer RAM
- * behind M_AXI_DP every heap access cost about 16 cycles and the in-place send was slower than the copy). */
+ * behind M_AXI_DP every heap access cost about 16 cycles and the in-place send was slower than the copy). A frame goes
+ * out in place only as ONE pbuf in that RAM: segments queued by reference (a header pbuf plus a payload pbuf, TCP_WRITE_FLAG_COPY
+ * absent) are chains and are always copied, so TCP data that matters for throughput is written with TCP_WRITE_FLAG_COPY
+ * (the iperf server: RTLNET_LWIPERF_TX_COPY, 285 against 223 Mbit/s board to PC). */
 #define LWIP_CHECKSUM_CTRL_PER_NETIF    1
 #define LWIP_SUPPORT_CUSTOM_PBUF        1
 #ifndef RTLNET_NETIF_ZERO_COPY_RX

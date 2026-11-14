@@ -575,6 +575,18 @@ int rtlnet_offload_ack_set(int on, uint32_t timer_us, uint32_t limit)
 }
 
 /*
+ * rtlnet_offload_boot_features -- the boot defaults of the receive features: ACK coalescing on with
+ * RTLNET_OFFLOAD_ACK_BOOT_TIMER_US and the default limit, receive batching off (never switched here).
+ * Only when the core reports the feature in CAPS (ERR_ABSENT otherwise, nothing written) and rx offload is on
+ * (ERR_NEED_RX otherwise); call it after rtlnet_offload_apply.
+ * Returns: RTLNET_OFFLOAD_OK, or the result of rtlnet_offload_ack_set.
+ */
+int rtlnet_offload_boot_features(void)
+{
+    return rtlnet_offload_ack_set(1, RTLNET_OFFLOAD_ACK_BOOT_TIMER_US, RTLNET_OFFLOAD_ACK_BOOT_LIMIT);
+}
+
+/*
  * rtlnet_offload_batch_set -- receive batching on or off, with the timer, the frame limit and the byte limit.
  *
  * The byte limit is the size of the DMA buffer the netif arms: no transfer is longer. The netif switches its

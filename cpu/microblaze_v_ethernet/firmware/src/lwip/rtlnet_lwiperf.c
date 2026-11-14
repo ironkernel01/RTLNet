@@ -206,6 +206,19 @@ static rtlnet_lwiperf_state_tcp_t *rtlnet_lwiperf_slot_owner[RTLNET_LWIPERF_SLOT
                             RTLNET_LWIPERF_P10, RTLNET_LWIPERF_P10, RTLNET_LWIPERF_P10, RTLNET_LWIPERF_P10, \
                             RTLNET_LWIPERF_P10, RTLNET_LWIPERF_P10
 
+/* RTLNET-MOD: data segments by reference (ROM pbuf, no copy) build a chain of a header pbuf and a payload reference, which
+ * the DMA netif cannot send in place (simple-mode DMA, one contiguous buffer): every frame is copied into a transmit buffer.
+ * With the frame buffer RAM heap (RTLNET_NETIF_ZERO_COPY_TX) the data is copied once, by tcp_write, into one contiguous
+ * pbuf in that RAM, and the frame is sent from there; this is also what an application that owns its data does.
+ * The small-memory profile keeps the reference (its heap is too small to hold a full send queue of copies). */
+#ifndef RTLNET_LWIPERF_TX_COPY
+#if defined(RTLNET_NETIF_ZERO_COPY_TX) && RTLNET_NETIF_ZERO_COPY_TX && !defined(RTLNET_SMALL_MEM)
+#define RTLNET_LWIPERF_TX_COPY             1
+#else
+#define RTLNET_LWIPERF_TX_COPY             0
+#endif
+#endif
+
 /** A const buffer to send from: we want to measure sending, not copying! */
 static const u8_t rtlnet_lwiperf_txbuf_const[1600] = {
   RTLNET_LWIPERF_P100, RTLNET_LWIPERF_P100, RTLNET_LWIPERF_P100, RTLNET_LWIPERF_P100,
@@ -426,7 +439,7 @@ rtlnet_lwiperf_tcp_tx_more(rtlnet_lwiperf_state_tcp_t *conn)
         len = (u16_t)(conn->amount - sent); /* last chunk of a byte-limited test */
       }
       txptr = &rtlnet_lwiperf_txbuf_const[sent % 10U];
-      apiflags = 0; /* no copying needed */
+      apiflags = RTLNET_LWIPERF_TX_COPY ? TCP_WRITE_FLAG_COPY : 0; /* RTLNET-MOD: see RTLNET_LWIPERF_TX_COPY */
     }
     if (tcp_sndbuf(pcb) < len) {
       break; /* wait for acknowledgements */

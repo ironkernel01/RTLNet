@@ -16,9 +16,13 @@ Overview:
   * Pass criteria per flood (each a table row): the generator sent frames; the TCP echo had no error and moved data; every
     console answer within -ConsoleBoundMs; ping loss within -MaxPingLossPct; the board's uptime advanced by about the flood
     time (no reset); the profile is still installed; the policed class shows drops where the rate is above its policer
-    (udp-closed, udp-bcast-lim, udp-bcast-net, icmp-bcast); the other classes drop at most -OtherDropTolerance frames;
-    mcast: no class counts it and the `filtered` counter rises. udp-echo, icmp-board and arp are reported, not required
-    (see below), arp is required to rise only with -RequireArp.
+    (udp-closed, udp-bcast-lim, udp-bcast-net, icmp-bcast) when the frames that reached the board exceed the policer rate,
+    otherwise the row reads "generator below policer limit: not exercised" and passes; the other classes drop at most
+    -OtherDropTolerance frames; mcast: no class counts it and every multicast frame the MAC received (MAC rx good minus
+    the frames that passed the ingress filter) is in the `filtered` counter. Frames sent against frames that reached the
+    board are reported for the multicast and broadcast kinds (a switch or the PC adapter may deliver far fewer than were
+    sent). udp-echo, icmp-board and arp are reported, not required (see below), arp is required to rise only with
+    -RequireArp. icmp-bcast runs 32 sender threads unless -IcmpThreads says otherwise (4 stay below the policer).
   * What the kinds cannot do: a frame that is not UDP, ICMP or ARP cannot be sent, so the `broadcast` class (broadcast that
     is not ARP, ICMP or UDP) is never exercised and UDP broadcasts count in the `udp` class. udp-echo and icmp-board are
     answered by hardware and normally do not reach the CPU path. SendARP blocks per call (until the request times out), so
@@ -28,8 +32,13 @@ Overview:
 Usage (example addresses 192.0.2.x):
   powershell -NoProfile -ExecutionPolicy Bypass -File cpu/microblaze_v_ethernet/test/flood_test.ps1 -Port <COM port> -Nic <PC adapter> `
     [-Board 192.0.2.50] [-Kinds udp-closed,udp-bcast-net,mcast,icmp-bcast] [-Seconds 10] [-Rate 1000] [-ConsoleBoundMs 3000] `
-    [-MaxPingLossPct 20] [-OtherDropTolerance 5] [-RequireArp] [-OutDir <dir>] [-Csv <file>]
+    [-MaxPingLossPct 40] [-OtherDropTolerance 5] [-RequireArp] [-OutDir <dir>] [-Csv <file>]
 Revision: 11-14-2026
+  * 11-14-2026: -MaxPingLossPct default 40 (was 20): under a 20000/s multicast or broadcast flood the ping loss reads 11 to 33 %
+    with the multicast flood too, which the board discards at the ingress filter before the CPU, so the loss is upstream.
+  * 11-14-2026: multicast criterion by the MAC rx-good and ingress counters (every received multicast frame is filtered), sent
+    against reached reported for the multicast and broadcast kinds, icmp-bcast defaults to 32 threads, a policed kind whose
+    generator stays below the policer rate reads "not exercised".
   * 11-14-2026: initial version; normal sockets only.
 -------------------------------------------------------------------------------
 #>
@@ -41,7 +50,7 @@ param(
     [int]$Seconds = 10,
     [int]$Rate = 1000,
     [int]$ConsoleBoundMs = 3000,
-    [int]$MaxPingLossPct = 20,
+    [int]$MaxPingLossPct = 40,
     [int]$OtherDropTolerance = 5,
     [switch]$RequireArp,
     [int]$IcmpThreads = 0,
@@ -93,6 +102,16 @@ function Get-FloodFiltered([string]$text) {
     if ($m.Success) { return [int64]$m.Groups[2].Value }
     return -1
 }
+function Get-FloodMacRxGood([string]$text) {
+    $m = [regex]::Match($text, 'MAC\s+: rx good (\d+)')
+    if ($m.Success) { return [int64]$m.Groups[1].Value }
+    return -1
+}
+function Get-FloodIngress([string]$text) {
+    $m = [regex]::Match($text, 'Protocol\s+: ingress (\d+), filtered (\d+)')
+    if ($m.Success) { return [int64]$m.Groups[1].Value }
+    return -1
+}
 function Measure-FloodCli($sp, [string]$cmd) {
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $o = Send-EthCli $sp $cmd ($ConsoleBoundMs * 3)
@@ -104,7 +123,8 @@ function Get-FloodState($sp) {
     $c = Measure-FloodCli $sp 'show classifier'
     $k = Measure-FloodCli $sp 'show counters'
     $u = Measure-FloodCli $sp 'show system'
-    return [pscustomobject]@{ Cls = (Get-FloodClassifier $c.Text); Filtered = (Get-FloodFiltered $k.Text); UpMs = (Get-FloodUptimeMs $u.Text) }
+    return [pscustomobject]@{ Cls = (Get-FloodClassifier $c.Text); Filtered = (Get-FloodFiltered $k.Text); UpMs = (Get-FloodUptimeMs $u.Text);
+        RxGood = (Get-FloodMacRxGood $k.Text); Ingress = (Get-FloodIngress $k.Text) }
 }
 
 # Policed class per kind ('' = none) and whether drops are required.
@@ -125,7 +145,9 @@ foreach ($kind in $Kinds) {
     $errFile = Join-Path $script:EthOutDir ("flood_{0}_error.txt" -f $kind)
     $pyArgs = @('-I', ('"{0}"' -f $pyScript), $board, '--bind', $src, '--net', $net, '--prefix', "$prefix", '--bcast', $bcast,
         '--kind', $kind, '--rate', "$Rate", '--seconds', "$Seconds")
-    if ($IcmpThreads -gt 0) { $pyArgs += @('--icmp-threads', "$IcmpThreads") }
+    # icmp-bcast needs 32 sender threads to exceed the policer (4 threads stay below it); -IcmpThreads overrides.
+    $threads = if ($IcmpThreads -gt 0) { $IcmpThreads } elseif ($kind -eq 'icmp-bcast') { 32 } else { 0 }
+    if ($threads -gt 0) { $pyArgs += @('--icmp-threads', "$threads") }
     $proc = Start-Process -FilePath $py -ArgumentList $pyArgs -NoNewWindow -PassThru -RedirectStandardOutput $outFile -RedirectStandardError $errFile
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $maxCliMs = 0; $cliBad = 0; $cliN = 0; $pingSent = 0; $pingLost = 0; $lastUp = -1; $upBackwards = 0
@@ -177,7 +199,17 @@ foreach ($kind in $Kinds) {
         }
         if ($policed.ContainsKey($kind)) {
             $pc = $policed[$kind]; $d = $delta[$pc]
-            Add-EthRow "${kind}: class $pc policed, drops above its limit $($d.Limit) per $($d.Window) ms" ("seen +{0}, passed +{1}, dropped +{2}" -f $d.Seen, $d.Passed, $d.Dropped) '' ($d.Dropped -gt 0)
+            $sentTxt = if ($done.Success) { $done.Groups[1].Value } else { '?' }
+            Add-EthRow "${kind}: frames sent by the generator against frames that reached the board (class $pc seen)" ("sent {0}, reached {1}" -f $sentTxt, $d.Seen) '' $true
+            # Drops are required only where the traffic that arrived exceeds the policer rate (limit per window, over the
+            # flood time). A generator that stays below it cannot exercise the policer: reported, not a failure.
+            $genSec = if ($done.Success) { [double]::Parse($done.Groups[2].Value, [System.Globalization.CultureInfo]::InvariantCulture) } else { [double]$Seconds }
+            $policerFrames = [double]$d.Limit * ($genSec * 1000.0 / [double]$d.Window)
+            if (($d.Dropped -eq 0) -and ($d.Seen -le $policerFrames)) {
+                Add-EthRow "${kind}: class $pc policer ($($d.Limit) per $($d.Window) ms)" ("generator below policer limit: not exercised (seen +{0} of {1:N0} allowed in {2} s)" -f $d.Seen, $policerFrames, $genSec) '' $true
+            } else {
+                Add-EthRow "${kind}: class $pc policed, drops above its limit $($d.Limit) per $($d.Window) ms" ("seen +{0}, passed +{1}, dropped +{2}" -f $d.Seen, $d.Passed, $d.Dropped) '' ($d.Dropped -gt 0)
+            }
         } elseif ($reported.ContainsKey($kind)) {
             $rc = $reported[$kind]; $d = $delta[$rc]
             $need = ($kind -eq 'arp') -and $RequireArp
@@ -194,9 +226,18 @@ foreach ($kind in $Kinds) {
             $seenAll = 0
             foreach ($name in @('broadcast', 'udp', 'arp', 'icmp')) { $seenAll += $delta[$name].Seen }
             Add-EthRow 'mcast: no class counts the multicast frames' $seenAll 'frames' ($seenAll -le $OtherDropTolerance + 50)
-            if ($before.Filtered -ge 0 -and $after.Filtered -ge 0 -and $done.Success) {
+            if ($before.Filtered -ge 0 -and $after.Filtered -ge 0 -and $before.RxGood -ge 0 -and $after.RxGood -ge 0 -and $done.Success) {
+                # Every frame the MAC received either passed the ingress filter (counted in "ingress": the TCP echo, ping
+                # and console traffic) or was discarded and counted in "filtered": the multicast frames that reached the
+                # board are rx-good minus ingress and must all be in filtered. The sender, the switch or the PC adapter
+                # may deliver fewer frames than were sent; that is reported, not judged.
                 $f = $after.Filtered - $before.Filtered
-                Add-EthRow 'mcast: ingress filter counted the multicast frames as filtered' ("filtered +{0} for {1} sent" -f $f, $done.Groups[1].Value) '' ($f -gt ([int64]$done.Groups[1].Value / 4))
+                $rx = $after.RxGood - $before.RxGood
+                $ing = $after.Ingress - $before.Ingress
+                $mc = $rx - $ing
+                $tol = [math]::Max(5, [int64]($rx / 1000))
+                Add-EthRow 'mcast: frames sent against frames that reached the board (MAC rx good minus ingress)' ("sent {0}, reached {1}" -f $done.Groups[1].Value, $mc) '' $true
+                Add-EthRow 'mcast: every multicast frame the MAC received is counted as filtered' ("filtered +{0}, MAC rx good +{1}, ingress +{2}, unaccounted {3}" -f $f, $rx, $ing, ($mc - $f)) '' (([math]::Abs($mc - $f) -le $tol) -and ($f -gt 0))
             }
         }
     }
