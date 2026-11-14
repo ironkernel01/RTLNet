@@ -173,13 +173,14 @@ mode, the profile state, and per class the limit, window, seen, passed and dropp
 class). `clear counters` clears the classifier and every policer counter; `show running-config` lists the four limits. There is no
 generic rule or table editor and no whitelist command.
 
-Hardware test: `test/flood_test.ps1 -Port <COM> -Nic <adapter> [-Board <ip>] [-Seconds 20]` loads the board for `-Seconds` with UDP
-broadcast, UDP multicast, ARP and ICMP while one TCP echo connection keeps exchanging 1460-byte blocks, the board is pinged and the console
-answers `show classifier` and `show system` in a loop. Pass: no TCP error, every console answer within `-ConsoleBoundMs` (3000), ping loss
-within `-MaxPingLossPct` (20), the board's uptime advanced by the test time (no reset), the UDP class drop counter rose, the multicast
-frames are counted as filtered and not in a class. Plain sockets and the Windows ICMP API only: raw frames need Npcap or Scapy (neither
-is installed on the development PC, nothing is installed by the test), so the `broadcast` class (non-ARP, non-ICMP, non-UDP broadcast)
-sees no traffic and the ARP and ICMP counters are reported, not required, unless `-RequireArpIcmp` is given.
+Hardware test: `test/flood_test.ps1 -Port <COM> -Nic <adapter> [-Board <ip>] [-Kinds ...] [-Seconds 10] [-Rate 1000]` runs one flood per kind with normal
+sockets (Python standard library, iphlpapi through ctypes): UDP to the board (closed port, echo port), UDP broadcast (limited and subnet),
+UDP multicast to a group the board never joined, ICMP echo (to the board and to the subnet broadcast) and ARP (SendARP), while one TCP echo
+connection exchanges data, the board is pinged and the console answers `show classifier` and `show system`. Pass per flood: frames sent, no TCP
+error, every console answer within `-ConsoleBoundMs` (3000), ping loss within `-MaxPingLossPct` (20), uptime advanced (no reset), the policed
+class (udp, icmp) shows drops, the other classes drop at most `-OtherDropTolerance`; multicast is counted as filtered and in no class. The
+`broadcast` class (broadcast that is not ARP, ICMP or UDP) cannot be exercised with sockets; `udp-echo` and `icmp-board` are answered by hardware;
+`arp` is reported, not required (SendARP blocks per call and the request on the wire is not verified), unless `-RequireArp`.
 
 ### Build
 
