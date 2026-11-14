@@ -1,0 +1,2 @@
+# IronKernel RTLNet host driver regression. Revision: 11-14-2026; source-available.
+rtlnet_phy_dp83848 script:cores/rtlnet_mdio/driver/test/rtlnet_test_dp83848.ps1

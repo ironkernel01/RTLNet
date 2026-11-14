@@ -3,7 +3,7 @@
 | Item | Value |
 |---|---|
 | Core | `rtlnet_mdio` |
-| Document revision | 10-22-2026 |
+| Document revision | 11-14-2026 |
 | Register map revision | `VERSION` = `0x10222026` |
 | Language | SystemVerilog-2012 (RTL, bench), C11 (drivers) |
 | Clock | `clk` = `cpu_clk` (100 MHz on the Nexys Video) |
@@ -22,6 +22,8 @@ advertisement and the status decode that the link monitor copies into the MAC.
 |---|---|
 | `hdl/rtlnet_mdio.sv` | the register core |
 | `hdl/rtlnet_mdio.f` | compile order (nests `rtlnet_common.f`) |
+| `driver/rtlnet_phy_dp83848.h`, `.c` | DP83848 10/100 full-duplex management (section 13) |
+| `driver/test/test_rtlnet_phy_dp83848.c`, `rtlnet_test_dp83848.ps1`, `regression.txt` | DP83848 host register-model regression and negative control |
 | `driver/rtlnet_mdio.h`, `.c` | register map (the single definition), the Clause 22 master and Clause 45 access |
 | `driver/rtlnet_phy_rtl8211e.h`, `.c` | RTL8211E PHY layer on top of the master |
 | `driver/test/test_rtlnet_mdio_host.c` | host unit test: register-block model and timed RTL8211E slave model |
@@ -402,3 +404,76 @@ Out of context, Vivado 2025.2, xc7a200tsbg484-1, defaults (`scripts/rtlnet_vivad
 | 10-22-2026 | Initial version: GPIO register core, Clause 22 master, RTL8211E layer, bench, host test |
 | 10-22-2026 | Clause 45 native frames and MMD access through registers 13/14; RTL8211E LED setting (page 0x2C) and EEE advertisement; host test model extended |
 | 11-13-2026 | `rtlnet_phy_rtl8211e_advertise_set` writes the half-duplex advertisement bits as 0 and rejects a mask without a full-duplex mode; `RTLNET_PHY_ADV_FULL`; host test updated |
+
+## 13. DP83848 PHY layer
+
+Revision: 11-14-2026. `rtlnet_phy_dp83848.h/.c` adds source-available Clause 22 management for the MII MAC.
+The driver uses only `rtlnet_mdio_read/write` and the bus context's delay hook. It shares the existing PHY
+API's status type, advertisement flags, speed codes and error codes through the existing PHY API header;
+no existing driver source or header changes. A DP83848-only application links `rtlnet_mdio.c` and
+`rtlnet_phy_dp83848.c`. The layer has no RGMII delay, gigabit advertisement or EEE operation.
+
+Register meanings follow the DP83848J datasheet SNLS250E, section 6.6: identity (Tables 6-11/6-12), ANAR
+(Table 6-13), PHYSTS (Table 6-18) and LEDCR (Table 6-23). These are PHY registers, separate
+from the FPGA MDIO core's AXI4-Lite register map. The FPGA register map remains unchanged.
+
+| Function suffix (`rtlnet_phy_dp83848_*`) | Contract |
+|---|---|
+| `probe(mdio, &id)` | PHYID1 `0x2000`, PHYID2 `0x5C90` with low four revision bits masked; optional raw 32-bit ID output |
+| `init(mdio)` | probe, advertise 10 full and 100 full only, restart autonegotiation; stop at first error |
+| `soft_reset(mdio)` | BMCR reset bit, up to 500 polls spaced 1 ms; missing delay hook rejected; run `init` again afterwards |
+| `advertise_set(mdio, mask)` | accept any nonempty subset of 10F/100F only; reject half/gigabit/unknown bits before writing; clear all ANAR technology bits including 100BASE-T4, keep pause/selector fields |
+| `advertise_get(mdio, &mask)` | report actual four 10/100 advertisement bits, including half-duplex strap defaults if init has not run |
+| `autoneg_restart(mdio)` | set BMCR AN enable and restart |
+| `force(mdio, speed, full)` | only speed codes 0/1 with full duplex accepted; clear AN and both speed bits, set 100 select and full duplex as required |
+| `status(mdio, &st)` | current link/speed/duplex/AN completion from PHYSTS, with BMCR/BMSR/ANLPAR raw words; caller output untouched on bus error |
+| `loopback(mdio, on)` | BMCR loopback read-modify-write |
+| `dump(mdio, regs)` | read all 32 words, return first error; read-clear registers have their normal side effects |
+| `set_leds(mdio, ledcr)`, `get_leds(mdio, &ledcr)` | LEDCR direct-control enables (bits 5, 4) and values (bits 2, 1); the reserved bits 3 and 0, which must be zero, and all other reserved bits are rejected and write readback verified; readback is control state, not LED pin state |
+| `leds_default(mdio)` | LEDCR zero, restoring strapped normal LED functions |
+
+There is no interrupt API: this datasheet lists registers `0x11` and `0x12` as reserved and the Arty A7 does not
+route the PHY interrupt pin to the FPGA, so the driver never writes them. The Arty A7 strap resistors disable
+auto-MDIX, so a crossover cable is required for a link to a device that does not cross over itself. The PHY address
+is strapped (`00001` by the board manual; the schematic is ambiguous), so a bring-up application scans addresses
+0..31 with `rtlnet_mdio_read_addr` for PHYIDR1 `0x2000` before it creates the bus context.
+
+PHYSTS `0x10`: link bit 0, speed bit 1 (1 means 10 Mb/s, 0 means 100 Mb/s), duplex bit 2,
+AN-complete bit 4 and MDIX bit 14. `st.physr` carries the raw PHYSTS word; `st.gbsr` is zero.
+`resolved = link && (!an_enabled || an_complete)`; `speed_valid = resolved && full_duplex`.
+This keeps a half-duplex result from enabling a full-duplex MAC. `an_complete` comes from PHYSTS rather than
+a second-time BMSR sample. Partner abilities are exposed only with AN enabled and complete. Bus faults pass
+through unchanged, so an absent PHY cannot appear as a valid link. The driver never accesses gigabit control
+or status during normal operations (`dump` intentionally reads every address).
+
+Bring-up: release hardware reset with `rtlnet_mdio_wait_por` or `rtlnet_mdio_phy_reset`, then run
+`rtlnet_phy_dp83848_init`. Apply optional LED settings afterwards. Poll status and copy only a valid
+speed code into the MAC's CTRL.SPEED; retain the previous speed on link loss and clear the software link flag.
+PHY clocks indicate rate, not link presence. Reapply init after hardware or software reset because the PHY
+can restore strapped advertisements, including unsupported half-duplex modes. Hardware/forced-mode behaviour
+and board-specific LED wiring remain unverified on hardware.
+
+Host validation command:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File cores/rtlnet_mdio/driver/test/rtlnet_test_dp83848.ps1
+```
+
+Recorded 11-14-2026: warning-free C11 host build (`-Wall -Wextra -Werror -pedantic -O2`):
+
+```text
+TEST PASS: rtlnet_phy_dp83848 checks=573
+negative control: TEST FAIL: rtlnet_phy_dp83848 fails=1 checks=574
+RTLNET_HOSTTEST: PASS rtlnet_phy_dp83848 (including negative control)
+```
+
+The test links the PHY driver unchanged against a Clause 22 register-transaction model. It covers all 16 ID
+revisions, wrong model, absent PHY, all 64 advertisement masks, preservation of pause/selector, rejection
+before writes, no gigabit accesses, forced modes, exhaustive link/speed/duplex/AN combinations with deliberately
+contradictory BMSR, reset completion and exact timeout bound, missing delay hook, loopback, dump, LED readback
+failure, rejection of the LEDCR reserved bits, every status/init bus-failure step and unchanged status output on
+error. The existing MDIO host test remains the wire-timing test. No target compiler or hardware run is claimed.
+
+| Revision | Change |
+|---|---|
+| 11-14-2026 | Add DP83848 PHY API and 573-check host regression with negative control; no interrupt registers (reserved in the datasheet); LEDCR mask 0x0036 |

@@ -13,3 +13,9 @@ tb_rtlnet_eth_mac       cores/rtlnet_eth_mac/testbench/tb_rtlnet_eth_mac.f      
 # Full MAC with the behavioural pin layer (GENERIC technology).
 tb_rtlnet_eth_mac       cores/rtlnet_eth_mac/testbench/tb_rtlnet_eth_mac.f       gen1000  defines=RTLNET_TECH_GENERIC  plusargs=SPEED=1000
 tb_rtlnet_eth_mac       cores/rtlnet_eth_mac/testbench/tb_rtlnet_eth_mac.f       gen100   defines=RTLNET_TECH_GENERIC  plusargs=SPEED=100,WALK
+
+# Clause 22 MII, PHY-sourced clocks, no RGMII pin layer or fast reference clock.
+tb_rtlnet_eth_mac_mii cores/rtlnet_eth_mac/testbench/tb_rtlnet_eth_mac_mii.f m100 plusargs=SPEED=100
+tb_rtlnet_eth_mac_mii cores/rtlnet_eth_mac/testbench/tb_rtlnet_eth_mac_mii.f m10 plusargs=SPEED=10
+tb_rtlnet_eth_mac_mii cores/rtlnet_eth_mac/testbench/tb_rtlnet_eth_mac_mii.f m100gen defines=RTLNET_TECH_GENERIC plusargs=SPEED=100
+tb_rtlnet_eth_mac_mii cores/rtlnet_eth_mac/testbench/tb_rtlnet_eth_mac_mii.f neg plusargs=SPEED=100,INJECT_FAILURE expectfail

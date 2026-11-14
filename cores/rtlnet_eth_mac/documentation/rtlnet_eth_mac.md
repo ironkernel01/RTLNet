@@ -3,7 +3,7 @@
 | Item | Value |
 |---|---|
 | Core | `rtlnet_eth_mac` |
-| Document revision | 10-22-2026 |
+| Document revision | 11-14-2026 |
 | Register map revision | `VERSION` = `0x10222026` |
 | Language | SystemVerilog-2012 (RTL, benches), C11 (driver) |
 | Target | Digilent Nexys Video, Artix-7 XC7A200T-1SBG484C, Realtek RTL8211E (RGMII, MDIO address 1) |
@@ -23,6 +23,9 @@ path may run. The MAC has no address register: the protocol wrapper owns the nod
 
 | File | Content |
 |---|---|
+| `hdl/rtlnet_eth_mac_mii.sv`, `rtlnet_mii_io.sv`, `rtlnet_mii_clkbuf.sv`, `rtlnet_mii_rxc_rate.sv` | MII integration, SDR nibble layer, PHY clock buffer and client-clock RXC measurement (section 13) |
+| `hdl/rtlnet_eth_mac_mii.f` | MII synthesis filelist; excludes RGMII pin layers |
+| `testbench/tb_rtlnet_eth_mac_mii.sv`, `.f`, `rtlnet_dp83848_model.sv` | MII end-to-end bench and behavioural PHY data model |
 | `hdl/rtlnet_eth_mac.sv` | top: port list of architecture section 15.1, crossings, receive-path reset, chains |
 | `hdl/rtlnet_eth_mac_regs.sv` | register file in `axis_clk`, counters, status outputs |
 | `hdl/rtlnet_gmii_rx.sv` | GMII receiver: SFD, CRC-32 residue check, FCS strip, 8 -> 64 packing, verdict |
@@ -490,4 +493,119 @@ Implementation and timing of the RGMII constraints (section 6) are board-top wor
 
 | Revision | Change |
 |---|---|
+| 11-14-2026 | Add independent 10/100 full-duplex MII top, PHY clock buffer, DP83848 data model and regressions; existing RGMII RTL is unchanged |
 | 10-22-2026 | Initial version: RTL, pin layers (AMD 7-series, generic), register map 0x10222026, driver, PHY model, benches |
+
+## 13. Clause 22 MII option
+
+`rtlnet_eth_mac_mii` connects a DP83848 in Clause 22 MII mode to the same client streams and register API.
+It supports 10 and 100 Mb/s, full duplex only; CRS and COL are unused. The source-available integration uses
+only SDR registers. The existing `rtlnet_eth_mac` top, its parameters, ports, hierarchy, pin-layer macro and
+synthesis filelist are unchanged. A sibling top avoids adding optional pins or moving any
+existing instance under a generate hierarchy. Both integrations instantiate the same byte engines, guards,
+packet FIFOs, stream slices, register block and common CDC primitives; the integration wiring is separate.
+That wiring (AXI4-Lite crossing, receive-path reset sequencing, TX control crossing, TX frame counter, FIFO
+and slice instances) is duplicated between `rtlnet_eth_mac.sv` and `rtlnet_eth_mac_mii.sv`. A change to one top
+must be reviewed against the other; the register file, byte engines, guards, FIFOs and CDC primitives are shared
+and cannot diverge. The MII top is simpler than the RGMII top: the rate measurement, the receive-run decision
+and the status register inputs are all in `axis_clk`, so it needs no speed/rate synchroniser back into `axis_clk`.
+
+### 13.1 Interface and parameters
+
+| Group | Ports | Contract |
+|---|---|---|
+| Client/register clocks | `axis_clk`, `s_axi_aclk` | independent free-running board clocks; no `clk125`, phase-shifted clock or delay reference |
+| Resets | `axis_resetn`, `s_axi_aresetn` | synchronous active low in their respective domains, from one board reset assertion |
+| PHY clocks | input `mii_rx_clk`, input `mii_tx_clk` | both come FROM the PHY; 25 MHz at 100 Mb/s, 2.5 MHz at 10 Mb/s; use clock-capable pins; each passes through `rtlnet_mii_clkbuf` |
+| MII receive | input `mii_rxd[3:0]`, `mii_rx_dv`, `mii_rx_er` | sample on RX_CLK rising edges; low nibble first |
+| MII transmit | output `mii_txd[3:0]`, `mii_tx_en` | registered on TX_CLK rising edges for sampling at the following rising edge; low nibble first; the MAC never signals TX_ER, so a board top ties the PHY TX_ER pin (if present) low |
+| Client streams | `m_axis_rx_*`, `s_axis_tx_*` | identical widths and frame contracts to section 2, in `axis_clk` |
+| Registers/status | `s_axi_*`, `stat_*`, `ev_*` | identical ports and clock domains to section 2 |
+
+`RX_FIFO_KB=8`, `TX_FIFO_KB=8`, `MAX_FRAME_BYTES=1518` and `RAM_STYLE="block"` have the same meaning as in
+section 3. `AXIS_CLK_HZ=62_500_000` replaces the RGMII delay-tap parameter and must equal the actual client
+clock frequency (10..250 MHz). There is no MII delay-tap parameter. Frame-size checks remain in the shared
+register/FIFO/guard modules. The MII filelist is `hdl/rtlnet_eth_mac_mii.f`.
+
+### 13.2 Data path, clocks and crossings
+
+`rtlnet_mii_io` asserts the TX byte enable once every two TX_CLK cycles. The byte engine advances on the
+edge that launches the previous byte's high nibble; the next edge launches the new byte's low nibble. The
+shared engine retains padding, CRC insertion, full-frame buffering and the 12-byte (24-nibble) IFG. TX_EN
+changes at byte boundaries. The stream crosses from `axis_clk` to TX_CLK through `u_tx_fifo`.
+
+Receive pairs align on the SFD high nibble `D` following `5`, independent of preamble nibble parity. No
+preamble bytes before SFD reach the byte engine. RX_ER from either nibble and from the preamble is retained;
+a dangling final nibble produces an errored final byte. The shared receive engine checks CRC and strips FCS,
+then the guard and `u_rx_fifo` deliver only good whole frames into `axis_clk`.
+
+| Domain/crossing | Implementation |
+|---|---|
+| PHY TX_CLK | TX engine, serializer, TX FIFO read side and frame counter |
+| PHY RX_CLK | nibble reconstruction, RX engine/guard, RX FIFO write side and rate probe |
+| `axis_clk` | client slices, TX guard, FIFO client sides, registers, rate measurement and receive-run decision |
+| `s_axi_aclk` to `axis_clk` | existing `rtlnet_axil_cdc` transaction crossing |
+| TX enable/speed to TX_CLK | `rtlnet_sync` and two consecutive equal samples |
+| RX frames to `axis_clk`, TX frames to TX_CLK | existing dual-clock packet FIFOs |
+| TX frame total to `axis_clk` | existing `rtlnet_gray_sync` |
+| RXC divided probe to `axis_clk` | `rtlnet_sync` |
+| RX reset to RX_CLK / FIFO read side | paired `rtlnet_reset_sync` instances, asserted together at a client frame boundary |
+| TX reset to TX_CLK | `rtlnet_reset_sync`, shared client assertion and PHY-clock release |
+
+The receive-run decision remains alive in `axis_clk` if a PHY clock stops. Rate failure or RX disable drops
+that decision; a frame already partly delivered to the client completes before both receive FIFO sides reset.
+A stopped TX clock stalls the TX FIFO; firmware must quiesce traffic before changing the PHY speed. A frame
+already transmitting completes if TX enable changes. Board integration supplies pin assignments, SDR input
+delay (RX_CLK to RXD/RX_DV/RX_ER 10..30 ns at 100 Mb/s, DP83848 datasheet T2.5) and output delay constraints
+and should pack the first RX register stage and the TX pin registers into the I/O cells; RGMII DDR constraints do
+not apply.
+
+`rtlnet_mii_clkbuf` is the only vendor clock primitive of the MII top: with `RTLNET_TECH_AMD` (the default) it
+instantiates a BUFG per PHY clock, with every other technology it forwards the clock and the vendor tool
+promotes it to a global net. Common RAM and synchronizer technology mapping still applies. Both PHY clock pins
+of the Arty A7 (F15, H16) are clock-capable. Both PHY clocks are asynchronous to each other and to `axis_clk`;
+`scripts/rtlnet_constrain_cdc.tcl` covers the synchronizer chains of the shared primitives, and the board
+constraints must declare the two PHY clocks and `axis_clk` asynchronous groups.
+
+### 13.3 Software-visible speed and status
+
+Firmware reads DP83848 PHYSTS (`0x10`) using `rtlnet_phy_dp83848_status`, then copies a valid full-duplex speed
+to CTRL.SPEED (`00` 10 Mb/s, `01` 100 Mb/s) and sets the link flag. STATUS speed and `stat_speed` report the
+configured code in `axis_clk`. The measured PHY rate qualifies that selection, matching the existing software
+contract; the MAC does not infer link presence from a running PHY clock. Gigabit/reserved speed codes never
+qualify RX and cause queued TX frames to be discarded by the byte engine.
+
+`rtlnet_mii_rxc_rate` counts RXC/16 transitions for `round(AXIS_CLK_HZ * 32.768 us)` reference cycles. This
+retains nominal RX_CLK_RATE values 102 and 10 and the existing accept bands 88..116 and 8..13. Two consecutive
+in-band windows assert RX_CLK_OK; the first out-of-band window or a speed change clears it. No fixed 125 MHz
+clock is required. STATUS.IDELAY_RDY is always 1 (MII has no delay controller), RX_IDELAY_TAP reads 0 and the
+RGMII in-band status fields read 0. ID, VERSION, CAPS, CTRL and counters retain their existing encodings.
+
+### 13.4 Verification record, 11-14-2026
+
+The `tb_rtlnet_eth_mac_mii` entries are `m100` (`SPEED=100`), `m10` (`SPEED=10`), `m100gen`
+(`SPEED=100`, `RTLNET_TECH_GENERIC`, no BUFG) and `neg` (`SPEED=100,INJECT_FAILURE`, expected failure). The PHY
+clocks have independent phases. The behavioural `rtlnet_dp83848_model` covers the MII data pins; it does not model
+MDIO or the analog line. The bench uses the shared serial CRC oracle (independent of the RTL CRC function), the stream
+source/sink and the AXI4-Lite master. The PHY model also captures the transmit wire and checks preamble, SFD,
+nibble order, FCS by the serial oracle, whole bytes and the 24-nibble minimum gap on its own.
+
+Checks cover 60 and 1518 byte receive frames, even and odd preambles down to a single preamble nibble, back-to-back
+frames at minimum IFG behind a stalling sink, false carrier (RX_ER without RX_DV) and a carrier without SFD, FCS
+corruption in two positions, RX_ER on the low nibble, the high nibble, the preamble and the last FCS nibble,
+a dangling nibble, an empty frame (FCS only), a 10 octet runt, a 59 byte runt and a 1519 byte frame (every rejected
+frame is dropped and counted, and the frame behind it is intact), 14 byte TX padding, maximum TX length, queued
+TX frames, TX_EN low (frames consumed, nothing on the wire, no stale frame afterwards), exact RX_GOOD, RX_BAD and
+TX_FRAMES counters, configured-speed status, measured rate, a mismatched speed holding the receive path in reset and
+recovery.
+
+Mutation checks run once by hand (mutant, then the `m100` entry): swapped TX nibble order, RX_ER ignored on the low
+nibble or the preamble or the high nibble, TX gap of 11 bytes and a TX_EN that extends one nibble were each caught.
+Two mutants pass because they are equivalent for every legal stimulus: dropping the dangling-nibble error flag
+(the extra byte already breaks the CRC) and not requiring `5` before the SFD nibble `D`.
+
+Results of `scripts/rtlnet_regression.ps1 -Match "rtlnet_eth_mac|rtlnet_mdio"`: `m100`, `m10` and `m100gen` pass
+with 3966 checks each; `neg` fails with exactly one failure, `INJECT_FAILURE negative control`; all eleven earlier
+RGMII entries pass unchanged.
+
+Synthesis of `rtlnet_eth_mac_mii` (`scripts/rtlnet_vivado.ps1`, `rtlnet_synth_check.tcl`, filelist `hdl/rtlnet_eth_mac_mii.f`) has not been run: both Vivado slots were held by other jobs. Run it before the first board build and record the utilization here. Implementation timing and hardware tests have not been run.
