@@ -39,6 +39,8 @@
 //     tables, MAC table classify-only with entry 0 destination
 //     FF:FF:FF:FF:FF:FF policed by policer 0, policer 0 = limit/window, MODE
 //     PASS_ALL; resp 2'b11 when the ID does not read "CLSF").
+//   * cls_config_protect(base, bcast, udp, arp, icmp, window_ms, resp): the register sequence of
+//     rtlnet_classifier_config_protect, the protection profile of the Ethernet demo firmware.
 //   * txo_config(base, ctrl, resp): the register sequence of rtlnet_tcp_offload_init +
 //     rtlnet_tcp_offload_set_ctrl (ID/VERSION check, CTRL write and read-back).
 //   * Simulation only; never synthesized.
@@ -50,6 +52,7 @@
 //   * 10-22-2026: cls_config_bcast_storm follows the driver's register map and write order exactly.
 //   * 10-22-2026: txo_config (checksum offload CTRL sequence).
 //   * 11-14-2026: copy for the Ethernet CPU core rtlnet_cpu_eth (no DDR3 master ports).
+//   * 11-14-2026: cls_config_protect (classifier protection profile register sequence).
 // Clocks: clk (cpu_clk); resetn synchronous to clk, active low.
 // -----------------------------------------------------------------------------
 `timescale 1ns / 1ps
@@ -323,6 +326,121 @@ module rtlnet_cpu_eth_sim_stub #(
     axil_write(base + CLS_REG_POLICER0 + CLS_POL_LIMIT, limit_pkts, 4'hF, resp);
     axil_write(base + CLS_REG_POLICER0 + CLS_POL_WINDOW, window_ms, 4'hF, resp);
     axil_write(base + CLS_REG_POLICER0 + CLS_POL_CTRL, CLS_POL_ENABLE, 4'hF, resp);
+    axil_write(base + CLS_REG_CTRL, CLS_MODE_PASS_ALL, 4'hF, resp);
+  endtask
+
+  // Classifier protection profile, register level: the register sequence of
+  // rtlnet_classifier_config_protect (cores/rtlnet_classifier/driver), the
+  // profile the Ethernet demo firmware installs at boot. base = the
+  // classifier window. Classes and their policers: 0 broadcast, 1 UDP,
+  // 2 ARP, 3 ICMP; priority when a frame is in several: ARP, ICMP, UDP,
+  // broadcast. The sequence (write order as in the driver):
+  //   init:   ID/VERSION/CAPS/LATENCY reads (resp 2'b11 on an ID mismatch), wait STATUS.CLEARING.
+  //   clear:  CTRL.CLEAR_TABLES, wait for STATUS.CLEARING to end.
+  //   rule 0: compare-buffer bytes 12 and 13 = 0x08, 0x06 (mask 0xFF, operator ==, the other bytes
+  //           stay don't-care from the clear), settle reads, RULE_MODE = ENABLE | CLASSIFY | POLICE_EN | policer 2.
+  //   tuple 0 (ICMP, protocol 1) and tuple 1 (UDP, protocol 17): addresses and masks 0, both port ranges
+  //           0..65535, control {VALID, PROTO_EN, POLICE_EN, policer, protocol}, TABLE_MODE[5] = ENABLE | CLASSIFY.
+  //   MAC entry 0: destination FF:FF:FF:FF:FF:FF, police with policer 0; TABLE_MODE[0] = ENABLE | CLASSIFY.
+  //   policers 0..3: LIMIT_PKTS, WINDOW_MS, CTRL = ENABLE.
+  //   MODE = PASS_ALL.
+  task automatic cls_config_protect(input logic [31:0] base, input int lim_bcast, input int lim_udp,
+                                    input int lim_arp, input int lim_icmp, input int window_ms,
+                                    output logic [1:0] resp);
+    localparam logic [31:0] CLS_REG_ID          = 32'h000;
+    localparam logic [31:0] CLS_REG_VERSION     = 32'h004;
+    localparam logic [31:0] CLS_REG_CAPS        = 32'h008;
+    localparam logic [31:0] CLS_REG_CTRL        = 32'h00C;
+    localparam logic [31:0] CLS_REG_STATUS      = 32'h010;
+    localparam logic [31:0] CLS_REG_LATENCY     = 32'h014;
+    localparam logic [31:0] CLS_REG_TABLE_MODE0 = 32'h020;
+    localparam logic [31:0] CLS_REG_TABLE_MODE5 = 32'h034;
+    localparam logic [31:0] CLS_REG_RULE_MODE0  = 32'h040;
+    localparam logic [31:0] CLS_REG_POLICER0    = 32'h100;
+    localparam logic [31:0] CLS_POLICER_STRIDE  = 32'h020;
+    localparam logic [31:0] CLS_POL_CTRL        = 32'h00;
+    localparam logic [31:0] CLS_POL_LIMIT       = 32'h04;
+    localparam logic [31:0] CLS_POL_WINDOW      = 32'h08;
+    localparam logic [31:0] CLS_REG_ENTRY00     = 32'h400;
+    localparam logic [31:0] CLS_ENT_SRC_LO      = 32'h0;
+    localparam logic [31:0] CLS_ENT_CTRL        = 32'h4;
+    localparam logic [31:0] CLS_ENT_DST_LO      = 32'h8;
+    localparam logic [31:0] CLS_ENT_DST_HI      = 32'hC;
+    localparam logic [31:0] CLS_REG_TUPLE0      = 32'h900;
+    localparam logic [31:0] CLS_TUPLE_STRIDE    = 32'h020;
+    localparam logic [31:0] CLS_REG_RULE_BASE   = 32'hC00;
+    localparam logic [31:0] CLS_ID_VALUE        = 32'h434C_5346;
+    localparam logic [31:0] CLS_VERSION_VALUE   = 32'h1022_2026;
+    localparam logic [31:0] CLS_CTRL_CLEAR      = 32'h0000_0100;
+    localparam logic [31:0] CLS_MODE_PASS_ALL   = 32'h0000_0001;
+    localparam logic [31:0] CLS_TM_ENABLE_CLASSIFY = 32'h0000_0011;
+    localparam logic [31:0] CLS_RULE_BYTE_12    = 32'hFF00_0800 | 32'h0000_0008;   // mask FF, operator ==, compare 0x08
+    localparam logic [31:0] CLS_RULE_BYTE_13    = 32'hFF00_0800 | 32'h0000_0006;   // mask FF, operator ==, compare 0x06
+    localparam logic [31:0] CLS_RULE_ARP        = 32'h0000_0001 | 32'h0000_0004 | 32'h0000_0008 | (32'd2 << 4);
+    localparam logic [31:0] CLS_TUP_BASE        = 32'hC000_0000 | 32'h2000_0000;   // VALID | PROTO_EN | POLICE_EN
+    localparam logic [31:0] CLS_ENT_CTRL_WORD   = 32'h8000_0000 | 32'h2000_0000 | 32'h0400_0000 | 32'h0000_FFFF;
+    localparam logic [31:0] CLS_POL_ENABLE      = 32'h0000_0001;
+    logic [31:0] st;
+    logic [31:0] id;
+    logic [31:0] ver;
+    int          n;
+    int          lim [4];
+    lim[0] = lim_bcast;
+    lim[1] = lim_udp;
+    lim[2] = lim_arp;
+    lim[3] = lim_icmp;
+    axil_read(base + CLS_REG_ID, id, resp);
+    axil_read(base + CLS_REG_VERSION, ver, resp);
+    axil_read(base + CLS_REG_CAPS, st, resp);
+    axil_read(base + CLS_REG_LATENCY, st, resp);
+    if (id !== CLS_ID_VALUE || ver !== CLS_VERSION_VALUE) begin
+      resp = 2'b11;
+      return;
+    end
+    n = 0;
+    do begin
+      axil_read(base + CLS_REG_STATUS, st, resp);
+      n++;
+    end while (st[0] && n < 1000);
+    axil_write(base + CLS_REG_CTRL, CLS_CTRL_CLEAR, 4'hF, resp);
+    n = 0;
+    do begin
+      axil_read(base + CLS_REG_STATUS, st, resp);
+      n++;
+    end while (st[0] && n < 1000);
+    // Rule 0: ARP (EtherType 0x0806 at bytes 12..13).
+    axil_read(base + CLS_REG_RULE_MODE0, st, resp);
+    axil_write(base + CLS_REG_RULE_BASE + 32'd4 * 12, CLS_RULE_BYTE_12, 4'hF, resp);
+    axil_write(base + CLS_REG_RULE_BASE + 32'd4 * 13, CLS_RULE_BYTE_13, 4'hF, resp);
+    for (int i = 0; i < 8; i++) axil_read(base + CLS_REG_STATUS, st, resp);
+    axil_write(base + CLS_REG_RULE_MODE0, CLS_RULE_ARP, 4'hF, resp);
+    // Tuples: 0 = ICMP (policer 3), 1 = UDP (policer 1).
+    for (int e = 0; e < 2; e++) begin
+      logic [31:0] tb_;
+      tb_ = base + CLS_REG_TUPLE0 + CLS_TUPLE_STRIDE * e;
+      axil_read(base + CLS_REG_TABLE_MODE5, st, resp);
+      axil_write(base + CLS_REG_TABLE_MODE5, st & ~32'h1, 4'hF, resp);
+      axil_write(tb_ + 32'h04, 32'h0, 4'hF, resp);
+      axil_write(tb_ + 32'h08, 32'h0, 4'hF, resp);
+      axil_write(tb_ + 32'h0C, 32'h0, 4'hF, resp);
+      axil_write(tb_ + 32'h10, 32'h0, 4'hF, resp);
+      axil_write(tb_ + 32'h14, 32'hFFFF_0000, 4'hF, resp);
+      axil_write(tb_ + 32'h18, 32'hFFFF_0000, 4'hF, resp);
+      axil_write(tb_ + 32'h00, CLS_TUP_BASE | ((e == 0) ? (32'd3 << 8) | 32'd1 : (32'd1 << 8) | 32'd17), 4'hF, resp);
+      axil_write(base + CLS_REG_TABLE_MODE5, CLS_TM_ENABLE_CLASSIFY, 4'hF, resp);
+    end
+    // MAC entry 0: destination broadcast, policer 0.
+    axil_read(base + CLS_REG_TABLE_MODE0, st, resp);
+    axil_write(base + CLS_REG_ENTRY00 + CLS_ENT_SRC_LO, 32'hFFFF_FFFF, 4'hF, resp);
+    axil_write(base + CLS_REG_ENTRY00 + CLS_ENT_DST_LO, 32'hFFFF_FFFF, 4'hF, resp);
+    axil_write(base + CLS_REG_ENTRY00 + CLS_ENT_DST_HI, 32'h0000_FFFF, 4'hF, resp);
+    axil_write(base + CLS_REG_ENTRY00 + CLS_ENT_CTRL, CLS_ENT_CTRL_WORD, 4'hF, resp);
+    axil_write(base + CLS_REG_TABLE_MODE0, CLS_TM_ENABLE_CLASSIFY, 4'hF, resp);
+    for (int p = 0; p < 4; p++) begin
+      axil_write(base + CLS_REG_POLICER0 + CLS_POLICER_STRIDE * p + CLS_POL_LIMIT, lim[p], 4'hF, resp);
+      axil_write(base + CLS_REG_POLICER0 + CLS_POLICER_STRIDE * p + CLS_POL_WINDOW, window_ms, 4'hF, resp);
+      axil_write(base + CLS_REG_POLICER0 + CLS_POLICER_STRIDE * p + CLS_POL_CTRL, CLS_POL_ENABLE, 4'hF, resp);
+    end
     axil_write(base + CLS_REG_CTRL, CLS_MODE_PASS_ALL, 4'hF, resp);
   endtask
 

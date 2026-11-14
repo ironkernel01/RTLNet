@@ -9,7 +9,7 @@
 | Registers | AXI4-Lite, `s_axi_aclk`, 4 KiB window, internal `rtlnet_axil_cdc` to `axis_clk`; protocol sub-map 0x8000 for the CPU-path instance |
 | First instance | inside `rtlnet_eth_protocol`, after `u_cpu_rx_fifo` (`u_cpu_classifier`): every frame headed to the CPU is filtered |
 | Power-up state | **drop-all**, tables and rules cleared, until the C driver configures it |
-| First driver configuration | **broadcast storm limiter**: destination `FF:FF:FF:FF:FF:FF` policed to 10 frames per 100 ms, every other frame passes |
+| First driver configuration | **broadcast storm limiter**: destination `FF:FF:FF:FF:FF:FF` policed to 10 frames per 100 ms, every other frame passes; the Ethernet demo firmware installs the protection profile of section 13 on top of it |
 
 ## 1. Purpose and structure
 
@@ -62,7 +62,7 @@ pass-all.
 | `NUM_RULES` | 2 | positional rule engines |
 | `NUM_POLICERS` | 4 | policers |
 | `MATCH_DEPTH_BYTES` | 64 | bytes of each frame the rule engines compare and the delay line spans (multiple of 8, 40..256; at least 42 for the L4 fields of a VLAN-tagged frame) |
-| `RAM_STYLE` | `"block"` | tables and compare buffers |
+| `RAM_STYLE` | `"block"` | every memory: tables, compare buffers and the readback mirror (12.2) |
 
 Derived: `DELAY_BEATS = MATCH_DEPTH_BYTES / 8 + VERDICT_LATENCY`, where `VERDICT_LATENCY` is the clock count from a
 frame's last compared beat to its final verdict (table scan `TABLE_ENTRIES / TABLE_LANES` + capture + combiner +
@@ -245,7 +245,7 @@ Vivado (Spartan UltraScale+) — with zero failing setup/hold endpoints and a lo
 |---:|---|---|---|
 | 0x000 | `ID` | RO | `"CLSF"` |
 | 0x004 | `VERSION` | RO | register-map date code |
-| 0x008 | `CAPS` | RO | `TABLE_ENTRIES`, `TUPLE_ENTRIES`, `NUM_RULES`, `NUM_POLICERS`, `TABLE_LANES`, `MATCH_DEPTH_BYTES` |
+| 0x008 | `CAPS` | RO | `TABLE_ENTRIES`, `TUPLE_ENTRIES`, `NUM_RULES`, `NUM_POLICERS`, `TABLE_LANES`, `MATCH_DEPTH_BYTES`, `RAM_STYLE` (12.4) |
 | 0x00C | `CTRL` | RW | bits 1:0 `MODE` (reset 00 = DROP_ALL), bit8 `CLEAR_TABLES` (pulse: invalidate every entry, disable every table/rule/policer, MODE back to DROP_ALL), bit16 `CNT_CLEAR` |
 | 0x010 | `STATUS` | RO | bit0 `CLEARING`, bits 9:8 current MODE, bit16 delay-line stall seen (sticky, cleared by `CNT_CLEAR`) |
 | 0x014 | `LATENCY` | RO | as built: bits 7:0 `DELAY_BEATS`, bits 15:8 `VERDICT_LATENCY` |
@@ -282,7 +282,7 @@ The only way the filter is configured. API (all bounded, named error codes):
 | `..._bcast_storm_enable(on)` | enable/disable policer 0 |
 
 The firmware network manager calls `rtlnet_classifier_config_bcast_storm(10, 100)` at boot, after probing, before the
-CPU network path is used; until then the CPU receives nothing (drop-all).
+CPU network path is used; until then the CPU receives nothing (drop-all). The Ethernet demo firmware follows it with `rtlnet_classifier_config_protect` (section 13).
 
 ## 9. Verification plan
 
@@ -386,7 +386,7 @@ takes the rule results into a per-frame token and the table results `WIN + 6` cl
 |---:|---|---|
 | 0x000 | `ID` | `0x434C5346` ("CLSF") |
 | 0x004 | `VERSION` | `0x10222026` |
-| 0x008 | `CAPS` | [4:0] `TABLE_ENTRIES`, [9:5] `TUPLE_ENTRIES`, [12:10] `NUM_RULES`, [15:13] `NUM_POLICERS`, [20:16] `TABLE_LANES`, [26:21] `MATCH_DEPTH_BYTES / 8` |
+| 0x008 | `CAPS` | [4:0] `TABLE_ENTRIES`, [9:5] `TUPLE_ENTRIES`, [12:10] `NUM_RULES`, [15:13] `NUM_POLICERS`, [20:16] `TABLE_LANES`, [26:21] `MATCH_DEPTH_BYTES / 8`, [27] `RAM_STYLE` is `"distributed"` (11-14-2026) |
 | 0x00C | `CTRL` | [1:0] `MODE` (reset 0), bit8 `CLEAR_TABLES` (pulse), bit16 `CNT_CLEAR` (pulse) |
 | 0x010 | `STATUS` | bit0 `CLEARING`, [9:8] `MODE`, bit16 `STALL_SEEN` |
 | 0x014 | `LATENCY` | [7:0] `DELAY_BEATS`, [15:8] `VERDICT_LATENCY` |
@@ -418,6 +418,8 @@ rtlnet_classifier_config_bcast_storm(&g_cls, 10u, 100u);  /* broadcast storm lim
 | `policer_set`, `policer_get` (configuration, counters, budget) | `classifier policer ...`, `show storm-control` |
 | `counters`, `clear_counters` | `show classifier` |
 | `mac_filter` (single), `ethertype_filter` (range pair), `ipv4_filter` (data/mask pair), `port_filter` (range pair, protocol 0 = any), `acl_add` | helpers; `action` = `RTLNET_CLS_ACT_GATE` or `RTLNET_CLS_ACT_CLASSIFY`, optionally ORed with `RTLNET_CLS_ACT_POLICE(p)` |
+| `get_build(ctx, rtlnet_cls_build_t *)` | built sizes, RAM style and latency (`show classifier`, 12.4) |
+| `config_protect(ctx, profile)`, `protect_limit(ctx, class, limit, window)`, `protect_get(ctx, class, state)`, `protect_defaults(profile)` | protection profile of section 13 (`show classifier`, `classifier policer`) |
 | `config_bcast_storm(ctx, limit_pkts, window_ms)` | `storm-control broadcast <packets> <milliseconds>` |
 | `bcast_storm_enable(ctx, on)` | `storm-control broadcast enable/disable` |
 
@@ -503,9 +505,198 @@ per-word entry memories for five field tables and the tuple table, eight lanes p
   `rtlnet_common` (register the request-toggle compare).
 * Sub-minimum frames (under 57 bytes) arriving back-to-back are dropped as overruns (10.3); legal Ethernet frames are
   never affected.
+* With `RAM_STYLE` `"distributed"` the LUT-level gate of 6a fails (3 levels in the XPM read of `u_mirror_ram`, 12.3); setup and hold
+  close. A separate style parameter for the mirror would let a small build keep 1 block RAM tile for it and pass the gate (about
+  760 LUTs fewer, 12.3); not built.
 * The bench shares one Active-HDL seat; the full regression (5 runs) takes about 5 minutes.
 
-## 11. Revision history
+## 11. Verification of the small-FPGA and protection-profile work (11-14-2026)
+
+| Run | Configuration | Result |
+|---|---|---|
+| `tb_rtlnet_classifier` | defaults (unchanged entries: base, generic, m128, m40) | PASS, 17474 / 17474 / 17742 / 13973 checks; negative control TEST FAIL as required |
+| `tb_rtlnet_classifier` dist | `TB_CLS_DIST`: defaults with `RAM_STYLE` `"distributed"` (AMD XPM models) | PASS, 17474 checks (CAPS bit 27 checked) |
+| `tb_rtlnet_classifier` small | `TB_CLS_SMALL`: distributed, `TABLE_ENTRIES` 8, `TUPLE_ENTRIES` 8, `NUM_RULES` 1, `NUM_POLICERS` 4, 64 bytes (AMD) | PASS, 14767 checks |
+| `tb_rtlnet_classifier` small_generic | same, `RTLNET_TECH_GENERIC` | PASS, 14767 checks |
+| `tb_rtlnet_classifier` small_neg | same with `+INJECT_FAILURE` | TEST FAIL as required |
+| `tb_rtlnet_eth_protocol` cls_block, cls_dist, cls_small | `u_cpu_classifier` built with the defaults, distributed, the small profile | PASS, 441 checks each |
+| board bench `tb_rtlnet_nexys_video_eth` | protection profile phase (broadcast, UDP, ARP, ICMP above their limits with unicast TCP interleaved) at 10, 100, 1000 Mb/s | PASS, 178 checks each; the new checks fail when a limit is perturbed |
+| driver host test | `driver/test/build_test.ps1`: default, default distributed and small builds, capacity bounds, profile register image | PASS, 1644 checks; negative control TEST FAIL; `mb-gcc ... -Werror` clean |
+
+The bench builds are chosen by defines (`TB_CLS_DIST`, `TB_CLS_SMALL`); the bench derives every size from them (CAPS, entry
+counts, rule count, latency). The bench keeps its reference model, its 10 000 random frames and its negative control in
+each build. The profile's register sequence is checked in the board bench through the CPU stand-in's `cls_config_protect`, which
+follows the driver's write order; the driver's own image is checked by the host test against the same offsets.
+
+
+## 12. Small FPGAs: parameters, RAM style and measured cost
+
+### 12.1 Parameters and where a board sets them
+
+`rtlnet_eth_protocol` passes the classifier parameters through, with defaults equal to the classifier's own, so an
+instance that sets none of them elaborates to the same logic as before (3350 LUTs, 6217 flip-flops and 30 block RAM tiles
+after implementation, identical in the default/block run of 12.3):
+
+| `rtlnet_eth_protocol` parameter | Classifier parameter | Default |
+|---|---|---|
+| `CLS_TABLE_ENTRIES` | `TABLE_ENTRIES` | 16 |
+| `CLS_TUPLE_ENTRIES` | `TUPLE_ENTRIES` | 16 |
+| `CLS_TABLE_LANES` | `TABLE_LANES` | 2 |
+| `CLS_NUM_RULES` | `NUM_RULES` | 2 |
+| `CLS_NUM_POLICERS` | `NUM_POLICERS` | 4 |
+| `CLS_MATCH_DEPTH_BYTES` | `MATCH_DEPTH_BYTES` | 64 |
+| `CLS_RAM_STYLE` | `RAM_STYLE` | `"block"` (the protocol wrapper's own `RAM_STYLE` does not reach the classifier) |
+
+A board top sets them on its `rtlnet_eth_protocol` instance (the two board tops are not edited; the defaults apply):
+
+```
+.CPU_CLASSIFIER_ENABLE (1),
+.CLS_RAM_STYLE         ("distributed"),
+.CLS_TABLE_ENTRIES     (8),
+.CLS_TUPLE_ENTRIES     (8),
+.CLS_NUM_RULES         (1),
+.CLS_NUM_POLICERS      (4),
+.CLS_MATCH_DEPTH_BYTES (64),
+```
+
+The classifier's elaboration checks (10.3, last row) apply to the passed values. The small profile has
+`WIN` = 4, `VERDICT_LATENCY` 19 and `DELAY_BEATS` 27 (`LATENCY` reads 27 / 19).
+
+### 12.2 What `RAM_STYLE` covers
+
+Every memory of the core is an `rtlnet_ram_core` that receives `RAM_STYLE` from the top; none is left in block RAM and
+no instance ignores the parameter (every instance was read and the synthesized netlist holds no block RAM with
+`"distributed"`: 0 RAMB18, 0 RAMB36):
+
+| Memory | Instances | Content |
+|---|---|---|
+| field-table entry words | `u_tbl_mac`, `u_tbl_ethertype`, `u_tbl_vlan`, `u_tbl_ip`, `u_tbl_port`: one `rtlnet_ram_core` per entry word and lane | five tables of `TABLE_ENTRIES` entries |
+| tuple-table entry words | `u_tuple`: one per word and lane | `TUPLE_ENTRIES` entries |
+| rule compare buffers | `g_rule[r].u_rule`: eight lanes per rule | `MATCH_DEPTH_BYTES` bytes per rule |
+| readback mirror | `u_regs/u_mirror_ram`: 1024 x 32 | one word per defined register word of 0x400..0xFFF |
+
+Not a `RAM_STYLE` memory: the delay line (`rtlnet_shift_reg_core`, a LUT shift register, 123 LUTs as memory in every
+configuration) and the verdict queue (flip-flops).
+
+The mirror is the largest single memory (32 Kbit) and dominates the LUT cost of `"distributed"` (12.3). Its address
+space is fixed by the register map, so it does not shrink with `TABLE_ENTRIES`, `TUPLE_ENTRIES` or `NUM_RULES`.
+
+### 12.3 Measured cost (xc7a100tcsg324-1, Vivado 2026.1, out of context, after implementation)
+
+`testbench/rtlnet_classifier_timing.tcl` through `scripts/rtlnet_vivado.ps1`, `axis_clk` at 8.000 ns (125 MHz, above the
+CPU-path instance's 100 MHz) and at 6.400 ns (156.25 MHz, the 10G gate of section 6a), `s_axi_aclk` 10 ns, crossings bound by
+`scripts/rtlnet_constrain_cdc.tcl`. Parameters of "small": `TABLE_ENTRIES` 8, `TUPLE_ENTRIES` 8, `NUM_RULES` 1, `NUM_POLICERS` 4,
+`MATCH_DEPTH_BYTES` 64, `TABLE_LANES` 2.
+
+| Configuration | LUT logic | LUT as memory | LUT total | FF | Block RAM tiles | WNS / WHS at 8.0 ns | WNS / WHS at 6.4 ns | Failing setup / hold | Max LUT levels (gate: 2) |
+|---|---:|---:|---:|---:|---:|---|---|---|---|
+| default, `"block"` | 3227 | 123 | 3350 | 6217 | 30 (58 RAMB18 + 1 RAMB36) | +2.219 / +0.070 ns | +1.040 / +0.059 ns | 0 / 0 | 2: gate PASS |
+| default, `"distributed"` | 3338 | 1735 | 5073 | 9273 | 0 | +1.402 / +0.053 ns | +0.735 / +0.058 ns | 0 / 0 | 3: gate FAIL (mirror) |
+| small, `"distributed"` | 3066 | 1620 | 4686 | 8549 | 0 | +2.414 / +0.065 ns | +1.325 / +0.041 ns | 0 / 0 | 3: gate FAIL (mirror) |
+
+Setup and hold close in all six runs with zero failing endpoints. The LUT-level gate of section 6a fails with
+`"distributed"` for one reason: the XPM distributed-RAM read of `u_regs/u_mirror_ram` is a LUT6 + MUXF7 + MUXF8 tree (3
+levels on 14 to 27 endpoints, depending on the run, inside the vendor macro); the frame path stays at 2 levels. The 6 endpoints of the shared
+`rtlnet_common` AXI4-Lite crossing at 3 levels are the same in all three configurations (not gated, 10.9). The
+`"distributed"` option is therefore for the slow CPU-path instance of a small FPGA (100 MHz, setup slack 1.3 ns or more at
+156 MHz); a 10G or 25G main-ingress instance keeps `"block"`.
+
+Measured but not implemented (synthesis only, small profile with the mirror kept in block RAM and everything else
+distributed, a scratch edit of `u_mirror_ram`): 3928 LUTs (2956 logic + 972 as memory), 8001 flip-flops, 1 block RAM tile
+(one RAMB36). Giving the mirror its own style parameter is an open option (10.9): about 760 LUTs fewer for one tile, and the
+LUT-level gate passes.
+
+Recommendation for a small FPGA (Arty A7-100: 63 400 LUTs, 135 tiles): the small profile with `"distributed"`: 0 block RAM
+tiles instead of 30, 4686 LUTs (7.4 %) and 8549 flip-flops (6.7 %). It holds the protection profile of section 13 (one MAC
+entry, two tuples, one rule, four policers).
+
+### 12.4 Capacity reporting
+
+Software reads the built sizes from `CAPS` (0x008) and `LATENCY` (0x014); no extra register is needed:
+
+| Register | Fields |
+|---|---|
+| `CAPS` | [4:0] `TABLE_ENTRIES`, [9:5] `TUPLE_ENTRIES`, [12:10] `NUM_RULES`, [15:13] `NUM_POLICERS`, [20:16] `TABLE_LANES`, [26:21] `MATCH_DEPTH_BYTES / 8`, **[27] `RAM_STYLE` is `"distributed"`** (added 11-14-2026; reads 0 for `"block"`, so every earlier `CAPS` value is unchanged) |
+| `LATENCY` | [7:0] `DELAY_BEATS`, [15:8] `VERDICT_LATENCY` |
+
+The driver decodes both at `rtlnet_classifier_init` (`ctx->table_entries`, `tuple_entries`, `num_rules`, `num_policers`,
+`table_lanes`, `match_depth_bytes`, `ram_distributed`, `delay_beats`, `verdict_latency`) and returns them with
+`rtlnet_classifier_get_build`. Every function that adds an entry, a rule or a policer checks the index against these
+sizes and returns `RTLNET_CLS_ERR_RANGE` before writing; a police action that selects a policer the build does not have is
+refused the same way (the hardware would treat it as a disabled policer without notice). The firmware prints the sizes with
+`show classifier`.
+
+## 13. Protection profile of the Ethernet demo
+
+The Ethernet demo firmware keeps `MODE` pass-all (no whitelist: the protocol ingress filter already admits only the station
+MAC and broadcast) and polices four traffic classes, each with its own policer. `rtlnet_classifier_config_protect` installs
+it, `rtlnet_classifier_protect_limit` changes one class, `rtlnet_classifier_protect_defaults` fills the default limits.
+
+### 13.1 Classes and the resources they use
+
+| Policer | Class | Matched by | Counts |
+|---:|---|---|---|
+| 2 | `arp` | rule 0: bytes 12..13 = 0x08 0x06, every other byte don't-care, classify-only | ARP requests for other hosts and ARP replies |
+| 3 | `icmp` | tuple 0: IPv4 protocol 1, any addresses and ports, classify-only | ICMP the hardware responder did not answer |
+| 1 | `udp` | tuple 1: IPv4 protocol 17, any addresses and ports, classify-only | UDP no hardware leaf claimed (unicast and broadcast) |
+| 0 | `broadcast` | MAC table entry 0: destination FF:FF:FF:FF:FF:FF, classify-only | other broadcast frames (not ARP, ICMP or UDP) |
+
+The hardware picks the policer of the first policing hit in the order rule, tuple table, field tables (6.3), so a frame in
+several classes is counted once, in the order of the rows of the table above: ARP, ICMP, UDP, broadcast. An ARP request is also a broadcast, but counts as ARP; a UDP broadcast counts as UDP. The profile needs one MAC
+entry, two tuples, one rule of at least 14 compared bytes and four policers; `config_protect` returns `RTLNET_CLS_ERR_RANGE`
+before writing anything on a smaller build, and the small profile of 12.1 fits.
+
+### 13.2 What reaches the CPU path
+
+The CPU path receives every frame no enabled leaf claims, after the ingress filter (station MAC and broadcast only). The
+classes in this design:
+
+| Class | Reaches the CPU path | Does not |
+|---|---|---|
+| ARP | requests for any address except the board's own (every ARP broadcast of the LAN); replies to the board's own requests; a request for the board's own address that begins while the ARP leaf is busy | requests for the board's address that the leaf answers (claimed) |
+| ICMP | echo requests that begin while the ICMP leaf is busy; echo requests with a bad size or checksum; every other ICMP type (echo replies, unreachable, redirect, time exceeded); echo requests to other addresses, such as the subnet broadcast | echo requests the hardware responder answers (claimed) |
+| UDP | datagrams to any port no hardware socket, iperf, DHCP or echo leaf claims (closed ports); lwIP answers each with an ICMP port unreachable | datagrams a leaf claims |
+| broadcast | every broadcast frame that is not claimed (DHCP replies are claimed by the DHCP leaf) | |
+| multicast | never: the ingress filter (`FILTER_ENABLE` 1, the default) discards every multicast frame and counts it as filtered | |
+
+A multicast class would police nothing in this design, so its policer is used by the UDP class. SYN-flood policing needs a
+second rule (bytes 12..13 = 0x08 0x00, byte 23 = 6, byte 47 masked 0x12 = 0x02) and is not installed, because the small
+build has one rule; a build with two rules can add it with `rtlnet_classifier_rule_pattern` and `rtlnet_classifier_rule_byte`.
+
+### 13.3 Default limits and why
+
+Frames passed per 100 ms window: `broadcast` 10, `udp` 10, `arp` 20, `icmp` 10 (the broadcast value is the earlier
+storm-control default). The per-frame cost comes from the firmware measurements of the CPU guide (section 6b): a transmitted
+frame costs about 11 000 cycles for a full 1460-byte segment, 110 microseconds at 100 MHz (88 at 125 MHz), an upper bound for
+the small reply to a frame; a frame that is only examined and ignored costs a fraction of that (about 20 microseconds assumed for an ARP
+request for another host). The limits are chosen so that the worst case of all four classes together uses a small share of the
+CPU and everything else, above all TCP, keeps the rest:
+
+| Class | Limit | Rate | Worst-case CPU at 110 microseconds per frame |
+|---|---:|---:|---:|
+| broadcast | 10 per 100 ms | 100 per second | 1.1 % |
+| udp | 10 per 100 ms | 100 per second | 1.1 % (each answered by an ICMP unreachable) |
+| arp | 20 per 100 ms | 200 per second | 2.2 % if every frame were answered, 0.4 % when ignored |
+| icmp | 10 per 100 ms | 100 per second | 1.1 % |
+| all four | | 500 per second | about 5.5 % |
+
+ARP gets the largest limit because a busy LAN carries tens of ARP broadcasts per second and the replies to the board's own
+requests share the class; the others have no legitimate use on this board above a few frames per second. A window releases
+its whole budget at once, so 10 frames can arrive back to back; the 32 KB CPU receive FIFO holds them. The flood in the
+class is dropped from the first frame over the limit to the end of the window, which includes legitimate frames of that class
+(for example an ARP reply during an ARP storm; lwIP repeats the request). These are engineering estimates from cycle counts, not
+measurements under load; `test/flood_test.ps1` of the CPU folder measures the effect on the board.
+
+### 13.4 Firmware and CLI
+
+`src/rtlnet_protect.[ch]` of `cpu/microblaze_v_ethernet/firmware` installs the profile after `cpupath_init`
+(`protect_install`, which falls back to the broadcast storm default of `cpupath_init` on a build too small for it), keeps the
+limits the CLI changes and reads the counters. `show classifier` prints the built sizes, mode, profile state and one line
+per class (limit, window, seen, passed, dropped); `classifier policer <broadcast|udp|arp|icmp> <frames> <window-ms>` changes one
+class (frames 0..100000, window 1..60000 ms); `clear counters` clears every policer counter; `show running-config` lists the
+four limits.
+
+## 14. Revision history
 
 | Revision | Change |
 |---|---|
@@ -515,3 +706,4 @@ per-word entry memories for five field tables and the tuple table, eight lanes p
 | 10-22-2026 | Shift-register delay line of `MATCH_DEPTH_BYTES` (default 64) with verdict-gated valid at its output, in place of a store-and-forward FIFO |
 | 10-22-2026 | Binding timing structure for 10G/25G line rates: two LUT levels per stage, pipelined compares and reductions, derived verdict latency |
 | 10-22-2026 | As built: RTL, driver, bench and timing gate; section 10 records the as-built latencies, register-map additions (`LATENCY`, `OVERRUN_DROPPED`, `BUDGET`), deviations, verification and timing results |
+| 11-14-2026 | Small-FPGA parameters (sections 11, 12): pass-through from `rtlnet_eth_protocol`, measured cost of `"distributed"`, CAPS bit 27, capacity-aware driver (`get_build`, policer index checks), protection profile (section 13, driver `config_protect`) |

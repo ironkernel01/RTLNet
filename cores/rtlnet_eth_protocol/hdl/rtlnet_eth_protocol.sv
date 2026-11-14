@@ -95,11 +95,13 @@
 //   * Simulation-only check: every leaf holds s_axis_tready at 1 while a
 //     beat is presented (the fan-out depends on it).
 // Language: SystemVerilog-2012 (synthesizable subset).
-// Revision: 10-22-2026
+// Revision: 11-14-2026
 //   * 10-22-2026: initial version.
 //   * 10-22-2026: leaf claim inputs; CPU network path (u_cpu_rx_fifo,
 //     u_cpu_tx_fifo, arbiter source 5); u_cpu_classifier on the CPU receive
 //     stream with its register window 0x8000; DELIVERED and CPU counters.
+//   * 11-14-2026: CLS_* parameters pass the classifier's sizes and RAM style through to u_cpu_classifier
+//     (defaults equal the classifier's own).
 // Clocks:
 //   * axis_clk: MAC client streams; axis_resetn synchronous to it.
 //   * proto_clk: leaves and register file; proto_resetn synchronous to it.
@@ -130,6 +132,13 @@ module rtlnet_eth_protocol #(
   parameter int    CPU_CLASSIFIER_ENABLE = 1,      // build u_cpu_classifier on the CPU receive stream
   parameter int    CPU_TCP_OFFLOAD_ENABLE = 1,     // build u_cpu_offload (checksum insert on TX, trailer on RX)
   parameter int    CPU_AXIS_CLK_HZ = 100_000_000,  // cpu_axis_clk frequency (classifier policer tick)
+  parameter int    CLS_TABLE_ENTRIES     = 16,     // u_cpu_classifier TABLE_ENTRIES (2, 4, 8, 16)
+  parameter int    CLS_TUPLE_ENTRIES     = 16,     // u_cpu_classifier TUPLE_ENTRIES (2, 4, 8, 16)
+  parameter int    CLS_TABLE_LANES       = 2,      // u_cpu_classifier TABLE_LANES (2 or 4)
+  parameter int    CLS_NUM_RULES         = 2,      // u_cpu_classifier NUM_RULES (1..4)
+  parameter int    CLS_NUM_POLICERS      = 4,      // u_cpu_classifier NUM_POLICERS (1..4)
+  parameter int    CLS_MATCH_DEPTH_BYTES = 64,     // u_cpu_classifier MATCH_DEPTH_BYTES (40..256, multiple of 8)
+  parameter string CLS_RAM_STYLE         = "block", // u_cpu_classifier RAM_STYLE ("block" | "distributed")
   parameter string RAM_STYLE       = "block"       // "block" | "distributed", every buffer
 )(
   // Clocks: axis_clk (MAC client), proto_clk (leaves, registers), app_clk
@@ -1079,7 +1088,14 @@ module rtlnet_eth_protocol #(
         // CPU-path classifier (cores/rtlnet_classifier, its section 2 ports):
         // every frame toward the CPU is filtered; registers at 0x8000.
         rtlnet_classifier #(
-          .AXIS_CLK_HZ (CPU_AXIS_CLK_HZ)
+          .AXIS_CLK_HZ       (CPU_AXIS_CLK_HZ),
+          .TABLE_ENTRIES     (CLS_TABLE_ENTRIES),
+          .TUPLE_ENTRIES     (CLS_TUPLE_ENTRIES),
+          .TABLE_LANES       (CLS_TABLE_LANES),
+          .NUM_RULES         (CLS_NUM_RULES),
+          .NUM_POLICERS      (CLS_NUM_POLICERS),
+          .MATCH_DEPTH_BYTES (CLS_MATCH_DEPTH_BYTES),
+          .RAM_STYLE         (CLS_RAM_STYLE)
         ) u_cpu_classifier (
           .axis_clk      (cpu_axis_clk),
           .axis_resetn   (cpu_axis_resetn),

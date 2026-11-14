@@ -50,6 +50,7 @@
 #include "rtlnet_classifier.h"
 #include "rtlnet_cpu_eth_sysregs.h"
 #include "rtlnet_cpupath.h"
+#include "rtlnet_protect.h"
 #include "rtlnet_eth_protocol.h"
 #include "rtlnet_netmgr.h"
 #include "rtlnet_offload.h"
@@ -150,6 +151,126 @@ static void demo_cls(uint32_t off, uint32_t want, const char *msg)
 }
 
 /**
+ * @brief The classifier protection profile against the register model: install at the default and the small build,
+ *        a build too small for it, "show classifier", "classifier policer", running-config and clear counters.
+ *        Runs in privileged exec with the classifier model present.
+ * @return None.
+ */
+static void demo_protect(void)
+{
+    const uint32_t caps_small = 8u | (8u << 5) | (1u << 10) | (4u << 13) | (2u << 16) | (8u << 21) | (1u << 27);
+    const uint32_t caps_one_tuple = 8u | (1u << 5) | (1u << 10) | (4u << 13) | (2u << 16) | (8u << 21);
+    const uint32_t entry0 = RTLNET_CLS_REG_ENTRY(RTLNET_CLS_TABLE_MAC, 0u);
+
+    /* Default build: rule 0 ARP, tuples ICMP and UDP, MAC entry 0 broadcast, four policers, pass-all. */
+    demo_check(protect_install() == PROTECT_OK, "protect_install: default build");
+    demo_cls(RTLNET_CLS_REG_CTRL, RTLNET_CLS_MODE_PASS_ALL, "profile MODE pass-all");
+    demo_cls(RTLNET_CLS_REG_RULE_MODE(0u), RTLNET_CLS_RM_ENABLE | RTLNET_CLS_RM_CLASSIFY | RTLNET_CLS_RM_POLICE_EN |
+             (PROTECT_ARP << RTLNET_CLS_RM_POLICER_SHIFT), "ARP rule: enabled, classify-only, policer 2");
+    demo_cls(RTLNET_CLS_REG_RULE_BASE + 4u * 12u, 0xFF000808u, "ARP rule byte 12 = 0x08");
+    demo_cls(RTLNET_CLS_REG_RULE_BASE + 4u * 13u, 0xFF000806u, "ARP rule byte 13 = 0x06");
+    demo_cls(RTLNET_CLS_REG_RULE_BASE + 4u * 14u, 0u, "ARP rule byte 14 don't care");
+    demo_cls(RTLNET_CLS_REG_TUPLE(0u), RTLNET_CLS_TUP_VALID | RTLNET_CLS_TUP_PROTO_EN | RTLNET_CLS_TUP_POLICE_EN |
+             (PROTECT_ICMP << RTLNET_CLS_TUP_POLICER_SHIFT) | 1u, "tuple 0: ICMP, policer 3");
+    demo_cls(RTLNET_CLS_REG_TUPLE(1u), RTLNET_CLS_TUP_VALID | RTLNET_CLS_TUP_PROTO_EN | RTLNET_CLS_TUP_POLICE_EN |
+             (PROTECT_UDP << RTLNET_CLS_TUP_POLICER_SHIFT) | 17u, "tuple 1: UDP, policer 1");
+    demo_cls(RTLNET_CLS_REG_TUPLE(1u) + RTLNET_CLS_TUP_DPORT, 0xFFFF0000u, "tuple 1: any destination port");
+    demo_cls(RTLNET_CLS_REG_TABLE_MODE(RTLNET_CLS_TABLE_TUPLE), RTLNET_CLS_TM_ENABLE | RTLNET_CLS_TM_CLASSIFY,
+             "tuple table classify-only");
+    demo_cls(RTLNET_CLS_REG_TABLE_MODE(RTLNET_CLS_TABLE_MAC), RTLNET_CLS_TM_ENABLE | RTLNET_CLS_TM_CLASSIFY,
+             "MAC table classify-only");
+    demo_cls(entry0 + RTLNET_CLS_ENT_CTRL, RTLNET_CLS_ENT_VALID | RTLNET_CLS_ENT_DST_EN | RTLNET_CLS_ENT_POLICE_EN |
+             0xFFFFu, "MAC entry 0: destination broadcast, policer 0");
+    demo_cls(RTLNET_CLS_REG_POLICER(PROTECT_BROADCAST) + RTLNET_CLS_POL_LIMIT, 10u, "broadcast limit 10");
+    demo_cls(RTLNET_CLS_REG_POLICER(PROTECT_UDP) + RTLNET_CLS_POL_LIMIT, 10u, "udp limit 10");
+    demo_cls(RTLNET_CLS_REG_POLICER(PROTECT_ARP) + RTLNET_CLS_POL_LIMIT, 20u, "arp limit 20");
+    demo_cls(RTLNET_CLS_REG_POLICER(PROTECT_ICMP) + RTLNET_CLS_POL_LIMIT, 10u, "icmp limit 10");
+    demo_cls(RTLNET_CLS_REG_POLICER(PROTECT_ARP) + RTLNET_CLS_POL_WINDOW, 100u, "arp window 100 ms");
+    demo_cls(RTLNET_CLS_REG_POLICER(PROTECT_ARP) + RTLNET_CLS_POL_CTRL, RTLNET_CLS_POL_CTRL_ENABLE, "arp policer enabled");
+
+    host_model_cls_poke(RTLNET_CLS_REG_POLICER(PROTECT_ARP) + RTLNET_CLS_POL_SEEN, 40u);
+    host_model_cls_poke(RTLNET_CLS_REG_POLICER(PROTECT_ARP) + RTLNET_CLS_POL_PASSED, 20u);
+    host_model_cls_poke(RTLNET_CLS_REG_POLICER(PROTECT_ARP) + RTLNET_CLS_POL_DROPPED, 20u);
+    host_model_cls_poke(RTLNET_CLS_REG_COUNTER(RTLNET_CLS_CNT_FRAMES), 500u);
+    host_capture_clear();
+    demo_type("show classifier\r");
+    demo_check(strstr(host_capture_text(), "Build           : 16 table entries, 16 tuples, 2 rules, 4 policers, 2 lanes, "
+                      "64 bytes matched, block RAM") != NULL, "show classifier: built sizes and RAM style");
+    demo_check(strstr(host_capture_text(), "Mode            : pass-all") != NULL, "show classifier: mode");
+    demo_check(strstr(host_capture_text(), "protection profile installed") != NULL, "show classifier: profile installed");
+    demo_check(strstr(host_capture_text(), "20 /   100 ms") != NULL && strstr(host_capture_text(), "40        20        20  ARP") != NULL,
+               "show classifier: ARP limit, window and counters");
+    demo_check(strstr(host_capture_text(), "broadcast ") != NULL && strstr(host_capture_text(), "udp ") != NULL &&
+               strstr(host_capture_text(), "icmp ") != NULL, "show classifier: the four classes");
+
+    /* classifier policer: limit and window of one class, argument checks. */
+    demo_type("configure terminal\r");
+    host_capture_clear();
+    demo_type("classifier policer arp 50 250\r");
+    demo_cls(RTLNET_CLS_REG_POLICER(PROTECT_ARP) + RTLNET_CLS_POL_LIMIT, 50u, "classifier policer arp: limit");
+    demo_cls(RTLNET_CLS_REG_POLICER(PROTECT_ARP) + RTLNET_CLS_POL_WINDOW, 250u, "classifier policer arp: window");
+    demo_cls(RTLNET_CLS_REG_POLICER(PROTECT_BROADCAST) + RTLNET_CLS_POL_LIMIT, 10u, "other classes unchanged");
+    demo_type("classifier policer ICMP 0 1000\r");
+    demo_cls(RTLNET_CLS_REG_POLICER(PROTECT_ICMP) + RTLNET_CLS_POL_LIMIT, 0u, "classifier policer icmp 0: drop all of the class");
+    demo_cls(RTLNET_CLS_REG_POLICER(PROTECT_ICMP) + RTLNET_CLS_POL_WINDOW, 1000u, "classifier policer icmp: window");
+    host_capture_clear();
+    demo_type("classifier policer multicast 5 100\r");
+    demo_check(strstr(host_capture_text(), "% Invalid class") != NULL, "classifier policer: unknown class");
+    host_capture_clear();
+    demo_type("classifier policer arp 100001 100\r");
+    demo_check(strstr(host_capture_text(), "% Invalid frames per window") != NULL, "classifier policer: frames too high");
+    host_capture_clear();
+    demo_type("classifier policer arp 5 0\r");
+    demo_check(strstr(host_capture_text(), "% Invalid window") != NULL, "classifier policer: window 0");
+    demo_cls(RTLNET_CLS_REG_POLICER(PROTECT_ARP) + RTLNET_CLS_POL_LIMIT, 50u, "rejected commands change nothing");
+    demo_type("end\r");
+    host_capture_clear();
+    demo_type("show running-config\r");
+    demo_check(strstr(host_capture_text(), "classifier policer arp 50 250\n") != NULL &&
+               strstr(host_capture_text(), "classifier policer icmp 0 1000\n") != NULL &&
+               strstr(host_capture_text(), "classifier policer broadcast 10 100\n") != NULL,
+               "running-config lists the classifier policers");
+
+    /* clear counters covers the classifier and every policer counter. */
+    demo_type("clear counters\r");
+    demo_cls(RTLNET_CLS_REG_POLICER(PROTECT_ARP) + RTLNET_CLS_POL_SEEN, 0u, "clear counters: policer SEEN");
+    demo_cls(RTLNET_CLS_REG_COUNTER(RTLNET_CLS_CNT_FRAMES), 0u, "clear counters: classifier FRAMES");
+    demo_cls(RTLNET_CLS_REG_POLICER(PROTECT_ARP) + RTLNET_CLS_POL_LIMIT, 50u, "clear counters keeps the limit");
+
+    /* Small build: 8 entries, 1 rule, 4 policers, distributed RAM: the same profile fits. */
+    host_model_cls_set_caps(caps_small);
+    demo_check(protect_install() == PROTECT_OK, "protect_install: small build");
+    demo_cls(RTLNET_CLS_REG_CTRL, RTLNET_CLS_MODE_PASS_ALL, "small build: MODE pass-all");
+    demo_cls(RTLNET_CLS_REG_RULE_MODE(0u), RTLNET_CLS_RM_ENABLE | RTLNET_CLS_RM_CLASSIFY | RTLNET_CLS_RM_POLICE_EN |
+             (PROTECT_ARP << RTLNET_CLS_RM_POLICER_SHIFT), "small build: ARP rule");
+    demo_cls(RTLNET_CLS_REG_POLICER(PROTECT_ARP) + RTLNET_CLS_POL_LIMIT, 50u, "small build: the configured limit is kept");
+    host_capture_clear();
+    demo_type("show classifier\r");
+    demo_check(strstr(host_capture_text(), "Build           : 8 table entries, 8 tuples, 1 rules, 4 policers, 2 lanes, "
+                      "64 bytes matched, distributed RAM") != NULL, "show classifier: small build, distributed RAM");
+
+    /* A build with one tuple cannot hold the profile: the driver refuses, the console says so. */
+    host_model_cls_set_caps(caps_one_tuple);
+    demo_check(protect_install() == PROTECT_TOO_SMALL, "protect_install: one tuple is too small");
+    host_capture_clear();
+    demo_type("show classifier\r");
+    demo_check(strstr(host_capture_text(), "NOT installed") != NULL, "show classifier: profile not installed");
+    demo_type("configure terminal\r");
+    host_capture_clear();
+    demo_type("classifier policer icmp 3 100\r");
+    demo_check(strstr(host_capture_text(), "cannot hold the protection profile") != NULL, "classifier policer: too-small build says so");
+    demo_type("end\r");
+    host_capture_clear();
+    demo_type("show running-config\r");
+    demo_check(strstr(host_capture_text(), "classifier policer icmp 3 100\n") != NULL, "too-small build: the setting is kept in the running configuration");
+
+    /* Back to the default build. */
+    host_model_cls_set_caps(0u);
+    demo_check(protect_install() == PROTECT_OK, "protect_install: default build again");
+    demo_cls(RTLNET_CLS_REG_POLICER(PROTECT_ICMP) + RTLNET_CLS_POL_LIMIT, 3u, "the kept setting is installed");
+}
+
+/**
  * @brief The CPU-path boot configuration against the classifier register model: cpupath_init writes the broadcast
  *        storm limiter through the driver, "show cpu-path" reads the state and counters back.
  * @return None.
@@ -185,6 +306,7 @@ static void demo_cpupath(void)
     demo_type("show counters\r");
     demo_check(strstr(host_capture_text(), "broadcasts seen 50, passed 12, dropped 38") != NULL, "show counters: storm limiter policer");
     demo_type("clear counters\r");
+    demo_protect();
     demo_type("disable\r");
     host_model_set_core(RTLNET_PLAT_CLS_BASE, 0u);
 }

@@ -16,8 +16,9 @@
 //     decision passes through in one block; the top level sums them into
 //     VERDICT_LATENCY (no hand-entered latency anywhere).
 // Language: SystemVerilog-2012 (synthesizable package).
-// Revision: 10-22-2026
+// Revision: 11-14-2026
 //   * 10-22-2026: initial version.
+//   * 11-14-2026: CAPS bit 27 (CAPS_RAM_DIST_BIT): RAM_STYLE is "distributed".
 // Clocks: none (package).
 // -----------------------------------------------------------------------------
 package rtlnet_classifier_pkg;
@@ -84,6 +85,7 @@ package rtlnet_classifier_pkg;
   localparam int CAPS_NUM_POLICERS_LSB  = 13;   // [15:13]
   localparam int CAPS_TABLE_LANES_LSB   = 16;   // [20:16]
   localparam int CAPS_MATCH_BEATS_LSB   = 21;   // [26:21] MATCH_DEPTH_BYTES / 8
+  localparam int CAPS_RAM_DIST_BIT      = 27;   // [27] 1 = RAM_STYLE "distributed"
 
   // LATENCY fields.
   localparam int LAT_DELAY_BEATS_LSB     = 0;   // [7:0]

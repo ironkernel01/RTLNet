@@ -35,6 +35,7 @@
  *  Revision    Author                          Description
  * ---------------------------------------------------------------------------
  *  11-14-2026  MenuBuilder AI / Steve Spano    Initial command set of the Ethernet demo
+ *  11-14-2026  MenuBuilder AI / Steve Spano    SHOW CLASSIFIER and CLASSIFIER POLICER (classifier protection profile)
  * ===========================================================================
  */
 #include "menu.h"
@@ -89,6 +90,8 @@ const MenuCommandDef g_menu_commands[] = {
       "CPU network path: DMA frames and errors, wrapper CPU-path counters", cli_show_cpu_path, MENU_MODE_NONE },
     { "cli_show_offload", MENU_MODE_EXEC, "SHOW OFFLOAD",
       "Checksum offload: discovery, CTRL, lwIP flags, counters, zero-copy options", cli_show_offload, MENU_MODE_NONE },
+    { "cli_show_classifier", MENU_MODE_EXEC, "SHOW CLASSIFIER",
+      "CPU-path classifier: built sizes, mode, protection profile with per-class limits and counters", cli_show_classifier, MENU_MODE_NONE },
     { "cli_show_running", MENU_MODE_PRIV, "SHOW RUNNING-CONFIG",
       "Current configuration", cli_show_running, MENU_MODE_NONE },
     { "cli_disable", MENU_MODE_PRIV, "DISABLE",
@@ -139,6 +142,8 @@ const MenuCommandDef g_menu_commands[] = {
       "TCP echo server port (default 7)", cli_tcp_echo_port, MENU_MODE_NONE },
     { "cli_offload", MENU_MODE_CONFIG, "OFFLOAD [WHAT] [STATE]",
       "Checksum offload: tx-ip, tx-l4, rx or all, on or off (as far as the build has it; lwIP follows)", cli_offload, MENU_MODE_NONE },
+    { "cli_classifier_policer", MENU_MODE_CONFIG, "CLASSIFIER POLICER [CLASS] [FRAMES] [WINDOW_MS]",
+      "Frames per window the CPU path passes for a traffic class: broadcast, udp, arp or icmp", cli_classifier_policer, MENU_MODE_NONE },
     { "cli_if_speed", MENU_MODE_CONFIG_IF, "SPEED [MBPS]",
       "Link speed, full duplex: 10, 100 or auto (auto = every mode of the board, best rate)", cli_if_speed, MENU_MODE_NONE },
     { "cli_if_shutdown", MENU_MODE_CONFIG_IF, "SHUTDOWN",

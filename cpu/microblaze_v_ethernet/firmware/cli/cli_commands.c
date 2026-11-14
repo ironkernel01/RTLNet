@@ -68,6 +68,7 @@
 #include "rtlnet_offload.h"
 #include "rtlnet_phy.h"
 #include "rtlnet_platform.h"
+#include "rtlnet_protect.h"
 #include "rtlnet_tcp_echo.h"
 #include "rtlnet_tcp_iperf.h"
 #include "rtlnet_udp_echo.h"
@@ -1005,6 +1006,21 @@ int cli_show_counters(const MenuCommandContext *ctx)
 }
 
 /**
+ * @brief The classifier protection profile as configuration commands (the four class policers).
+ * @return None.
+ */
+static void cli_print_protect_config(void)
+{
+    protect_class_t pc;
+    for (unsigned c = 0u; c < PROTECT_CLASSES; c++) {
+        if (protect_class_get(c, &pc) == PROTECT_OK) {
+            fmt_printf("classifier policer %s %u %u\n", protect_class_name(c), (unsigned)pc.limit_pkts,
+                       (unsigned)pc.window_ms);
+        }
+    }
+}
+
+/**
  * @brief SHOW RUNNING-CONFIG: the running configuration as commands.
  * @param ctx Unused.
  * @return 0.
@@ -1064,6 +1080,7 @@ int cli_show_running(const MenuCommandContext *ctx)
     if ((rtlnet_offload_request() & RTLNET_OFFLOAD_RX) == 0u) {
         fmt_printf("offload rx off\n");
     }
+    cli_print_protect_config();
     fmt_printf("end\n");
     return 0;
 }
@@ -2130,4 +2147,85 @@ int cli_offload(const MenuCommandContext *ctx)
         fmt_printf("%% CTRL did not read back as written\n");
     }
     return (rc == RTLNET_OFFLOAD_OK) ? 0 : -1;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Classifier protection profile                                             */
+/* ------------------------------------------------------------------------- */
+
+/**
+ * @brief SHOW CLASSIFIER: the built classifier (sizes, RAM style, latency), its mode, the protection profile
+ *        and, per traffic class, the policer limit, window and counters.
+ * @param ctx Unused.
+ * @return 0.
+ */
+int cli_show_classifier(const MenuCommandContext *ctx)
+{
+    protect_info_t info;
+    cpupath_cls_counters_t ck;
+    protect_class_t pc;
+    (void)ctx;
+    fmt_printf("Classifier (CPU path)\n");
+    if (protect_info(&info) != PROTECT_OK || !info.valid) {
+        fmt_printf("  Not present in this build\n");
+        return 0;
+    }
+    fmt_printf("  Build           : %u table entries, %u tuples, %u rules, %u policers, %u lanes, %u bytes matched, "
+               "%s RAM\n", (unsigned)info.table_entries, (unsigned)info.tuple_entries, (unsigned)info.num_rules,
+               (unsigned)info.num_policers, (unsigned)info.table_lanes, (unsigned)info.match_depth_bytes,
+               info.ram_distributed ? "distributed" : "block");
+    fmt_printf("  Latency         : %u beats (verdict %u)\n", (unsigned)info.delay_beats,
+               (unsigned)info.verdict_latency);
+    fmt_printf("  Mode            : %s\n", cpupath_mode_name(info.mode));
+    fmt_printf("  Profile         : %s\n", info.installed ?
+               "protection profile installed: everything passes except the classes below" :
+               "protection profile NOT installed (build too small): broadcast storm limiter only");
+    if (cpupath_cls_counters(&ck) == CPUPATH_OK) {
+        fmt_printf("  Counters        : frames %u, passed %u, dropped %u (policers %u, mode %u, overrun %u)\n",
+                   (unsigned)ck.frames, (unsigned)ck.passed, (unsigned)ck.dropped, (unsigned)ck.police_dropped,
+                   (unsigned)ck.mode_dropped, (unsigned)ck.overrun_dropped);
+    }
+    if (!info.installed) {
+        return 0;
+    }
+    fmt_printf("  Class      Limit / window      Seen    Passed   Dropped  Polices\n");
+    for (unsigned c = 0u; c < PROTECT_CLASSES; c++) {
+        if (protect_class_get(c, &pc) != PROTECT_OK) {
+            fmt_printf("  %% class %s not readable\n", protect_class_name(c));
+            continue;
+        }
+        fmt_printf("  %-9s %6u / %5u ms %9u %9u %9u  %s%s\n", protect_class_name(c), (unsigned)pc.limit_pkts,
+                   (unsigned)pc.window_ms, (unsigned)pc.seen, (unsigned)pc.passed, (unsigned)pc.dropped,
+                   protect_class_text(c), pc.enabled ? "" : " (policer off)");
+    }
+    return 0;
+}
+
+/**
+ * @brief CLASSIFIER POLICER [CLASS] [FRAMES] [WINDOW-MS] (config): the number of frames of one traffic class the
+ *        classifier passes to the CPU per window; the rest of the window's frames of that class are dropped.
+ * @param ctx argv[0] = class (broadcast, udp, arp, icmp), argv[1] = frames 0..100000, argv[2] = window in ms 1..60000.
+ * @return 0, or -1 for a bad word or a failed change.
+ */
+int cli_classifier_policer(const MenuCommandContext *ctx)
+{
+    uint32_t frames;
+    uint32_t window;
+    int cls = protect_class_find(ctx->argv[0]);
+    int rc;
+    if (cls < 0) {
+        return cli_bad_value("class (broadcast, udp, arp, icmp)", ctx->argv[0]);
+    }
+    if (cli_parse_u32(ctx->argv[1], &frames) != 0 || frames > PROTECT_LIMIT_MAX) {
+        return cli_bad_value("frames per window (0..100000)", ctx->argv[1]);
+    }
+    if (cli_parse_u32(ctx->argv[2], &window) != 0 || window == 0u || window > PROTECT_WINDOW_MAX_MS) {
+        return cli_bad_value("window in ms (1..60000)", ctx->argv[2]);
+    }
+    rc = protect_set((unsigned)cls, frames, window);
+    if (rc != PROTECT_OK) {
+        fmt_printf("%% %s\n", protect_result_text(rc));
+        return -1;
+    }
+    return 0;
 }

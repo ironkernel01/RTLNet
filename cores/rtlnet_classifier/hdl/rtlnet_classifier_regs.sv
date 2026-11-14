@@ -33,8 +33,9 @@
 //   * Policer restart: a write to a policer's CTRL, LIMIT_PKTS or
 //     WINDOW_MS pulses cfg_pol_restart for that policer.
 // Language: SystemVerilog-2012.
-// Revision: 10-22-2026
+// Revision: 11-14-2026
 //   * 10-22-2026: initial version.
+//   * 11-14-2026: CAPS bit 27 reports RAM_STYLE "distributed" (0 for "block": earlier CAPS values unchanged).
 // Clocks: s_axi_aclk (AXI4-Lite slave side of u_axil_cdc), clk (axis_clk:
 //   everything else). Both resets synchronous to their clocks, active low,
 //   asserted together.
@@ -115,7 +116,8 @@ module rtlnet_classifier_regs #(
       (32'(NUM_RULES)              << CAPS_NUM_RULES_LSB)     |
       (32'(NUM_POLICERS)           << CAPS_NUM_POLICERS_LSB)  |
       (32'(TABLE_LANES)            << CAPS_TABLE_LANES_LSB)   |
-      (32'(MATCH_DEPTH_BYTES / 8)  << CAPS_MATCH_BEATS_LSB);
+      (32'(MATCH_DEPTH_BYTES / 8)  << CAPS_MATCH_BEATS_LSB)   |
+      (32'(RAM_STYLE == "distributed") << CAPS_RAM_DIST_BIT);
   localparam logic [31:0] LATENCY_VALUE =
       (32'(DELAY_BEATS)     << LAT_DELAY_BEATS_LSB) |
       (32'(VERDICT_LATENCY) << LAT_VERDICT_LATENCY_LSB);

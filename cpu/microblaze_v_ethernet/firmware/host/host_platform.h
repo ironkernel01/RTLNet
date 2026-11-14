@@ -44,6 +44,7 @@ void        host_model_set_core(uintptr_t base, uint32_t id);
 uint32_t    host_model_leds(void);
 uint32_t    host_model_cls_peek(uint32_t offset);
 void        host_model_cls_poke(uint32_t offset, uint32_t value);
+void        host_model_cls_set_caps(uint32_t caps);   /* classifier CAPS word; 0 = the default build */
 int         host_reload_count(void);
 
 /* Protocol wrapper: CAPS.CPU_PATH_PRESENT and CPU_CAPS (bits 16..18 are the optional blocks). */

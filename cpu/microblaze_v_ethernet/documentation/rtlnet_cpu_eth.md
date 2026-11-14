@@ -25,7 +25,7 @@ cpu/microblaze_v_ethernet/
                 cli/ (MenuBuilder CLI: cli_commands.txt, gen_menu.py, check_menu.py, generated tables, MenuDocumentation.md),
                 host/ (desktop harness with scripted session), test/ (host unit tests, regression.txt), bsp/, build.ps1
   test/         board-independent hardware tests (PowerShell 5.1 and Python 3): console, link, ping, ARP, DHCP, UDP echo,
-                UDP iperf, TCP echo, TCP throughput, and run_all.ps1
+                UDP iperf, TCP echo, TCP throughput, the protection profile flood test (flood_test.ps1, eth_flood_test.py), and run_all.ps1
   documentation/ this document
 ```
 
@@ -125,7 +125,8 @@ To add a PHY (the DP83848 of the Arty A7-100 next): write its driver file under 
 | `src/rtlnet_board.[ch]` | system registers, board facts, core probing, raw debug access |
 | `src/rtlnet_phy.[ch]` | PHY driver selection by ID (section 4) |
 | `src/rtlnet_netmgr.[ch]` | running configuration, PHY bring-up, link monitor (MAC speed follows the PHY), DHCP and lease events, `InitLWIP` |
-| `src/rtlnet_cpupath.[ch]`, `rtlnet_offload.[ch]` | classifier (broadcast storm limiter) and TCP checksum offload on the CPU path |
+| `src/rtlnet_cpupath.[ch]`, `rtlnet_offload.[ch]` | classifier (broadcast storm limiter at boot) and TCP checksum offload on the CPU path |
+| `src/rtlnet_protect.[ch]` | classifier protection profile (four policed traffic classes), installed after `cpupath_init`; section 5a |
 | `src/lwip/` | lwIP port: DMA netif, TCP echo (port 7), lwiperf (TCP, port 5001), options |
 | `cli/` | MenuBuilder hierarchical CLI; the command set is `cli/cli_commands.txt`, the generated reference `cli/MenuDocumentation.md` |
 | `host/` | desktop harness: the CLI and network manager against a register model, scripted session (`TEST PASS`) |
@@ -139,12 +140,46 @@ auto-negotiates. There is no duplex, autoneg or advertise command.
 
 | Mode | Commands |
 |---|---|
-| user exec | `show version`, `show system`, `show interfaces`, `show phy`, `show ip`, `show arp`, `show dhcp`, `show iperf`, `show sockets`, `show counters`, `show tcp`, `show cpu-path`, `show offload` |
+| user exec | `show version`, `show system`, `show interfaces`, `show phy`, `show ip`, `show arp`, `show dhcp`, `show iperf`, `show sockets`, `show counters`, `show tcp`, `show cpu-path`, `show offload`, `show classifier` |
 | privileged exec (`enable`) | `show running-config`, `disable`, `debug read|write`, `phy read|write|dump|reset`, `clear counters`, `led <n> on|off`, `reload` |
-| `configure terminal` | `ip default-gateway`, `echo enable|socket`, `iperf port`, `iperf tcp enable|disable|port`, `tcp echo enable|disable|port`, `offload <what> <state>`, `interface eth0`, `ip dhcp`, `socket <n>` |
+| `configure terminal` | `ip default-gateway`, `echo enable|socket`, `iperf port`, `iperf tcp enable|disable|port`, `tcp echo enable|disable|port`, `offload <what> <state>`, `classifier policer <class> <frames> <window-ms>`, `interface eth0`, `ip dhcp`, `socket <n>` |
 | `interface eth0` | `speed`, `shutdown`, `no shutdown`, `ip address`, `ip netmask`, `mac-address` |
 | `ip dhcp` | `start`, `stop`, `renew`, `auto`, `no auto` |
 | `socket <n>` | `open`, `close`, `remote`, `connect-on-receive` |
+
+### 5a. Protection profile of the CPU path
+
+The classifier on the CPU receive stream stays in `MODE` pass-all (no whitelist: the protocol ingress filter admits only the
+station MAC and broadcast) and the firmware polices four traffic classes with the classifier's four policers, each with its own
+limit in frames per window. `protect_install` (`src/rtlnet_protect.c`) installs the profile through the classifier driver
+(`rtlnet_classifier_config_protect`) once per boot after `cpupath_init`, before lwIP sees a frame. Defaults, per 100 ms window:
+
+| Class | Limit | What is policed (classifier document, section 13) |
+|---|---:|---|
+| `arp` | 20 | ARP requests for other hosts and ARP replies (requests for the board's own address are answered and claimed by the ARP leaf) |
+| `icmp` | 10 | ICMP the hardware responder did not answer: other types, bad frames, requests that began while it was busy, requests to other addresses |
+| `udp` | 10 | UDP datagrams no hardware leaf claimed (closed ports); lwIP answers each with an ICMP port unreachable |
+| `broadcast` | 10 | other broadcast frames; the limit is the storm-control default of the earlier firmware |
+
+A frame in several classes counts once, in the order ARP, ICMP, UDP, broadcast. Multicast has no class: the protocol ingress
+filter discards every multicast frame, so none reaches the CPU path. TCP and every other frame pass unpoliced. The worst case of the four
+limits together is 500 frames per second, about 5 % of the CPU at the 110 microseconds per answered frame of section 6b; the reasoning
+is in the classifier document, section 13.3. The profile fits the small classifier of section 6a (8 entries, 1 rule, 4 policers); a
+classifier too small for it keeps the broadcast storm limiter of `cpupath_init` and the boot message and `show classifier` say so.
+
+CLI: `show classifier` prints the built sizes (table and tuple entries, rules, policers, lanes, matched bytes, RAM style), the
+mode, the profile state, and per class the limit, window, seen, passed and dropped counts. `classifier policer <broadcast|udp|arp|icmp>
+<frames> <window-ms>` (configuration mode) changes one class (frames 0..100000, window 1..60000 ms; frames 0 drops the whole
+class). `clear counters` clears the classifier and every policer counter; `show running-config` lists the four limits. There is no
+generic rule or table editor and no whitelist command.
+
+Hardware test: `test/flood_test.ps1 -Port <COM> -Nic <adapter> [-Board <ip>] [-Seconds 20]` loads the board for `-Seconds` with UDP
+broadcast, UDP multicast, ARP and ICMP while one TCP echo connection keeps exchanging 1460-byte blocks, the board is pinged and the console
+answers `show classifier` and `show system` in a loop. Pass: no TCP error, every console answer within `-ConsoleBoundMs` (3000), ping loss
+within `-MaxPingLossPct` (20), the board's uptime advanced by the test time (no reset), the UDP class drop counter rose, the multicast
+frames are counted as filtered and not in a class. Plain sockets and the Windows ICMP API only: raw frames need Npcap or Scapy (neither
+is installed on the development PC, nothing is installed by the test), so the `broadcast` class (non-ARP, non-ICMP, non-UDP broadcast)
+sees no traffic and the ARP and ICMP counters are reported, not required, unless `-RequireArpIcmp` is given.
 
 ### Build
 
@@ -160,9 +195,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File cpu/microblaze_v_ethernet/fi
 
 | What | Where | Result |
 |---|---|---|
-| Board bench, 10/100/1000 with negative control | `boards/nexys_video/testbench/tb_rtlnet_nexys_video_eth.sv` (`regression.txt`) | 154 checks per speed, 155 with `INJECT_FAILURE` (expected failure) |
+| Board bench, 10/100/1000 with negative control | `boards/nexys_video/testbench/tb_rtlnet_nexys_video_eth.sv` (`regression.txt`) | 178 checks per speed, 179 with `INJECT_FAILURE` (expected failure) |
 | CLI tables | `firmware/cli/check_menu.py` | `CHECK PASS` |
-| CLI desktop session | `firmware/build.ps1 -NoFirmware -Demo` | `TEST PASS` |
+| CLI desktop session | `firmware/build.ps1 -NoFirmware -Demo` | `TEST PASS` (385 checks, including the protection profile on the default, the small and a too-small classifier, `show classifier`, `classifier policer`, running-config, clear counters) |
+| Protection profile on the board top | `boards/nexys_video/testbench/tb_rtlnet_nexys_video_eth.sv` (stand-in task `cls_config_protect`) | broadcast, UDP, ARP and ICMP classes each above their limit with unicast TCP segments interleaved: exactly the limits and every TCP segment reach the CPU, byte-exact and in order; per-policer and per-table counters |
+| Protection profile on the board | `test/flood_test.ps1` | written and syntax-checked, not run (needs the board) |
 | DMA netif, lwiperf loopback, txring | `firmware/test/regression.txt` | `NETIF_HOST`, `LWIPERF_LOOPBACK`, `TXRING_TEST`, `PHY_HOST_TEST` (25 checks, mock MDIO bus) PASS |
 | Hardware tests | `test/run_all.ps1 -Port <COM> -Nic <adapter> -LinkMbps 10|100|1000` | results table `test/out/results_<speed>.txt` and `.csv` |
 
@@ -184,16 +221,20 @@ Block RAM of the dev image (`post_route_utilization_hier.rpt`, 212.5 tiles of 36
 | `lmb_bram` (CPU code and data) | 128 | `lmb_kb` of `rtlnet_cpu_eth_bd_create` (256 KiB = 64 tiles) |
 | AXI BRAM + DMA (rest of `u_cpu`) | 19 | `axi_bram_kb` (64), DMA internals 3 |
 | `u_protocol` | 60.5 | below |
-| - CPU-path classifier | 30 | `CPU_CLASSIFIER_ENABLE` (0 removes it and the storm limiter; the firmware then runs without it) |
+| - CPU-path classifier | 30 | `CPU_CLASSIFIER_ENABLE` (0 removes it and the storm limiter; the firmware then runs without it); `CLS_RAM_STYLE` `"distributed"` makes it 0 tiles |
 | - CPU receive FIFO | 8.5 | `CPU_RX_FIFO_KB` (32) |
 | - UDP socket layer | 8 | `UDP_RX_BUF_KB` (16), `UDP_TX_BUF_KB` (8), `NUM_SOCKETS` |
 | - ingress FIFO | 4.5 | `INGRESS_FIFO_KB` (16) |
 | - checksum offload, ICMP, DHCP, egress, CPU TX FIFO, rest | about 9.5 | `CPU_TX_FIFO_KB`, `ICMP_BUF_KB`, `DHCP_BUF_KB`, `EGRESS_FIFO_KB` |
 | `u_mac` | 5 | `RX_FIFO_KB`, `TX_FIFO_KB` (8 each) |
 
-Recommended Arty set (10/100, no core edits): `lmb_kb` 256 (small-memory firmware), `axi_bram_kb` 64, `CPU_CLASSIFIER_ENABLE` 0, `INGRESS_FIFO_KB` 8,
-`CPU_RX_FIFO_KB` 16, `UDP_RX_BUF_KB` 8, MAC FIFOs 4 KiB each. Estimate: 64 + 19 + 30.5 (protocol without classifier, with the smaller FIFOs about 21.5)
-+ 4 = about 108 tiles (target <= 110). With the classifier kept the estimate is about 138 tiles, which does not fit the target.
+Recommended Arty set (10/100): `lmb_kb` 256 (small-memory firmware), `axi_bram_kb` 64, the classifier **kept** with `CLS_RAM_STYLE` `"distributed"` and the
+small profile (`CLS_TABLE_ENTRIES` 8, `CLS_TUPLE_ENTRIES` 8, `CLS_NUM_RULES` 1, `CLS_NUM_POLICERS` 4, `CLS_MATCH_DEPTH_BYTES` 64), `INGRESS_FIFO_KB` 8,
+`CPU_RX_FIFO_KB` 16, `UDP_RX_BUF_KB` 8, MAC FIFOs 4 KiB each. The classifier then uses **0 block RAM tiles** (measured, out-of-context implementation for
+xc7a100tcsg324-1: 0 RAMB18, 0 RAMB36, 4686 LUTs of which 1620 as memory, 8549 flip-flops, 7.4 % of the LUTs; the default build with block RAM is 30 tiles,
+classifier document section 12.3). The protocol wrapper without the classifier, with the smaller FIFOs, is about 21.5 tiles (estimate), so the estimate
+of the set stays 64 + 19 + 21.5 + 4 = about 108 tiles (target <= 110) with the protection profile of section 5a in place. Only the classifier's
+count is measured; the rest of the sum is the earlier estimate and needs the Arty build to confirm.
 
 ## 6b. TCP throughput tuning (Nexys Video, 1000 Mb/s, PC to board / board to PC)
 
@@ -221,3 +262,4 @@ CPU configuration options of `rtlnet_cpu_eth_bd_create` (`cpu_opt`, `cpu_btc`, `
 ## 8. Revision history
 
 * 11-14-2026: first version (derived from the H.264 demo CPU with the DDR3 path, caches and video removed).
+* 11-14-2026: protection profile of the CPU path (section 5a, `show classifier`, `classifier policer`, `test/flood_test.ps1`); Arty recommendation keeps the classifier with distributed RAM (section 6a).

@@ -141,6 +141,7 @@
 #define RTLNET_CLS_CAPS_NUM_POLICERS(c)   (((c) >> 13) & 0x7u)
 #define RTLNET_CLS_CAPS_TABLE_LANES(c)    (((c) >> 16) & 0x1Fu)
 #define RTLNET_CLS_CAPS_MATCH_BEATS(c)    (((c) >> 21) & 0x3Fu)   /* MATCH_DEPTH_BYTES / 8 */
+#define RTLNET_CLS_CAPS_RAM_DIST(c)       (((c) >> 27) & 0x1u)    /* 1 = RAM_STYLE "distributed" */
 
 /* LATENCY fields. */
 #define RTLNET_CLS_LAT_DELAY_BEATS(v)     (((v) >> 0) & 0xFFu)
@@ -326,16 +327,64 @@ typedef struct {
     uint32_t  num_policers;
     uint32_t  table_lanes;
     uint32_t  match_depth_bytes;
+    uint32_t  ram_distributed; /* 1 = built with RAM_STYLE "distributed" */
     uint32_t  rule_stride;     /* bytes between rule compare buffers */
     uint32_t  delay_beats;
     uint32_t  verdict_latency;
     uint32_t  initialised;
 } rtlnet_classifier_t;
 
+/* Built sizes of one instance (rtlnet_classifier_get_build), as read from CAPS and LATENCY at init. */
+typedef struct {
+    uint32_t table_entries;     /* entries per field table */
+    uint32_t tuple_entries;
+    uint32_t num_rules;
+    uint32_t num_policers;
+    uint32_t table_lanes;
+    uint32_t match_depth_bytes;
+    uint32_t ram_distributed;   /* 1 = RAM_STYLE "distributed", 0 = "block" */
+    uint32_t delay_beats;
+    uint32_t verdict_latency;
+} rtlnet_cls_build_t;
+
+/* Protection profile (rtlnet_classifier_config_protect): traffic classes, each policed by the policer of the
+ * same number. Priority when a frame is in several classes: ARP (rule 0), ICMP (tuple 0), UDP (tuple 1),
+ * broadcast (MAC table entry 0). Everything else passes unpoliced (MODE = PASS_ALL). */
+typedef enum {
+    RTLNET_CLS_PROT_BROADCAST = 0,   /* destination FF:FF:FF:FF:FF:FF (not ARP, ICMP or UDP) */
+    RTLNET_CLS_PROT_UDP       = 1,   /* IPv4 protocol 17 that no hardware leaf claimed (closed ports) */
+    RTLNET_CLS_PROT_ARP       = 2,   /* EtherType 0x0806, requests and replies */
+    RTLNET_CLS_PROT_ICMP      = 3,   /* IPv4 protocol 1 */
+    RTLNET_CLS_PROT_CLASSES   = 4
+} rtlnet_cls_prot_class_t;
+
+/* Default limits: frames per 100 ms window (reasoning in the classifier document, section 12). */
+#define RTLNET_CLS_PROT_WINDOW_MS_DEFAULT   100u
+#define RTLNET_CLS_PROT_BROADCAST_DEFAULT   10u
+#define RTLNET_CLS_PROT_UDP_DEFAULT         10u
+#define RTLNET_CLS_PROT_ARP_DEFAULT         20u
+#define RTLNET_CLS_PROT_ICMP_DEFAULT        10u
+
+/* Smallest build the profile fits: 1 MAC-table entry, 1 rule, 2 tuples, 4 policers, 14 compared bytes. */
+#define RTLNET_CLS_PROT_MIN_TABLE_ENTRIES   1u
+#define RTLNET_CLS_PROT_MIN_TUPLES          2u
+#define RTLNET_CLS_PROT_MIN_RULES           1u
+#define RTLNET_CLS_PROT_MIN_POLICERS        4u
+#define RTLNET_CLS_PROT_MIN_MATCH_BYTES     14u
+#define RTLNET_CLS_PROT_ARP_ETYPE_OFFSET    12u   /* rule 0 compares bytes 12..13 = 08 06 */
+#define RTLNET_CLS_PROT_ICMP_PROTO          1u
+#define RTLNET_CLS_PROT_UDP_PROTO           17u
+
+typedef struct {
+    uint32_t limit_pkts[RTLNET_CLS_PROT_CLASSES];
+    uint32_t window_ms[RTLNET_CLS_PROT_CLASSES];   /* 1 or more */
+} rtlnet_cls_protect_t;
+
 /* -------------------------------------------------------------------------
  * API
  * ------------------------------------------------------------------------- */
 int rtlnet_classifier_init(rtlnet_classifier_t *ctx, uintptr_t base);
+int rtlnet_classifier_get_build(const rtlnet_classifier_t *ctx, rtlnet_cls_build_t *build);
 
 int rtlnet_classifier_set_mode(const rtlnet_classifier_t *ctx, rtlnet_cls_mode_t mode);
 int rtlnet_classifier_get_mode(const rtlnet_classifier_t *ctx, rtlnet_cls_mode_t *mode);
@@ -388,5 +437,13 @@ int rtlnet_classifier_acl_add(const rtlnet_classifier_t *ctx, uint32_t index, ui
 int rtlnet_classifier_config_bcast_storm(const rtlnet_classifier_t *ctx, uint32_t limit_pkts,
                                          uint32_t window_ms);
 int rtlnet_classifier_bcast_storm_enable(const rtlnet_classifier_t *ctx, int on);
+
+
+void rtlnet_classifier_protect_defaults(rtlnet_cls_protect_t *profile);
+int rtlnet_classifier_config_protect(const rtlnet_classifier_t *ctx, const rtlnet_cls_protect_t *profile);
+int rtlnet_classifier_protect_limit(const rtlnet_classifier_t *ctx, rtlnet_cls_prot_class_t cls,
+                                    uint32_t limit_pkts, uint32_t window_ms);
+int rtlnet_classifier_protect_get(const rtlnet_classifier_t *ctx, rtlnet_cls_prot_class_t cls,
+                                  rtlnet_cls_policer_t *state);
 
 #endif /* RTLNET_CLASSIFIER_H */

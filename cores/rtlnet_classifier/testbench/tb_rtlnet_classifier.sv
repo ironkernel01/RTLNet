@@ -6,7 +6,10 @@
 // Overview:
 //   * Build configurations (defines): default 64-byte match depth (16/16
 //     entries, 2 lanes, 2 rules, 4 policers); TB_CLS_M128 (128 bytes, 4
-//     lanes); TB_CLS_M40 (40 bytes, 8/4 entries, 4 rules, 2 policers).
+//     lanes); TB_CLS_M40 (40 bytes, 8/4 entries, 4 rules, 2 policers);
+//     TB_CLS_DIST (the defaults with RAM_STYLE "distributed"); TB_CLS_SMALL
+//     (the small-FPGA profile: distributed RAM, 8/8 entries, 2 lanes, 1 rule,
+//     4 policers, 64 bytes).
 //     AXIS_CLK_HZ is 100 kHz in the bench (100 clocks per millisecond) so
 //     policer windows are short; axis_clk 100 MHz and s_axi_aclk 76.9 MHz
 //     are unrelated clocks.
@@ -50,13 +53,30 @@ module tb_rtlnet_classifier;
   // ---------------------------------------------------------------------------
   // Build configuration.
   // ---------------------------------------------------------------------------
-`ifdef TB_CLS_M128
+`ifdef TB_CLS_SMALL
+  localparam int MDB   = 64;
+  localparam int TE    = 8;
+  localparam int TU    = 8;
+  localparam int LANES = 2;
+  localparam int NR    = 1;
+  localparam int NP    = 4;
+  localparam string RS = "distributed";
+`elsif TB_CLS_DIST
+  localparam int MDB   = 64;
+  localparam int TE    = 16;
+  localparam int TU    = 16;
+  localparam int LANES = 2;
+  localparam int NR    = 2;
+  localparam int NP    = 4;
+  localparam string RS = "distributed";
+`elsif TB_CLS_M128
   localparam int MDB   = 128;
   localparam int TE    = 16;
   localparam int TU    = 16;
   localparam int LANES = 4;
   localparam int NR    = 2;
   localparam int NP    = 4;
+  localparam string RS = "block";
 `elsif TB_CLS_M40
   localparam int MDB   = 40;
   localparam int TE    = 8;
@@ -64,6 +84,7 @@ module tb_rtlnet_classifier;
   localparam int LANES = 2;
   localparam int NR    = 4;
   localparam int NP    = 2;
+  localparam string RS = "block";
 `else
   localparam int MDB   = 64;
   localparam int TE    = 16;
@@ -71,6 +92,7 @@ module tb_rtlnet_classifier;
   localparam int LANES = 2;
   localparam int NR    = 2;
   localparam int NP    = 4;
+  localparam string RS = "block";
 `endif
   localparam int CLK_HZ            = 100_000;
   localparam int TICKS             = CLK_HZ / 1000;
@@ -163,7 +185,7 @@ module tb_rtlnet_classifier;
     .NUM_RULES         (NR),
     .NUM_POLICERS      (NP),
     .MATCH_DEPTH_BYTES (MDB),
-    .RAM_STYLE         ("block")
+    .RAM_STYLE         (RS)
   ) dut (
     .axis_clk      (axis_clk),
     .axis_resetn   (axis_resetn),
@@ -1094,7 +1116,7 @@ module tb_rtlnet_classifier;
     r_expect(A_ID, 32'h434C_5346, "ID");
     r_expect(A_VERSION, 32'h1022_2026, "VERSION");
     r_expect(A_CAPS, (32'(TE) << 0) | (32'(TU) << 5) | (32'(NR) << 10) | (32'(NP) << 13) | (32'(LANES) << 16) |
-                     (32'(M) << 21), "CAPS");
+                     (32'(M) << 21) | ((RS == "distributed") ? 32'h0800_0000 : 32'h0), "CAPS");
     r(A_LATENCY, v);
     delay_beats     = int'(v[7:0]);
     verdict_latency = int'(v[15:8]);
