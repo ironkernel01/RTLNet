@@ -6,7 +6,8 @@
 | Folder | `cpu/microblaze_v_ethernet/` |
 | Wrapper module | `rtlnet_cpu_eth` (`hdl/rtlnet_cpu_eth.sv`), block design `rtlnet_cpu_eth_bd` (`hdl/rtlnet_cpu_eth_bd.tcl`), simulation stub `rtlnet_cpu_eth_sim_stub` |
 | Board dependence | none: the folder names no board, pin, part, PHY type or clock rate |
-| First board | Nexys Video (`boards/nexys_video/hdl/rtlnet_nexys_video_eth_top.sv`); a second board, the Arty A7-100 (MII, 10/100), uses the same sources |
+| First board | Nexys Video (`boards/nexys_video/hdl/rtlnet_nexys_video_eth_top.sv`) |
+| Second board | Arty A7-100T (`boards/arty_a7_100/hdl/rtlnet_arty_a7_100_eth_top.sv`, MII, 10/100): the same sources, `-LmbKb 256 -BufKb 64`; simulated and built with timing met (section 6a), not yet run on the board |
 
 ## 1. Purpose
 
@@ -32,7 +33,8 @@ cpu/microblaze_v_ethernet/
 ## 2. Block design (`rtlnet_cpu_eth_bd_create <bd_dir> <cpu_clk_hz> <lmb_kb> [<axi_bram_kb> [<cpu_opt> <cpu_btc> <cpu_muldiv> [<lmb_buf>]]]`)
 
 The procedure takes the clock frequency, the memory sizes and the processor options as arguments; the board build script passes them
-(`boards/nexys_video/scripts/build_ethernet.tcl`: `-CommonClk`, `-CpuClkHz`, `-LmbKb` 512, `-BufKb` 128, `-CpuOpt`, `-CpuBtc`, `-CpuMuldiv`, `-LmbBuf` 1). The design is named `rtlnet_cpu_eth_bd` because the generated
+(`boards/nexys_video/scripts/build_ethernet.tcl`: `-CommonClk`, `-CpuClkHz`, `-LmbKb` 512, `-BufKb` 128, `-CpuOpt`, `-CpuBtc`, `-CpuMuldiv`, `-LmbBuf` 1;
+`boards/arty_a7_100/scripts/build_ethernet.tcl`: the same without `-CommonClk`, defaults `-LmbKb` 256 and `-BufKb` 64). The design is named `rtlnet_cpu_eth_bd` because the generated
 module takes the design name and must not collide with the wrapper `rtlnet_cpu_eth`; the generated wrapper is
 `rtlnet_cpu_eth_bd_wrapper`, the processor path in the bitstream is `u_cpu/u_bd/rtlnet_cpu_eth_bd_i/microblaze_0`.
 
@@ -121,7 +123,7 @@ AXI4-Lite slave, single definition of the map in `driver/rtlnet_cpu_eth_sysregs.
 | 0x008 | CAPS | RO | [15:8] LEDs, [23:16] switches, [31:24] buttons |
 | 0x00C | BUILD_ID | RO | git hash, first 8 hex digits |
 | 0x010 | BUILD_DIRTY | RO | bit 0: tree had uncommitted changes |
-| 0x014 | BOARD_ID | RO | four ASCII characters naming the board (Nexys Video: `NXVD`) |
+| 0x014 | BOARD_ID | RO | four ASCII characters naming the board (Nexys Video: `NXVD`, Arty A7-100T: `ARTY`) |
 | 0x018 | CPU_CLK_HZ | RO | frequency of `clk` |
 | 0x01C | LINK_CAPS | RO | bit 0 10 Mb/s, bit 1 100 Mb/s, bit 2 1000 Mb/s, full duplex; half duplex is never offered |
 | 0x020 | UPTIME_MS | RO | milliseconds since reset release (a one-clock `tick_ms` pulse also leaves the block) |
@@ -147,9 +149,10 @@ masked ID matches (the revision bits are masked). Each entry gives the driver fu
 | ID (masked) | Driver |
 |---|---|
 | 0x001CC91x | RTL8211E (`cores/rtlnet_mdio/driver/rtlnet_phy_rtl8211e.c`): RX clock delay, LEDs, EEE off |
+| 0x20005C9x | DP83848 (Arty A7-100T, `cores/rtlnet_mdio/driver/rtlnet_phy_dp83848.c`): 10/100 full duplex only, PHYSTS (register 0x10) for link, speed and duplex, no gigabit register is touched |
 | any other | generic Clause 22: BMCR, BMSR, ANAR, ANLPAR, GBCR/GBSR (when BMSR extended status shows 1000BASE-T), speed and duplex resolved from the advertised and partner abilities; the ID is printed at boot and in `show phy` |
 
-To add a PHY (the DP83848 of the Arty A7-100 next): write its driver file under `cores/rtlnet_mdio/driver/`, add one line to
+To add a PHY: write its driver file under `cores/rtlnet_mdio/driver/`, add one line to
 `g_drivers` in `rtlnet_phy.c`, and list the file in `firmware/build.ps1` and `firmware/Makefile`. Nothing else changes.
 
 ## 5. Firmware
@@ -240,6 +243,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File cpu/microblaze_v_ethernet/fi
 | Hardware tests | `test/run_all.ps1 -Port <COM> -Nic <adapter> -LinkMbps 10|100|1000` | results table `test/out/results_<speed>.txt` and `.csv` |
 | Board bench modes | `tb_rtlnet_nexys_video_eth`: `COMMON_CLK` 2 (tags g10, g100, g1000, neg), 0 (g10mc, g100mc, g1000mc) | 154 checks each, 155 with `INJECT_FAILURE` (expected failure) |
 | Hardware suite on the final image `eth_cc100c` | `run_all.ps1 -LinkMbps 10`, `100`, `1000` | ETH_SUITE: PASS 8/8 scripts at each speed |
+| Arty A7-100T board bench, 10 and 100 Mb/s with negative control | `boards/arty_a7_100/testbench/tb_rtlnet_arty_a7_100_eth.sv` (`regression.txt`: `m100`, `m10`, `neg`) | 338 checks per speed, 339 with `INJECT_FAILURE` (expected failure) |
+| Arty A7-100T build `arty_dev`, firmware `-LmbKb 256 -BufKb 64` | `boards/arty_a7_100/scripts/build_ethernet.ps1 -Tag arty_dev` | timing met (WNS +0.290 ns), 105.5 of 135 block RAM tiles, `RTLNET_FW: PASS`, `RTLNET_BUILD_ETH: PASS`; hardware suite not run (no board) |
 
 ## 6a. Small memory (256 KiB LMB) and the Arty A7-100 budget
 
@@ -267,35 +272,35 @@ Block RAM of the dev image (`post_route_utilization_hier.rpt`, 212.5 tiles of 36
 | `u_mac` | 5 | `RX_FIFO_KB`, `TX_FIFO_KB` (8 each) |
 
 The CPU-path classifier (`cores/rtlnet_classifier`, `CPU_CLASSIFIER_ENABLE` 1) stays in every design, enabled and unchanged: it keeps lwIP from being
-overloaded on a real network. Its 30 tiles are a fixed cost, so the block RAM has to come from elsewhere. Estimated sets for the Arty A7-100 (135 tiles,
-10/100 Mb/s only). These are ESTIMATES from the table above and from scaling each FIFO with its size; no Arty build has been run, nothing here is measured:
+overloaded on a real network. Its 30 tiles with block RAM are a fixed cost, so on the Arty A7-100T (135 tiles, 10/100 Mb/s only) the classifier uses its
+distributed-RAM option (`CLS_RAM_STYLE` `"distributed"`, small profile) and the rest of the memory is sized down by existing parameters. Measured build
+`arty_dev` (`boards/arty_a7_100/`, `-LmbKb 256 -BufKb 64`, post-route `post_route_utilization_hier.rpt` and a per-cell count of the RAMB36/RAMB18 instances):
 
-| Item | Nexys Video image (tiles) | Set A: measured firmware profile (tiles) | Set B: tiny firmware profile, not built (tiles) |
+| Item | Nexys Video image (tiles) | Arty A7-100T build `arty_dev`, measured (tiles) | Parameter |
 |---|---|---|---|
-| `lmb_bram` | 128 (512 KiB) | 64 (`lmb_kb` 256, small-memory profile of this section) | 32 (`lmb_kb` 128; needs a new lwIP profile with a smaller pool and heap, about 100 KiB of image: not built) |
-| frame buffer RAM + DMA internals (3) | 35 (128 KiB) | 11 (`axi_bram_kb` 32: 8 receive + 2 transmit buffers of 2 KiB = 20 KiB, transmit by copy, heap in the LMB) | 11 (same) |
-| CPU-path classifier | 30 | 30 (kept, unchanged) | 30 (kept, unchanged) |
-| CPU receive FIFO | 8.5 (32 KiB) | 2.5 (`CPU_RX_FIFO_KB` 8: a 100 Mb/s link needs a tenth of the window) | 2.5 |
-| UDP socket layer | 8 | 1.5 (`NUM_SOCKETS` 2, `UDP_RX_BUF_KB` 2, `UDP_TX_BUF_KB` 2) | 1.5 |
-| ingress FIFO | 4.5 (16 KiB) | 2.5 (`INGRESS_FIFO_KB` 8) | 2.5 |
-| checksum offload, ICMP, DHCP, egress, CPU TX FIFO, rest | 9.5 | 6 (`CPU_TX_FIFO_KB` 4, `EGRESS_FIFO_KB` 4, `ICMP_BUF_KB` 1, `DHCP_BUF_KB` 1) | 6 |
-| `u_mac` | 5 (8 KiB FIFOs) | 2.5 (`RX_FIFO_KB`, `TX_FIFO_KB` 4) | 2.5 |
-| Total | 228.5 (212.5 measured with the 64 KiB buffer RAM of the earlier layout) | about 120 of 135 | about 88 of 135 |
+| `lmb_bram` | 128 (512 KiB) | 64 | `lmb_kb` 256, small-memory firmware profile of this section |
+| frame buffer RAM | 32 (128 KiB) | 16 | `axi_bram_kb` 64 (60 KiB used: frame buffers and the lwIP heap) |
+| AXI DMA internals | 3 | 3 | fixed |
+| CPU-path classifier | 30 | 0 | `CLS_RAM_STYLE` `"distributed"`, `CLS_TABLE_ENTRIES` 8, `CLS_TUPLE_ENTRIES` 8, `CLS_NUM_RULES` 1, `CLS_NUM_POLICERS` 4, `CLS_MATCH_DEPTH_BYTES` 64 (4670 LUT, 1500 as memory) |
+| CPU receive FIFO | 8.5 (32 KiB) | 4.5 | `CPU_RX_FIFO_KB` 16 |
+| UDP socket layer | 8 | 5.0 | `NUM_SOCKETS` 4, `UDP_RX_BUF_KB` 8, `UDP_TX_BUF_KB` 4 |
+| ingress FIFO | 4.5 (16 KiB) | 2.5 | `INGRESS_FIFO_KB` 8 |
+| checksum offload (transmit side) | 2.5 | 2.5 | fixed |
+| egress FIFO, CPU transmit FIFO | about 3 | 3.0 | `EGRESS_FIFO_KB` 4, `CPU_TX_FIFO_KB` 4 |
+| ICMP and DHCP buffers | about 4 | 2.0 | `ICMP_BUF_KB` 1, `DHCP_BUF_KB` 1 |
+| `u_mac` FIFOs | 5 (8 KiB FIFOs) | 3.0 | `RX_FIFO_KB`, `TX_FIFO_KB` 4 |
+| Total | 228.5 (212.5 measured with the 64 KiB buffer RAM of the earlier layout) | 105.5 of 135 (78.2 %) | 29.5 tiles free |
 
-Set A reaches the target of at most 120 tiles only just (15 tiles of margin) and uses nothing that is not already a parameter; Set B has the margin
-(about 47 tiles) but needs the smaller firmware profile, which has to be sized by a measurement first. What else can give block RAM: small buffers in
-distributed RAM through the RAM wrapper's `RAM_STYLE "distributed"` option (a protocol-wrapper parameter that applies to every buffer of the wrapper;
-the ICMP and DHCP buffers and the egress and CPU transmit FIFOs are small enough to cost only LUTs, about 2 tiles for the four); the single-clock
-top (`COMMON_CLK` 2) saves no block RAM, because the cores keep their asynchronous FIFOs (0 tiles; it does remove two clock buffers and the 62.5 and 50 MHz
-domains); the dual-port frame buffer of the Nexys design costs the same tiles as a single-port RAM of its size, so Set A uses it too at 32 KiB (8 tiles).
+The earlier estimate for this set was about 108 tiles (target at most 110); the build gives 105.5. The firmware needs 229 KiB of the 256 KiB LMB
+(stack and heap areas included) and 60 KiB of the 64 KiB frame buffer RAM. What else could give block RAM, not needed so far: the tiny firmware profile
+(`lmb_kb` 128, about 32 tiles less, needs a new lwIP profile and a measurement), `NUM_SOCKETS` 2 with smaller UDP buffers (about 3.5 tiles), `RAM_STYLE`
+`"distributed"` for the small buffers of the protocol wrapper (about 2 tiles). The single-clock top saves no block RAM, because the cores keep their asynchronous
+FIFOs (0 tiles); the dual-port frame buffer costs the same tiles as a single-port RAM of its size.
 
-Recommended Arty set (10/100): `lmb_kb` 256 (small-memory firmware), `axi_bram_kb` 64, the classifier **kept** with `CLS_RAM_STYLE` `"distributed"` and the
-small profile (`CLS_TABLE_ENTRIES` 8, `CLS_TUPLE_ENTRIES` 8, `CLS_NUM_RULES` 1, `CLS_NUM_POLICERS` 4, `CLS_MATCH_DEPTH_BYTES` 64), `INGRESS_FIFO_KB` 8,
-`CPU_RX_FIFO_KB` 16, `UDP_RX_BUF_KB` 8, MAC FIFOs 4 KiB each. The classifier then uses **0 block RAM tiles** (measured, out-of-context implementation for
-xc7a100tcsg324-1: 0 RAMB18, 0 RAMB36, 4686 LUTs of which 1620 as memory, 8549 flip-flops, 7.4 % of the LUTs; the default build with block RAM is 30 tiles,
-classifier document section 12.3). The protocol wrapper without the classifier, with the smaller FIFOs, is about 21.5 tiles (estimate), so the estimate
-of the set stays 64 + 19 + 21.5 + 4 = about 108 tiles (target <= 110) with the protection profile of section 5a in place. Only the classifier's
-count is measured; the rest of the sum is the earlier estimate and needs the Arty build to confirm.
+Other results of the Arty build (post-route, 100 MHz single clock, Vivado 2026.1): WNS +0.290 ns, WHS +0.005 ns, WPWS +3.000 ns, LUT 24986 (39.4 %), FF 36050
+(28.4 %), DSP 6, no critical warning, `report_cdc` clean apart from the Gray-code waivers. The MII interface (DP83848 datasheet numbers at 100 Mb/s: receive delay 10 to 30 ns,
+transmit setup 10 ns, hold 0 ns): receive setup +6.30 ns, hold +10.43 ns; transmit setup +20.65 ns, hold +2.86 ns. The first MII MAC synthesis showed one
+core warning, recorded in the MAC document, section 13.4. Nothing of this has run on a board.
 
 ## 6b. TCP throughput tuning (Nexys Video, 1000 Mb/s, PC to board / board to PC)
 
@@ -336,6 +341,7 @@ Builds of the tree (post-route, `build_ethernet.ps1`, 100 MHz single clock unles
 |---|---|---|---|---|---|
 | `eth_dev` | multi-clock, CPU 100 MHz (before this work) | +0.221 ns | +0.013 ns | +0.264 ns | 22505 / 31258 / 212.5 / 6 |
 | `eth_cc100c` | single clock, 128 KiB dual-port frame buffer on the LMB, zero-copy transmit, the core changes above (final tree) | +0.037 ns | +0.013 ns | +0.264 ns | 22179 / 31720 / 228.5 / 6 |
+| `arty_dev` (xc7a100t, Arty A7-100T, section 6a) | single 100 MHz clock, MII, 256 KiB LMB, 64 KiB frame buffer, classifier in distributed RAM | +0.290 ns | +0.005 ns | +3.000 ns | 24986 / 36050 / 105.5 / 6 |
 
 Intermediate builds with a subset of the core changes failed by -1.478, -0.154 and -0.107 ns (each time the paths named in the table). The margin of the final build is thin (below +0.15 ns); a build with another placer directive (`RTLNET_PLACE_DIRECTIVE`) was not run. CDC census of the build: FIFO 10, Gray 6, AXI4-Lite bridges 5, reset synchronizers 5, level synchronizers 28; `report_cdc`: only the Gray-code waivers.
 
@@ -364,6 +370,7 @@ with the first image of the 100 Mb/s test).
 
 ## 8. Revision history
 
+* 11-14-2026: Arty A7-100T build-out: second board, `ARTY` board ID, DP83848 row of the PHY table, section 6a changed from an estimate to the measured `arty_dev` build (105.5 of 135 tiles), verification and build rows.
 * 11-14-2026: clock tree section 2a (`COMMON_CLK`), dual-port frame buffer RAM on the data-side LMB with its address map, processor options, the 125 MHz study (6c), the Arty estimate with the classifier kept (6a).
 * 11-14-2026: first version (derived from the H.264 demo CPU with the DDR3 path, caches and video removed).
 * 11-14-2026: protection profile of the CPU path (section 5a, `show classifier`, `classifier policer`, `test/flood_test.ps1`); Arty recommendation keeps the classifier with distributed RAM (section 6a).

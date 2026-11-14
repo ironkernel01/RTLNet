@@ -1,0 +1,5 @@
+# Arty A7-100T board regression: <bench> <filelist> [tag] [defines=A,B] [plusargs=X,Y] [expectfail]
+# Ethernet demo top (rtlnet_arty_a7_100_eth_top, CPU simulation stub rtlnet_cpu_eth_sim_stub), DP83848 model, one 100 MHz system clock
+tb_rtlnet_arty_a7_100_eth   boards/arty_a7_100/testbench/tb_rtlnet_arty_a7_100_eth.f  m100  plusargs=SPEED=100
+tb_rtlnet_arty_a7_100_eth   boards/arty_a7_100/testbench/tb_rtlnet_arty_a7_100_eth.f  m10   plusargs=SPEED=10
+tb_rtlnet_arty_a7_100_eth   boards/arty_a7_100/testbench/tb_rtlnet_arty_a7_100_eth.f  neg   plusargs=SPEED=100,INJECT_FAILURE  expectfail
