@@ -1666,6 +1666,42 @@ The stream tests with the QP sweep use the pattern `scroll`: with the pattern `a
 
 **Left open or changed.** The demo image did not run the interrupt/polled, filter on/off and CAVLC sweeps (the High profile runs listed above stay inside the 30-minute licence window; the CAVLC behaviour of the demo image is the one of the full image: the same encoder and filter). `rel_demo_cab_dbk` is on the board at the end of this work (programmed over JTAG, its 30-minute licence runs from that moment; the board lock is released).
 
+### 6.24 Release rebuild from the board branches (11-13-2026)
+
+Change: no RTL change against 6.23. The two public release images are built again from the board branches with a clean working tree, after the repository split into `main`, `nexys_video_h264_baseline` and `nexys_video_h264_highprofile`. Differences to the images of 6.23: the firmware (the stream start resolves the receiver's ARP entry before the first datagram, so the first access unit after programming is an IDR picture with its parameter sets; `speed 10`, `speed 100` and `speed auto` are the only link commands), the DDR3 controller project file at `boards/nexys_video/ip/rtlnet_ddr_mig.prj`, and a High profile netlist built from a committed tree. Section 6.23 stays as the record of the earlier builds (worst paths, methodology counts, filter and clock measurements); those were not measured again.
+
+Build commands, both with `RTLNET_PLACE_DIRECTIVE=AltSpreadLogic_high` and `RTLNET_UTIL_LIMIT=81`, each on the first attempt: `build.ps1 -Network -Tag rel_base_dbk -Image` on `nexys_video_h264_baseline`; `build.ps1 -Network -HighProfile demo -HpTools cabac -Tag rel_demo_cab_dbk -Image` on `nexys_video_h264_highprofile`.
+
+| Item | `rel_base_dbk` (Baseline) | `rel_demo_cab_dbk` (High profile demo) |
+|---|---|---|
+| Build id (`git_hash`, `git_dirty`) | 6fc46373, 0 | f4f7d4b1, 0 |
+| High profile netlist | none | demo, CABAC, 30 minutes, tree 5c4f768, 2,719 LUT, 1,295 FF |
+| WNS / WHS / WPWS (ns) | +0.156 / +0.014 / +0.131 | +0.167 / +0.013 / +0.131 |
+| LUT | 94,557 (70.67 %) | 99,700 (74.51 %) |
+| Flip-flops | 89,000 (33.26 %) | 91,680 (34.26 %) |
+| Slices | 31,814 (95.11 %) | 32,152 (96.12 %) |
+| Block RAM tiles / DSP | 292.5 (80.14 %) / 84 (11.35 %) | 292.5 (80.14 %) / 84 (11.35 %) |
+| Bitstream step | 2,369 s | 1,977 s |
+| CDC census | as 6.23 | as 6.23 |
+
+Board results (JTAG, PC on Wi-Fi, link 1000 Mb/s unless stated):
+
+| Test | `rel_base_dbk` | `rel_demo_cab_dbk` |
+|---|---|---|
+| First `stream_test.ps1` after programming (Baseline 720p30; High 1080p30, pattern `all`, 8 Mb/s, `-Profile high`) | PASS 12/12, first access unit IDR | PASS 17/17, first access unit IDR |
+| Second run | PASS 11/11 | PASS 17/17 |
+| `-LinkSpeed 100` | PASS 12/12 | PASS 18/18 |
+| `-LinkSpeed auto` | PASS 12/12 at 1000 Mb/s | first run FAIL 2/18 (1 continuity error in 110,324 packets), second run PASS 18/18 |
+| `cli_test.ps1` | PASS 109/109 | not run |
+| `net_test.ps1 -Speed 1000` | PASS 25/25 (UDP iperf 900 Mb/s, 0 lost both ways) | not run |
+| `release_stream_gates.ps1` | 14 of 15 on the first pass; `qp28` FAIL 2/24 (2 continuity errors in 5,166 packets), second run PASS 25/25 | 10 High profile runs PASS; 14 of 15 Baseline-profile runs on the first pass, `qp24_off` (run after the license end) passes on the second run |
+| License after programming | n/a | present, licensed, 29 min 57 s left 1.0 s after programming |
+| `hp_expiry_test.ps1 -Profile high` | n/a | PASS, every gate: forced IDR picture 1,799.88 s after configuration, High before and Constrained Baseline after, 2 forced IDR pictures counted, 0 of 59,404 pictures dropped, stream stop/start and `reload` do not restore the license, programming does |
+
+In the runs that failed once the board counts 0 dropped pictures and 0 UDP drops, and the PC reports datagrams out of order; the PC is on Wi-Fi. The cause is not established. A first run of `hp_expiry_test.ps1` without `-Profile high` reports one failed gate (it expects 1 forced IDR picture; the CABAC image counts 2 with the profile command of the test): `-Profile high` is the correct call for this image.
+
+No build output is tracked in git from this revision on: `boards/nexys_video/build/rtlnet_nexys_video.bit`, `.mmi`, `.xsa` and `microblaze/firmware/build/firmware.elf` are build outputs only. The released images are `demos/h264_baseline/nexys_video/` and, on `nexys_video_h264_highprofile`, `demos/h264_high_profile_demo/nexys_video/`.
+
 ## 7. Network integration (done 10-22-2026) and what remains
 
 Integrated: `u_mac`, `u_mdio`, `u_protocol` (every leaf, the CPU network path and its classifier), `u_echo` under
@@ -1690,6 +1726,7 @@ Open:
 
 | Revision | Change |
 |---|---|
+| 11-13-2026 | Section 6.24: release rebuild of `rel_base_dbk` and `rel_demo_cab_dbk` from the board branches with clean build ids, board results; build outputs no longer tracked in git |
 | 11-13-2026 | Section 6.23: the three release images of the merged tree (`rel_base_dbk`, `rel_demo_cab_dbk`, `rel_full_cab_dbk`, each met timing on the first attempt with `AltSpreadLogic_high`), the DDR3 arbiter in two clocks, the filter's multiplier in a DSP block (no `SYNTH-9`, no waiver), board gates, `hp_expiry_test.ps1` of the demo image; sections 6.21 and 6.22 stay as the 6.21 of the interrupt merge and the CABAC-only image of the filter branch |
 | 11-12-2026 | Section 6.22: CABAC-only High profile image with the deblocking filter (`-HpTools cabac`, `hp_full_cab_dbk` built, `hp_demo_cab_dbk` two attempts without timing closure), RTLNET_UTIL_LIMIT, RTLNET_RESUME_DCP, SYNTH-9 waiver; section 6.20 VERSION corrected to 0x11122C04; board gates open |
 | 10-22-2026 | Initial version: CPU-only board top, build flow, bring-up |
