@@ -44,6 +44,7 @@ param(
     [int]$MaxPingLossPct = 20,
     [int]$OtherDropTolerance = 5,
     [switch]$RequireArp,
+    [int]$IcmpThreads = 0,
     [string]$OutDir = '',
     [string]$Csv = ''
 )
@@ -124,6 +125,7 @@ foreach ($kind in $Kinds) {
     $errFile = Join-Path $script:EthOutDir ("flood_{0}_error.txt" -f $kind)
     $pyArgs = @('-I', ('"{0}"' -f $pyScript), $board, '--bind', $src, '--net', $net, '--prefix', "$prefix", '--bcast', $bcast,
         '--kind', $kind, '--rate', "$Rate", '--seconds', "$Seconds")
+    if ($IcmpThreads -gt 0) { $pyArgs += @('--icmp-threads', "$IcmpThreads") }
     $proc = Start-Process -FilePath $py -ArgumentList $pyArgs -NoNewWindow -PassThru -RedirectStandardOutput $outFile -RedirectStandardError $errFile
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $maxCliMs = 0; $cliBad = 0; $cliN = 0; $pingSent = 0; $pingLost = 0; $lastUp = -1; $upBackwards = 0
