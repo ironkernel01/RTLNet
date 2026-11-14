@@ -50,7 +50,7 @@ The AXI4 slave follows the burst rules of the MIG: INCR bursts, full-width beats
 crossing, AxLEN 0..255. `rtlnet_axi_arbiter` in front checks and enforces them; a master that connects here directly
 must obey them. Writes and reads are independent channels; AXI4 does not order a read behind an earlier write, so a
 master that needs read-after-write waits for the write response first (the CPU firmware does, see
-`microblaze/firmware/src/rtlnet_ddrtest.h`). Responses for one ID return in order.
+`cpu/microblaze_v_h264/firmware/src/rtlnet_ddrtest.h`). Responses for one ID return in order.
 
 ---
 

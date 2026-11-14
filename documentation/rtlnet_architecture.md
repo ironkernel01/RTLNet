@@ -3,7 +3,7 @@
 | Item | Value |
 |---|---|
 | Product line | IronKernel RTLNet |
-| Document revision | 11-13-2026 |
+| Document revision | 11-14-2026 |
 | First target | Digilent Nexys Video (Artix-7 XC7A200T-1SBG484C, Realtek RTL8211E RGMII PHY) |
 | Toolchain | Vivado 2026.1 (synthesis, implementation), Aldec Active-HDL 11.1 (simulation), MicroBlaze GCC 13.4 |
 | Languages | SystemVerilog-2012 for all RTL and benches (`.sv`), C11 for drivers and firmware |
@@ -34,7 +34,7 @@ CPU also configures and monitors the RTL.
 | UDP echo server | `rtlnet_udp_echo` | application on the socket payload streams: returns every datagram to its sender |
 | Frame filter/classifier | `rtlnet_classifier` | on the CPU receive path: configurable L2-L4 filter with policers, drop-all until configured, broadcast storm limiter at boot (section 13) |
 | Checksum offload | `rtlnet_tcp_offload` | on the CPU DMA stream: inserts IPv4 / TCP / UDP checksums into frames the CPU sends (store-and-forward patch); checks them on frames the CPU receives and appends an 8-byte trailer beat with the result (cut-through) |
-| CPU network path | `rtlnet_eth_protocol` CPU port + `microblaze/` | every frame no enabled leaf claims goes to the CPU (`cpu_axis_ethernet_stream`, AXI DMA); the CPU sends frames back the same way; lwIP runs a TCP echo server on it; the CPU-path classifier and the checksum offload sit on the two streams |
+| CPU network path | `rtlnet_eth_protocol` CPU port + `cpu/microblaze_v_h264/` | every frame no enabled leaf claims goes to the CPU (`cpu_axis_ethernet_stream`, AXI DMA); the CPU sends frames back the same way; lwIP runs a TCP echo server on it; the CPU-path classifier and the checksum offload sit on the two streams |
 | CPU core | `rtlnet_cpu_microblaze` | MicroBlaze block design behind a vendor-neutral core port list; replaceable by a Nios V / RISC-V core with the same ports |
 | Board top | `boards/nexys_video/hdl/rtlnet_nexys_video_top.sv` | the Nexys Video "Top.sv": clocks, resets, pins, CPU core, address decode, LEDs |
 
@@ -68,7 +68,8 @@ RTLNet/
     rtlnet_tcp_offload/           IPv4 / TCP / UDP checksum insert (TX) and check with trailer (RX) on the CPU path
     rtlnet_axi_arbiter/           N:1 AXI4 arbiter in front of the DDR3 controller (illegal-burst guard, per-master counters)
     rtlnet_ddr/                   DDR3 controller behind a vendor-neutral AXI4 slave (MIG IP generated from the board's project file)
-  microblaze/                     everything MicroBlaze: CPU core (hdl, driver, testbench, documentation) and
+  cpu/<cpu>/                      one folder per CPU, each independent (own block design, firmware, CLI, tests); today
+                                  cpu/microblaze_v_h264/: MicroBlaze CPU core (hdl, driver, documentation) and
                                   firmware/ (CLI + lwIP TCP echo application; BSP, drivers and lwIP are generated or
                                   compiled in place from the AMD install, never copied)
   boards/nexys_video/             board top ("Top.sv"), XDC, build scripts, board bench
@@ -76,8 +77,8 @@ RTLNet/
 ```
 
 The repository has one branch, `main`; folders separate the parts. `cores/` is board-independent and does not depend on
-`boards/`, `microblaze/` or `demos/`; `boards/<board>/` holds one board design (today `boards/nexys_video/`); `microblaze/` holds the
-CPU block design and firmware; `demos/` holds the released demo bitstreams. The board results quoted in this document are results
+`boards/`, `cpu/` or `demos/`; `boards/<board>/` holds one board design (today `boards/nexys_video/`); `cpu/` holds one folder per CPU (today
+`cpu/microblaze_v_h264/`), each with its own CPU block design and firmware; `demos/` holds the released demo bitstreams. The board results quoted in this document are results
 on the Nexys Video (layout rules: `rtlnet_contributing.md` section 8).
 
 Generated output (Vivado runs, Active-HDL work directories, firmware objects, bitstreams) is never committed;
@@ -227,7 +228,7 @@ Protocol sub-map (offset inside 0x1_0000):
 Other MicroBlaze addresses sit in the block design's own map (LMB BRAM `0x0000_0000` 512 KiB, AXI DMA registers
 `0x4040_0000`, UART Lite `0x4060_0000`, interrupt controller `0x4120_0000`, Timer `0x41C0_0000`, DDR3 SDRAM
 `0x8000_0000` 512 MiB through the instruction and data caches and `M_AXI_DDR`, AXI BRAM `0xC000_0000` 128 KiB). The
-single source of these addresses for firmware is `microblaze/driver/rtlnet_cpu_microblaze.h`.
+single source of these addresses for firmware is `cpu/microblaze_v_h264/driver/rtlnet_cpu_microblaze.h`.
 
 ---
 
@@ -477,12 +478,12 @@ vendor neutral so another soft or hard processor drops in with a wrapper of the 
 | interrupts | `irq[7:0]` level inputs (PHY interrupt, DHCP event, ...) |
 
 `rtlnet_cpu_microblaze.sv` wraps the block design `rtlnet_cpu` (Tcl-generated from
-`microblaze/hdl/rtlnet_cpu_bd.tcl`): MicroBlaze (little endian, 32-bit, no MMU, hardware
+`cpu/microblaze_v_h264/hdl/rtlnet_cpu_bd.tcl`): MicroBlaze (little endian, 32-bit, no MMU, hardware
 multiplier/divider/barrel shifter, 8 KiB instruction and 8 KiB write-through data cache over the DDR3 window only),
 512 KiB LMB BRAM, MDM (JTAG debug), AXI UART Lite (115200 8N1), AXI Timer, AXI interconnect, the exported AXI4-Lite
 master, a SmartConnect that joins the two cache masters into the exported 128-bit `M_AXI_DDR` and an interrupt controller. A Nios V core would be
 `rtlnet_cpu_niosv.sv` around a Platform Designer system with the same ports; the RTL below the decoder does
-not change. `microblaze/rtlnet_microblaze_sim_stub.sv` (module `rtlnet_microblaze_sim_stub`, the simulation stand-in for the CPU) has the same ports and drives scripted
+not change. `cpu/microblaze_v_h264/rtlnet_microblaze_sim_stub.sv` (module `rtlnet_microblaze_sim_stub`, the simulation stand-in for the CPU) has the same ports and drives scripted
 AXI4-Lite transactions for the board bench.
 
 The block design also carries an AXI DMA (simple mode, 64-bit streams, data realignment engine on MM2S only (transmit buffers at any byte address; the DMA buffers and lwIP's heap are in the AXI BRAM), `S2MM` from `s_axis_eth_*`, `MM2S` to
@@ -493,7 +494,7 @@ The MicroBlaze caches (8 KiB instruction, 8 KiB write-through data) cover only t
 single-cycle LMB and the DMA buffers are accessed uncached, so the DMA path has no coherence handling; software that
 shares the DDR3 window with another master flushes or invalidates the data cache around the access.
 
-Firmware (`microblaze/firmware`) is C11 built with `mb-gcc` against a standalone BSP that is **generated at build time
+Firmware (`cpu/microblaze_v_h264/firmware`) is C11 built with `mb-gcc` against a standalone BSP that is **generated at build time
 from the hardware export (XSA) by the Vitis tools in the AMD install** (standalone OS, `axidma`, `uartlite`,
 `tmrctr`, `intc` drivers and the `lwip220` library, NO_SYS raw API). Nothing from the install is copied into the
 repository; the generated BSP lives in the ignored build folder. Layers:
@@ -501,13 +502,13 @@ repository; the generated BSP lives in the ignored build folder. Layers:
 | Layer | Owns |
 |---|---|
 | BSP (generated) | start-up, vectors, Xilinx drivers, `xil_printf`, lwIP core |
-| platform (`microblaze/firmware/src`) | UART console on XUartLite, millisecond tick on XTmrCtr, interrupt setup on XIntc |
+| platform (`cpu/microblaze_v_h264/firmware/src`) | UART console on XUartLite, millisecond tick on XTmrCtr, interrupt setup on XIntc |
 | RTLNet drivers | `cores/<core>/driver/*.c`, compiled in place, the only code that touches each core's registers |
 | network | `rtlnet_netmgr.c` (PHY/MAC/DHCP management), `src/lwip/rtlnet_lwip_netif.c` (lwIP netif on the AXI DMA and the `cpu_axis_ethernet_stream`), `src/lwip/rtlnet_tcp_echo.c` (lwIP raw-API TCP echo server, port 7), TCP iperf server on port 5001 (`src/lwip/rtlnet_lwiperf.c`, the RTLNet copy of lwIP's `lwiperf` with the reverse, tradeoff and dual modes; the UDP iperf server on port 5001 is the RTL iperf leaf) |
 | CLI | `menu.c`, `cli_commands.c` (MenuBuilder hierarchical rules) |
 
 CLI: a light network-switch style hierarchy built on the MenuBuilder rules
-(`microblaze/firmware/cli/MenuBuilder_hierarchical.md`, command source `cli_commands.txt`):
+(`cpu/microblaze_v_h264/firmware/cli/MenuBuilder_hierarchical.md`, command source `cli_commands.txt`):
 
 | Mode (prompt) | Entered by | Examples |
 |---|---|---|
@@ -532,7 +533,7 @@ mode or the next keywords of a partial command, unique prefixes are accepted (`s
 - `+INJECT_FAILURE` forces a failure; each bench is run once with it and must report `TEST FAIL`.
 - Oracles are independent of the RTL: a bit-serial CRC-32, an RFC 1071 checksum, bench-built expected frames.
 - Leaf benches include the shared busy-rule monitor.
-- Board bench: the real board top (MicroBlaze replaced by `microblaze/rtlnet_microblaze_sim_stub.sv`) against an RTL8211E
+- Board bench: the real board top (MicroBlaze replaced by `cpu/microblaze_v_h264/rtlnet_microblaze_sim_stub.sv`) against an RTL8211E
   RGMII/MDIO model at 10, 100 and 1000 Mb/s.
 
 Hardware: Vivado batch build with exit-code gates (synthesis, timing setup and hold, CDC report, utilization),
@@ -690,7 +691,7 @@ DHCP control (start, stop, renew now, auto-start) lives in the DHCP leaf's own r
 | to socket layer (app_clk) | out `m_axis_tdata[63:0]`, `m_axis_tkeep[7:0]`, `m_axis_tvalid`, `m_axis_tlast`; in `m_axis_tready` |
 | registers | `s_axi_*` slave, `ADDR_W` 12 (internal `rtlnet_axil_cdc` to `app_clk`) |
 
-### 15.6 `rtlnet_cpu_microblaze` (in `microblaze/`)
+### 15.6 `rtlnet_cpu_microblaze` (in `cpu/microblaze_v_h264/`)
 
 | Group | Ports |
 |---|---|
@@ -723,7 +724,7 @@ and between the DMA MM2S stream and `u_cpu_tx_fifo` (TX).
 | Revision | Change |
 |---|---|
 | 10-22-2026 | Initial architecture; all RTL in SystemVerilog; CPU as a replaceable core; one technology include file; Active-HDL simulation; CPU port list, BD address map and CLI hierarchy aligned with the built cores |
-| 10-22-2026 | CPU network path (`cpu_axis_ethernet_stream`, leaf `claim`), AXI DMA, lwIP TCP echo server, `microblaze/` folder, BSP generated from the AMD install |
+| 10-22-2026 | CPU network path (`cpu_axis_ethernet_stream`, leaf `claim`), AXI DMA, lwIP TCP echo server, `cpu/microblaze_v_h264/` folder, BSP generated from the AMD install |
 | 10-22-2026 | Broadcast storm limiter on the CPU path (default 10 frames / 100 ms) |
 | 11-13-2026 | Link speed: `speed 10/100/auto`, full duplex only (no half-duplex advertisement), `duplex` removed |
 | 10-22-2026 | `rtlnet_tcp_offload`: checksum insert on the CPU TX stream, check with trailer on the CPU RX stream (core built; sub-map slot 0x9000 planned) |
@@ -732,4 +733,5 @@ and between the DMA MM2S stream and `u_cpu_tx_fifo` (TX).
 | 11-09-2026 | DDR3 (Phase 0 stage 1): `rtlnet_ddr` (MIG, 512 MiB) and `rtlnet_axi_arbiter` in the board top; MicroBlaze V caches (8 KiB I, 8 KiB write-through D over `0x8000_0000..0x9FFF_FFFF`), SmartConnect and the exported 128-bit `M_AXI_DDR`; arbiter window `0x44A0_4000`; `ui_clk` domain; firmware `show ddr`, `ddr test`; the CPU's `M_AXI_DDR` runs on `cpu_clk` and crosses to `ui_clk` in the board top's `rtlnet_axi_cdc` (`u_ddr_cdc`), so the SmartConnect has one clock |
 | 11-09-2026 | DDR3 controller `sys_clk` is MMCM CLKOUT6 through a BUFG (`ddr_sys_clk`); the arbiter's CPU master sets `NARROW_MASK` for the write-through data cache's 32-bit stores |
 | 11-13-2026 | The MIG project file moved to `boards/nexys_video/ip/` and is an argument of `rtlnet_ddr_mig_create`; section 2 notes where each folder lives |
-| 11-13-2026 | The repository is one branch, `main`; board-independent code and a board are separated by folder (`cores/`, `boards/<board>/`, `microblaze/`, `demos/`), layout rules in `rtlnet_contributing.md` section 8 |
+| 11-13-2026 | The repository is one branch, `main`; board-independent code and a board are separated by folder (`cores/`, `boards/<board>/`, `cpu/microblaze_v_h264/`, `demos/`), layout rules in `rtlnet_contributing.md` section 8 |
+| 11-14-2026 | The MicroBlaze CPU moved from `microblaze/` to `cpu/microblaze_v_h264/`; `cpu/` holds one folder per CPU, each independent with its own block design, firmware, CLI and tests |

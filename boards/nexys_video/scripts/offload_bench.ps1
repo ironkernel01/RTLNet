@@ -23,7 +23,8 @@ Overview:
 Usage:
   powershell -NoProfile -ExecutionPolicy Bypass -File boards/nexys_video/scripts/offload_bench.ps1 `
     [-Port COM3] [-Board 192.169.1.199] [-Seconds 10] [-Runs 2] [-Label zc-both] [-Iperf <iperf.exe>]
-Revision: 11-09-2026
+Revision: 11-14-2026
+  * 11-14-2026: moved to cpu/microblaze_v_h264/ (was microblaze/).
   * 10-22-2026: initial version.
   * 10-22-2026: modes plain, -R, -d, plain + UDP 20M concurrent; one table row per offload state.
   * 11-09-2026: takes the machine-wide board lock (rtlnet_board_lock.ps1) before touching the board.
@@ -44,7 +45,7 @@ $Repo   = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..')).Path
 . (Join-Path $Repo 'scripts\rtlnet_tools.ps1')
 $Python = Resolve-RtlnetPython
 if (-not $Iperf) { $Iperf = Resolve-RtlnetIperf; if (-not $Iperf) { $Iperf = 'iperf.exe' } }
-$Client = Join-Path $Repo 'microblaze\firmware\test\tcp_echo_client.py'
+$Client = Join-Path $Repo 'cpu\microblaze_v_h264\firmware\test\tcp_echo_client.py'
 $PromptRe = '(rtlnet(\([a-z-]+\))?[>#])$'
 $script:results = @()
 $script:rows = @()

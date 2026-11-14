@@ -18,7 +18,7 @@
 -f cores/rtlnet_h264_enc/hdl/rtlnet_h264_enc.f
 cores/rtlnet_eth_protocol/testbench/rtlnet_tb_eth_frames_pkg.sv
 cores/rtlnet_eth_mac/testbench/rtlnet_rtl8211e_model.sv
-microblaze/rtlnet_microblaze_sim_stub.sv
+cpu/microblaze_v_h264/rtlnet_microblaze_sim_stub.sv
 boards/nexys_video/hdl/rtlnet_nexys_video_clk_beacon.sv
 boards/nexys_video/hdl/rtlnet_nexys_video_sysregs.sv
 boards/nexys_video/hdl/rtlnet_nexys_video_top.sv

@@ -3,7 +3,7 @@
 # Purpose: load an ELF into the MicroBlaze V memory over JTAG and run it
 #   (xsdb script, Nexys Video). The ELF is the release image linked into the
 #   512 KiB LMB (0x0) or the development image linked into DDR3 (0x8000_0000,
-#   microblaze/firmware/build.ps1 -Ddr); both go through the same sequence.
+#   cpu/microblaze_v_h264/firmware/build.ps1 -Ddr); both go through the same sequence.
 # Overview:
 #   * hw_server lists the MicroBlaze V debug module as `RISC-V at USER2` with
 #     the child `Hart #0`, not as `MicroBlaze #0`; the hart appears one to two
@@ -39,7 +39,8 @@
 #     mismatch, not an ELF32, rwr pc, con.
 # Usage: xsdb jtag_load_elf.tcl <elf> [calib_timeout_ms]
 #   (normally through jtag_load_elf.ps1)
-# Revision: 11-09-2026
+# Revision: 11-14-2026
+#   * 11-14-2026: moved to cpu/microblaze_v_h264/ (was microblaze/).
 #   * 11-09-2026: initial version.
 #   * 11-09-2026: bounded wait for DDR3 calibration after the reset, download verification, reset/MIG finding.
 # -----------------------------------------------------------------------------

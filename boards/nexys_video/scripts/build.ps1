@@ -11,7 +11,7 @@ Overview:
      flag from git status, both inside the Tcl. -Network defines
      RTLNET_WITH_NETWORK (needs the network cores' filelists). Writes
      build/rtlnet_nexys_video.xsa (write_hw_platform -fixed).
-  2. microblaze/firmware/build.ps1 -Demo -Xsa build/rtlnet_nexys_video.xsa:
+  2. cpu/microblaze_v_h264/firmware/build.ps1 -Demo -Xsa build/rtlnet_nexys_video.xsa:
      CLI table check, BSP from the XSA (Vitis), firmware.elf, host harness
      and its scripted demo (TEST PASS required).
   3. merge_elf.ps1: updatemem -> build/rtlnet_nexys_video.bit.
@@ -38,7 +38,8 @@ Usage:
     choice between the 4x4 and the 8x8 transform. -HpTools picks the netlist (netlist\<variant> for all, netlist\<variant>_<tools> for the others) and sets
     the encoder parameters HP_T8 and HP_T8_AUTO to match: the netlist and the encoder always carry the same tool set. Software reads the set from hp_caps.
     The deblocking filter is not part of this choice (it is the DEBLOCK parameter of rtlnet_h264_top, on by default).
-Revision: 11-12-2026
+Revision: 11-14-2026
+  * 11-14-2026: moved to cpu/microblaze_v_h264/ (was microblaze/).
   * 11-12-2026: -HpTools (tool set of the High profile build: netlist and the HP_T8 / HP_T8_AUTO parameters).
   * 11-11-2026: -Image (tagged build with firmware and merge).
   * 11-11-2026: -HighProfile.
@@ -107,7 +108,7 @@ Step 'bitstream' {
 Get-Content -LiteralPath (Join-Path $Build 'build_bitstream.log') | Where-Object { $_ -match '^(rtlnet_build|rtlnet_cdc):' } |
     ForEach-Object { Write-Output "  $_" }
 if ($Tag -and $Image) {
-    Step 'firmware' { powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Repo 'microblaze\firmware\build.ps1') -Demo `
+    Step 'firmware' { powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Repo 'cpu\microblaze_v_h264\firmware\build.ps1') -Demo `
         -Xsa (Join-Path $Build 'rtlnet_nexys_video.xsa') }
     Step 'merge' { powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'merge_elf.ps1') `
         -Mmi (Join-Path $Build 'rtlnet_nexys_video.mmi') -Bit (Join-Path $Build 'rtlnet_nexys_video_hw.bit') -Out (Join-Path $Build 'rtlnet_nexys_video.bit') }
@@ -123,7 +124,7 @@ if ($Tag) {
     exit 0
 }
 if (-not $SkipFirmware) {
-    Step 'firmware' { powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Repo 'microblaze\firmware\build.ps1') -Demo `
+    Step 'firmware' { powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Repo 'cpu\microblaze_v_h264\firmware\build.ps1') -Demo `
         -Xsa (Join-Path $Build 'rtlnet_nexys_video.xsa') }
 }
 Step 'merge' { powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'merge_elf.ps1') }

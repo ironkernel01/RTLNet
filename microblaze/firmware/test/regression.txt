@@ -1,5 +1,0 @@
-# Firmware host tests: <name> script:<host script path> [arguments]   (passes on exit code 0)
-tsmux_host_test   script:microblaze/firmware/test/tsmux_host_test.ps1
-picq_host_test    script:microblaze/firmware/test/picq_host_test.ps1
-txring_host_test  script:microblaze/firmware/test/txring_host_test.ps1
-venc_irq_host_test script:microblaze/firmware/test/venc_irq_host_test.ps1

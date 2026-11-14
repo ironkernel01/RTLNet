@@ -378,4 +378,4 @@ The memory-controller wrapper connects to the `m_axi_*` ports; widths follow `ID
 ## 10. Board master mix (11-10-2026)
 
 Board configuration unchanged (`NARROW_MASK` 1, `WRAP_MASK` 1 for master 0). Beats per burst measured with the per-master counters after a 60 s 1080p30 stream: video DMA 16.0,
-encoder engines 12.0 writes (ring, index record, tiles) and 8.0 reads, CPU writes 4.0 (64-byte line write-back), CPU reads 1.0 (open, see `microblaze/documentation/rtlnet_cpu_microblaze.md` section 11). No error captured.
+encoder engines 12.0 writes (ring, index record, tiles) and 8.0 reads, CPU writes 4.0 (64-byte line write-back), CPU reads 1.0 (open, see `cpu/microblaze_v_h264/documentation/rtlnet_cpu_microblaze.md` section 11). No error captured.

@@ -8,7 +8,7 @@
 #   * Paths derive from this script's location (boards/nexys_video/scripts), so
 #     the build survives tree moves and does not depend on the working
 #     directory. Outputs go to boards/nexys_video/build/.
-#   * Steps: create the block design rtlnet_cpu (microblaze/
+#   * Steps: create the block design rtlnet_cpu (cpu/microblaze_v_h264/
 #     hdl/rtlnet_cpu_bd.tcl) under build/bd, generate output products with
 #     global synthesis, generate the DDR3 controller IP rtlnet_ddr_mig from
 #     boards/nexys_video/ip/rtlnet_ddr_mig.prj under build/ip (nothing generated
@@ -18,7 +18,7 @@
 #     network build), scripts/rtlnet_constrain_cdc.tcl, opt/place/phys_opt/
 #     route, reports, gates, write_bitstream, write_mem_info, the fixed
 #     hardware platform (XSA, write_hw_platform -fixed, the input of the
-#     firmware BSP flow microblaze/firmware/build.ps1), build_info.txt.
+#     firmware BSP flow cpu/microblaze_v_h264/firmware/build.ps1), build_info.txt.
 #   * High profile: `highprofile full|demo hp_netlist <dir>` (build.ps1 -HighProfile) reads the black box hp/rtlnet_h264_hp_bb.sv and the EDIF
 #     <dir>/rtlnet_h264_hp.edf instead of the stand-in module and sets the generic HIGH_PROFILE 1 (and HP_T8, HP_T8_AUTO from `hp_t8 0|1 hp_t8_auto 0|1`, default 1 1:
 #     the tool set the netlist contains, build.ps1 -HpTools); `none` (default) leaves the flow unchanged.
@@ -43,7 +43,8 @@
 # Usage: vivado -mode batch -source build_bitstream.tcl -tclargs [network 0|1]
 #          [build_id <8 hex>] [dirty 0|1] [tag <name>]   (pairs as "name value" or name=value)
 #   Normally run through boards/nexys_video/scripts/build.ps1.
-# Revision: 11-09-2026
+# Revision: 11-14-2026
+#   * 11-14-2026: moved to cpu/microblaze_v_h264/ (was microblaze/).
 #   * 10-22-2026: initial version.
 #   * 10-22-2026: XSA export (write_hw_platform -fixed).
 #   * 11-09-2026: Explore directives and a post-route phys_opt_design while WNS is negative (MicroBlaze V caches).
@@ -197,7 +198,7 @@ create_project -in_memory -part $PART
 set_property target_language Verilog [current_project]
 set_property default_lib xil_defaultlib [current_project]
 if {[catch {
-  source [file join $REPO microblaze hdl rtlnet_cpu_bd.tcl]
+  source [file join $REPO cpu microblaze_v_h264 hdl rtlnet_cpu_bd.tcl]
   set bd_file [rtlnet_cpu_bd_create [file join $BUILD_DIR bd]]
   set_property synth_checkpoint_mode None [get_files $bd_file]
   generate_target all [get_files $bd_file]

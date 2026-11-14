@@ -1,0 +1,5 @@
+# Firmware host tests: <name> script:<host script path> [arguments]   (passes on exit code 0)
+tsmux_host_test   script:cpu/microblaze_v_h264/firmware/test/tsmux_host_test.ps1
+picq_host_test    script:cpu/microblaze_v_h264/firmware/test/picq_host_test.ps1
+txring_host_test  script:cpu/microblaze_v_h264/firmware/test/txring_host_test.ps1
+venc_irq_host_test script:cpu/microblaze_v_h264/firmware/test/venc_irq_host_test.ps1

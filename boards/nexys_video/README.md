@@ -19,7 +19,7 @@ the measurements and the build log is `documentation/rtlnet_nexys_video.md`.
 | `testbench/` | board benches and `regression.txt` (picked up by `scripts/rtlnet_regression.ps1`) |
 | `documentation/` | the board guide |
 
-Related folders: `microblaze/` (CPU block design, firmware, host tests) and `demos/` (ready-to-run
+Related folders: `cpu/microblaze_v_h264/` (CPU block design, firmware, host tests) and `demos/` (ready-to-run
 bitstreams, see `demos/README.md`).
 
 ## Build, program, outputs
@@ -54,8 +54,8 @@ Prefix of every command: `powershell -NoProfile -ExecutionPolicy Bypass -File`.
 | `post_synth.dcp`, `post_route.dcp` | design checkpoints |
 | `bd/`, `ip/` | the generated MicroBlaze block design and the generated DDR3 controller IP (from `ip/rtlnet_ddr_mig.prj`) |
 
-The firmware build writes into `microblaze/firmware/build/`: `firmware.elf` (the image merged into the bitstream),
-`firmware_ddr.elf` (`build.ps1 -Ddr` in `microblaze/firmware/`, loaded with `scripts/jtag_load_elf.ps1`), `menu.exe` (CLI
+The firmware build writes into `cpu/microblaze_v_h264/firmware/build/`: `firmware.elf` (the image merged into the bitstream),
+`firmware_ddr.elf` (`build.ps1 -Ddr` in `cpu/microblaze_v_h264/firmware/`, loaded with `scripts/jtag_load_elf.ps1`), `menu.exe` (CLI
 desktop harness), `ws/` (the generated BSP), `ratectl_test.log`.
 
 ### Program
@@ -120,7 +120,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File boards/nexys_video/scripts/t
 The CLI is on the board's USB-UART (115200 8N1). It is hierarchical, in a lightweight switch style; type `?` for help.
 
 Tools beyond the ones of the root README: the MicroBlaze GCC and BSP from the Vitis install (lwIP 2.2.0 is compiled in place
-from it; only the RTLNet-specific files live in `microblaze/firmware/src/lwip/`) and iperf 2.2.x on the PC.
+from it; only the RTLNet-specific files live in `cpu/microblaze_v_h264/firmware/src/lwip/`) and iperf 2.2.x on the PC.
 
 ## Status
 

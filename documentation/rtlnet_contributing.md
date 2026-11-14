@@ -2,8 +2,8 @@
 
 | Item | Value |
 |---|---|
-| Document revision | 11-13-2026 |
-| Applies to | every file under `cores/`, `scripts/`, `microblaze/`, `boards/` and `demos/` |
+| Document revision | 11-14-2026 |
+| Applies to | every file under `cores/`, `scripts/`, `cpu/`, `boards/` and `demos/` |
 
 Read `documentation/rtlnet_architecture.md` first (bus, register conventions, address map, leaf contract,
 section 15 port lists). This page lists the rules a core must follow to be accepted.
@@ -81,7 +81,7 @@ section 15 port lists). This page lists the rules a core must follow to be accep
 - Run: `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rtlnet_run_sim.ps1 -Bench <tb> -Filelist <f>`.
   The runner serializes the single Active-HDL seat machine-wide; just call it. Do not start the Active-HDL GUI.
 - Prove each new check can fail (perturb the bench once, see TEST FAIL, restore).
-- **Board-level benches never simulate the processor.** (They live under `boards/`.) The CPU core is replaced by `microblaze/rtlnet_microblaze_sim_stub.sv`
+- **Board-level benches never simulate the processor.** (They live under `boards/`.) The CPU core is replaced by `cpu/microblaze_v_h264/rtlnet_microblaze_sim_stub.sv`
   (same ports): scripted AXI4-Lite register sequences do what firmware does, and frame source/sink tasks stand in for
   the DMA streams. Firmware (lwIP, CLI) is verified on hardware and by the host-side harnesses.
 
@@ -116,13 +116,13 @@ The repository has one branch, `main`; all work is committed on it. Folders keep
 | `scripts/` | generic scripts (simulation, regression, synthesis check, tool discovery) |
 | `documentation/`, `diagrams/` | the generic documents and drawings |
 | `boards/<board>/` | one board design per folder (top, constraints, MIG project file, build and test scripts, board bench, board guide); today `boards/nexys_video/`, a second board (Arty A7-100) is planned as `boards/arty_a7_100/` |
-| `microblaze/` | the CPU block design and firmware (written for the Nexys Video today) |
+| `cpu/` | one folder per CPU, each independent with its own block design, driver, firmware, CLI, tests and documents; today `cpu/microblaze_v_h264/` (written for the Nexys Video today) |
 | `demos/` | released demonstration bitstreams |
 
 Rules:
 
-1. **`cores/` and generic `scripts/` never depend on `boards/`, `microblaze/` or `demos/`.** The regression of the cores
-   (`scripts/rtlnet_regression.ps1`) runs with those folders absent; it runs `microblaze/` and `boards/<board>/testbench`
+1. **`cores/` and generic `scripts/` never depend on `boards/`, `cpu/` or `demos/`.** The regression of the cores
+   (`scripts/rtlnet_regression.ps1`) runs with those folders absent; it runs every `cpu/<cpu>/` and `boards/<board>/testbench`
    when they exist.
 2. **Board-specific files live under `boards/<board>/`**: board top, constraints, MIG project file, build and test scripts.
    No board path, pin, part or board address in core RTL, drivers, benches, generic scripts or filelists. The cores take

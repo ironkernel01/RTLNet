@@ -6,7 +6,7 @@ Purpose: host-side hardware test of the CPU network path of the Nexys Video
   server (rtlnet_lwiperf, port 5001), alone and together with the RTL UDP iperf
   server, from the PC over the bench network.
 Overview:
-  1. TCP echo alone: microblaze/firmware/test/tcp_echo_client.py, 4
+  1. TCP echo alone: cpu/microblaze_v_h264/firmware/test/tcp_echo_client.py, 4
      connections, every payload size 1 B .. 64 KiB (PASS line required).
   2. TCP iperf alone, PC -> board: iperf -c <board> -t <s> (TCP). The
      throughput is parsed from the iperf client's summary line.
@@ -28,7 +28,8 @@ Usage:
     [-Board <board IPv4>] [-Seconds 10] [-UdpRate 20M] [-Iperf <iperf.exe>] [-Port COM3]
   Without -Board the script reads the board's address over the USB-UART (CLI `show ip`, the effective IPv4) under the board lock;
   the DHCP lease changes between sessions.
-Revision: 11-10-2026
+Revision: 11-14-2026
+  * 11-14-2026: moved to cpu/microblaze_v_h264/ (was microblaze/).
   * 10-22-2026: initial version.
   * 10-22-2026: -R, -r and -d are gates with throughput (rtlnet_lwiperf).
   * 11-09-2026: takes the machine-wide board lock (rtlnet_board_lock.ps1) before touching the board.
@@ -78,7 +79,7 @@ if (-not $Board) {
 . (Join-Path $Repo 'scripts\rtlnet_tools.ps1')
 $Python = Resolve-RtlnetPython
 if (-not $Iperf) { $Iperf = Resolve-RtlnetIperf; if (-not $Iperf) { $Iperf = 'iperf.exe' } }
-$Client = Join-Path $Repo 'microblaze\firmware\test\tcp_echo_client.py'
+$Client = Join-Path $Repo 'cpu\microblaze_v_h264\firmware\test\tcp_echo_client.py'
 $script:results = @()
 function Record([string]$name, [bool]$ok, [string]$detail) {
     $script:results += [pscustomobject]@{ Step = $name; Ok = $ok; Detail = $detail }

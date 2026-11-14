@@ -114,7 +114,7 @@ maximum since clear; the overflow count (with the count below the QP maximum) an
 
 ## 5. CLI
 
-Defined in `microblaze/firmware/cli/cli_commands.txt` (MenuBuilder hierarchy; `gen_menu.py` regenerates the tables, `check_menu.py` checks them).
+Defined in `cpu/microblaze_v_h264/firmware/cli/cli_commands.txt` (MenuBuilder hierarchy; `gen_menu.py` regenerates the tables, `check_menu.py` checks them).
 
 | Command | Mode | Action |
 |---|---|---|
@@ -131,8 +131,8 @@ command calls the driver.
 
 ## 6. Host test
 
-`cores/rtlnet_h264_enc/testbench/test_rtlnet_ratectl.c`, built and run by `testbench/h264_driver_test.ps1`, `build.ps1 -RatectlTest` and as part of `build.ps1 -Demo`; log `microblaze/firmware/build/ratectl_test.log`
-(the whole `-Demo` run is in `microblaze/firmware/build/phase2d_build_demo.txt`). The synthetic encoder: `bits = complexity x 2^((34 - QP)/6) x (1 + noise)`, noise uniform within +-10 %
+`cores/rtlnet_h264_enc/testbench/test_rtlnet_ratectl.c`, built and run by `testbench/h264_driver_test.ps1`, `build.ps1 -RatectlTest` and as part of `build.ps1 -Demo`; log `cpu/microblaze_v_h264/firmware/build/ratectl_test.log`
+(the whole `-Demo` run is in `cpu/microblaze_v_h264/firmware/build/phase2d_build_demo.txt`). The synthetic encoder: `bits = complexity x 2^((34 - QP)/6) x (1 + noise)`, noise uniform within +-10 %
 (fixed-seed generator), an IDR picture 6 x a P picture at equal QP (4 x and 8 x also run for constant motion), 2700 pictures (90 s) per run at 30 fps. Sequences: static (0.02 of
 the moderate complexity), constant moderate motion (equilibrium QP 34), a 3 s noise burst of 4 x complexity from t = 20.5 s, a scene cut to 3 x complexity at t = 30.5 s, ramps
 (0.5 to 3 x and back over 60 s). Cases: 720p30 at 1000 kb/s, 1080p30 at 2000 kb/s, 720p30 at 300 kb/s, each with GOP 30 and GOP 1: 30 runs, 18 more for the IDR ratios,

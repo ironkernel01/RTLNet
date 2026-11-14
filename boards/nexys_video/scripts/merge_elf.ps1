@@ -6,7 +6,7 @@ Purpose: put the MicroBlaze firmware ELF into the LMB block RAM of the
 Overview:
   * Inputs (defaults): build/rtlnet_nexys_video_hw.bit and
     build/rtlnet_nexys_video.mmi from build_bitstream.tcl, and
-    microblaze/firmware/build/firmware.elf.
+    cpu/microblaze_v_h264/firmware/build/firmware.elf.
   * Verifies the MMI before use: one processor, InstPath
     u_cpu/u_bd/rtlnet_cpu_i/microblaze_0, an LMB address space
     of 0..524287 (512 KiB) with 128 RAMB36 bit lanes (other address spaces,
@@ -22,7 +22,8 @@ Overview:
 Usage:
   powershell -NoProfile -ExecutionPolicy Bypass -File boards/nexys_video/scripts/merge_elf.ps1 `
     [-Elf <elf>] [-Mmi <mmi>] [-Bit <bit>] [-Out <bit>]
-Revision: 11-09-2026
+Revision: 11-14-2026
+  * 11-14-2026: moved to cpu/microblaze_v_h264/ (was microblaze/).
   * 10-22-2026: initial version.
   * 10-22-2026: 512 KiB LMB (128 RAMB36); further address spaces allowed.
   * 11-09-2026: MicroBlaze V: MMI endianness label Big accepted.
@@ -38,7 +39,7 @@ $ErrorActionPreference = 'Stop'
 $Board = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $Repo  = (Resolve-Path (Join-Path $Board '..\..')).Path
 $Build = Join-Path $Board 'build'
-if (-not $Elf) { $Elf = Join-Path $Repo 'microblaze\firmware\build\firmware.elf' }
+if (-not $Elf) { $Elf = Join-Path $Repo 'cpu\microblaze_v_h264\firmware\build\firmware.elf' }
 if (-not $Mmi) { $Mmi = Join-Path $Build 'rtlnet_nexys_video.mmi' }
 if (-not $Bit) { $Bit = Join-Path $Build 'rtlnet_nexys_video_hw.bit' }
 if (-not $Out) { $Out = Join-Path $Build 'rtlnet_nexys_video.bit' }

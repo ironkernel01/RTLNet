@@ -3,11 +3,11 @@
 | Item | Value |
 |---|---|
 | Board | Digilent Nexys Video, XC7A200T-1SBG484C, Realtek RTL8211E-VL |
-| Document revision | 11-13-2026 |
+| Document revision | 11-14-2026 |
 | Top | `boards/nexys_video/hdl/rtlnet_nexys_video_top.sv` (`rtlnet_nexys_video_top`) |
 | Builds | network (`build.ps1 -Network`, `RTLNET_WITH_NETWORK`: MAC, MDIO, protocol wrapper with ARP/ICMP/DHCP/iperf/UDP socket leaves, CPU network path with its classifier, UDP echo) and CPU-only (default); both built, timing met, on hardware |
 | Tools | Vivado 2026.1, GNU GCC 13.4 (RISC-V, MicroBlaze V), Active-HDL 11.1 |
-| Firmware | one image for both builds (`microblaze/firmware`, standalone BSP generated from the build's XSA, lwIP TCP echo on the CPU network path); absent cores are probed and reported "not present in this build" |
+| Firmware | one image for both builds (`cpu/microblaze_v_h264/firmware`, standalone BSP generated from the build's XSA, lwIP TCP echo on the CPU network path); absent cores are probed and reported "not present in this build" |
 
 ## 1. Files
 
@@ -67,7 +67,7 @@ wrapper at PROTOCOL + 0x8000 = 0x44A1_8000; the checksum offload `rtlnet_tcp_off
 0x44A1_9000). Windows without a core are `rtlnet_axil_slave` stubs: OKAY,
 read data 0. Other addresses in the 1 MiB window: DECERR.
 
-System registers (single definition `microblaze/firmware/src/rtlnet_nexys_video_sysregs.h`):
+System registers (single definition `cpu/microblaze_v_h264/firmware/src/rtlnet_nexys_video_sysregs.h`):
 
 | Offset | Name | Access | Content |
 |---:|---|---|---|
@@ -103,7 +103,7 @@ hardware.
 `powershell -File boards/nexys_video/scripts/build.ps1 [-Network] [-Program] [-Test] [-Tag <name>]` runs
 `build_bitstream.tcl` (which also writes the hardware export `rtlnet_nexys_video.xsa`), then the firmware
 build on a BSP generated from that XSA (with the CLI table check and the harness demo,
-`microblaze/documentation/rtlnet_cpu_microblaze.md` section 5), through
+`cpu/microblaze_v_h264/documentation/rtlnet_cpu_microblaze.md` section 5), through
 `scripts/rtlnet_vivado.ps1`, and `merge_elf.ps1`. Outputs in `boards/nexys_video/build/`:
 `rtlnet_nexys_video.bit` (to program), `rtlnet_nexys_video_hw.bit` (no firmware),
 `rtlnet_nexys_video.mmi`, `build_info.txt`, `post_synth.dcp`, `post_route.dcp`, `reports/`. With `-Tag <name>` only the bitstream step runs and every output goes to `build/<name>/` (for example `-Tag cpu` for the CPU-only gate build), so the network image files stay as they are.
@@ -165,7 +165,7 @@ paths (`rtlnet_nexys_video.xdc`). No clock groups.
 
 ### 5.2 Firmware network manager
 
-`microblaze/firmware/src/rtlnet_netmgr.c` (called from `main.c`): probes every core; MDIO core
+`cpu/microblaze_v_h264/firmware/src/rtlnet_netmgr.c` (called from `main.c`): probes every core; MDIO core
 init, MDC calibration against the AXI timer, wait for the core's PHY power-on reset plus 30 ms,
 RTL8211E ID check, RX delay on (page 0xA4 register 28, read back), advertisement (full duplex
 10/100/1000 by default) and AN restart; MAC init; CPU-path classifier (`cpupath_init`: `rtlnet_classifier_init` at
@@ -339,7 +339,7 @@ core lands), u_cpu's DMA streams on `s_axis_cpu_eth_*` / `m_axis_cpu_eth_*` in c
 | Timing (post-route) | WNS +0.221 ns, WHS +0.018 ns, WPWS +0.264 ns; 0 failing endpoints |
 | Utilization | 16169 LUTs (12.08 %), 21183 FFs (7.92 %), 196.5 BRAM tiles (53.84 %), 5 DSP48 |
 | CDC | fifo 9, gray 6, axil_cdc 3 instances, as expected (`build_bitstream.tcl`) |
-| Firmware | text 153724 B, data 2104 B, bss 151624 B (lwIP with the echo and iperf servers): 307 KiB of 512 KiB; after the TCP throughput tuning (`microblaze/documentation/rtlnet_cpu_microblaze.md` section 9.10): text 162356 B, data 2104 B, bss 238280 B, 381 KiB of 512 KiB |
+| Firmware | text 153724 B, data 2104 B, bss 151624 B (lwIP with the echo and iperf servers): 307 KiB of 512 KiB; after the TCP throughput tuning (`cpu/microblaze_v_h264/documentation/rtlnet_cpu_microblaze.md` section 9.10): text 162356 B, data 2104 B, bss 238280 B, 381 KiB of 512 KiB |
 | Console | `cli_test.ps1` PASS 27/27; start-up: `PHY: RTL8211E ID 0x001CC915, RX delay 0xAD77 -> 0xAD77, MDC half period 266 ns, LEDs LINK steady, ACT blink, USER off; EEE off, auto-negotiation restarted`, `CPU path: DMA ok, classifier absent, lwIP up (TCP echo, TCP iperf)` |
 | PHY LEDs / EEE | `show phy`: LCR 0x0070, LACR 0x0010 (read back), MMD 7.60 = 0x0000 (EEE not advertised); the LED behaviour itself was not observed (no view of the board) |
 | lwIP identity | `show tcp`: netif MAC 02:49:4b:52:4e:01, IPv4 192.169.1.199 / 24, gateway 192.169.1.1 (the DHCP lease), "RTL identity: matches" |
@@ -391,7 +391,7 @@ Hardware (board at 192.169.1.199 by DHCP, PC wired NIC "Ethernet" 192.169.1.178)
 | `show phy` | LCR 0x0070, LACR 0x0010 (read back, ext page 0x2C), EEE: MMD 7.60 = 0x0000 (off); RX delay 0x8575 -> 0xAD75; 100 Mb/s full duplex, partner 10h/10f/100h/100f |
 | Broadcast flood | see below |
 
-Broadcast flood (`microblaze/firmware/test/bcast_flood.py --rate 400 --seconds 10 --bind 192.169.1.178`, 2000
+Broadcast flood (`cpu/microblaze_v_h264/firmware/test/bcast_flood.py --rate 400 --seconds 10 --bind 192.169.1.178`, 2000
 datagrams to 192.169.1.255 and 2000 to 255.255.255.255, UDP port 9, 64 B), with `ping` of the board once a second
 and `tcp_echo_client.py --conns 2` in a loop (20 runs of 76 messages, 589408 bytes each way) running at the same
 time; counters cleared (`clear counters`) before, read after:
@@ -433,7 +433,7 @@ both directions are bit-exact pass-through. Full regression `scripts/rtlnet_regr
 Hardware (board 192.169.1.199 by DHCP, PC wired NIC 192.169.1.178, `iperf.exe -t 10`, mean of two runs, Mbit/s;
 `offload_bench.ps1` once per firmware image, the CLI switches the offload at run time; the images differ in the
 zero-copy options RX / TX; the measurements, the CPU profile and the analysis are in
-`microblaze/documentation/rtlnet_cpu_microblaze.md` section 9.11):
+`cpu/microblaze_v_h264/documentation/rtlnet_cpu_microblaze.md` section 9.11):
 
 | Zero-copy RX / TX | Offload | plain | `-R` | `-d` (PC -> board + board -> PC) | plain + UDP 20M (TCP / UDP) |
 |---|---|---|---|---|---|
@@ -462,7 +462,7 @@ idle at that rate (35 % busy, against 81 % copying). Zero-copy transmit costs th
 The processor of the block design is MicroBlaze V (`microblaze_riscv` 1.0: RV32IMC, Zicsr, Zba/Zbb/Zbs, performance
 pipeline, no caches, debug through `mdm_riscv` 1.0, serial JTAG interface, without the JTAG UART); address map, interrupt numbering,
 exported ports and the 100 MHz clock are unchanged, except that the unused MDM register window 0x4140_0000 no longer
-exists (`microblaze/documentation/rtlnet_cpu_microblaze.md`). Network
+exists (`cpu/microblaze_v_h264/documentation/rtlnet_cpu_microblaze.md`). Network
 build, Vivado 2026.1, `build.ps1 -Network` flow (bitstream, XSA, firmware, updatemem). Both images were measured on the
 same board (JTAG, COM3) with the PC on its Wi-Fi adapter (192.168.68.84) and the board on the router at 1000 Mb/s by
 DHCP (192.168.68.68); no wired PC adapter was connected, so the iperf rates carry Wi-Fi variation. The baseline is the
@@ -575,7 +575,7 @@ Board benches: `rtlnet_regression.ps1`, `RTLNET_REGRESSION` summary in `phase0_d
 
 ### 6.9 Phase 0 stage 2: JTAG development flow, DDR3 image and 32-bit program counter (11-09-2026)
 
-Changes: `build.ps1 -Ddr` and `jtag_load_elf` (`microblaze/documentation/rtlnet_cpu_microblaze.md` section 9.12); the block design sets
+Changes: `build.ps1 -Ddr` and `jtag_load_elf` (`cpu/microblaze_v_h264/documentation/rtlnet_cpu_microblaze.md` section 9.12); the block design sets
 `C_PC_WIDTH` 32; `build.ps1 -Tag <name>` writes a variant build into `build/<name>/` without touching the network image.
 
 Finding: `C_PC_WIDTH` was 19 (propagated from the 512 KiB ILMB, `C_I_AXI` 0), so the first load of `firmware_ddr.elf` ran
@@ -930,7 +930,7 @@ Board (release image, JTAG, COM3, lease 192.168.68.79 from `show ip`, PC on Wi-F
 | `phase1_gate` | `PHASE1_GATE: PASS 19/19` | `phase2d_phase1_gate.txt` |
 | `cli_test` (Phase 2d steps: bit rate, buffer, QP range, history, patterns) | `CLI_TEST: PASS 79/79` | `phase2d_cli_test.txt` |
 | `net_test`, `tcp_test` | `NET_TEST: PASS 25/25`, `TCP_TEST: PASS 8/8` | `phase2d_net_test.txt`, `phase2d_tcp_test.txt` |
-| firmware host test | demo 448/448, `RATECTL_TEST: PASS (11 gates)` | `microblaze/firmware/build/ratectl_test.log` |
+| firmware host test | demo 448/448, `RATECTL_TEST: PASS (11 gates)` | `cpu/microblaze_v_h264/firmware/build/ratectl_test.log` |
 | `stream_test`, static bars, constant QP 28, GOP 30, 1080p30, 60 s (regression) | `STREAM_TEST: PASS 12/12`, 203 kb/s as in 6.13 | `phase2d_stream_bars_gop30.txt` |
 
 **Capture and test tooling.** The first 60 s rate-control runs failed on "lost" first datagrams. The PC receive path is not the cause: the datagram counts match the board (for example 2,192 received, 2,192 sent), the Windows `Receive Errors` counter does not move, and the receiver
@@ -1074,10 +1074,10 @@ license test does not poll the CLI during the capture and takes the expiry time 
 ### 6.16 Start QP of the rate control (11-11-2026)
 
 Change (firmware only, no RTL change, default image): with constant bit rate on, the first picture after a stream start, a mode change or a target change is coded at the start QP `qp_max - 3` (48 with the default range 12..51); the controller then
-descends by its normal step (at most 2 per picture) while the buffer shows room. The bits-per-pixel start rule of Phase 2d is removed (`rtlnet_ratectl.md` section 2.2). Constant QP mode is unchanged. The firmware is rebuilt with `microblaze/firmware/build.ps1`
+descends by its normal step (at most 2 per picture) while the buffer shows room. The bits-per-pixel start rule of Phase 2d is removed (`rtlnet_ratectl.md` section 2.2). Constant QP mode is unchanged. The firmware is rebuilt with `cpu/microblaze_v_h264/firmware/build.ps1`
 and merged into the default image (`merge_elf.ps1`), programmed over JTAG (`phase2e_default_program.txt`).
 
-Host (`microblaze/firmware/build/ratectl_test.log`): `RATECTL_TEST: PASS (15 gates, 0 failed)`, the 11 gates of Phase 2d unchanged and four new ones: the first picture is at QP 48 in every start-up run; no picture of the first second of
+Host (`cpu/microblaze_v_h264/firmware/build/ratectl_test.log`): `RATECTL_TEST: PASS (15 gates, 0 failed)`, the 11 gates of Phase 2d unchanged and four new ones: the first picture is at QP 48 in every start-up run; no picture of the first second of
 1080p30 pattern `all` (8,000 kb/s GOP 30, 10,000 kb/s GOP 1) is above 62,500 B (the 15 Mb/s the output path sustains at 1080p30, section 6.14, divided by 30 pictures per second; the largest is 49,074 B at 10,000 kb/s GOP 1);
 the second second of a hard source (the measured sizes of `all`) and of an easy source (`box`-like: IDR 130 to 305 kbit, P 250 bit) are within +-10 % of the target with the QP at 2 s within 4 of the steady state (worst 1.94 %, easy source: QP 30 at 2 s against 26.96 steady);
 the start QP follows the range (12..40 gives 37, 40..42 gives 40). The firmware host demo passes (`menu_demo checks=462`, `TEST PASS`). The easy source of the host model is optimistic: on the board `box` needs about 6 s (below).
@@ -1110,7 +1110,7 @@ Proposed, not done: after the first IDR picture seeds `K_i`, derive `K_p` from i
 
 ### 6.17 Stream throughput: the mux runs apart from the encoder (11-11-2026)
 
-Change (firmware only, no RTL change, default image, no Vivado build): `microblaze/documentation/rtlnet_ts_mux.md` section 5.2 and `rtlnet_cpu_microblaze.md` section 9.2.1.
+Change (firmware only, no RTL change, default image, no Vivado build): `cpu/microblaze_v_h264/documentation/rtlnet_ts_mux.md` section 5.2 and `rtlnet_cpu_microblaze.md` section 9.2.1.
 
 1. The picture is queued at DONE (descriptor, rate control, slot released, next picture started at once) and sent in chunks of four datagrams by the main loop (`rtlnet_picq.c`, `rtlnet_muxjob.c`); the encoder never waits for the mux. At `PICQ_LIMIT` = 3 pictures queued a new frame is skipped on purpose (own counter), so RING_STALL cannot occur.
 2. Console output goes through a 4 KiB transmit ring and the UART interrupt (`rtlnet_txring.c`, `rtlnet_platform.c`); `plat_putc` no longer waits on the 16-character FIFO.
@@ -1589,7 +1589,7 @@ None of the ten worst paths is in the High profile netlist, and the filter's wor
 
 The failing paths are the same classes as in the open demo builds of 6.19; none is in the netlist, the filter or the CABAC logic. The netlist `demo_cabac` differs from `full_cabac` by the license timer only (28 LUT cells, 52 FF). The licence-end test of this image (High before, Constrained Baseline after, one forced IDR picture at 1,800 s) is not run on the board; its simulation form, the engine bench with the licence ending in picture 2 on the CABAC-only RTL with the filter on and off, passes (private document 10.7, part C). The demo image needs a third build attempt (another directive or a change of the arbiter path), which is outside the two attempts of this job.
 
-**Files for the board gates** (`build.ps1 -Image` output, this worktree): `boards/nexys_video/build/hp_full_cab_dbk/rtlnet_nexys_video.bit` (firmware merged; program it with `program.ps1 -Bit`), `rtlnet_nexys_video_hw.bit` (without firmware), `rtlnet_nexys_video.mmi`, `rtlnet_nexys_video.xsa`, `firmware.elf` (a copy of `microblaze/firmware/build/firmware.elf` as merged; that file is tracked and the build rewrote it), `build_info.txt`, `reports/`, `post_route.dcp`. No board, COM3 or JTAG was used for this section. The image build ran the firmware host demo (`TEST PASS: menu_demo checks=502`) and the rate control test (15 gates); the regression of the worktree passes (`RTLNET_REGRESSION: 176 passed, 0 failed`).
+**Files for the board gates** (`build.ps1 -Image` output, this worktree): `boards/nexys_video/build/hp_full_cab_dbk/rtlnet_nexys_video.bit` (firmware merged; program it with `program.ps1 -Bit`), `rtlnet_nexys_video_hw.bit` (without firmware), `rtlnet_nexys_video.mmi`, `rtlnet_nexys_video.xsa`, `firmware.elf` (a copy of `cpu/microblaze_v_h264/firmware/build/firmware.elf` as merged; that file is tracked and the build rewrote it), `build_info.txt`, `reports/`, `post_route.dcp`. No board, COM3 or JTAG was used for this section. The image build ran the firmware host demo (`TEST PASS: menu_demo checks=502`) and the rate control test (15 gates); the regression of the worktree passes (`RTLNET_REGRESSION: 176 passed, 0 failed`).
 
 Board gates open. They are: `program.ps1 -Bit build/hp_full_cab_dbk/rtlnet_nexys_video.bit`, `show encoder` (`tools CABAC (hp_caps 1)`, `Transform 8x8   : not offered`, deblocking on), `CLI_TEST`, `PHASE1_GATE`, `encoder irqtest`, the stream tests with the filter on and off and `-Profile baseline|high`, the 1080p throughput sweep with the filter, and the PSNR comparison; the licence-end test needs the demo image.
 
@@ -1700,7 +1700,7 @@ Board results (JTAG, PC on Wi-Fi, link 1000 Mb/s unless stated):
 
 In the runs that failed once the board counts 0 dropped pictures and 0 UDP drops, and the PC reports datagrams out of order; the PC is on Wi-Fi. The cause is not established. A first run of `hp_expiry_test.ps1` without `-Profile high` reports one failed gate (it expects 1 forced IDR picture; the CABAC image counts 2 with the profile command of the test): `-Profile high` is the correct call for this image.
 
-No build output is tracked in git from this revision on: `boards/nexys_video/build/rtlnet_nexys_video.bit`, `.mmi`, `.xsa` and `microblaze/firmware/build/firmware.elf` are build outputs only. The released images are `demos/h264_baseline/nexys_video/` and `demos/h264_high_profile_demo/nexys_video/`. The two branches were merged into `main` afterwards on 11-13-2026 and deleted; both build commits (6fc46373 and f4f7d4b1) are in the history of `main`.
+No build output is tracked in git from this revision on: `boards/nexys_video/build/rtlnet_nexys_video.bit`, `.mmi`, `.xsa` and `cpu/microblaze_v_h264/firmware/build/firmware.elf` are build outputs only. The released images are `demos/h264_baseline/nexys_video/` and `demos/h264_high_profile_demo/nexys_video/`. The two branches were merged into `main` afterwards on 11-13-2026 and deleted; both build commits (6fc46373 and f4f7d4b1) are in the history of `main`.
 
 ## 7. Network integration (done 10-22-2026) and what remains
 
@@ -1726,12 +1726,13 @@ Open:
 
 | Revision | Change |
 |---|---|
+| 11-14-2026 | The MicroBlaze V CPU moved from `microblaze/` to `cpu/microblaze_v_h264/` (paths in the build scripts and in this document); no build or board result changed |
 | 11-13-2026 | Section 6.24: release rebuild of `rel_base_dbk` and `rel_demo_cab_dbk` from the board branches with clean build ids, board results; build outputs no longer tracked in git |
 | 11-13-2026 | Section 6.23: the three release images of the merged tree (`rel_base_dbk`, `rel_demo_cab_dbk`, `rel_full_cab_dbk`, each met timing on the first attempt with `AltSpreadLogic_high`), the DDR3 arbiter in two clocks, the filter's multiplier in a DSP block (no `SYNTH-9`, no waiver), board gates, `hp_expiry_test.ps1` of the demo image; sections 6.21 and 6.22 stay as the 6.21 of the interrupt merge and the CABAC-only image of the filter branch |
 | 11-12-2026 | Section 6.22: CABAC-only High profile image with the deblocking filter (`-HpTools cabac`, `hp_full_cab_dbk` built, `hp_demo_cab_dbk` two attempts without timing closure), RTLNET_UTIL_LIMIT, RTLNET_RESUME_DCP, SYNTH-9 waiver; section 6.20 VERSION corrected to 0x11122C04; board gates open |
 | 10-22-2026 | Initial version: CPU-only board top, build flow, bring-up |
 | 10-22-2026 | Network integration: RGMII XDC, CDC counts and waivers, network board bench, firmware network manager and driver-backed CLI, hardware results at 100 and 10 Mb/s |
-| 10-22-2026 | `microblaze/` folder; CPU core with AXI DMA, AXI BRAM, 512 KiB LMB; XSA export; BSP-based firmware with lwIP; CPU-only hardware checkpoint (section 6.3) |
+| 10-22-2026 | `cpu/microblaze_v_h264/` folder; CPU core with AXI DMA, AXI BRAM, 512 KiB LMB; XSA export; BSP-based firmware with lwIP; CPU-only hardware checkpoint (section 6.3) |
 | 10-22-2026 | Checksum offload (`rtlnet_tcp_offload`) enabled in the network build (`CPU_TCP_OFFLOAD_ENABLE` 1, window 0x44A1_9000), CDC expectation `fifo 10 axil_cdc 5 gray 6`, MM2S data realignment engine in the block design, firmware zero-copy options, `show offload` step in `cli_test.ps1`, `offload_bench.ps1`; build and hardware results of section 6.6 (default: zero-copy receive on, transmit off) |
 | 10-22-2026 | CPU-path classifier enabled in the network build (`CPU_CLASSIFIER_ENABLE` 1), CDC expectation `axil_cdc 4`, firmware on the classifier driver, bench checks for drop-all and broadcast limiting, hardware results of section 6.5; open items refreshed |
 | 11-09-2026 | Phase 0a: MicroBlaze V replaces the classic MicroBlaze in the block design; hardware results of section 6.7 |

@@ -781,7 +781,7 @@ are shorter. Cause: with 32 single-beat writes per macroblock the encoder measur
 | Index record (AW) | 1 beat of 16 bytes | 1 burst of 8 beats (128-byte record) |
 | Compressed ring (AW) | up to 16 beats; every NAL unit end closed a burst (the 6-byte access unit delimiter was a 1-beat burst) | up to 16 beats; only a slice NAL unit end, the ring end and 4 KiB close a burst early (the delimiter joins the burst of the slice that follows); the last burst of a slice can still be short, down to 1 beat |
 | Video write DMA (`rtlnet_vdma_s2mm`) | 16-beat bursts | unchanged: line starts are 256-byte aligned at both strides (2560 and 3840 bytes), so every burst is 16 beats, 720p30 and 1080p30 |
-| CPU caches (arbiter master 0) | write-through: every store one narrow 32-bit beat; line fill one 128-bit beat (4 x 32-bit packed by the SmartConnect) | see `microblaze/documentation/rtlnet_cpu_microblaze.md` section 11: write-back, 64-byte lines; stores leave as 4-beat bursts (measured), reads still reach the memory controller as single beats (open) |
+| CPU caches (arbiter master 0) | write-through: every store one narrow 32-bit beat; line fill one 128-bit beat (4 x 32-bit packed by the SmartConnect) | see `cpu/microblaze_v_h264/documentation/rtlnet_cpu_microblaze.md` section 11: write-back, 64-byte lines; stores leave as 4-beat bursts (measured), reads still reach the memory controller as single beats (open) |
 
 Other DDR3 masters: none. The AXI DMA of the CPU network path uses the AXI BRAM, the frame-buffer reader port is unused, `rtlnet_csi2_rx`
 and `rtlnet_framebuf` have no memory port.
@@ -1298,7 +1298,7 @@ The driver host test checks the three tool sets (`hp_caps` 1, 3 and 7: `set_tran
 
 The default build is covered by the existing regression, `h264_lint.ps1` and `h264_synth.tcl` (the latter with argument 4 = 1 synthesizes the
 seam with the black box). The driver host test covers the new functions and both SPS / PPS forms (635 checks with the stage 3 functions) and the CLI demo of
-`microblaze/firmware/build.ps1 -Demo` the CLI lines in every state of the seam (470 checks). The bench `tb_rtlnet_h264_top` has the defines `TB_HIGH_PROFILE`
+`cpu/microblaze_v_h264/firmware/build.ps1 -Demo` the CLI lines in every state of the seam (470 checks). The bench `tb_rtlnet_h264_top` has the defines `TB_HIGH_PROFILE`
 and `TB_HP_ENABLE` (the module in place, `hp_enable` written) and `TB_DUMP_MB` (a text dump of stage B's input and of the clocks per macroblock, for
 reference models of entropy coders); `h264_spspps_tool` takes a last argument `high`. The benches of the module and of the engine with the module in place (license expiry in the
 middle of a stream, forced IDR picture, decoders) are in the High profile repository.
@@ -1408,7 +1408,7 @@ registers, the start functions keeping `CTRL.IRQ_EN`); the control layer `test_r
 over done, an invalid entry, forced IDR with the rewritten parameter sets, buffer alternation, `release`, the switch between modes, the older core) with its negative control (`-DINJECT_FAILURE` must report `CTL TEST FAIL`); the rate
 controller `test_rtlnet_ratectl.c` 15 gates.
 
-**Firmware host tests** (`microblaze/firmware/test/venc_irq_host_test.ps1`, the session `rtlnet_venc.c` against the harness models, both modes): 181 checks; the demo `build.ps1 -Demo` 487 checks. The two modes send byte-identical datagrams
+**Firmware host tests** (`cpu/microblaze_v_h264/firmware/test/venc_irq_host_test.ps1`, the session `rtlnet_venc.c` against the harness models, both modes): 181 checks; the demo `build.ps1 -Demo` 487 checks. The two modes send byte-identical datagrams
 for a constant QP, rate control, a profile change with a forced IDR picture, an encoder error and a switch of the mode in mid-stream; a core without the interrupt registers degrades to polled and no interrupt register is touched; in the
 pipelined runs the model completes a picture between any two register accesses of the firmware, every frame is a sent or a dropped picture, and the transport stream is demultiplexed and every access unit is compared with the picture the model wrote (bytes
 and PTS).

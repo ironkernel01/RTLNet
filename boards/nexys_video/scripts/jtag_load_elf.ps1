@@ -14,7 +14,7 @@ Overview:
     that the loaded ELF runs: the line "JTAG_LOAD_ELF: PASS" needs the Tcl
     PASS line, a CLI prompt (rtlnet>) on the port and the banner of the image.
   * -Image: LMB (release image, linked at 0x0), DDR3 (development image of
-    microblaze/firmware/build.ps1 -Ddr, linked at 0x8000_0000) or Auto (the
+    cpu/microblaze_v_h264/firmware/build.ps1 -Ddr, linked at 0x8000_0000) or Auto (the
     default: the ELF entry address decides). A DDR3 image must print
     "DDR3 image" in its boot banner. An LMB image must not print it; it passes
     with "LMB image" or, for a release ELF built before the image name was added to
@@ -24,7 +24,8 @@ Overview:
 Usage:
   powershell -NoProfile -ExecutionPolicy Bypass -File boards/nexys_video/scripts/jtag_load_elf.ps1 `
     [-Elf <elf>] [-Image Auto|LMB|DDR3] [-Port COM3] [-Baud 115200] [-WaitMs 4000] [-CalibTimeoutMs 10000]
-Revision: 11-09-2026
+Revision: 11-14-2026
+  * 11-14-2026: moved to cpu/microblaze_v_h264/ (was microblaze/).
   * 11-09-2026: initial version.
   * 11-09-2026: -Image (banner check of the LMB and DDR3 images), -CalibTimeoutMs (DDR3 calibration wait of the Tcl).
   * 11-09-2026: takes the machine-wide board lock (rtlnet_board_lock.ps1) before touching the board.
@@ -43,7 +44,7 @@ $ErrorActionPreference = 'Stop'
 Enter-RtlnetBoardLock -Purpose 'jtag load' -ExpectedMinutes 60
 $Repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..')).Path
 . (Join-Path $Repo 'scripts\rtlnet_tools.ps1')
-if (-not $Elf) { $Elf = Join-Path $Repo 'microblaze\firmware\build\firmware.elf' }
+if (-not $Elf) { $Elf = Join-Path $Repo 'cpu\microblaze_v_h264\firmware\build\firmware.elf' }
 if (-not (Test-Path -LiteralPath $Elf)) { Write-Output "JTAG_LOAD_ELF: FAIL missing $Elf"; exit 1 }
 $Elf = (Resolve-Path -LiteralPath $Elf).Path
 if ($Image -eq 'Auto') {

@@ -248,7 +248,7 @@ Ordering (one firmware function, never mismatched):
   a bad checksum -> drop and count; verified and good -> pass; unverified -> pass.
 * `IP_REASSEMBLY 0`: fragments are never verified.
 
-Firmware (as built, `microblaze/firmware/src/rtlnet_offload.c`, `src/lwip/rtlnet_lwip_netif.c`):
+Firmware (as built, `cpu/microblaze_v_h264/firmware/src/rtlnet_offload.c`, `src/lwip/rtlnet_lwip_netif.c`):
 
 * **Discovery** (`rtlnet_features_discover`, once at boot, before the classifier boot configuration): wrapper
   ID/VERSION, `CAPS.CPU_PATH_PRESENT`, `CPU_CAPS` bits 16..18, then the block's own header: classifier `"CLSF"` and
@@ -272,7 +272,7 @@ Firmware (as built, `microblaze/firmware/src/rtlnet_offload.c`, `src/lwip/rtlnet
 * Measured on the Nexys Video (100 Mb/s, PC iperf 2): with the offload on, plain and `-R` TCP reach 94.9 Mbit/s
   (86.8 / 81.9 without); with zero-copy receive the CPU is 35 % busy at that rate (81 % with the receive copy);
   zero-copy transmit lowers `-R` to 90.4 Mbit/s (lwIP heap in the AXI BRAM) and is off by default (tables:
-  `microblaze/documentation/rtlnet_cpu_microblaze.md` 9.11, `boards/nexys_video/documentation/rtlnet_nexys_video.md` 6.6).
+  `cpu/microblaze_v_h264/documentation/rtlnet_cpu_microblaze.md` 9.11, `boards/nexys_video/documentation/rtlnet_nexys_video.md` 6.6).
 * Tests: host demo (`build.ps1 -Demo`: discovery of the none / TX only / RX only / both builds and the mismatch
   cases, the order of every CTRL / STATUS / lwIP-flag change, receive policy, CLI) and the netif test on real lwIP with
   a mock AXI DMA (`build.ps1 -NetifTest`, four zero-copy combinations).
