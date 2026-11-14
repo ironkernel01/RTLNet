@@ -3,7 +3,7 @@
 # Purpose: create the MicroBlaze block design `rtlnet_cpu_eth_bd` by script, the one
 #   AMD-only block of the Ethernet CPU core rtlnet_cpu_eth.
 # Overview:
-#   * Defines `rtlnet_cpu_eth_bd_create <bd_dir> <cpu_clk_hz> <lmb_kb> [<axi_bram_kb>]`; the caller has an open (or
+#   * Defines `rtlnet_cpu_eth_bd_create <bd_dir> <cpu_clk_hz> <lmb_kb> [<axi_bram_kb> [<cpu_opt> <cpu_btc> <cpu_muldiv> [<lmb_buf>]]]`; the caller has an open (or
 #     in-memory) project with the part set. The procedure creates the design under <bd_dir>, validates and saves it, and
 #     returns the .bd file path. Nothing in this file names a board, a part or a clock rate: the clock frequency and
 #     the memory sizes are arguments.
@@ -33,13 +33,16 @@
 #       0x4120_0000   64 KiB  AXI INTC
 #       0x41C0_0000   64 KiB  AXI Timer
 #       0x44A0_0000    1 MiB  M_AXI_RTLNET (RTLNet register window)
-#       0xC000_0000  <axi_bram_kb> KiB  AXI BRAM (MicroBlaze data side and DMA)
+#       0x0010_0000  <axi_bram_kb> KiB  frame buffer RAM, CPU view (data-side LMB, lmb_buf 1)
+#       0xC000_0000  <axi_bram_kb> KiB  the same RAM, DMA view (AXI; with lmb_buf 0 also the CPU's view, over M_AXI_DP)
 #   * Cell names are part of the build interface: the MMI written by write_mem_info names microblaze_0 and the lmb_bram
 #     cell; updatemem uses the processor path <hier>/rtlnet_cpu_eth_bd_i/microblaze_0; the BSP flow
 #     (cpu/microblaze_v_ethernet/firmware/build.ps1) names microblaze_0 and finds the DMA, UART, timer and INTC by their
 #     XSA instance names.
 # Language: Vivado Tcl (2026.1).
 # Revision: 11-14-2026
+#   * 11-14-2026: processor options (cpu_opt, cpu_btc, cpu_muldiv); lmb_buf: the frame buffer RAM is true dual-port, port B on a second
+#     data-side LMB BRAM controller (CPU view 0x0010_0000), port A on the AXI BRAM controller (32-bit; the DMA keeps 0xC000_0000).
 #   * 11-14-2026: initial version (derived from the block design of the H.264 CPU with the DDR3 path and the caches removed).
 # Clocks: clk (cpu_clk) for every cell.
 # -----------------------------------------------------------------------------
@@ -53,15 +56,26 @@ namespace eval rtlnet_cpu_eth_bd {
   variable INTC_BASE      0x41200000
   variable TIMER_BASE     0x41C00000
   variable AXI_BRAM_BASE  0xC0000000
+  # lmb_buf 1: the CPU's view of the same buffer memory, on the data-side LMB (data only, no instruction fetch).
+  variable LMB_BUF_BASE   0x00100000
   # DMA length register width: 2^14 - 1 = 16383 bytes per simple transfer,
   # above the 1518-byte frame and the 2 KiB buffer.
   variable DMA_LEN_W      14
 }
 
-proc rtlnet_cpu_eth_bd_create {bd_dir cpu_clk_hz lmb_kb {axi_bram_kb 64}} {
+proc rtlnet_cpu_eth_bd_create {bd_dir cpu_clk_hz lmb_kb {axi_bram_kb 64} {cpu_opt 0} {cpu_btc 0} {cpu_muldiv 1} {lmb_buf 0}} {
   if {![string is integer -strict $cpu_clk_hz] || $cpu_clk_hz < 1000000} {
     error "rtlnet_cpu_eth_bd_create: bad cpu_clk_hz '$cpu_clk_hz'"
   }
+  # CPU options (2026.1 IP, queried): C_OPTIMIZATION 0 Performance, 1 Area, 2 Frequency; C_BRANCH_TARGET_CACHE_SIZE 0..7
+  # (0 = no cache); C_USE_MULDIV 0..2.
+  if {$cpu_opt ni {0 1 2}}                  { error "rtlnet_cpu_eth_bd_create: cpu_opt must be 0, 1 or 2" }
+  if {$cpu_btc ni {0 1 2 3 4 5 6 7}}        { error "rtlnet_cpu_eth_bd_create: cpu_btc must be 0..7" }
+  if {$cpu_muldiv ni {0 1 2}}               { error "rtlnet_cpu_eth_bd_create: cpu_muldiv must be 0, 1 or 2" }
+  # lmb_buf 1: the DMA buffer memory is a true dual-port block RAM, port A on the AXI BRAM controller (the DMA), port B on a
+  # second LMB BRAM controller on the data-side LMB (the CPU: 1-2 clocks instead of about 16 over M_AXI_DP). 0: the CPU
+  # reaches the buffer memory over M_AXI_DP (single-port block RAM behind axi_mem).
+  if {$lmb_buf ni {0 1}}                    { error "rtlnet_cpu_eth_bd_create: lmb_buf must be 0 or 1" }
   if {$lmb_kb ni {32 64 128 256 512}} { error "rtlnet_cpu_eth_bd_create: lmb_kb must be 32, 64, 128, 256 or 512" }
   if {$axi_bram_kb ni {16 32 64 128}} { error "rtlnet_cpu_eth_bd_create: axi_bram_kb must be 16, 32, 64 or 128" }
   set lmb_size   "${lmb_kb}K"
@@ -115,8 +129,8 @@ proc rtlnet_cpu_eth_bd_create {bd_dir cpu_clk_hz lmb_kb {axi_bram_kb 64}} {
   # ---------------------------------------------------------------------------
   set mb [create_bd_cell -type ip -vlnv xilinx.com:ip:microblaze_riscv:1.0 microblaze_0]
   set_property -dict [list \
-    CONFIG.C_OPTIMIZATION            0 \
-    CONFIG.C_USE_MULDIV              1 \
+    CONFIG.C_OPTIMIZATION            $cpu_opt \
+    CONFIG.C_USE_MULDIV              $cpu_muldiv \
     CONFIG.C_USE_COMPRESSION         1 \
     CONFIG.C_USE_BITMAN_A            1 \
     CONFIG.C_USE_BITMAN_B            1 \
@@ -126,7 +140,8 @@ proc rtlnet_cpu_eth_bd_create {bd_dir cpu_clk_hz lmb_kb {axi_bram_kb 64}} {
     CONFIG.C_USE_MMU                 0 \
     CONFIG.C_USE_ICACHE              0 \
     CONFIG.C_USE_DCACHE              0 \
-    CONFIG.C_USE_BRANCH_TARGET_CACHE 0 \
+    CONFIG.C_USE_BRANCH_TARGET_CACHE [expr {$cpu_btc > 0 ? 1 : 0}] \
+    CONFIG.C_BRANCH_TARGET_CACHE_SIZE $cpu_btc \
     CONFIG.C_DEBUG_ENABLED           1 \
     CONFIG.C_D_AXI                   1 \
     CONFIG.C_D_LMB                   1 \
@@ -206,22 +221,36 @@ proc rtlnet_cpu_eth_bd_create {bd_dir cpu_clk_hz lmb_kb {axi_bram_kb 64}} {
   set bctl [create_bd_cell -type ip -vlnv xilinx.com:ip:axi_bram_ctrl:4.1 axi_bram_ctrl_0]
   set_property -dict [list \
     CONFIG.PROTOCOL         AXI4 \
-    CONFIG.DATA_WIDTH       64 \
+    CONFIG.DATA_WIDTH       [expr {$lmb_buf ? 32 : 64}] \
     CONFIG.SINGLE_PORT_BRAM 1 \
     CONFIG.ECC_TYPE         0] $bctl
   set dbram [create_bd_cell -type ip -vlnv xilinx.com:ip:blk_mem_gen:8.4 axi_bram]
-  set_property -dict [list \
-    CONFIG.Memory_Type    Single_Port_RAM \
-    CONFIG.use_bram_block BRAM_Controller] $dbram
+  if {$lmb_buf} {
+    # True dual-port: port A = axi_bram_ctrl_0 (the DMA), port B = dlmb_buf_cntlr (the CPU, data-side LMB).
+    set_property -dict [list \
+      CONFIG.Memory_Type    True_Dual_Port_RAM \
+      CONFIG.use_bram_block BRAM_Controller \
+      CONFIG.Enable_B       Use_ENB_Pin \
+      CONFIG.Use_RSTB_Pin   true] $dbram
+    set bufctl [create_bd_cell -type ip -vlnv xilinx.com:ip:lmb_bram_if_cntlr:4.0 dlmb_buf_cntlr]
+    set_property CONFIG.C_ECC 0 $bufctl
+    # The data-side LMB serves two BRAM controllers: the firmware RAM and the buffer memory.
+    set_property CONFIG.C_LMB_NUM_SLAVES 2 $dlmb
+  } else {
+    set_property -dict [list \
+      CONFIG.Memory_Type    Single_Port_RAM \
+      CONFIG.use_bram_block BRAM_Controller] $dbram
+  }
 
-  # Peripheral interconnect: MicroBlaze M_AXI_DP to six slaves.
+  # Peripheral interconnect: MicroBlaze M_AXI_DP to six slaves (five with lmb_buf: the CPU no longer reaches the buffer
+  # memory over AXI).
   set ic [create_bd_cell -type ip -vlnv xilinx.com:ip:axi_interconnect:2.1 axi_periph]
-  set_property -dict [list CONFIG.NUM_SI 1 CONFIG.NUM_MI 6] $ic
+  set_property -dict [list CONFIG.NUM_SI 1 CONFIG.NUM_MI [expr {$lmb_buf ? 5 : 6}]] $ic
 
   # Memory interconnect: CPU memory path and both DMA channels to the AXI
-  # BRAM controller (width conversion 32 -> 64 for the CPU path inside).
+  # BRAM controller (width conversion 32 -> 64 for the CPU path inside); with lmb_buf only the two DMA channels.
   set icm [create_bd_cell -type ip -vlnv xilinx.com:ip:axi_interconnect:2.1 axi_mem]
-  set_property -dict [list CONFIG.NUM_SI 3 CONFIG.NUM_MI 1] $icm
+  set_property -dict [list CONFIG.NUM_SI [expr {$lmb_buf ? 2 : 3}] CONFIG.NUM_MI 1] $icm
 
   # Reset sequencer: external resetn (active low) plus the MDM debug reset.
   create_bd_cell -type ip -vlnv xilinx.com:ip:proc_sys_reset:5.0 rst_cpu
@@ -245,9 +274,17 @@ proc rtlnet_cpu_eth_bd_create {bd_dir cpu_clk_hz lmb_kb {axi_bram_kb 64}} {
   connect_bd_intf_net [get_bd_intf_pins axi_periph/M02_AXI] [get_bd_intf_pins axi_intc_0/s_axi]
   connect_bd_intf_net [get_bd_intf_pins axi_periph/M03_AXI] [get_bd_intf_ports M_AXI_RTLNET]
   connect_bd_intf_net [get_bd_intf_pins axi_periph/M04_AXI] [get_bd_intf_pins axi_dma_0/S_AXI_LITE]
-  connect_bd_intf_net [get_bd_intf_pins axi_periph/M05_AXI] [get_bd_intf_pins axi_mem/S00_AXI]
-  connect_bd_intf_net [get_bd_intf_pins axi_dma_0/M_AXI_MM2S] [get_bd_intf_pins axi_mem/S01_AXI]
-  connect_bd_intf_net [get_bd_intf_pins axi_dma_0/M_AXI_S2MM] [get_bd_intf_pins axi_mem/S02_AXI]
+  if {$lmb_buf} {
+    # CPU: buffer memory over the data-side LMB, port B of the block RAM. DMA: AXI, port A.
+    connect_bd_intf_net [get_bd_intf_pins dlmb_v10/LMB_Sl_1] [get_bd_intf_pins dlmb_buf_cntlr/SLMB]
+    connect_bd_intf_net [get_bd_intf_pins dlmb_buf_cntlr/BRAM_PORT] [get_bd_intf_pins axi_bram/BRAM_PORTB]
+    connect_bd_intf_net [get_bd_intf_pins axi_dma_0/M_AXI_MM2S] [get_bd_intf_pins axi_mem/S00_AXI]
+    connect_bd_intf_net [get_bd_intf_pins axi_dma_0/M_AXI_S2MM] [get_bd_intf_pins axi_mem/S01_AXI]
+  } else {
+    connect_bd_intf_net [get_bd_intf_pins axi_periph/M05_AXI] [get_bd_intf_pins axi_mem/S00_AXI]
+    connect_bd_intf_net [get_bd_intf_pins axi_dma_0/M_AXI_MM2S] [get_bd_intf_pins axi_mem/S01_AXI]
+    connect_bd_intf_net [get_bd_intf_pins axi_dma_0/M_AXI_S2MM] [get_bd_intf_pins axi_mem/S02_AXI]
+  }
   connect_bd_intf_net [get_bd_intf_pins axi_mem/M00_AXI] [get_bd_intf_pins axi_bram_ctrl_0/S_AXI]
   connect_bd_intf_net [get_bd_intf_pins axi_bram_ctrl_0/BRAM_PORTA] [get_bd_intf_pins axi_bram/BRAM_PORTA]
   connect_bd_intf_net [get_bd_intf_ports S_AXIS_ETH] [get_bd_intf_pins axi_dma_0/S_AXIS_S2MM]
@@ -263,9 +300,14 @@ proc rtlnet_cpu_eth_bd_create {bd_dir cpu_clk_hz lmb_kb {axi_bram_kb 64}} {
     axi_dma_0/s_axi_lite_aclk axi_dma_0/m_axi_mm2s_aclk axi_dma_0/m_axi_s2mm_aclk \
     axi_bram_ctrl_0/s_axi_aclk \
     axi_periph/ACLK axi_periph/S00_ACLK axi_periph/M00_ACLK axi_periph/M01_ACLK \
-    axi_periph/M02_ACLK axi_periph/M03_ACLK axi_periph/M04_ACLK axi_periph/M05_ACLK \
-    axi_mem/ACLK axi_mem/S00_ACLK axi_mem/S01_ACLK axi_mem/S02_ACLK axi_mem/M00_ACLK \
+    axi_periph/M02_ACLK axi_periph/M03_ACLK axi_periph/M04_ACLK \
+    axi_mem/ACLK axi_mem/S00_ACLK axi_mem/S01_ACLK axi_mem/M00_ACLK \
     rst_cpu/slowest_sync_clk]
+  if {$lmb_buf} {
+    lappend clk_pins dlmb_buf_cntlr/LMB_Clk
+  } else {
+    lappend clk_pins axi_periph/M05_ACLK axi_mem/S02_ACLK
+  }
   foreach p $clk_pins { connect_bd_net [get_bd_ports clk] [get_bd_pins $p] }
   set intc_pclk [get_bd_pins -quiet axi_intc_0/processor_clk]
   if {$intc_pclk ne ""} { connect_bd_net [get_bd_ports clk] $intc_pclk }
@@ -279,7 +321,9 @@ proc rtlnet_cpu_eth_bd_create {bd_dir cpu_clk_hz lmb_kb {axi_bram_kb 64}} {
   connect_bd_net [get_bd_pins rst_cpu/mb_reset] [get_bd_pins microblaze_0/Reset]
   set intc_prst [get_bd_pins -quiet axi_intc_0/processor_rst]
   if {$intc_prst ne ""} { connect_bd_net [get_bd_pins rst_cpu/mb_reset] $intc_prst }
-  foreach p {ilmb_v10/SYS_Rst dlmb_v10/SYS_Rst ilmb_bram_if_cntlr/LMB_Rst dlmb_bram_if_cntlr/LMB_Rst} {
+  set lmb_rst_pins {ilmb_v10/SYS_Rst dlmb_v10/SYS_Rst ilmb_bram_if_cntlr/LMB_Rst dlmb_bram_if_cntlr/LMB_Rst}
+  if {$lmb_buf} { lappend lmb_rst_pins dlmb_buf_cntlr/LMB_Rst }
+  foreach p $lmb_rst_pins {
     connect_bd_net [get_bd_pins rst_cpu/bus_struct_reset] [get_bd_pins $p]
   }
   connect_bd_net [get_bd_pins rst_cpu/interconnect_aresetn] [get_bd_pins axi_periph/ARESETN]
@@ -288,8 +332,9 @@ proc rtlnet_cpu_eth_bd_create {bd_dir cpu_clk_hz lmb_kb {axi_bram_kb 64}} {
     axi_uartlite_0/s_axi_aresetn axi_timer_0/s_axi_aresetn axi_intc_0/s_axi_aresetn \
     axi_dma_0/axi_resetn axi_bram_ctrl_0/s_axi_aresetn \
     axi_periph/S00_ARESETN axi_periph/M00_ARESETN axi_periph/M01_ARESETN axi_periph/M02_ARESETN \
-    axi_periph/M03_ARESETN axi_periph/M04_ARESETN axi_periph/M05_ARESETN \
-    axi_mem/S00_ARESETN axi_mem/S01_ARESETN axi_mem/S02_ARESETN axi_mem/M00_ARESETN]
+    axi_periph/M03_ARESETN axi_periph/M04_ARESETN \
+    axi_mem/S00_ARESETN axi_mem/S01_ARESETN axi_mem/M00_ARESETN]
+  if {!$lmb_buf} { lappend prst_pins axi_periph/M05_ARESETN axi_mem/S02_ARESETN }
   foreach p $prst_pins { connect_bd_net [get_bd_pins rst_cpu/peripheral_aresetn] [get_bd_pins $p] }
 
   # ---------------------------------------------------------------------------
@@ -322,7 +367,15 @@ proc rtlnet_cpu_eth_bd_create {bd_dir cpu_clk_hz lmb_kb {axi_bram_kb 64}} {
     [get_bd_addr_segs axi_timer_0/S_AXI/Reg] -force
   assign_bd_address -offset $::rtlnet_cpu_eth_bd::RTLNET_BASE -range $::rtlnet_cpu_eth_bd::RTLNET_RANGE \
     -target_address_space $dspace [get_bd_addr_segs M_AXI_RTLNET/Reg] -force
-  foreach sp [list $dspace [get_bd_addr_spaces axi_dma_0/Data_MM2S] [get_bd_addr_spaces axi_dma_0/Data_S2MM]] {
+  set buf_spaces [list [get_bd_addr_spaces axi_dma_0/Data_MM2S] [get_bd_addr_spaces axi_dma_0/Data_S2MM]]
+  if {$lmb_buf} {
+    # The CPU's view of the buffer memory: the data-side LMB, data only. The DMA keeps the AXI address below.
+    assign_bd_address -offset $::rtlnet_cpu_eth_bd::LMB_BUF_BASE -range $abram_size -target_address_space $dspace \
+      [get_bd_addr_segs dlmb_buf_cntlr/SLMB/Mem] -force
+  } else {
+    lappend buf_spaces $dspace
+  }
+  foreach sp $buf_spaces {
     assign_bd_address -offset $::rtlnet_cpu_eth_bd::AXI_BRAM_BASE -range $abram_size \
       -target_address_space $sp [get_bd_addr_segs axi_bram_ctrl_0/S_AXI/Mem0] -force
   }

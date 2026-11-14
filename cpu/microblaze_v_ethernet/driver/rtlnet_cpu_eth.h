@@ -37,11 +37,16 @@
 /* Local memory: one LMB block RAM, instruction and data, at 0 (size: block design argument lmb_kb). No caches. */
 #define RTLNET_CPU_LMB_BASE         0x00000000u
 
-/* AXI block RAM on the data side, shared with the AXI DMA: DMA buffers and
- * the lwIP heap and pools (linker section .axi_bram, NOLOAD). Size: block design
- * argument axi_bram_kb, 64 KiB by default. */
+/* Frame buffer memory: one true dual-port block RAM, the DMA buffers and the lwIP heap (linker section .axi_bram,
+ * NOLOAD). Size: block design argument axi_bram_kb (128 KiB for the Ethernet design).
+ * Two views of the same bytes, a fixed offset apart:
+ *   CPU view  RTLNET_CPU_BUF_CPU_BASE  on the data-side LMB (second LMB BRAM controller, data only): 1-2 clocks per access.
+ *   DMA view  RTLNET_CPU_AXI_BRAM_BASE through the AXI BRAM controller, the address the AXI DMA is programmed with.
+ * The firmware links the buffers at the CPU view and gives the DMA ptr + RTLNET_CPU_BUF_DMA_OFFSET. */
 #define RTLNET_CPU_AXI_BRAM_BASE    0xC0000000u
-#define RTLNET_CPU_AXI_BRAM_SIZE    0x00010000u
+#define RTLNET_CPU_AXI_BRAM_SIZE    0x00020000u
+#define RTLNET_CPU_BUF_CPU_BASE     0x00100000u
+#define RTLNET_CPU_BUF_DMA_OFFSET   (RTLNET_CPU_AXI_BRAM_BASE - RTLNET_CPU_BUF_CPU_BASE)
 
 /* MicroBlaze V reset vector (C_BASE_VECTORS = 0). Exceptions and interrupts
  * enter through mtvec, which the BSP start-up code sets; the firmware

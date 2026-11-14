@@ -15,9 +15,9 @@
  * iperf server (rtlnet_lwiperf.c, port 5001); both run at the same time and
  * the sizes below hold both.
  *
- * Memory (all in the LMB block RAM, .bss; only the DMA buffers live in the
- * AXI BRAM, rtlnet_lwip_netif.c: 16 x 2 KiB receive + 2 x 2 KiB transmit = 36 KiB of the 64 KiB by default;
- * with RTLNET_NETIF_ZERO_COPY_TX the 64 KiB heap moves there too: 100 KiB):
+ * Memory (all in the LMB block RAM, .bss; only the DMA buffers and, with zero-copy transmit, the heap live in the
+ * dual-port frame buffer RAM, rtlnet_lwip_netif.c: 16 x 2 KiB receive + 2 x 2 KiB transmit = 36 KiB of the 128 KiB;
+ * with RTLNET_NETIF_ZERO_COPY_TX (default) the 64 KiB heap is there too: 100 KiB):
  *   MEM_SIZE                      64 KiB heap: tcp_write copies of echoed
  *                                 data (TCP_WRITE_FLAG_COPY: up to TCP_WND
  *                                 of 8 x 1460 B per echo connection, 37 KB
@@ -204,16 +204,16 @@
  * reassembled (IP_REASSEMBLY 0 above): the hardware verifies whole datagrams only.
  * Zero copy (override with -DRTLNET_NETIF_ZERO_COPY_RX=0/1 and _TX=0/1): receive buffers go to lwIP as custom
  * pbufs (default on: with the receive offload it halves the CPU load of bulk receive, 81% -> 35% busy at
- * 94.8 Mbit/s); lwIP's heap sits in the AXI BRAM so a single-pbuf frame is sent in place (default OFF: every lwIP
- * heap access then costs about 16 cycles, iperf -R falls back to the copy anyway, and the measured throughput
- * is lower: -R 94.8 -> 90.4 Mbit/s with the offload, 81.9 -> 58.8 without; microblaze documentation 9.10). */
+ * 94.8 Mbit/s); lwIP's heap sits in the dual-port frame buffer RAM so a single-pbuf frame is sent in place (default ON
+ * with the Ethernet design: the CPU reaches that RAM over the data-side LMB, 1-2 clocks per access; with the buffer RAM
+ * behind M_AXI_DP every heap access cost about 16 cycles and the in-place send was slower than the copy). */
 #define LWIP_CHECKSUM_CTRL_PER_NETIF    1
 #define LWIP_SUPPORT_CUSTOM_PBUF        1
 #ifndef RTLNET_NETIF_ZERO_COPY_RX
 #define RTLNET_NETIF_ZERO_COPY_RX       1
 #endif
 #ifndef RTLNET_NETIF_ZERO_COPY_TX
-#define RTLNET_NETIF_ZERO_COPY_TX       0
+#define RTLNET_NETIF_ZERO_COPY_TX       1
 #endif
 #if RTLNET_NETIF_ZERO_COPY_TX
 #define RTLNET_LWIP_HEAP_BYTES          (MEM_SIZE + 128)

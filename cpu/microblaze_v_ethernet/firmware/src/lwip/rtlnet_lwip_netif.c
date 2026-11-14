@@ -23,8 +23,9 @@
 #include "xaxidma.h"   /* XAxiDma */
 #include "xstatus.h"   /* XST_SUCCESS */
 
-/* DMA buffers and, with zero-copy transmit, lwIP's heap: the only firmware data in the AXI BRAM (section
- * .axi_bram, NOLOAD, placed at RTLNET_CPU_AXI_BRAM_BASE by the linker script). */
+/* DMA buffers and, with zero-copy transmit, lwIP's heap: the only firmware data in the frame buffer memory (section
+ * .axi_bram, NOLOAD, placed by the linker script at the CPU view RTLNET_CPU_BUF_CPU_BASE of the dual-port block RAM; the
+ * DMA reaches the same bytes at the AXI address pointer + RTLNET_CPU_BUF_DMA_OFFSET). */
 #define NETIF_AXI_BRAM __attribute__((section(".axi_bram"), aligned(RTLNET_NETIF_BUF_ALIGN)))
 
 static uint8_t g_rx_buf[RTLNET_NETIF_RX_BUFS][RTLNET_NETIF_BUF_BYTES] NETIF_AXI_BRAM;
@@ -42,6 +43,13 @@ typedef struct {
 } rx_loan_t;
 
 static rx_loan_t g_rx_loan[RTLNET_NETIF_RX_BUFS];
+#endif
+
+/* The address the AXI DMA is programmed with for a buffer at CPU address p (none on the desktop). */
+#ifdef RTLNET_HOST_TEST
+#define DMA_ADDR(p)         ((UINTPTR)(p))
+#else
+#define DMA_ADDR(p)         ((UINTPTR)(p) + RTLNET_CPU_BUF_DMA_OFFSET)
 #endif
 
 static XAxiDma              g_dma;
@@ -132,11 +140,11 @@ static int chan_busy(int rx)
 typedef uint32_t __attribute__((may_alias)) word_t;
 
 /*
- * axi_put_chain -- copy a pbuf chain into a TX buffer in the AXI BRAM with word writes only.
- * The CPU reaches the AXI BRAM over M_AXI_DP, about 16 cycles per access whatever its width, and the
- * pieces of a chain start at odd offsets (54 byte header, then the payload at any alignment). A byte
- * copy, which is what memcpy does for mismatched alignments, cost about 20 cycles per byte (307 us per
- * frame). Here the bytes are packed into words in registers (little endian): bytes of a piece are
+ * axi_put_chain -- copy a pbuf chain into a TX buffer in the frame buffer memory with word writes only.
+ * The CPU reaches the buffers over the data-side LMB (1-2 cycles per access; over M_AXI_DP it was about 16 whatever
+ * the width), and the pieces of a chain start at odd offsets (54 byte header, then the payload at any alignment). A
+ * byte copy, which is what memcpy does for mismatched alignments, costs several cycles per byte. Here the bytes are
+ * packed into words in registers (little endian): bytes of a piece are
  * consumed until its source is word aligned, then every source word is shifted into place against the
  * pending bytes and written as one aligned word.
  * Returns: nothing; the last partial word is written whole (the DMA length cuts it).
@@ -272,7 +280,7 @@ static void rx_arm(void)
         return;
     }
     idx = g_free[g_free_n - 1u];
-    if (XAxiDma_SimpleTransfer(&g_dma, (UINTPTR)g_rx_buf[idx], RTLNET_NETIF_BUF_BYTES, XAXIDMA_DEVICE_TO_DMA) ==
+    if (XAxiDma_SimpleTransfer(&g_dma, DMA_ADDR(g_rx_buf[idx]), RTLNET_NETIF_BUF_BYTES, XAXIDMA_DEVICE_TO_DMA) ==
         XST_SUCCESS) {
         g_free_n--;
         g_rx_armed_idx = idx;
@@ -344,7 +352,7 @@ static void tx_reap(void)
 
 #if RTLNET_NETIF_ZERO_COPY_TX
 /*
- * in_axi_bram -- a buffer lies wholly in the AXI BRAM, where the DMA can read it.
+ * in_axi_bram -- a buffer lies wholly in the frame buffer memory (CPU view), where the DMA can read it.
  * The desktop test builds its pbufs in lwIP's heap, which stands in for the AXI BRAM there.
  * Returns: 1 yes, 0 no.
  */
@@ -354,7 +362,7 @@ static int in_axi_bram(const void *p, uint32_t len)
 #ifdef RTLNET_HOST_TEST
     return (a >= (uintptr_t)rtlnet_lwip_heap && a + len <= (uintptr_t)rtlnet_lwip_heap + RTLNET_LWIP_HEAP_BYTES) ? 1 : 0;
 #else
-    return (a >= RTLNET_CPU_AXI_BRAM_BASE && a + len <= (uintptr_t)RTLNET_CPU_AXI_BRAM_BASE + RTLNET_CPU_AXI_BRAM_SIZE) ? 1 : 0;
+    return (a >= RTLNET_CPU_BUF_CPU_BASE && a + len <= (uintptr_t)RTLNET_CPU_BUF_CPU_BASE + RTLNET_CPU_AXI_BRAM_SIZE) ? 1 : 0;
 #endif
 }
 #endif
@@ -417,7 +425,7 @@ static err_t netif_linkoutput(struct netif *nif, struct pbuf *p)
         (void)dma_reset();
         rx_arm();
     }
-    if (XAxiDma_SimpleTransfer(&g_dma, (UINTPTR)buf, len, XAXIDMA_DMA_TO_DEVICE) != XST_SUCCESS) {
+    if (XAxiDma_SimpleTransfer(&g_dma, DMA_ADDR(buf), len, XAXIDMA_DMA_TO_DEVICE) != XST_SUCCESS) {
         g_st.tx_errors++;
         LINK_STATS_INC(link.err);
         return ERR_IF;

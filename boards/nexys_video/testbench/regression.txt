@@ -8,8 +8,12 @@ tb_rtlnet_nexys_video_net   boards/nexys_video/testbench/tb_rtlnet_nexys_video_n
 tb_rtlnet_nexys_video_net   boards/nexys_video/testbench/tb_rtlnet_nexys_video_net.f  neg   plusargs=INJECT_FAILURE  expectfail
 # Host test of the board stream checker (pattern PSNR path against the csi2_rx pattern model)
 stream_check_selftest   script:boards/nexys_video/scripts/stream_check_selftest.ps1
-# Ethernet demo top (rtlnet_nexys_video_eth_top, CPU simulation stub rtlnet_cpu_eth_sim_stub)
+# Ethernet demo top (rtlnet_nexys_video_eth_top, CPU simulation stub rtlnet_cpu_eth_sim_stub), default COMMON_CLK = 2 (one 100 MHz system clock)
 tb_rtlnet_nexys_video_eth   boards/nexys_video/testbench/tb_rtlnet_nexys_video_eth.f  g100  plusargs=SPEED=100
 tb_rtlnet_nexys_video_eth   boards/nexys_video/testbench/tb_rtlnet_nexys_video_eth.f  g1000 plusargs=SPEED=1000
 tb_rtlnet_nexys_video_eth   boards/nexys_video/testbench/tb_rtlnet_nexys_video_eth.f  g10   plusargs=SPEED=10
 tb_rtlnet_nexys_video_eth   boards/nexys_video/testbench/tb_rtlnet_nexys_video_eth.f  neg   plusargs=INJECT_FAILURE  expectfail
+# The same bench on the multi-clock tree (COMMON_CLK = 0: cpu_clk 100 MHz, axis_clk 62.5 MHz, proto_clk 50 MHz)
+tb_rtlnet_nexys_video_eth   boards/nexys_video/testbench/tb_rtlnet_nexys_video_eth.f  g100mc  defines=RTLNET_TB_MULTI_CLK plusargs=SPEED=100
+tb_rtlnet_nexys_video_eth   boards/nexys_video/testbench/tb_rtlnet_nexys_video_eth.f  g1000mc defines=RTLNET_TB_MULTI_CLK plusargs=SPEED=1000
+tb_rtlnet_nexys_video_eth   boards/nexys_video/testbench/tb_rtlnet_nexys_video_eth.f  g10mc   defines=RTLNET_TB_MULTI_CLK plusargs=SPEED=10

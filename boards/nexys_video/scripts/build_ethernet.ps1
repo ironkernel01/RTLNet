@@ -19,18 +19,33 @@ Overview:
     build_ethernet.tcl).
 Usage:
   powershell -NoProfile -ExecutionPolicy Bypass -File boards/nexys_video/scripts/build_ethernet.ps1 `
-    [-Tag <name>] [-CpuClkHz 100000000] [-LmbKb 512] [-SkipBitstream] [-SkipFirmware] [-Program]
+    [-Tag <name>] [-CommonClk 2] [-CpuClkHz 100000000] [-LmbKb 512] [-CpuOpt 0] [-CpuBtc 0] [-CpuMuldiv 1]
+    [-SkipBitstream] [-SkipFirmware] [-Program]
   * -SkipBitstream: reuse the bitstream, MMI and XSA already in the build folder (firmware and merge only).
-  * -CpuClkHz: the CPU clock (100 MHz default; the MMCM divider is 1000 MHz / CpuClkHz and the block design is built
-    for it). -LmbKb: size of the LMB block RAM in KiB (code, data, lwIP pools and stack), 512 default.
+  * -CommonClk: 2 (default) = one system clock at -CpuClkHz (100 MHz) for the CPU, the protocol and the MAC client side (clk125 and clk125_90
+    only the RGMII transmit side); 0 = the multi-clock tree.
+  * -CpuClkHz: the system (CPU) clock (100 MHz default; the MMCM divider is 1000 MHz / CpuClkHz and the block
+    design is built for it). -LmbKb: size of the LMB block RAM in KiB (code, data, lwIP pools and stack), 512 default.
+  * -LmbBuf 1 (default): the frame buffer RAM is a true dual-port block RAM, the CPU on the data-side LMB at 0x00100000, the DMA on
+    the AXI side at 0xC0000000; -BufKb its size (128 KiB default). 0: the CPU reaches the buffer RAM over M_AXI_DP (the firmware
+    of this tree then does not match: build it from an earlier commit).
+  * -CpuOpt (0 performance, 1 area, 2 frequency pipeline), -CpuBtc (branch target cache size 0..7), -CpuMuldiv (0..2):
+    MicroBlaze V configuration (IP property values of the 2026.1 IP).
 Revision: 11-14-2026
+  * 11-14-2026: -CommonClk, -CpuOpt, -CpuBtc, -CpuMuldiv.
   * 11-14-2026: initial version.
 -------------------------------------------------------------------------------
 #>
 param(
     [string]$Tag = '',
+    [ValidateSet(0, 2)][int]$CommonClk = 2,
     [int]$CpuClkHz = 100000000,
     [int]$LmbKb = 512,
+    [ValidateSet(0, 1, 2)][int]$CpuOpt = 0,
+    [ValidateRange(0, 7)][int]$CpuBtc = 0,
+    [ValidateSet(0, 1, 2)][int]$CpuMuldiv = 1,
+    [ValidateSet(0, 1)][int]$LmbBuf = 1,
+    [ValidateSet(16, 32, 64, 128)][int]$BufKb = 128,
     [switch]$SkipBitstream,
     [switch]$SkipFirmware,
     [switch]$Program
@@ -62,7 +77,7 @@ $bit = Join-Path $Build 'rtlnet_nexys_video_eth.bit'
 $fwOut = Join-Path $Build 'firmware'
 
 if (-not $SkipBitstream) {
-    $tclArgs = "cpu_clk_hz,$CpuClkHz,lmb_kb,$LmbKb"
+    $tclArgs = "common_clk,$CommonClk,cpu_clk_hz,$CpuClkHz,lmb_kb,$LmbKb,cpu_opt,$CpuOpt,cpu_btc,$CpuBtc,cpu_muldiv,$CpuMuldiv,lmb_buf,$LmbBuf,buf_kb,$BufKb"
     if ($Tag) { $tclArgs += ",tag,$Tag" }
     Step 'bitstream' {
         & (Join-Path $Repo 'scripts\rtlnet_vivado.ps1') -Tcl (Join-Path $PSScriptRoot 'build_ethernet.tcl') `
@@ -77,7 +92,7 @@ foreach ($p in @($xsa, $mmi, $hw)) {
 if (-not $SkipFirmware) {
     Step 'firmware' {
         powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Repo 'cpu\microblaze_v_ethernet\firmware\build.ps1') -Demo `
-            -Xsa $xsa -OutDir $fwOut -LmbKb $LmbKb
+            -Xsa $xsa -OutDir $fwOut -LmbKb $LmbKb -BufKb $BufKb
     }
 }
 Step 'merge' {

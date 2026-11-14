@@ -90,9 +90,14 @@ lwIP TCP; no DDR3, MIG, camera, video or H.264. Top `hdl/rtlnet_nexys_video_eth_
 `constraints/rtlnet_nexys_video_eth.xdc` with the shared `rtlnet_nexys_video_rgmii.xdc`, bench `testbench/tb_rtlnet_nexys_video_eth.sv`,
 CPU and firmware `cpu/microblaze_v_ethernet/` (board independent, shared with the Arty A7-100 later). The H.264 flow above is not touched.
 
+Clocks (`COMMON_CLK` parameter of the top, build option `-CommonClk`): 2 (default) = one 100 MHz system clock for the CPU, the protocol cores and the MAC client
+side; besides it only the RGMII receive clock, `clk125`/`clk125_90` (RGMII transmit side) and `clk200` (IDELAYCTRL) exist; 0 = the multi-clock tree (62.5 and
+50 MHz protocol clocks, CPU on its own clock). The CPU's frame buffers are a dual-port block RAM
+on the CPU's data-side LMB (`-LmbBuf 1`, `-BufKb 128`). Details: `cpu/microblaze_v_ethernet/documentation/rtlnet_cpu_eth.md` sections 2, 2a and 6c.
+
 ```powershell
 # bitstream, firmware and merge; output boards/nexys_video/build/<tag>/rtlnet_nexys_video_eth.bit (and .mmi, .xsa, build_info.txt)
-powershell -NoProfile -ExecutionPolicy Bypass -File boards/nexys_video/scripts/build_ethernet.ps1 -Tag eth_dev [-Program]
+powershell -NoProfile -ExecutionPolicy Bypass -File boards/nexys_video/scripts/build_ethernet.ps1 -Tag eth_dev -CommonClk 2 [-Program]
 # hardware tests of the board-independent set (console on <COM port>, PC adapter <name>)
 powershell -NoProfile -ExecutionPolicy Bypass -File cpu/microblaze_v_ethernet/test/run_all.ps1 -Port <COM port> -Nic <adapter> -LinkMbps 1000
 ```

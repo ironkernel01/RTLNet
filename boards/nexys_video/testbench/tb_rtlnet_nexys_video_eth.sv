@@ -32,6 +32,8 @@
 // Ends with one anchored verdict line from rtlnet_tb_pkg::tb_verdict; +INJECT_FAILURE is the negative control.
 // Language: SystemVerilog-2012 (simulation only).
 // Revision: 11-14-2026
+//   * 11-14-2026: the top's COMMON_CLK 2 (one 100 MHz system clock) is the default; the define RTLNET_TB_MULTI_CLK selects the
+//     multi-clock tree (tags mc).
 //   * 11-14-2026: initial version (from tb_rtlnet_nexys_video_net for the Ethernet demo top).
 // -----------------------------------------------------------------------------
 `timescale 1ns / 1ps
@@ -65,6 +67,12 @@ module tb_rtlnet_nexys_video_eth;
   localparam logic [31:0] SRV_IP     = 32'hC0A9_0101;          // 192.169.1.1
   localparam logic [31:0] LEASE_IP   = 32'hC0A9_014D;          // 192.169.1.77
   localparam int          PHYAD      = 1;
+`ifdef RTLNET_TB_MULTI_CLK
+  localparam int          COMMON_CLK   = 0;                             // the multi-clock tree: cpu_clk 100 MHz, axis 62.5, proto 50
+`else
+  localparam int          COMMON_CLK   = 2;                             // one 100 MHz system clock (the default of the top)
+`endif
+  localparam int          SYS_CLK_HZ   = 100_000_000;
   localparam int          FRAME_TMO  = 400_000;                 // ns per expected frame at 100/1000 Mb/s (x10 at 10)
 
   // Board pins.
@@ -99,6 +107,7 @@ module tb_rtlnet_nexys_video_eth;
   rtlnet_nexys_video_eth_top #(
     .BUILD_ID     (32'hBEEF_0001),
     .BUILD_DIRTY  (1'b0),
+    .COMMON_CLK   (COMMON_CLK),
     .MS_CYCLES    (1000),
     .POR_RESET_MS (1)
   ) dut (
@@ -363,7 +372,7 @@ module tb_rtlnet_nexys_video_eth;
     check_reg(SYS + 32'h00C, 32'hBEEF_0001, "SYS BUILD_ID");
     check_reg(SYS + 32'h010, 32'h0, "SYS BUILD_DIRTY");
     check_reg(SYS + 32'h014, 32'h4E58_5644, "SYS BOARD_ID");
-    check_reg(SYS + 32'h018, 32'd100_000_000, "SYS CPU_CLK_HZ");
+    check_reg(SYS + 32'h018, SYS_CLK_HZ, "SYS CPU_CLK_HZ");
     check_reg(SYS + 32'h01C, 32'h7, "SYS LINK_CAPS: 10, 100, 1000 full duplex");
     wr(SYS + 32'h024, 32'h0000_00AB);
     check_reg(SYS + 32'h024, 32'h0000_00AA, "SYS LEDS write and read back (bit 0 stays 0)");

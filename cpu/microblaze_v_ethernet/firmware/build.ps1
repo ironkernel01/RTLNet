@@ -13,7 +13,9 @@ Overview:
      runs sdtgen and lopper from there).
   3. Linker script <OutDir>/lscript.ld generated from the install's MicroBlaze V template
      (Vitis/data/embeddedsw/scripts/linker_files/lscript_mb_riscv.ld.in): boot code at address 0, code, data, heap and
-     stack in the LMB BRAM (-LmbKb KiB), plus the NOLOAD section .axi_bram in the AXI BRAM for the DMA frame buffers.
+     stack in the LMB BRAM (-LmbKb KiB), plus the NOLOAD section .axi_bram (the DMA frame buffers and lwIP's heap) at the
+     CPU view 0x00100000 of the dual-port frame buffer RAM (-BufKb KiB, the block design's axi_bram_kb); the DMA reaches the
+     same bytes at 0xC0000000 (rtlnet_cpu_eth.h RTLNET_CPU_BUF_DMA_OFFSET).
   4. Compile: firmware (src, cli) and the RTLNet core drivers (cores/<core>/driver, in place) with
      -std=c11 -Wall -Wextra -Werror -pedantic; lwIP 2.2.0 core, IPv4 and Ethernet sources from the install
      (Vitis/data/embeddedsw/ThirdParty/sw_services/lwip220_v1_3/src/lwip-2.2.0), in place with src/lwip/lwipopts.h.
@@ -35,8 +37,9 @@ Overview:
   * Exit code 0 only when every requested step succeeded; prints RTLNET_FW: PASS <elf>.
 Usage:
   powershell -NoProfile -ExecutionPolicy Bypass -File cpu/microblaze_v_ethernet/firmware/build.ps1 `
-    -Xsa <xsa> [-OutDir <dir>] [-LmbKb 512] [-FastOpt -O2] [-Bsp] [-HostHarness] [-Demo] [-LwipTest] [-NetifTest] [-NoFirmware] [-Define NAME=VALUE,...]
+    -Xsa <xsa> [-OutDir <dir>] [-LmbKb 512] [-BufKb 128] [-FastOpt -O2] [-Bsp] [-HostHarness] [-Demo] [-LwipTest] [-NetifTest] [-NoFirmware] [-Define NAME=VALUE,...]
 Revision: 11-14-2026
+  * 11-14-2026: the frame buffer section links at the CPU view 0x00100000 of the dual-port buffer RAM (-BufKb, default 128).
   * 11-14-2026: initial version (derived from the H.264 CPU firmware build: no DDR3 image, video, encoder or rate control;
     -OutDir and -LmbKb; the XSA is an argument, not a default).
 -------------------------------------------------------------------------------
@@ -45,6 +48,7 @@ param(
     [string]$Xsa = '',
     [string]$OutDir = '',
     [int]$LmbKb = 512,
+    [int]$BufKb = 128,
     [string]$FastOpt = '-O2',
     [switch]$Bsp,
     [switch]$HostHarness,
@@ -164,20 +168,22 @@ if (-not $NoFirmware) {
 
     # 3. Linker script from the install template.
     $ld = Get-Content -LiteralPath $LdTmpl -Raw
-    # Everything in the LMB (-LmbKb KiB); the AXI BRAM holds the DMA buffers (the .axi_bram section).
+    # Everything in the LMB (-LmbKb KiB); the frame buffer RAM holds the DMA buffers and lwIP's heap (the .axi_bram section),
+    # linked at its CPU view on the data-side LMB.
     $mem = 'lmb_bram'
     $lmbLen = '0x{0:X}' -f ($LmbKb * 1024)
+    $bufLen = '0x{0:X}' -f ($BufKb * 1024)
     $memory = @"
 MEMORY
 {
    lmb_bram : ORIGIN = 0x0, LENGTH = $lmbLen
-   axi_bram : ORIGIN = 0xC0000000, LENGTH = 0x10000
+   axi_bram : ORIGIN = 0x00100000, LENGTH = $bufLen
 }
 "@
     $ld = $ld.Replace('@STACK_SIZE@', '0x2000').Replace('@HEAP_SIZE@', '0x800').Replace('@MEMORY_SECTION@', $memory)
     $ld = $ld.Replace('@CODE@', $mem).Replace('@DATA@', $mem)
     $axi = @"
-/* RTLNet: DMA frame buffers in the AXI BRAM (rtlnet_lwip_netif.c), never loaded. */
+/* RTLNet: DMA frame buffers and lwIP heap in the frame buffer RAM, CPU view (rtlnet_lwip_netif.c), never loaded. */
 .axi_bram (NOLOAD) : {
    . = ALIGN(64);
    __axi_bram_start = .;

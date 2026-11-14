@@ -5,10 +5,20 @@
 //   H.264: pins, one MMCM and its global buffers, the reset tree, the Ethernet CPU core rtlnet_cpu_eth, the RTLNet
 //   AXI4-Lite address decoder, the board-independent system registers, the PHY MDIO pad buffer and the network cores.
 // Overview:
-//   * Clocks (architecture section 9): MMCME2_ADV u_mmcm, 100 MHz in, VCO 1000 MHz; CLKOUT0 clk125, CLKOUT1 clk125_90
-//     (90 deg), CLKOUT2 clk200, CLKOUT3 axis_clk 62.5 MHz, CLKOUT4 proto_clk 50 MHz, CLKOUT5 cpu_clk (CPU_CLK_HZ,
-//     100 MHz by default; the divider is 1000 MHz / CPU_CLK_HZ), each on a BUFG; feedback through BUFG u_bufg_fb. cpu_clk is the CPU, AXI4-Lite, system
-//     register, MDIO and CPU-path stream clock.
+//   * Clocks (architecture section 9): MMCME2_ADV u_mmcm, 100 MHz in, VCO 1000 MHz; CLKOUT0 clk125 and CLKOUT1 clk125_90 (90 deg) for the RGMII
+//     transmit side (MAC transmit clock and TXC forwarding), CLKOUT2 clk200 (IDELAYCTRL reference), CLKOUT5 cpu_clk; feedback through BUFG
+//     u_bufg_fb. Two clock trees, selected by COMMON_CLK:
+//       COMMON_CLK = 2 (default): ONE system clock. cpu_clk (BUFG u_bufg_cpu, CPU_CLK_HZ = 100 MHz) is the MAC client side, the protocol
+//         filter, the protocol leaves, the UDP echo, the checksum offload, the CPU, LMB, AXI DMA, AXI4-Lite and every register:
+//         axis_clk = proto_clk = cpu_clk (nets of one buffer), one reset release. Besides it only the clocks the RGMII interface and
+//         the I/O primitives force remain: the RGMII receive clock of the PHY (inside u_mac), clk125 and clk125_90 (RGMII transmit
+//         side) and clk200 (IDELAY reference). The MMCM output CLKOUT3 and CLKOUT4 are not used.
+//       COMMON_CLK = 0: the multi-clock tree kept buildable: CLKOUT3 axis_clk 62.5 MHz, CLKOUT4 proto_clk 50 MHz, CLKOUT5 cpu_clk
+//         (CPU_CLK_HZ, divider 1000 MHz / CPU_CLK_HZ), each on a BUFG, one reset release per clock. The cores' asynchronous FIFOs, Gray
+//         counters and register bridges cross between them.
+//     In both modes the cores keep their asynchronous FIFOs, Gray counters and register bridges (the cores have no same-clock option for
+//     them): with one clock they are correct but cost latency and block RAM (a later saving).
+//     cpu_clk is the CPU, AXI4-Lite, system register, MDIO and CPU-path stream clock.
 //   * Resets: one assertion, rst_arstn = cpu_resetn (button, low = pressed) AND mmcm_locked, enters one
 //     rtlnet_reset_sync per clock. Glitch argument for the AND: either input low asserts every domain at once (safe in
 //     any order); release needs rst_arstn high for STAGES consecutive clocks of each domain, so a short high glitch
@@ -35,18 +45,20 @@
 //   * MMCM, BUFG and IOBUF primitives appear in this file only.
 // Language: SystemVerilog-2012.
 // Revision: 11-14-2026
+//   * 11-14-2026: parameter COMMON_CLK (2 = one system clock of CPU_CLK_HZ, default; 0 = the multi-clock tree).
 //   * 11-14-2026: initial version (network part of rtlnet_nexys_video_top with the DDR3, video and H.264 parts removed).
-// Clocks: sysclk (100 MHz pin) -> MMCM -> clk125, clk125_90, clk200, axis_clk, proto_clk, cpu_clk; the MAC's receive
-//   clock is internal to it.
+// Clocks: sysclk (100 MHz pin) -> MMCM -> clk125, clk125_90, clk200, cpu_clk (the system clock when COMMON_CLK = 2) and, when
+//   COMMON_CLK = 0, axis_clk, proto_clk; the MAC's receive clock is internal to it.
 // Pins: names, balls, banks and I/O standards from the Digilent Nexys-Video-Master.xdc (Rev. A); constraints in
 //   boards/nexys_video/constraints/rtlnet_nexys_video_eth.xdc and rtlnet_nexys_video_rgmii.xdc.
 // -----------------------------------------------------------------------------
 module rtlnet_nexys_video_eth_top #(
   parameter logic [31:0] BUILD_ID     = 32'h0000_0000,  // git hash (build script: git rev-parse --short=8 HEAD)
   parameter logic        BUILD_DIRTY  = 1'b0,           // build tree had uncommitted changes
-  parameter int          CPU_CLK_HZ   = 100_000_000,    // cpu_clk = MMCM CLKOUT5 = 1000 MHz / (1000 MHz / CPU_CLK_HZ); the build script
-                                                        // passes the same value to the block design (build_ethernet.tcl)
-  parameter int          MS_CYCLES    = 0,              // cpu_clk clocks per millisecond; 0 = CPU_CLK_HZ / 1000 (bench may shorten)
+  parameter int          COMMON_CLK   = 2,              // 2: one system clock of CPU_CLK_HZ; 0: multi-clock tree
+  parameter int          CPU_CLK_HZ   = 100_000_000,    // COMMON_CLK 0 and 2: cpu_clk = MMCM CLKOUT5 = 1000 MHz / (1000 MHz / CPU_CLK_HZ);
+                                                        // the build script passes the cpu_clk rate to the block design (build_ethernet.tcl)
+  parameter int          MS_CYCLES    = 0,              // cpu_clk clocks per millisecond; 0 = SYS_CLK_HZ / 1000 (bench may shorten)
   parameter int          POR_RESET_MS = 20              // PHY reset hold after reset release
 )(
   // System clock: 100 MHz oscillator, ball R4, net SYSCLK, bank 34 (3.3 V),
@@ -109,9 +121,10 @@ module rtlnet_nexys_video_eth_top #(
   // ---------------------------------------------------------------------------
   // Constants
   // ---------------------------------------------------------------------------
-  localparam int          CPU_CLK_DIV  = 1_000_000_000 / CPU_CLK_HZ;
-  localparam int          MS_CLKS      = (MS_CYCLES == 0) ? (CPU_CLK_HZ / 1000) : MS_CYCLES;
-  localparam int          PROTO_CLK_HZ = 50_000_000;
+  localparam int          SYS_CLK_HZ   = CPU_CLK_HZ;   // rate of cpu_clk (CPU, registers, CPU path)
+  localparam int          CPU_CLK_DIV  = 1_000_000_000 / SYS_CLK_HZ;
+  localparam int          MS_CLKS      = (MS_CYCLES == 0) ? (SYS_CLK_HZ / 1000) : MS_CYCLES;
+  localparam int          PROTO_CLK_HZ = (COMMON_CLK == 0) ? 50_000_000 : SYS_CLK_HZ;    // rate of proto_clk (protocol leaves, UDP echo)
   localparam int          NUM_SLV      = 5;
   localparam int          AW           = 32;
   localparam int          SLV_SYS      = 0;
@@ -135,7 +148,7 @@ module rtlnet_nexys_video_eth_top #(
   localparam logic [NUM_SLV*AW-1:0] SLAVE_SIZE = {WIN_64K, WIN_4K, WIN_4K, WIN_4K, WIN_4K};
 
   generate
-    if (CPU_CLK_DIV * CPU_CLK_HZ != 1_000_000_000) begin : g_bad_cpu_clk
+    if (CPU_CLK_DIV * SYS_CLK_HZ != 1_000_000_000) begin : g_bad_cpu_clk
       $fatal(1, "rtlnet_nexys_video_eth_top: CPU_CLK_HZ=%0d is not 1000 MHz / an integer", CPU_CLK_HZ);
     end
   endgenerate
@@ -154,9 +167,9 @@ module rtlnet_nexys_video_eth_top #(
   logic clk125;                // 125 MHz, 0 deg: MAC transmit, RXC rate detector
   logic clk125_90;             // 125 MHz, 90 deg: RGMII TXC forwarding only
   logic clk200;                // 200 MHz: IDELAYCTRL reference
-  logic axis_clk;              // 62.5 MHz: MAC client side, protocol filter
-  logic proto_clk;             // 50 MHz: protocol leaves, UDP echo (app_clk)
-  logic cpu_clk;               // CPU_CLK_HZ: CPU, AXI4-Lite, system registers, MDIO, CPU-path streams
+  logic axis_clk;              // MAC client side, protocol filter: 62.5 MHz (COMMON_CLK = 0)
+  logic proto_clk;             // protocol leaves, UDP echo (app_clk): 50 MHz (COMMON_CLK = 0)
+  logic cpu_clk;               // CPU, AXI4-Lite, system registers, MDIO, CPU-path streams: CPU_CLK_HZ (COMMON_CLK = 0)
   logic mmcm_locked;
   logic rst_arstn;
   logic clk125_resetn;
@@ -339,9 +352,6 @@ module rtlnet_nexys_video_eth_top #(
   BUFG u_bufg_clk125    (.I(clk125_mmcm),    .O(clk125));
   BUFG u_bufg_clk125_90 (.I(clk125_90_mmcm), .O(clk125_90));
   BUFG u_bufg_clk200    (.I(clk200_mmcm),    .O(clk200));
-  BUFG u_bufg_axis      (.I(axis_clk_mmcm),  .O(axis_clk));
-  BUFG u_bufg_proto     (.I(proto_clk_mmcm), .O(proto_clk));
-  BUFG u_bufg_cpu       (.I(cpu_clk_mmcm),   .O(cpu_clk));
 
   // The one reset assertion: button pressed or MMCM not locked.
   assign rst_arstn = cpu_resetn & mmcm_locked;
@@ -352,14 +362,29 @@ module rtlnet_nexys_video_eth_top #(
   // Reset release into clk200.
   rtlnet_reset_sync u_rst_clk200 (.clk(clk200), .arstn(rst_arstn), .resetn(clk200_resetn));
 
-  // Reset release into axis_clk.
-  rtlnet_reset_sync u_rst_axis (.clk(axis_clk), .arstn(rst_arstn), .resetn(axis_resetn));
+  if (COMMON_CLK == 2) begin : g_sys_clk
+    // One system clock of its own rate (CPU_CLK_HZ, MMCM CLKOUT5): axis_clk, proto_clk and cpu_clk are that clock, one reset
+    // chain. clk125 stays the MAC transmit clock only. CLKOUT3 and CLKOUT4 get no buffer.
+    BUFG u_bufg_cpu       (.I(cpu_clk_mmcm),   .O(cpu_clk));
+    assign axis_clk        = cpu_clk;
+    assign proto_clk       = cpu_clk;
+    rtlnet_reset_sync u_rst_cpu (.clk(cpu_clk), .arstn(rst_arstn), .resetn(cpu_resetn_sync));
+    assign axis_resetn     = cpu_resetn_sync;
+    assign proto_resetn    = cpu_resetn_sync;
+  end else begin : g_multi_clk
+    BUFG u_bufg_axis      (.I(axis_clk_mmcm),  .O(axis_clk));
+    BUFG u_bufg_proto     (.I(proto_clk_mmcm), .O(proto_clk));
+    BUFG u_bufg_cpu       (.I(cpu_clk_mmcm),   .O(cpu_clk));
 
-  // Reset release into proto_clk (also app_clk).
-  rtlnet_reset_sync u_rst_proto (.clk(proto_clk), .arstn(rst_arstn), .resetn(proto_resetn));
+    // Reset release into axis_clk.
+    rtlnet_reset_sync u_rst_axis (.clk(axis_clk), .arstn(rst_arstn), .resetn(axis_resetn));
 
-  // Reset release into cpu_clk: the CPU, the decoder, MDIO, the system registers and the CPU-path streams.
-  rtlnet_reset_sync u_rst_cpu (.clk(cpu_clk), .arstn(rst_arstn), .resetn(cpu_resetn_sync));
+    // Reset release into proto_clk (also app_clk).
+    rtlnet_reset_sync u_rst_proto (.clk(proto_clk), .arstn(rst_arstn), .resetn(proto_resetn));
+
+    // Reset release into cpu_clk: the CPU, the decoder, MDIO, the system registers and the CPU-path streams.
+    rtlnet_reset_sync u_rst_cpu (.clk(cpu_clk), .arstn(rst_arstn), .resetn(cpu_resetn_sync));
+  end
 
   // ---------------------------------------------------------------------------
   // CPU core
@@ -367,7 +392,7 @@ module rtlnet_nexys_video_eth_top #(
 `ifdef RTLNET_CPU_ETH_SIM_STUB
   // Board bench: simulation stub in place of the processor.
   rtlnet_cpu_eth_sim_stub #(
-    .CLK_HZ (CPU_CLK_HZ)
+    .CLK_HZ (SYS_CLK_HZ)
   ) u_cpu (
 `else
   // MicroBlaze subsystem: console on the USB-UART, register master into the
@@ -460,7 +485,7 @@ module rtlnet_nexys_video_eth_top #(
     .BUILD_ID    (BUILD_ID),
     .BUILD_DIRTY (BUILD_DIRTY),
     .BOARD_ID    (BOARD_ID),
-    .CPU_CLK_HZ  (CPU_CLK_HZ),
+    .CPU_CLK_HZ  (SYS_CLK_HZ),
     .MS_CYCLES   (MS_CLKS),
     .LINK_CAPS   (LINK_CAPS),
     .NUM_LED     (8),
@@ -571,7 +596,7 @@ module rtlnet_nexys_video_eth_top #(
 
   // PHY management GPIO core: MDC/MDIO through the pad buffer, PHY reset.
   rtlnet_mdio #(
-    .CLK_HZ       (CPU_CLK_HZ),
+    .CLK_HZ       (SYS_CLK_HZ),
     .POR_RESET_MS (POR_RESET_MS)
   ) u_mdio (
     .clk           (cpu_clk),
@@ -628,7 +653,7 @@ module rtlnet_nexys_video_eth_top #(
     // IPv4/TCP/UDP checksums of CPU transmit frames, appends a checksum trailer to CPU receive frames; power-up
     // CTRL 0 is a pass-through.
     .CPU_TCP_OFFLOAD_ENABLE (1),
-    .CPU_AXIS_CLK_HZ (CPU_CLK_HZ),
+    .CPU_AXIS_CLK_HZ (SYS_CLK_HZ),
     .RAM_STYLE       ("block")
   ) u_protocol (
     .axis_clk          (axis_clk),

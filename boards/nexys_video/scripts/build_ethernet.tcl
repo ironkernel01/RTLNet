@@ -33,9 +33,14 @@
 #   * Reports saved in build/reports: utilization post-synth and post-route, timing summary, CDC (report_cdc -details),
 #     methodology, DRC, check_timing, clock networks, clock interaction, failing paths.
 # Usage: vivado -mode batch -source build_ethernet.tcl -tclargs [build_id <8 hex>] [dirty 0|1] [tag <name>]
-#          [cpu_clk_hz <Hz>] [lmb_kb <32..512>]   (pairs as "name value" or name=value)
+#          [common_clk 0|2 (default 2)] [cpu_clk_hz <Hz> (default 100000000)] [lmb_kb <32..512>] [cpu_opt 0..2] [cpu_btc 0..7] [cpu_muldiv 0..2]
+#          [lmb_buf 0|1] [buf_kb 16|32|64|128]   (lmb_buf 1, default: the frame buffer RAM is dual-port with the CPU on the data-side LMB)
+#          (pairs as "name value" or name=value). common_clk 2 (default) = one system clock at cpu_clk_hz (100 MHz) for the CPU, the
+#          protocol and the MAC client side; common_clk 0 = the multi-clock tree with the CPU at cpu_clk_hz.
 #   Normally run through boards/nexys_video/scripts/build_ethernet.ps1.
 # Revision: 11-14-2026
+#   * 11-14-2026: common_clk (one system clock at cpu_clk_hz, default 2), cpu_opt, cpu_btc, cpu_muldiv; the CDC census expectation and
+#     the clock-group check follow the mode.
 #   * 11-14-2026: initial version (derived from build_bitstream.tcl for the Ethernet demo top).
 # -----------------------------------------------------------------------------
 
@@ -65,16 +70,25 @@ proc nv_exit {code msg} {
 set opt(build_id) ""
 set opt(dirty)    ""
 set opt(tag)      ""
+set opt(common_clk) 2
 set opt(cpu_clk_hz) 100000000
 set opt(lmb_kb)   512
+set opt(cpu_opt)    0
+set opt(cpu_btc)    0
+set opt(cpu_muldiv) 1
+set opt(lmb_buf)    1
+set opt(buf_kb)     128
 set toks {}
 foreach a $argv { foreach t [split $a ",="] { if {$t ne ""} { lappend toks $t } } }
-if {[llength $toks] % 2 != 0} { puts "usage: \[build_id XXXXXXXX\] \[dirty 0|1\] \[tag name\] \[cpu_clk_hz Hz\] \[lmb_kb 32..512\]"; exit 99 }
+if {[llength $toks] % 2 != 0} { puts "usage: \[build_id XXXXXXXX\] \[dirty 0|1\] \[tag name\] \[common_clk 0|2\] \[cpu_clk_hz Hz\] \[lmb_kb 32..512\] \[cpu_opt 0..2\] \[cpu_btc 0..7\] \[cpu_muldiv 0..2\]"; exit 99 }
 foreach {k v} $toks {
   set k [string tolower $k]
   if {![info exists opt($k)]} { puts "rtlnet_build: unknown argument '$k'"; exit 99 }
   set opt($k) $v
 }
+if {$opt(common_clk) ni {0 2}} { puts "rtlnet_build: common_clk must be 0 or 2"; exit 99 }
+if {$opt(lmb_buf) ni {0 1} || $opt(buf_kb) ni {16 32 64 128}} { puts "rtlnet_build: bad lmb_buf/buf_kb"; exit 99 }
+if {$opt(cpu_opt) ni {0 1 2} || $opt(cpu_btc) ni {0 1 2 3 4 5 6 7} || $opt(cpu_muldiv) ni {0 1 2}} { puts "rtlnet_build: bad cpu_opt/cpu_btc/cpu_muldiv"; exit 99 }
 if {![string is integer -strict $opt(cpu_clk_hz)] || $opt(cpu_clk_hz) < 50000000 || $opt(cpu_clk_hz) > 200000000} { puts "rtlnet_build: bad cpu_clk_hz '$opt(cpu_clk_hz)'"; exit 99 }
 if {$opt(lmb_kb) ni {32 64 128 256 512}} { puts "rtlnet_build: lmb_kb must be 32, 64, 128, 256 or 512"; exit 99 }
 # tag <name>: every output goes to build/<name>/ instead of build/.
@@ -97,7 +111,7 @@ if {![regexp {^[0-9a-fA-F]{1,8}$} $opt(build_id)]} { puts "rtlnet_build: bad bui
 if {$opt(dirty) ni {0 1}} { puts "rtlnet_build: dirty must be 0 or 1"; exit 99 }
 set BUILD_ID_HEX [format %08x [scan $opt(build_id) %x]]
 puts "rtlnet_build: repo $REPO"
-puts "rtlnet_build: build_id $BUILD_ID_HEX dirty $opt(dirty) cpu_clk_hz $opt(cpu_clk_hz) lmb_kb $opt(lmb_kb) part $PART"
+puts "rtlnet_build: build_id $BUILD_ID_HEX dirty $opt(dirty) common_clk $opt(common_clk) cpu_clk_hz $opt(cpu_clk_hz) lmb_kb $opt(lmb_kb) cpu_opt $opt(cpu_opt) cpu_btc $opt(cpu_btc) cpu_muldiv $opt(cpu_muldiv) part $PART"
 
 file mkdir $BUILD_DIR
 file delete -force $RPT_DIR [file join $BUILD_DIR bd] [file join $BUILD_DIR ip]
@@ -150,7 +164,7 @@ set_property target_language Verilog [current_project]
 set_property default_lib xil_defaultlib [current_project]
 if {[catch {
   source [file join $REPO cpu microblaze_v_ethernet hdl rtlnet_cpu_eth_bd.tcl]
-  set bd_file [rtlnet_cpu_eth_bd_create [file join $BUILD_DIR bd] $opt(cpu_clk_hz) $opt(lmb_kb)]
+  set bd_file [rtlnet_cpu_eth_bd_create [file join $BUILD_DIR bd] $opt(cpu_clk_hz) $opt(lmb_kb) $opt(buf_kb) $opt(cpu_opt) $opt(cpu_btc) $opt(cpu_muldiv) $opt(lmb_buf)]
   set_property synth_checkpoint_mode None [get_files $bd_file]
   generate_target all [get_files $bd_file]
   set bd_wrapper [make_wrapper -files [get_files $bd_file] -top]
@@ -171,7 +185,7 @@ foreach x $xdc_list {
 # Synthesis.
 # ---------------------------------------------------------------------------
 set synth_args [list -top $TOP -part $PART -include_dirs $::incdirs \
-  -generic BUILD_ID=32'h$BUILD_ID_HEX -generic BUILD_DIRTY=1'b$opt(dirty) -generic CPU_CLK_HZ=$opt(cpu_clk_hz)]
+  -generic BUILD_ID=32'h$BUILD_ID_HEX -generic BUILD_DIRTY=1'b$opt(dirty) -generic COMMON_CLK=$opt(common_clk) -generic CPU_CLK_HZ=$opt(cpu_clk_hz)]
 if {[catch {synth_design {*}$synth_args} err]} { nv_exit 10 "synth_design: $err" }
 set crit_synth [get_msg_config -count -severity {CRITICAL WARNING}]
 if {$crit_synth > 0} { nv_exit 10 "$crit_synth critical warning(s) up to synthesis (see the log)" }
@@ -191,7 +205,10 @@ set rgmii_xdc [file join $BOARD_DIR constraints rtlnet_nexys_video_rgmii.xdc]
 if {![file exists $rgmii_xdc]} { nv_exit 11 "XDC not found: $rgmii_xdc" }
 if {[catch {read_xdc $rgmii_xdc} err]} { nv_exit 13 "RGMII constraints: $err" }
 set ::rtlnet_cdc_required {sync reset gray fifo axil_cdc}
-set ::rtlnet_cdc_expect   {fifo 10 axil_cdc 5 gray 6}
+# Reset chains: clk125, clk200 and the MAC's two receive-clock chains, plus cpu_clk with COMMON_CLK 2 (5 instances) or axis_clk,
+# proto_clk and cpu_clk with COMMON_CLK 0 (7). The FIFO, Gray and register-bridge instances are the same in both modes: the cores
+# keep them with one clock (correct, a later saving).
+set ::rtlnet_cdc_expect   [list fifo 10 axil_cdc 5 gray 6 reset [dict get {0 7 2 5} $opt(common_clk)]]
 set ::rtlnet_cdc_report [file join $RPT_DIR cdc_instances.txt]
 if {[catch {source [file join $REPO scripts rtlnet_constrain_cdc.tcl]} err]} { nv_exit 13 "CDC constraints: $err" }
 
@@ -260,6 +277,14 @@ if {$wns < 0 || $whs < 0 || $fail_setup > 0 || $fail_hold > 0 || $wpws < 0 || $f
   report_timing -hold  -max_paths 50 -nworst 1 -slack_lesser_than 0 -file [file join $RPT_DIR failing_hold.rpt]
   nv_exit 20 "timing not met"
 }
+
+# ---------------------------------------------------------------------------
+# Clock tree record: the clocks the design has. The Ethernet XDCs declare no clock group and no false path between internal
+# clocks (only the RGMII receive pair and the asynchronous board pins), so every path between the system logic is timed.
+# ---------------------------------------------------------------------------
+set clk_names {}
+foreach c [get_clocks -quiet] { lappend clk_names "[get_property NAME $c]=[format %.3f [get_property PERIOD $c]]ns" }
+puts "rtlnet_build: clocks: [join $clk_names {, }]"
 
 # ---------------------------------------------------------------------------
 # Gate: check_timing (every endpoint clocked and constrained, no loops).
@@ -347,11 +372,11 @@ if {[llength $cdc_bad] > 0} { nv_exit 27 "report_cdc findings: [join $cdc_bad {,
 # Waiver test for LUTAR-1 on the reset AND: the LUT is the rst_arstn gate and
 # every asynchronous pin it drives is a CLR pin of an rtlnet_reset_sync chain.
 proc nv_waive_reset_and {desc} {
-  if {![regexp {^LUT cell u_rst_[a-z0-9_]+/pipe\[[0-9]+\]_i_1(__[0-9]+)?,} $desc]} { return 0 }
+  if {![regexp {^LUT cell (g_[a-z_]+\.)?u_rst_[a-z0-9_]+/pipe\[[0-9]+\]_i_1(__[0-9]+)?,} $desc]} { return 0 }
   set pins [regexp -all -inline {\S+/(?:CLR|PRE)\M} $desc]
   if {[llength $pins] == 0} { return 0 }
   foreach p $pins {
-    if {![regexp {^u_rst_[a-z0-9_]+/pipe_reg\[[0-9]+\]/CLR$} [string trimright $p ",."]]} { return 0 }
+    if {![regexp {^(g_[a-z_]+\.)?u_rst_[a-z0-9_]+/pipe_reg\[[0-9]+\]/CLR$} [string trimright $p ",."]]} { return 0 }
   }
   return 1
 }
@@ -445,8 +470,11 @@ puts $fh "design        $TOP"
 puts $fh "part          $PART"
 puts $fh "git_hash      $BUILD_ID_HEX"
 puts $fh "git_dirty     $opt(dirty)"
+puts $fh "common_clk    $opt(common_clk)"
 puts $fh "cpu_clk_hz    $opt(cpu_clk_hz)"
 puts $fh "lmb_kb        $opt(lmb_kb)"
+puts $fh "cpu_options   opt $opt(cpu_opt) btc $opt(cpu_btc) muldiv $opt(cpu_muldiv)"
+puts $fh "frame_buffer  lmb_buf $opt(lmb_buf) buf_kb $opt(buf_kb)"
 puts $fh "tool          [version -short]"
 puts $fh "built         [clock format [clock seconds] -format {%Y-%m-%d %H:%M:%S %z}]"
 puts $fh "wns_ns        $wns"
