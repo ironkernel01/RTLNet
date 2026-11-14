@@ -263,7 +263,7 @@ token counts; exec commands are also accepted in priv.
 | 40 | cli_tcp_echo_enable | config | `TCP ECHO ENABLE` | — | — | 3 | 3 | — | Enable the TCP echo server |
 | 41 | cli_tcp_echo_disable | config | `TCP ECHO DISABLE` | — | — | 3 | 3 | — | Disable the TCP echo server (open connections stay) |
 | 42 | cli_tcp_echo_port | config | `TCP ECHO PORT [PORT]` | PORT | — | 4 | 4 | — | TCP echo server port (default 7) |
-| 43 | cli_offload | config | `OFFLOAD [WHAT] [STATE]` | WHAT, STATE | — | 3 | 3 | — | Checksum offload: tx-ip, tx-l4, rx or all, on or off (as far as the build has it; lwIP follows) |
+| 43 | cli_offload | config | `OFFLOAD [WHAT] [STATE] {TIMER} {LIMIT}` | WHAT, STATE | TIMER, LIMIT | 3 | 5 | — | Checksum offload (tx-ip, tx-l4, rx, all) and receive features (ack-coalesce, rx-batch) on or off, as far as the build has them; TIMER in microseconds, LIMIT ACKs or frames |
 | 44 | cli_if_speed | config-if | `SPEED [MBPS]` | MBPS | — | 2 | 2 | — | Link speed, full duplex: 10, 100 or auto (auto = every mode of the board, best rate) |
 | 45 | cli_if_shutdown | config-if | `SHUTDOWN` | — | — | 1 | 1 | — | Disable the interface (MAC receive and transmit) |
 | 46 | cli_if_no_shutdown | config-if | `NO SHUTDOWN` | — | — | 2 | 2 | — | Enable the interface |

@@ -40,6 +40,18 @@
  *     transfer is done. Chained pbufs and pbufs outside the AXI BRAM are
  *     copied into one of the two transmit buffers.
  *
+ * Receive batching (hardware RX_BATCH, rtlnet_offload.c / the CLI "offload rx-batch"): the AXI DMA transfer of
+ * a batch holds several frames, each padded to 8 bytes and followed by its trailer. The receive buffers then
+ * have the batch geometry: RTLNET_NETIF_BATCH_BUFS buffers of RTLNET_NETIF_BATCH_BUF_BYTES (the hardware closes a
+ * batch before its byte limit, which is set to the buffer size, so a transfer never overruns). One poll step per
+ * transfer: rtlnet_tcp_offload_batch_walk splits it (bounds-checked), every frame goes through the same trailer
+ * policy as a single frame and is handed to lwIP on its own: zero-copy receive hands each frame as a custom
+ * PBUF_REF pbuf and counts the references per buffer, the buffer returns to the free list when the last one is
+ * freed; a batch that finds no free buffer left to arm is copied into pool pbufs instead, so the channel never
+ * starves for buffers lwIP holds. Switching the geometry (rtlnet_netif_set_rx_batch) needs every buffer free;
+ * with batching off the buffers are the 2 KiB single-frame buffers above and none of this code runs. A build
+ * without the batch hardware never leaves that mode.
+ *
  * Memory rule: the MicroBlaze has no caches, so the DMA buffers need no flush
  * or invalidate; the CPU reads and writes them uncached over M_AXI_DP. The
  * buffers are 64-byte aligned (DMA without realignment engine needs 8).
@@ -65,6 +77,22 @@ struct netif;
 #define RTLNET_NETIF_RX_BUFS      4u        /* receive buffers: one armed, the rest free */
 #endif
 #define RTLNET_NETIF_TX_BUFS      2u        /* transmit buffers (copy overlaps the DMA) */
+
+/* Batch geometry: the same memory as the single-frame buffers, carved into larger buffers. */
+#define RTLNET_NETIF_BATCH_BUF_BYTES  8192u
+#if RTLNET_NETIF_ZERO_COPY_RX
+#define RTLNET_NETIF_BATCH_BUFS   4u        /* one armed, up to three held by lwIP */
+#else
+#define RTLNET_NETIF_BATCH_BUFS   2u        /* copy receive: one armed, one being delivered */
+#endif
+#define RTLNET_NETIF_BATCH_MAX_FRAMES RTLNET_TXO_BATCH_MAX_FRAMES   /* walker array; the hardware count limit stays below */
+#define RTLNET_NETIF_BATCH_LOANS  128u      /* custom pbufs on loan across all batch buffers (zero-copy receive) */
+/* Receive memory in 2 KiB units: the single-frame buffers, or the batch buffers when those need more. */
+#if (RTLNET_NETIF_BATCH_BUFS * RTLNET_NETIF_BATCH_BUF_BYTES / 2048u) > RTLNET_NETIF_RX_BUFS
+#define RTLNET_NETIF_RX_POOL_UNITS (RTLNET_NETIF_BATCH_BUFS * RTLNET_NETIF_BATCH_BUF_BYTES / 2048u)
+#else
+#define RTLNET_NETIF_RX_POOL_UNITS RTLNET_NETIF_RX_BUFS
+#endif
 #define RTLNET_NETIF_BUF_BYTES    2048u     /* per buffer; holds the 1518-byte frame */
 #define RTLNET_NETIF_BUF_ALIGN    64u
 #define RTLNET_NETIF_RX_BUDGET    8u        /* frames handled per poll call */
@@ -105,6 +133,12 @@ typedef struct {
     uint32_t tx_zero_copy;    /* frames sent from the pbuf in place */
     uint32_t tx_copied;       /* frames copied into a transmit buffer */
     uint32_t rx_budget_hits;  /* polls that used the whole frame budget (more frames were waiting) */
+    uint32_t rx_batches;      /* receive batching: transfers walked (a single frame is a batch of one) */
+    uint32_t rx_batch_frames; /* frames taken out of them */
+    uint32_t rx_batch_max;    /* most frames in one transfer */
+    uint32_t rx_batch_bad;    /* transfers that did not walk (malformed or too many frames), dropped */
+    uint32_t rx_batch_copied; /* transfers copied into pool pbufs: no buffer left to arm (zero-copy receive) */
+    uint32_t rx_batch_noloan; /* frames copied because the loan table was full */
     /* Profile, in cpu_clk ticks (RTLNET_PLAT_TICKS_PER_US per microsecond), since the last clear. */
     uint32_t prof_clear;      /* plat_ticks() at the clear: wall time = now - prof_clear */
     uint32_t prof_busy;       /* polls that delivered frames: all work done from them, lwIP and applications included */
@@ -123,5 +157,13 @@ void                        rtlnet_netif_poll(struct netif *nif);
 const rtlnet_netif_stats_t *rtlnet_netif_stats(void);
 void                        rtlnet_netif_clear_stats(void);
 uint32_t                    rtlnet_netif_dma_sr(int rx);
+int                         rtlnet_netif_set_rx_batch(int on);
+int                         rtlnet_netif_rx_batch_active(void);
+uint32_t                    rtlnet_netif_rx_buf_bytes(void);
+
+/* rtlnet_netif_set_rx_batch results. */
+#define RTLNET_NETIF_BATCH_OK       0
+#define RTLNET_NETIF_BATCH_BUSY     (-1)   /* buffers are on loan to lwIP or a transmit is running: try again */
+#define RTLNET_NETIF_BATCH_ABSENT   (-2)   /* no DMA, or no batch hardware in this bitstream */
 
 #endif /* RTLNET_LWIP_NETIF_H */

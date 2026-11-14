@@ -4,3 +4,9 @@ tb_rtlnet_tcp_offload   cores/rtlnet_tcp_offload/testbench/tb_rtlnet_tcp_offload
 tb_rtlnet_tcp_offload   cores/rtlnet_tcp_offload/testbench/tb_rtlnet_tcp_offload.f  buf4     defines=TB_TXO_BUF4,RTLNET_TECH_GENERIC
 tb_rtlnet_tcp_offload   cores/rtlnet_tcp_offload/testbench/tb_rtlnet_tcp_offload.f  buf16    defines=TB_TXO_BUF16,RTLNET_TECH_GENERIC
 tb_rtlnet_tcp_offload   cores/rtlnet_tcp_offload/testbench/tb_rtlnet_tcp_offload.f  neg      defines=RTLNET_TECH_GENERIC  plusargs=INJECT_FAILURE  expectfail
+# ACK coalescing / receive batching (parameters ACK_COALESCE, RX_BATCH; built, disabled, and enabled)
+tb_rtlnet_tcp_offload_feat  cores/rtlnet_tcp_offload/testbench/tb_rtlnet_tcp_offload_feat.f  both
+tb_rtlnet_tcp_offload_feat  cores/rtlnet_tcp_offload/testbench/tb_rtlnet_tcp_offload_feat.f  ack      defines=TB_FEAT_ACK
+tb_rtlnet_tcp_offload_feat  cores/rtlnet_tcp_offload/testbench/tb_rtlnet_tcp_offload_feat.f  batch    defines=TB_FEAT_BATCH
+tb_rtlnet_tcp_offload_feat  cores/rtlnet_tcp_offload/testbench/tb_rtlnet_tcp_offload_feat.f  generic  defines=RTLNET_TECH_GENERIC
+tb_rtlnet_tcp_offload_feat  cores/rtlnet_tcp_offload/testbench/tb_rtlnet_tcp_offload_feat.f  neg      defines=RTLNET_TECH_GENERIC  plusargs=INJECT_FAILURE  expectfail

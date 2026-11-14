@@ -129,6 +129,9 @@ module rtlnet_eth_protocol #(
   parameter int    CPU_TX_FIFO_KB  = 8,            // CPU transmit queue, kilobytes
   parameter int    CPU_CLASSIFIER_ENABLE = 1,      // build u_cpu_classifier on the CPU receive stream
   parameter int    CPU_TCP_OFFLOAD_ENABLE = 1,     // build u_cpu_offload (checksum insert on TX, trailer on RX)
+  parameter int    CPU_TCP_OFFLOAD_ACK_COALESCE = 0, // u_cpu_offload: build the ACK coalescer (needs the trailer, CTRL.rx_csum)
+  parameter int    CPU_TCP_OFFLOAD_RX_BATCH = 0,   // u_cpu_offload: build the receive batcher (several frames per DMA transfer)
+  parameter int    CPU_TCP_OFFLOAD_ACK_FLOWS = 4,  // u_cpu_offload: ACK coalescer flow table entries
   parameter int    CPU_AXIS_CLK_HZ = 100_000_000,  // cpu_axis_clk frequency (classifier policer tick)
   parameter string RAM_STYLE       = "block"       // "block" | "distributed", every buffer
 )(
@@ -1140,7 +1143,11 @@ module rtlnet_eth_protocol #(
         // Checksum offload on the CPU DMA streams (cores/rtlnet_tcp_offload): receive frames get a
         // checksum trailer, transmit frames get their checksum fields inserted; registers at 0x9000.
         rtlnet_tcp_offload #(
-          .RAM_STYLE (RAM_STYLE)
+          .RAM_STYLE    (RAM_STYLE),
+          .ACK_COALESCE (CPU_TCP_OFFLOAD_ACK_COALESCE),
+          .ACK_FLOWS    (CPU_TCP_OFFLOAD_ACK_FLOWS),
+          .RX_BATCH     (CPU_TCP_OFFLOAD_RX_BATCH),
+          .CLK_HZ       (CPU_AXIS_CLK_HZ)
         ) u_cpu_offload (
           .clk              (cpu_axis_clk),
           .resetn           (cpu_axis_resetn),

@@ -30,11 +30,15 @@
 //     place, so there is no padding beat.
 //   * All outputs are flops (output rtlnet_axis_reg_slice).
 // Language: SystemVerilog-2012.
-// Revision: 10-22-2026
+// Revision: 11-14-2026
+//   * 11-14-2026: parameter SIDEBAND and output m_axis_trl (the frame of an output beat carries a trailer), for the
+//     ACK coalescer and the batcher; 0 (default) is the original netlist.
 //   * 10-22-2026: initial version.
 // Clocks: clk; resetn synchronous, active low.
 // -----------------------------------------------------------------------------
-module rtlnet_tcp_offload_rx (
+module rtlnet_tcp_offload_rx #(
+  parameter bit SIDEBAND = 1'b0   // 1: m_axis_trl tells, per output beat, that the frame carries a trailer
+)(
   // Clock and synchronous active-low reset.
   input  logic        clk,
   input  logic        resetn,
@@ -54,6 +58,7 @@ module rtlnet_tcp_offload_rx (
   output logic [7:0]  m_axis_tkeep,
   output logic        m_axis_tvalid,
   output logic        m_axis_tlast,
+  output logic        m_axis_trl,
   input  logic        m_axis_tready,
 
   // Status and one-clock event pulses (registered).
@@ -242,22 +247,51 @@ module rtlnet_tcp_offload_rx (
     if (deliver_last) tr_data <= trl;
   end
 
-  rtlnet_axis_reg_slice #(
-    .DATA_W (64)
-  ) u_out_slice (
-    .clk      (clk),
-    .resetn   (resetn),
-    .s_tdata  (tr_pend ? tr_data : o_d),
-    .s_tkeep  (tr_pend ? 8'hFF : o_k),
-    .s_tlast  (tr_pend ? 1'b1 : o_l),
-    .s_tvalid (tr_pend || o_v),
-    .s_tready (o_rdy),
-    .m_tdata  (m_axis_tdata),
-    .m_tkeep  (m_axis_tkeep),
-    .m_tlast  (m_axis_tlast),
-    .m_tvalid (m_axis_tvalid),
-    .m_tready (m_axis_tready)
-  );
+  generate
+    if (SIDEBAND) begin : g_sb
+      // The sideband bit rides in a ninth byte lane of the output slice: every beat of a frame that
+      // carries a trailer (padded data beats and the trailer itself) has it set.
+      logic [71:0] os_d;
+      logic [8:0]  os_k;
+      rtlnet_axis_reg_slice #(
+        .DATA_W (72)
+      ) u_out_slice (
+        .clk      (clk),
+        .resetn   (resetn),
+        .s_tdata  ({7'd0, (tr_pend || le_en), (tr_pend ? tr_data : o_d)}),
+        .s_tkeep  ({1'b0, (tr_pend ? 8'hFF : o_k)}),
+        .s_tlast  (tr_pend ? 1'b1 : o_l),
+        .s_tvalid (tr_pend || o_v),
+        .s_tready (o_rdy),
+        .m_tdata  (os_d),
+        .m_tkeep  (os_k),
+        .m_tlast  (m_axis_tlast),
+        .m_tvalid (m_axis_tvalid),
+        .m_tready (m_axis_tready)
+      );
+      assign m_axis_tdata = os_d[63:0];
+      assign m_axis_tkeep = os_k[7:0];
+      assign m_axis_trl   = os_d[64];
+    end else begin : g_plain
+      rtlnet_axis_reg_slice #(
+        .DATA_W (64)
+      ) u_out_slice (
+        .clk      (clk),
+        .resetn   (resetn),
+        .s_tdata  (tr_pend ? tr_data : o_d),
+        .s_tkeep  (tr_pend ? 8'hFF : o_k),
+        .s_tlast  (tr_pend ? 1'b1 : o_l),
+        .s_tvalid (tr_pend || o_v),
+        .s_tready (o_rdy),
+        .m_tdata  (m_axis_tdata),
+        .m_tkeep  (m_axis_tkeep),
+        .m_tlast  (m_axis_tlast),
+        .m_tvalid (m_axis_tvalid),
+        .m_tready (m_axis_tready)
+      );
+      assign m_axis_trl = 1'b0;
+    end
+  endgenerate
 
   // ---------------------------------------------------------------------------
   // Events (from the trailer flags as the final beat leaves) and idle

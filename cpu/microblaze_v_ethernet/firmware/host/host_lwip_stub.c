@@ -139,6 +139,29 @@ void rtlnet_netif_clear_stats(void)
 }
 
 /*
+ * rtlnet_netif_set_rx_batch / _rx_batch_active / _rx_buf_bytes -- harness: the buffer geometry is a flag; there is
+ * no DMA, so the switch never finds a buffer in use.
+ * Returns: RTLNET_NETIF_BATCH_OK; the flag; the buffer size of the geometry.
+ */
+static int g_stub_batch;
+
+int rtlnet_netif_set_rx_batch(int on)
+{
+    g_stub_batch = on ? 1 : 0;
+    return RTLNET_NETIF_BATCH_OK;
+}
+
+int rtlnet_netif_rx_batch_active(void)
+{
+    return g_stub_batch;
+}
+
+uint32_t rtlnet_netif_rx_buf_bytes(void)
+{
+    return g_stub_batch ? RTLNET_NETIF_BATCH_BUF_BYTES : RTLNET_NETIF_BUF_BYTES;
+}
+
+/*
  * rtlnet_netif_dma_sr -- harness: no DMA.
  * Returns: 0.
  */

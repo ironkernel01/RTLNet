@@ -94,6 +94,9 @@ static uint32_t  g_txo_ctrl;
 static uint32_t  g_txo_stuck;
 static uint32_t  g_txo_idle_after = 2u;
 static uint32_t  g_txo_status_reads;
+static uint32_t  g_txo_feat_mask;     /* CTRL bits 4:3 of the receive features the CAPS announce */
+static uint32_t  g_txo_cfg[5];        /* ACK_TIMER, ACK_LIMIT, BAT_TIMER, BAT_FRAMES, BAT_BYTES */
+static uint32_t  g_txo_feat_cnt[RTLNET_TXO_NUM_ACK_COUNTERS + RTLNET_TXO_NUM_BAT_COUNTERS];
 static uint32_t  g_txo_cnt[RTLNET_TXO_NUM_TX_COUNTERS + RTLNET_TXO_NUM_RX_COUNTERS];
 static host_event_t g_ev[HOST_EV_MAX];
 static unsigned  g_ev_n;
@@ -190,6 +193,33 @@ void host_model_txo_set(int present, uint32_t caps)
     g_txo_idle_after = 2u;
     g_txo_status_reads = 0u;
     memset(g_txo_cnt, 0, sizeof(g_txo_cnt));
+    g_txo_feat_mask = (((caps & RTLNET_TXO_CAPS_ACK_COALESCE) != 0u) ? RTLNET_TXO_CTRL_ACK_COALESCE : 0u) |
+                      (((caps & RTLNET_TXO_CAPS_RX_BATCH) != 0u) ? RTLNET_TXO_CTRL_RX_BATCH : 0u);
+    memset(g_txo_cfg, 0, sizeof(g_txo_cfg));
+    memset(g_txo_feat_cnt, 0, sizeof(g_txo_feat_cnt));
+}
+
+/**
+ * @brief Value of one receive-feature counter of the model (index: ACK counters, then batch counters).
+ * @param index 0..11.
+ * @param value Value.
+ * @return None.
+ */
+void host_model_txo_feat_counter(uint32_t index, uint32_t value)
+{
+    if (index < RTLNET_TXO_NUM_ACK_COUNTERS + RTLNET_TXO_NUM_BAT_COUNTERS) {
+        g_txo_feat_cnt[index] = value;
+    }
+}
+
+/**
+ * @brief A configuration register of the receive features as the model holds it (0 ACK_TIMER .. 4 BAT_BYTES).
+ * @param index 0..4.
+ * @return Value.
+ */
+uint32_t host_model_txo_cfg(uint32_t index)
+{
+    return (index < 5u) ? g_txo_cfg[index] : 0u;
 }
 
 /**
@@ -229,7 +259,7 @@ uint32_t host_model_txo_ctrl(void)
  */
 void host_model_txo_set_ctrl(uint32_t ctrl)
 {
-    g_txo_ctrl = ctrl & RTLNET_TXO_CTRL_MASK;
+    g_txo_ctrl = ctrl & (RTLNET_TXO_CTRL_MASK | g_txo_feat_mask);
 }
 
 /**
@@ -297,11 +327,18 @@ static uint32_t host_txo_read(uint32_t off)
     case RTLNET_TXO_REG_VERSION: return RTLNET_TXO_VERSION_VALUE;
     case RTLNET_TXO_REG_CAPS:    return g_txo_caps;
     case RTLNET_TXO_REG_CTRL:    return g_txo_ctrl;
+    case RTLNET_TXO_REG_CAPS2:   return (g_txo_feat_mask != 0u) ? (4u | (2056u << 8)) : 0u;
+    case RTLNET_TXO_REG_ACK_TIMER:  return g_txo_cfg[0];
+    case RTLNET_TXO_REG_ACK_LIMIT:  return g_txo_cfg[1];
+    case RTLNET_TXO_REG_BAT_TIMER:  return g_txo_cfg[2];
+    case RTLNET_TXO_REG_BAT_FRAMES: return g_txo_cfg[3];
+    case RTLNET_TXO_REG_BAT_BYTES:  return g_txo_cfg[4];
     case RTLNET_TXO_REG_STATUS: {
         int idle = (g_txo_idle_after != 0xFFFFFFFFu && g_txo_status_reads >= g_txo_idle_after) ? 1 : 0;
         g_txo_status_reads++;
         host_event_add(HOST_EV_STATUS_READ, (uint32_t)idle);
-        return (uint32_t)idle | RTLNET_TXO_STATUS_RX_IDLE;
+        return (uint32_t)idle | RTLNET_TXO_STATUS_RX_IDLE |
+               ((g_txo_feat_mask != 0u) ? (RTLNET_TXO_STATUS_ACK_IDLE | RTLNET_TXO_STATUS_BAT_IDLE) : 0u);
     }
     case RTLNET_TXO_REG_LATENCY: return 18u | (17u << 8);
     default:
@@ -317,6 +354,16 @@ static uint32_t host_txo_read(uint32_t off)
             return g_txo_cnt[RTLNET_TXO_NUM_TX_COUNTERS + i];
         }
     }
+    for (uint32_t i = 0u; g_txo_feat_mask != 0u && i < RTLNET_TXO_NUM_ACK_COUNTERS; i++) {
+        if (off == RTLNET_TXO_REG_CNT_ACK(i)) {
+            return g_txo_feat_cnt[i];
+        }
+    }
+    for (uint32_t i = 0u; g_txo_feat_mask != 0u && i < RTLNET_TXO_NUM_BAT_COUNTERS; i++) {
+        if (off == RTLNET_TXO_REG_CNT_BAT(i)) {
+            return g_txo_feat_cnt[RTLNET_TXO_NUM_ACK_COUNTERS + i];
+        }
+    }
     return 0u;
 }
 
@@ -330,9 +377,12 @@ static void host_txo_write(uint32_t off, uint32_t value)
 {
     if (off == RTLNET_TXO_REG_CTRL) {
         host_event_add(HOST_EV_CTRL_WRITE, value);
-        g_txo_ctrl = (g_txo_ctrl & g_txo_stuck) | (value & RTLNET_TXO_CTRL_MASK & ~g_txo_stuck);
+        g_txo_ctrl = (g_txo_ctrl & g_txo_stuck) | (value & (RTLNET_TXO_CTRL_MASK | g_txo_feat_mask) & ~g_txo_stuck);
+    } else if (off >= RTLNET_TXO_REG_ACK_TIMER && off <= RTLNET_TXO_REG_BAT_BYTES && g_txo_feat_mask != 0u) {
+        g_txo_cfg[(off - RTLNET_TXO_REG_ACK_TIMER) / 4u] = value;
     } else if (off == RTLNET_TXO_REG_CNT_CLEAR && (value & 1u) != 0u) {
         memset(g_txo_cnt, 0, sizeof(g_txo_cnt));
+        memset(g_txo_feat_cnt, 0, sizeof(g_txo_feat_cnt));
     }
 }
 

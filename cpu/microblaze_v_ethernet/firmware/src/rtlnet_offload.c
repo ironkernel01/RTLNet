@@ -21,6 +21,45 @@ static rtlnet_tcp_offload_t    g_txo;
 static int                     g_txo_ok;
 static rtlnet_offload_state_t  g_st;
 static uint32_t                g_req = RTLNET_OFFLOAD_ALL;   /* requested offloads (default: everything present) */
+static rtlnet_offload_feat_t   g_fc;                         /* receive features: ACK coalescing, batching */
+
+/*
+ * feat_discovered -- the receive features of a confirmed core: what is present, the reset values of the
+ * configuration registers (all off).
+ * Returns: nothing.
+ */
+static void feat_discovered(void)
+{
+    memset(&g_fc, 0, sizeof(g_fc));
+    if (g_txo.ack_present != 0u) {
+        g_fc.present |= RTLNET_OFFLOAD_FEAT_ACK;
+        g_fc.ack_flows = g_txo.ack_flows;
+        g_fc.ack_timer_us = RTLNET_TXO_ACK_TIMER_DEFAULT;
+        g_fc.ack_limit = RTLNET_TXO_ACK_LIMIT_DEFAULT;
+    }
+    if (g_txo.batch_present != 0u) {
+        g_fc.present |= RTLNET_OFFLOAD_FEAT_BATCH;
+        g_fc.bat_reserve = g_txo.batch_reserve;
+        g_fc.bat_timer_us = RTLNET_TXO_BAT_TIMER_DEFAULT;
+        g_fc.bat_frames = RTLNET_TXO_BAT_FRAMES_DEFAULT;
+        g_fc.bat_bytes = RTLNET_TXO_BAT_BYTES_DEFAULT;
+    }
+}
+
+/*
+ * feat_quiesce -- switch both receive features off (rx is about to go off) and wait, bounded, until what they hold
+ * has been forwarded.
+ * Returns: nothing.
+ */
+static void feat_quiesce(void)
+{
+    if (g_fc.on == 0u) {
+        return;
+    }
+    (void)rtlnet_tcp_offload_set_features(&g_txo, 0u);
+    (void)rtlnet_tcp_offload_wait_features_idle(&g_txo, RTLNET_OFFLOAD_IDLE_POLLS);
+    g_fc.on = 0u;
+}
 
 /*
  * fail_block -- log a discovery mismatch and count it.
@@ -110,6 +149,7 @@ void rtlnet_features_discover(void)
         return;
     }
     memset(&g_feat, 0, sizeof(g_feat));
+    memset(&g_fc, 0, sizeof(g_fc));
     g_txo_ok = 0;
     g_feat.discovered = 1;
     g_feat.wrapper_ok = (rtlnet_eth_protocol_probe(RTLNET_PLAT_PROT_BASE) == RTLNET_PROTO_OK) ? 1 : 0;
@@ -133,6 +173,7 @@ void rtlnet_features_discover(void)
             g_feat.tx_present = g_feat.tx_advertised;
             g_feat.rx_present = g_feat.rx_advertised;
             g_txo_ok = 1;
+            feat_discovered();
         }
     }
 }
@@ -276,6 +317,7 @@ int rtlnet_offload_apply(uint32_t want_mask)
     }
     (void)rtlnet_tcp_offload_get_ctrl(&g_txo, &cur);
     g_st.ctrl = cur;
+    cur &= RTLNET_OFFLOAD_ALL;   /* the receive feature bits are not part of the checksum request */
     off = cur & ~want;
     on = want & ~cur;
 
@@ -285,6 +327,7 @@ int rtlnet_offload_apply(uint32_t want_mask)
 
         /* Flags first: software takes over before the hardware lets go. */
         if ((off & RTLNET_OFFLOAD_RX) != 0u) {
+            feat_quiesce();   /* ACK coalescing and batching work on the trailer: off before it goes */
             g_st.rx_state = RTLNET_RX_TRAILER_DRAINING;
         }
         g_st.flags = rtlnet_offload_flags_for(next, g_st.rx_state == RTLNET_RX_TRAILER_ON);
@@ -298,11 +341,11 @@ int rtlnet_offload_apply(uint32_t want_mask)
             }
         }
         rc = write_ctrl(next, &rb);
-        cur = rb;
+        cur = rb & RTLNET_OFFLOAD_ALL;
     }
     if (on != 0u && rc == RTLNET_OFFLOAD_OK) {
         rc = write_ctrl(cur | on, &rb);
-        cur = rb;
+        cur = rb & RTLNET_OFFLOAD_ALL;
     }
     if ((cur & RTLNET_OFFLOAD_RX) != 0u) {
         if (g_st.rx_state == RTLNET_RX_TRAILER_OFF || g_st.rx_state == RTLNET_RX_TRAILER_DRAINING) {
@@ -456,4 +499,124 @@ void rtlnet_offload_reset_stats(void)
     if (g_txo_ok) {
         (void)rtlnet_tcp_offload_clear_counters(&g_txo);
     }
+}
+
+/*
+ * rtlnet_offload_feat -- the receive features as configured.
+ * Returns: pointer to the state (all zero without the features).
+ */
+const rtlnet_offload_feat_t *rtlnet_offload_feat(void)
+{
+    return &g_fc;
+}
+
+/*
+ * feat_switch -- turn one receive feature on or off in CTRL (hardware order: configuration first, then the bit;
+ * off: the bit, then wait for what the block holds).
+ * Returns: RTLNET_OFFLOAD_OK, RTLNET_OFFLOAD_ERR_IO.
+ */
+static int feat_switch(uint32_t feat, uint32_t ctrl_bit, int on)
+{
+    uint32_t next = on ? (g_fc.on | feat) : (g_fc.on & ~feat);
+    uint32_t bits = 0u;
+
+    if ((next & RTLNET_OFFLOAD_FEAT_ACK) != 0u) {
+        bits |= RTLNET_TXO_CTRL_ACK_COALESCE;
+    }
+    if ((next & RTLNET_OFFLOAD_FEAT_BATCH) != 0u) {
+        bits |= RTLNET_TXO_CTRL_RX_BATCH;
+    }
+    (void)ctrl_bit;
+    if (rtlnet_tcp_offload_set_features(&g_txo, bits) != RTLNET_TXO_OK) {
+        g_st.io_errors++;
+        return RTLNET_OFFLOAD_ERR_IO;
+    }
+    if (!on) {
+        (void)rtlnet_tcp_offload_wait_features_idle(&g_txo, RTLNET_OFFLOAD_IDLE_POLLS);
+    }
+    g_fc.on = next;
+    return RTLNET_OFFLOAD_OK;
+}
+
+/*
+ * rtlnet_offload_ack_set -- ACK coalescing on or off, with the timer and the count limit.
+ *
+ * Steps:
+ *   1. The build must have it (ERR_ABSENT); on needs rx offload on (ERR_NEED_RX): the feature works on the trailer.
+ *   2. Timer (microseconds, 0..65535) and limit (0..255) written (RTLNET_OFFLOAD_KEEP keeps the current value).
+ *   3. The CTRL bit follows; off waits until held ACKs have been forwarded.
+ * Returns: RTLNET_OFFLOAD_OK, ERR_ABSENT, ERR_NEED_RX, ERR_ARG, ERR_IO.
+ */
+int rtlnet_offload_ack_set(int on, uint32_t timer_us, uint32_t limit)
+{
+    uint32_t ctrl = 0u;
+    uint32_t t = (timer_us == RTLNET_OFFLOAD_KEEP) ? g_fc.ack_timer_us : timer_us;
+    uint32_t l = (limit == RTLNET_OFFLOAD_KEEP) ? g_fc.ack_limit : limit;
+
+    if ((g_fc.present & RTLNET_OFFLOAD_FEAT_ACK) == 0u) {
+        return RTLNET_OFFLOAD_ERR_ABSENT;
+    }
+    if (t > 0xFFFFu || l > 0xFFu) {
+        return RTLNET_OFFLOAD_ERR_ARG;
+    }
+    if (on) {
+        (void)rtlnet_tcp_offload_get_ctrl(&g_txo, &ctrl);
+        if ((ctrl & RTLNET_OFFLOAD_RX) == 0u) {
+            return RTLNET_OFFLOAD_ERR_NEED_RX;
+        }
+        if (rtlnet_tcp_offload_ack_config(&g_txo, t, l) != RTLNET_TXO_OK) {
+            g_st.io_errors++;
+            return RTLNET_OFFLOAD_ERR_IO;
+        }
+        g_fc.ack_timer_us = t;
+        g_fc.ack_limit = l;
+    }
+    return feat_switch(RTLNET_OFFLOAD_FEAT_ACK, RTLNET_TXO_CTRL_ACK_COALESCE, on);
+}
+
+/*
+ * rtlnet_offload_batch_set -- receive batching on or off, with the timer, the frame limit and the byte limit.
+ *
+ * The byte limit is the size of the DMA buffer the netif arms: no transfer is longer. The netif switches its
+ * buffers to that size first (rtlnet_netif_set_rx_batch); the CLI does both, in that order. Same steps and
+ * results as rtlnet_offload_ack_set (max_frames 0..64, max_bytes one frame to 65535).
+ * Returns: RTLNET_OFFLOAD_OK, ERR_ABSENT, ERR_NEED_RX, ERR_ARG, ERR_IO.
+ */
+int rtlnet_offload_batch_set(int on, uint32_t timer_us, uint32_t max_frames, uint32_t max_bytes)
+{
+    uint32_t ctrl = 0u;
+    uint32_t t = (timer_us == RTLNET_OFFLOAD_KEEP) ? g_fc.bat_timer_us : timer_us;
+    uint32_t f = (max_frames == RTLNET_OFFLOAD_KEEP) ? g_fc.bat_frames : max_frames;
+    uint32_t b = (max_bytes == RTLNET_OFFLOAD_KEEP) ? g_fc.bat_bytes : max_bytes;
+
+    if ((g_fc.present & RTLNET_OFFLOAD_FEAT_BATCH) == 0u) {
+        return RTLNET_OFFLOAD_ERR_ABSENT;
+    }
+    if (on) {
+        (void)rtlnet_tcp_offload_get_ctrl(&g_txo, &ctrl);
+        if ((ctrl & RTLNET_OFFLOAD_RX) == 0u) {
+            return RTLNET_OFFLOAD_ERR_NEED_RX;
+        }
+        if (rtlnet_tcp_offload_batch_config(&g_txo, t, f, b) != RTLNET_TXO_OK) {
+            g_st.io_errors++;
+            return RTLNET_OFFLOAD_ERR_ARG;
+        }
+        g_fc.bat_timer_us = t;
+        g_fc.bat_frames = f;
+        g_fc.bat_bytes = b;
+    }
+    return feat_switch(RTLNET_OFFLOAD_FEAT_BATCH, RTLNET_TXO_CTRL_RX_BATCH, on);
+}
+
+/*
+ * rtlnet_offload_feat_counters -- the ACK coalescer and batcher counters of the core.
+ * Returns: RTLNET_TXO_OK, or RTLNET_TXO_ERR_NOT_INIT when the core is absent.
+ */
+int rtlnet_offload_feat_counters(rtlnet_txo_feat_counters_t *out)
+{
+    if (!g_txo_ok) {
+        memset(out, 0, sizeof(*out));
+        return RTLNET_TXO_ERR_NOT_INIT;
+    }
+    return rtlnet_tcp_offload_feature_counters(&g_txo, out);
 }

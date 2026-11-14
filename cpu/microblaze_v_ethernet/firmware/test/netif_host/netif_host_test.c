@@ -18,6 +18,12 @@
  *   trailer      with rx_csum on: frames are delivered with the length of the trailer,
  *                bad L4 / bad IPv4 / missing trailer are dropped and their buffers come
  *                back, the lwIP CHECK flags follow the first trailer
+ *   batch        receive batching (the batch hardware present in the register model): the buffers switch to the
+ *                batch geometry (refused while a buffer is on loan), a batch of several frames is delivered
+ *                frame by frame in order, buffer references are counted per batch (a buffer comes back only
+ *                when its last frame is freed, and not before), the trailer policy applies per frame, a
+ *                malformed or oversized batch is dropped and its buffer returned, a batch that leaves no buffer
+ *                free to arm is copied, raw frames pass, the geometry switches back
  * One build line decides the zero-copy options (-DRTLNET_NETIF_ZERO_COPY_RX/_TX).
  * Ends with exactly one line: NETIF_HOST: PASS checks=<n> or FAIL.
  */
@@ -155,6 +161,9 @@ static int mock_rx_inject(const uint8_t *data, uint32_t n)
  * Register model: protocol wrapper (CAPS, CPU_CAPS) and the checksum offload window
  * ------------------------------------------------------------------------- */
 static uint32_t g_txo_ctrl;
+static uint32_t g_txo_caps = 0x05EE083Fu;
+static uint32_t g_txo_feat_mask;       /* CTRL bits 4:3 the model has (0: checksum-only build) */
+static uint32_t g_txo_cfg[5];          /* ACK_TIMER, ACK_LIMIT, BAT_TIMER, BAT_FRAMES, BAT_BYTES */
 
 uint32_t rtlnet_host_reg_read32(uintptr_t addr)
 {
@@ -162,10 +171,16 @@ uint32_t rtlnet_host_reg_read32(uintptr_t addr)
         switch ((uint32_t)(addr - RTLNET_PLAT_TXO_BASE)) {
         case RTLNET_TXO_REG_ID:      return RTLNET_TXO_ID_VALUE;
         case RTLNET_TXO_REG_VERSION: return RTLNET_TXO_VERSION_VALUE;
-        case RTLNET_TXO_REG_CAPS:    return 0x05EE083Fu;
+        case RTLNET_TXO_REG_CAPS:    return g_txo_caps;
+        case RTLNET_TXO_REG_CAPS2:   return (g_txo_feat_mask != 0u) ? (4u | (2056u << 8)) : 0u;
         case RTLNET_TXO_REG_CTRL:    return g_txo_ctrl;
-        case RTLNET_TXO_REG_STATUS:  return 3u;
+        case RTLNET_TXO_REG_STATUS:  return (g_txo_feat_mask != 0u) ? 0xFu : 3u;
         case RTLNET_TXO_REG_LATENCY: return 18u | (17u << 8);
+        case RTLNET_TXO_REG_ACK_TIMER:  return g_txo_cfg[0];
+        case RTLNET_TXO_REG_ACK_LIMIT:  return g_txo_cfg[1];
+        case RTLNET_TXO_REG_BAT_TIMER:  return g_txo_cfg[2];
+        case RTLNET_TXO_REG_BAT_FRAMES: return g_txo_cfg[3];
+        case RTLNET_TXO_REG_BAT_BYTES:  return g_txo_cfg[4];
         default:                     return 0u;
         }
     }
@@ -179,7 +194,9 @@ uint32_t rtlnet_host_reg_read32(uintptr_t addr)
 void rtlnet_host_reg_write32(uintptr_t addr, uint32_t value)
 {
     if (addr == RTLNET_PLAT_TXO_BASE + RTLNET_TXO_REG_CTRL) {
-        g_txo_ctrl = value & RTLNET_TXO_CTRL_MASK;
+        g_txo_ctrl = value & (RTLNET_TXO_CTRL_MASK | g_txo_feat_mask);
+    } else if (addr >= RTLNET_PLAT_TXO_BASE + RTLNET_TXO_REG_ACK_TIMER && addr <= RTLNET_PLAT_TXO_BASE + RTLNET_TXO_REG_BAT_BYTES) {
+        g_txo_cfg[(addr - RTLNET_PLAT_TXO_BASE - RTLNET_TXO_REG_ACK_TIMER) / 4u] = value;
     }
 }
 
@@ -486,6 +503,237 @@ static void test_trailer(void)
     check(lwip_stats.memp[MEMP_PBUF_POOL]->used == 0u, "trailer: no pbuf leaked");
 }
 
+
+/* ---------------------------------------------------------------------------
+ * Receive batching
+ * ------------------------------------------------------------------------- */
+static uint8_t g_big[8192];
+
+/* Frames of the given lengths, each padded to 8 bytes and followed by its trailer; returns the transfer length. */
+static uint32_t make_batch(uint8_t *buf, unsigned n, const uint32_t *lens, const uint16_t *flags, uint8_t tag0)
+{
+    uint32_t pos = 0u;
+
+    for (unsigned i = 0; i < n; i++) {
+        uint32_t len = lens[i];
+        uint32_t pad = (len + 7u) & ~7u;
+        uint8_t *t = &buf[pos + pad];
+
+        memset(&buf[pos], 0, pad + 8u);
+        make_frame(&buf[pos], len, (uint8_t)(tag0 + i));
+        t[0] = (uint8_t)len;
+        t[1] = (uint8_t)(len >> 8);
+        t[2] = 0xFFu;
+        t[3] = 0xFFu;
+        t[4] = (uint8_t)flags[i];
+        t[5] = (uint8_t)(flags[i] >> 8);
+        t[6] = 34u;
+        t[7] = 0xA5u;
+        pos += pad + 8u;
+    }
+    return pos;
+}
+
+/* Held pbuf k is frame (tag, len). */
+static int held_is(unsigned k, uint8_t tag, uint32_t len)
+{
+    const uint8_t *d;
+
+    if (k >= g_held_n || g_held[k] == NULL || g_held[k]->tot_len != len) {
+        return 0;
+    }
+    d = (const uint8_t *)g_held[k]->payload;
+    return (d[0] == tag && d[len - 1u] == (uint8_t)((len - 1u) * 3u + 1u)) ? 1 : 0;
+}
+
+static void test_batch(void)
+{
+    static const uint16_t good3[3] = { 0x00E3u, 0x00E3u, 0x00E3u };
+    const rtlnet_netif_stats_t *st = rtlnet_netif_stats();
+    uint32_t lens3[3] = { 64u, 1000u, 20u };
+    uint32_t xfer;
+    uint32_t base_batches;
+    uint32_t base_frames;
+    uint32_t base_copied;
+    uint32_t base_bad;
+    unsigned i;
+    unsigned k;
+
+    g_nif.input = hold_input;
+    g_held_n = 0u;
+    free_held();
+
+    /* A build without the batch hardware never takes the batch geometry. */
+    check(rtlnet_netif_set_rx_batch(1) == RTLNET_NETIF_BATCH_ABSENT && rtlnet_netif_rx_buf_bytes() == RTLNET_NETIF_BUF_BYTES,
+          "batch: refused without the hardware, buffers unchanged");
+    check(rtlnet_netif_set_rx_batch(0) == RTLNET_NETIF_BATCH_OK, "batch: off while off is a no-op");
+
+    /* The batch hardware appears (register model), discovery runs again, rx offload on. */
+    g_txo_caps = 0x05EE083Fu | RTLNET_TXO_CAPS_ACK_COALESCE | RTLNET_TXO_CAPS_RX_BATCH;
+    g_txo_feat_mask = RTLNET_TXO_CTRL_FEATURE_MASK;
+    memset(g_txo_cfg, 0, sizeof(g_txo_cfg));
+    rtlnet_features_rediscover();
+    check(rtlnet_offload_feat()->present == (RTLNET_OFFLOAD_FEAT_ACK | RTLNET_OFFLOAD_FEAT_BATCH) &&
+          rtlnet_offload_feat()->ack_flows == 4u && rtlnet_offload_feat()->bat_reserve == 2056u, "batch: features discovered");
+    check(rtlnet_offload_batch_set(1, 30u, 16u, 8192u) == RTLNET_OFFLOAD_ERR_NEED_RX, "batch: needs rx offload on");
+    check(rtlnet_offload_apply(RTLNET_OFFLOAD_ALL) == RTLNET_OFFLOAD_OK, "batch: apply(all)");
+
+    /* Geometry: refused while a buffer is on loan, granted when all are free. */
+    for (i = 0u; i < 4u; i++) {
+        (void)rtlnet_netif_dma_sr(0);   /* the mock completes the last transmit after a few status reads */
+    }
+    poll_n(4);
+    xfer = make_trailer_transfer(g_big, 70u, 0x00E3u, 0xFFFFu, 0x10u);
+    check(inject(g_big, xfer) == 1, "batch: a frame, single-frame geometry");
+#if RTLNET_NETIF_ZERO_COPY_RX
+    check(g_held_n == 1u && rtlnet_netif_set_rx_batch(1) == RTLNET_NETIF_BATCH_BUSY && !rtlnet_netif_rx_batch_active() &&
+          rtlnet_netif_rx_buf_bytes() == RTLNET_NETIF_BUF_BYTES, "batch: refused while a buffer is on loan");
+#endif
+    free_held();
+    poll_n(2);
+    check(rtlnet_netif_set_rx_batch(1) == RTLNET_NETIF_BATCH_OK && rtlnet_netif_rx_batch_active() &&
+          rtlnet_netif_rx_buf_bytes() == RTLNET_NETIF_BATCH_BUF_BYTES, "batch: geometry switched");
+    check(g_rx_armed && g_rx_cap == RTLNET_NETIF_BATCH_BUF_BYTES, "batch: a transfer of the batch buffer size is armed");
+    check(rtlnet_offload_batch_set(1, 30u, 16u, rtlnet_netif_rx_buf_bytes()) == RTLNET_OFFLOAD_OK &&
+          (g_txo_ctrl & RTLNET_TXO_CTRL_RX_BATCH) != 0u && g_txo_cfg[2] == 30u && g_txo_cfg[3] == 16u && g_txo_cfg[4] == 8192u,
+          "batch: hardware configured and switched on with the buffer size as byte limit");
+    check(rtlnet_offload_ack_set(1, 100u, 4u) == RTLNET_OFFLOAD_OK && (g_txo_ctrl & RTLNET_TXO_CTRL_ACK_COALESCE) != 0u &&
+          g_txo_cfg[0] == 100u && g_txo_cfg[1] == 4u, "batch: ack coalescing configured and on");
+    check(rtlnet_offload_batch_set(1, 30u, 65u, 8192u) == RTLNET_OFFLOAD_ERR_ARG, "batch: frame limit above the walker bound refused");
+    base_batches = st->rx_batches;
+    base_frames = st->rx_batch_frames;
+
+    /* One batch of three frames: delivered in order. */
+    xfer = make_batch(g_big, 3u, lens3, good3, 0x50u);
+    check(xfer == 72u + 1008u + 32u, "batch: transfer length");
+    check(inject(g_big, xfer) == 1 && g_held_n == 3u, "batch: three frames delivered");
+    check(held_is(0u, 0x50u, 64u) && held_is(1u, 0x51u, 1000u) && held_is(2u, 0x52u, 20u), "batch: frames in order, trailers cut off");
+    check(st->rx_batches == base_batches + 1u && st->rx_batch_frames == base_frames + 3u && st->rx_batch_max >= 3u,
+          "batch: counted");
+    check(rtlnet_offload_state()->rx_state == RTLNET_RX_TRAILER_ON, "batch: the first trailer made the state ON");
+    free_held();
+    poll_n(2);
+
+    /* Reference counting: the buffer stays while any frame is held, and no longer. */
+#if RTLNET_NETIF_ZERO_COPY_RX
+    xfer = make_batch(g_big, 3u, lens3, good3, 0x60u);
+    check(inject(g_big, xfer) == 1 && g_held_n == 3u, "batch refs: batch A held");
+    pbuf_free(g_held[0]);
+    pbuf_free(g_held[1]);
+    g_held[0] = NULL;
+    g_held[1] = NULL;
+    for (i = 0; i < 12u; i++) {
+        uint32_t l2[2] = { 40u + i, 90u };
+        static const uint16_t f2[2] = { 0x00E3u, 0x00E3u };
+        uint32_t x2 = make_batch(g_big, 2u, l2, f2, (uint8_t)(0x90u + i));
+        check(inject(g_big, x2) == 1, "batch refs: later batch accepted");
+        check(g_held_n >= 3u, "batch refs: later frames delivered");
+        while (g_held_n > 3u) {
+            pbuf_free(g_held[--g_held_n]);
+        }
+    }
+    check(held_is(2u, 0x62u, 20u), "batch refs: the frame still held keeps its buffer intact");
+    pbuf_free(g_held[2]);
+    g_held[2] = NULL;
+    g_held_n = 0u;
+    poll_n(2);
+    /* Nothing leaked: three batches can be held, the fourth leaves no buffer to arm and is copied. */
+    base_copied = st->rx_batch_copied;
+    for (i = 0; i < 3u; i++) {
+        xfer = make_batch(g_big, 3u, lens3, good3, (uint8_t)(0x20u + 8u * i));
+        check(inject(g_big, xfer) == 1, "batch refs: batch held");
+    }
+    check(g_held_n == 9u && st->rx_batch_copied == base_copied, "batch refs: three buffers on loan, no copy yet");
+    xfer = make_batch(g_big, 3u, lens3, good3, 0x70u);
+    check(inject(g_big, xfer) == 1 && g_held_n == 12u && st->rx_batch_copied == base_copied + 1u,
+          "batch refs: no buffer left to arm: the batch is copied");
+    check((g_held[9]->flags & PBUF_FLAG_IS_CUSTOM) == 0u && held_is(9u, 0x70u, 64u) && held_is(10u, 0x71u, 1000u),
+          "batch refs: the copied frames are pool pbufs with the right content");
+    check(held_is(0u, 0x20u, 64u) && held_is(8u, 0x30u + 2u, 20u) && g_rx_armed, "batch refs: loaned frames intact, channel armed again");
+    free_held();
+    poll_n(2);
+#endif
+
+    /* Trailer policy per frame: a bad L4 checksum in the middle drops that frame only. */
+    {
+        static const uint16_t fl[3] = { 0x00E3u, 0x00A3u, 0x00E3u };
+        uint32_t d0 = st->rx_drop_l4;
+
+        xfer = make_batch(g_big, 3u, lens3, fl, 0x40u);
+        check(inject(g_big, xfer) == 1 && g_held_n == 2u && st->rx_drop_l4 == d0 + 1u, "batch policy: one frame dropped");
+        check(held_is(0u, 0x40u, 64u) && held_is(1u, 0x42u, 20u), "batch policy: the others delivered in order");
+        free_held();
+        poll_n(2);
+    }
+
+    /* A single frame with its trailer is a batch of one. */
+    xfer = make_trailer_transfer(g_big, 333u, 0x00E3u, 0xFFFFu, 0x21u);
+    check(inject(g_big, xfer) == 1 && g_held_n == 1u && g_held[0]->tot_len == 333u, "batch: single frame delivered");
+    free_held();
+    poll_n(2);
+
+    /* Malformed transfers: dropped, counted, buffers come back. */
+    base_bad = st->rx_batch_bad;
+    xfer = make_batch(g_big, 3u, lens3, good3, 0x30u);
+    check(inject(g_big, xfer - 8u) == 1 && g_held_n == 0u && st->rx_batch_bad == base_bad + 1u, "batch bad: truncated transfer dropped");
+    g_big[xfer - 8u] = 0xFFu;
+    g_big[xfer - 7u] = 0x7Fu;
+    check(inject(g_big, xfer) == 1 && g_held_n == 0u && st->rx_batch_bad == base_bad + 2u, "batch bad: length beyond the buffer dropped");
+    xfer = make_batch(g_big, 3u, lens3, good3, 0x30u);
+    g_big[xfer - 1u] = 0u;
+    check(inject(g_big, xfer) == 1 && g_held_n == 0u && st->rx_batch_bad == base_bad + 3u, "batch bad: missing marker dropped");
+    memset(g_big, 0, sizeof(g_big));
+    {
+        uint32_t lens_many[RTLNET_NETIF_BATCH_MAX_FRAMES + 1u];
+        uint16_t fl_many[RTLNET_NETIF_BATCH_MAX_FRAMES + 1u];
+
+        for (i = 0; i < RTLNET_NETIF_BATCH_MAX_FRAMES + 1u; i++) {
+            lens_many[i] = 14u;
+            fl_many[i] = 0x00E3u;
+        }
+        xfer = make_batch(g_big, RTLNET_NETIF_BATCH_MAX_FRAMES + 1u, lens_many, fl_many, 0u);
+        check(inject(g_big, xfer) == 1 && g_held_n == 0u && st->rx_batch_bad == base_bad + 4u, "batch bad: more frames than the walker holds");
+        xfer = make_batch(g_big, RTLNET_NETIF_BATCH_MAX_FRAMES, lens_many, fl_many, 0u);
+        check(inject(g_big, xfer) == 1 && g_held_n == RTLNET_NETIF_BATCH_MAX_FRAMES, "batch: exactly the walker bound is delivered");
+        free_held();
+        poll_n(2);
+    }
+    /* After all that the buffers are all back (three can be held, none leaked). */
+    base_copied = st->rx_batch_copied;
+    for (i = 0; i < 3u; i++) {
+        xfer = make_batch(g_big, 3u, lens3, good3, 0x10u);
+        (void)inject(g_big, xfer);
+    }
+    check(st->rx_batch_copied == base_copied || RTLNET_NETIF_ZERO_COPY_RX == 0, "batch bad: no buffer leaked by the dropped transfers");
+    free_held();
+    poll_n(2);
+
+    /* A raw frame (rx offload off, trailers drained) passes whole in the batch geometry. */
+    check(rtlnet_offload_batch_set(0, RTLNET_OFFLOAD_KEEP, RTLNET_OFFLOAD_KEEP, RTLNET_OFFLOAD_KEEP) == RTLNET_OFFLOAD_OK &&
+          (g_txo_ctrl & RTLNET_TXO_CTRL_RX_BATCH) == 0u, "batch: switched off in hardware");
+    check(rtlnet_offload_apply(RTLNET_OFFLOAD_TX_IP | RTLNET_OFFLOAD_TX_L4) == RTLNET_OFFLOAD_OK &&
+          (g_txo_ctrl & RTLNET_TXO_CTRL_ACK_COALESCE) == 0u && rtlnet_offload_feat()->on == 0u,
+          "batch: turning rx off first switches the features off");
+    xfer = make_trailer_transfer(g_big, 80u, 0x0000u, 0u, 0x77u);
+    (void)inject(g_big, xfer);
+    free_held();
+    make_frame(g_big, 120u, 0x88u);
+    check(inject(g_big, 120u) == 1 && g_held_n == 1u && g_held[0]->tot_len == 120u, "batch: raw frame delivered whole");
+    free_held();
+    poll_n(2);
+
+    /* Back to the single-frame buffers. */
+    check(rtlnet_netif_set_rx_batch(0) == RTLNET_NETIF_BATCH_OK && !rtlnet_netif_rx_batch_active() &&
+          rtlnet_netif_rx_buf_bytes() == RTLNET_NETIF_BUF_BYTES && g_rx_armed && g_rx_cap == RTLNET_NETIF_BUF_BYTES,
+          "batch: single-frame geometry restored");
+    check(rtlnet_offload_apply(RTLNET_OFFLOAD_ALL) == RTLNET_OFFLOAD_OK, "batch: rx on again");
+    xfer = make_trailer_transfer(g_big, 100u, 0x00E3u, 0xFFFFu, 0x31u);
+    check(inject(g_big, xfer) == 1 && g_held_n == 1u && g_held[0]->tot_len == 100u, "batch: single-frame path works again");
+    free_held();
+    check(lwip_stats.memp[MEMP_PBUF_POOL]->used == 0u, "batch: no pbuf leaked");
+    (void)k;
+}
+
 int main(void)
 {
     ip4_addr_t ip;
@@ -513,6 +761,8 @@ int main(void)
     test_rx_hold();
     g_nif.input = ethernet_input;
     test_trailer();
+    test_batch();
+    g_nif.input = ethernet_input;
 
     if (g_fails == 0u) {
         printf("NETIF_HOST: PASS checks=%u\n", g_checks);

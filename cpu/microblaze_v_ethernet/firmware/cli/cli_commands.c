@@ -1064,6 +1064,14 @@ int cli_show_running(const MenuCommandContext *ctx)
     if ((rtlnet_offload_request() & RTLNET_OFFLOAD_RX) == 0u) {
         fmt_printf("offload rx off\n");
     }
+    if ((rtlnet_offload_feat()->on & RTLNET_OFFLOAD_FEAT_ACK) != 0u) {
+        fmt_printf("offload ack-coalesce on %u %u\n", (unsigned)rtlnet_offload_feat()->ack_timer_us,
+                   (unsigned)rtlnet_offload_feat()->ack_limit);
+    }
+    if ((rtlnet_offload_feat()->on & RTLNET_OFFLOAD_FEAT_BATCH) != 0u) {
+        fmt_printf("offload rx-batch on %u %u\n", (unsigned)rtlnet_offload_feat()->bat_timer_us,
+                   (unsigned)rtlnet_offload_feat()->bat_frames);
+    }
     fmt_printf("end\n");
     return 0;
 }
@@ -2011,6 +2019,52 @@ static void cli_print_cs_flags(uint32_t f)
 }
 
 /**
+ * @brief The receive features of the offload core in SHOW OFFLOAD: ACK coalescing and receive batching, their
+ *        configuration and counters, and the netif side of batching. Prints nothing without the features.
+ * @return None.
+ */
+static void cli_show_offload_features(void)
+{
+    const rtlnet_offload_feat_t *ft = rtlnet_offload_feat();
+    const rtlnet_netif_stats_t *ns = rtlnet_netif_stats();
+    rtlnet_txo_feat_counters_t fc;
+    if (ft->present == 0u) {
+        return;
+    }
+    if ((ft->present & RTLNET_OFFLOAD_FEAT_ACK) != 0u) {
+        fmt_printf("  ACK coalescing  : %s, timer %u us, limit %u ACKs per forwarded ACK, %u flows\n",
+                   (ft->on & RTLNET_OFFLOAD_FEAT_ACK) ? "on" : "off", (unsigned)ft->ack_timer_us, (unsigned)ft->ack_limit,
+                   (unsigned)ft->ack_flows);
+    }
+    if ((ft->present & RTLNET_OFFLOAD_FEAT_BATCH) != 0u) {
+        fmt_printf("  RX batching     : %s, timer %u us, at most %u frames and %u bytes (reserve %u), buffers %s\n",
+                   (ft->on & RTLNET_OFFLOAD_FEAT_BATCH) ? "on" : "off", (unsigned)ft->bat_timer_us, (unsigned)ft->bat_frames,
+                   (unsigned)ft->bat_bytes, (unsigned)ft->bat_reserve,
+                   rtlnet_netif_rx_batch_active() ? "batch geometry" : "single-frame geometry");
+    }
+    if (rtlnet_offload_feat_counters(&fc) == RTLNET_TXO_OK) {
+        if ((ft->present & RTLNET_OFFLOAD_FEAT_ACK) != 0u) {
+            fmt_printf("  ACK counters    : candidates %u, dropped %u, forwarded %u, flushed by timer %u, limit %u, ordering %u\n",
+                       (unsigned)fc.ack[RTLNET_TXO_CNT_ACK_CAND], (unsigned)fc.ack[RTLNET_TXO_CNT_ACK_DROPPED],
+                       (unsigned)fc.ack[RTLNET_TXO_CNT_ACK_FWD], (unsigned)fc.ack[RTLNET_TXO_CNT_ACK_FL_TIMER],
+                       (unsigned)fc.ack[RTLNET_TXO_CNT_ACK_FL_LIMIT], (unsigned)fc.ack[RTLNET_TXO_CNT_ACK_FL_ORDER]);
+        }
+        if ((ft->present & RTLNET_OFFLOAD_FEAT_BATCH) != 0u) {
+            fmt_printf("  Batch counters  : batches %u, frames %u, closed by bytes %u, count %u, timer %u, other %u\n",
+                       (unsigned)fc.bat[RTLNET_TXO_CNT_BAT_BATCHES], (unsigned)fc.bat[RTLNET_TXO_CNT_BAT_FRAMES],
+                       (unsigned)fc.bat[RTLNET_TXO_CNT_BAT_CL_BYTES], (unsigned)fc.bat[RTLNET_TXO_CNT_BAT_CL_COUNT],
+                       (unsigned)fc.bat[RTLNET_TXO_CNT_BAT_CL_TIMER], (unsigned)fc.bat[RTLNET_TXO_CNT_BAT_CL_OTHER]);
+        }
+    }
+    if ((ft->present & RTLNET_OFFLOAD_FEAT_BATCH) != 0u) {
+        fmt_printf("  Batch receive   : transfers walked %u, frames %u, most per transfer %u, bad %u, copied (no buffer "
+                   "left) %u, no loan %u\n", (unsigned)ns->rx_batches, (unsigned)ns->rx_batch_frames,
+                   (unsigned)ns->rx_batch_max, (unsigned)ns->rx_batch_bad, (unsigned)ns->rx_batch_copied,
+                   (unsigned)ns->rx_batch_noloan);
+    }
+}
+
+/**
  * @brief SHOW OFFLOAD: feature discovery, CTRL, the lwIP checksum flags (and
  *        a MISMATCH line when they disagree), counters, receive policy and
  *        the zero-copy build options.
@@ -2082,15 +2136,71 @@ int cli_show_offload(const MenuCommandContext *ctx)
                "copied %u, rx no buffer %u\n", RTLNET_NETIF_ZERO_COPY_RX ? "on" : "off", (unsigned)RTLNET_NETIF_RX_BUFS,
                (unsigned)RTLNET_NETIF_BUF_BYTES, RTLNET_NETIF_ZERO_COPY_TX ? "on" : "off", (unsigned)ns->tx_zero_copy,
                (unsigned)ns->tx_copied, (unsigned)ns->rx_no_buf);
+    cli_show_offload_features();
     return 0;
 }
 
 /**
- * @brief OFFLOAD [WHAT] [STATE] (config): request an offload on or off. WHAT
- *        is tx-ip, tx-l4, rx or all; the request is masked by what the
- *        bitstream has and applied through rtlnet_offload_apply (CTRL first
- *        or lwIP flags first, in the order that never loses a checksum).
- * @param ctx argv[0] = what, argv[1] = on or off.
+ * @brief ack-coalesce / rx-batch of the OFFLOAD command: configure and switch one receive feature of the core.
+ *        rx-batch on switches the netif to the batch buffers first (then the hardware byte limit is the buffer
+ *        size); rx-batch off switches the hardware off first, then the buffers back (when nothing is on loan).
+ * @param ctx argv[0] = feature word, argv[1] = on or off, argv[2] = timer in microseconds, argv[3] = limit
+ *            (ack-coalesce: ACKs dropped per forwarded ACK; rx-batch: frames per batch).
+ * @param feat RTLNET_OFFLOAD_FEAT_ACK or RTLNET_OFFLOAD_FEAT_BATCH.
+ * @param on 1 on, 0 off.
+ * @return 0, or -1.
+ */
+static int cli_offload_feature(const MenuCommandContext *ctx, uint32_t feat, int on)
+{
+    uint32_t timer = RTLNET_OFFLOAD_KEEP;
+    uint32_t limit = RTLNET_OFFLOAD_KEEP;
+    int rc;
+    if (ctx->argc > 2 && cli_parse_u32(ctx->argv[2], &timer) != 0) {
+        return cli_bad_value("timer (microseconds)", ctx->argv[2]);
+    }
+    if (ctx->argc > 3 && cli_parse_u32(ctx->argv[3], &limit) != 0) {
+        return cli_bad_value("limit", ctx->argv[3]);
+    }
+    if ((rtlnet_offload_feat()->present & feat) == 0u) {
+        fmt_printf("%% This build has no such feature (see show offload)\n");
+        return -1;
+    }
+    if (feat == RTLNET_OFFLOAD_FEAT_ACK) {
+        rc = rtlnet_offload_ack_set(on, timer, limit);
+    } else if (on) {
+        int nrc = rtlnet_netif_set_rx_batch(1);
+        if (nrc == RTLNET_NETIF_BATCH_BUSY) {
+            fmt_printf("%% Receive buffers are in use: try again when the traffic has stopped\n");
+            return -1;
+        }
+        rc = rtlnet_offload_batch_set(1, timer, limit, rtlnet_netif_rx_buf_bytes());
+        if (rc != RTLNET_OFFLOAD_OK) {
+            (void)rtlnet_netif_set_rx_batch(0);
+        }
+    } else {
+        rc = rtlnet_offload_batch_set(0, RTLNET_OFFLOAD_KEEP, RTLNET_OFFLOAD_KEEP, RTLNET_OFFLOAD_KEEP);
+        if (rc == RTLNET_OFFLOAD_OK && rtlnet_netif_set_rx_batch(0) == RTLNET_NETIF_BATCH_BUSY) {
+            fmt_printf("%% Batching is off; the batch buffers stay until the frames in flight are consumed (repeat to retry)\n");
+        }
+    }
+    if (rc == RTLNET_OFFLOAD_ERR_NEED_RX) {
+        fmt_printf("%% The feature works on the receive trailer: turn the receive offload on first (offload rx on)\n");
+    } else if (rc == RTLNET_OFFLOAD_ERR_ARG) {
+        fmt_printf("%% Value out of range (timer 0..65535 us, ACK limit 0..255, frames per batch 0..%u)\n",
+                   (unsigned)RTLNET_TXO_BATCH_MAX_FRAMES);
+    } else if (rc == RTLNET_OFFLOAD_ERR_IO) {
+        fmt_printf("%% CTRL did not read back as written\n");
+    }
+    return (rc == RTLNET_OFFLOAD_OK) ? 0 : -1;
+}
+
+/**
+ * @brief OFFLOAD [WHAT] [STATE] {TIMER} {LIMIT} (config): request an offload on or off. WHAT
+ *        is tx-ip, tx-l4, rx or all (the request is masked by what the
+ *        bitstream has and applied through rtlnet_offload_apply: CTRL first
+ *        or lwIP flags first, in the order that never loses a checksum), or
+ *        ack-coalesce / rx-batch (receive features, optional TIMER microseconds and LIMIT).
+ * @param ctx argv[0] = what, argv[1] = on or off, argv[2] = timer, argv[3] = limit (features only).
  * @return 0, or -1 for a bad word or a failed change.
  */
 int cli_offload(const MenuCommandContext *ctx)
@@ -2099,6 +2209,8 @@ int cli_offload(const MenuCommandContext *ctx)
     uint32_t want = rtlnet_offload_request();
     int on;
     int rc;
+    int feature = 0;
+    uint32_t feat = 0u;
     if (cli_word_is(ctx->argv[0], "tx-ip")) {
         bits = RTLNET_OFFLOAD_TX_IP;
     } else if (cli_word_is(ctx->argv[0], "tx-l4")) {
@@ -2107,8 +2219,16 @@ int cli_offload(const MenuCommandContext *ctx)
         bits = RTLNET_OFFLOAD_RX;
     } else if (cli_word_is(ctx->argv[0], "all")) {
         bits = RTLNET_OFFLOAD_ALL;
+    } else if (cli_word_is(ctx->argv[0], "ack-coalesce")) {
+        bits = 0u;
+        feature = 1;
+        feat = RTLNET_OFFLOAD_FEAT_ACK;
+    } else if (cli_word_is(ctx->argv[0], "rx-batch")) {
+        bits = 0u;
+        feature = 1;
+        feat = RTLNET_OFFLOAD_FEAT_BATCH;
     } else {
-        return cli_bad_value("offload (tx-ip, tx-l4, rx, all)", ctx->argv[0]);
+        return cli_bad_value("offload (tx-ip, tx-l4, rx, all, ack-coalesce, rx-batch)", ctx->argv[0]);
     }
     if (cli_word_is(ctx->argv[1], "on")) {
         on = 1;
@@ -2118,6 +2238,13 @@ int cli_offload(const MenuCommandContext *ctx)
         return cli_bad_value("state (on, off)", ctx->argv[1]);
     }
     rtlnet_features_discover();
+    if (feature) {
+        return cli_offload_feature(ctx, feat, on);
+    }
+    if (ctx->argc > 2) {
+        fmt_printf("%% The timer and limit arguments belong to ack-coalesce and rx-batch\n");
+        return -1;
+    }
     if ((bits & rtlnet_offload_supported()) == 0u) {
         fmt_printf("%% This build has no such offload (see show offload)\n");
         return -1;

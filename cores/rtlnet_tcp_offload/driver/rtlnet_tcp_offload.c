@@ -48,7 +48,7 @@ static int ready(const rtlnet_tcp_offload_t *ctx)
  *
  * Steps:
  *   1. Check ID and VERSION.
- *   2. Read CAPS and LATENCY into the context.
+ *   2. Read CAPS and LATENCY into the context, CAPS2 when a feature is built.
  * Returns: RTLNET_TXO_OK, RTLNET_TXO_ERR_ARG, or RTLNET_TXO_ERR_ID when the
  * window does not hold this core (an absent core reads 0).
  */
@@ -79,6 +79,16 @@ int rtlnet_tcp_offload_init(rtlnet_tcp_offload_t *ctx, uintptr_t base)
     ctx->max_frame = RTLNET_TXO_CAPS_MAX_FRAME(caps);
     ctx->tx_latency = RTLNET_TXO_LAT_TX(lat);
     ctx->rx_delay = RTLNET_TXO_LAT_RX(lat);
+    ctx->ack_present = ((caps & RTLNET_TXO_CAPS_ACK_COALESCE) != 0u) ? 1u : 0u;
+    ctx->batch_present = ((caps & RTLNET_TXO_CAPS_RX_BATCH) != 0u) ? 1u : 0u;
+    ctx->ack_flows = 0u;
+    ctx->batch_reserve = 0u;
+    if (ctx->ack_present != 0u || ctx->batch_present != 0u) {
+        uint32_t caps2 = rd(ctx, RTLNET_TXO_REG_CAPS2);
+        ctx->ack_flows = (ctx->ack_present != 0u) ? RTLNET_TXO_CAPS2_ACK_FLOWS(caps2) : 0u;
+        ctx->batch_reserve = (ctx->batch_present != 0u) ? RTLNET_TXO_CAPS2_BAT_RESERVE(caps2) : 0u;
+    }
+    ctx->feat_ctrl = 0u;
     ctx->initialised = 1u;
     return RTLNET_TXO_OK;
 }
@@ -90,7 +100,8 @@ int rtlnet_tcp_offload_init(rtlnet_tcp_offload_t *ctx, uintptr_t base)
  *   1. Reject bits outside RTLNET_TXO_CTRL_MASK, and bits the build lacks
  *      (tx_ip needs INS_IP, tx_l4 needs INS_TCP and INS_UDP, rx_csum needs
  *      RX_PRESENT).
- *   2. Write CTRL, read it back.
+ *   2. Write CTRL (the feature bits stay as rtlnet_tcp_offload_set_features set
+ *      them), read it back.
  * The hardware samples CTRL at each frame's first beat, so the new value
  * applies to frames that start after the write has taken effect (a few
  * clocks); the read-back confirms it.
@@ -113,8 +124,8 @@ int rtlnet_tcp_offload_set_ctrl(const rtlnet_tcp_offload_t *ctx, uint32_t ctrl)
         ((ctrl & RTLNET_TXO_CTRL_RX_CSUM) != 0u && ctx->rx_present == 0u)) {
         return RTLNET_TXO_ERR_UNSUPPORTED;
     }
-    wr(ctx, RTLNET_TXO_REG_CTRL, ctrl);
-    return (rd(ctx, RTLNET_TXO_REG_CTRL) == ctrl) ? RTLNET_TXO_OK : RTLNET_TXO_ERR_READBACK;
+    wr(ctx, RTLNET_TXO_REG_CTRL, ctrl | ctx->feat_ctrl);
+    return (rd(ctx, RTLNET_TXO_REG_CTRL) == (ctrl | ctx->feat_ctrl)) ? RTLNET_TXO_OK : RTLNET_TXO_ERR_READBACK;
 }
 
 /*
@@ -220,6 +231,238 @@ int rtlnet_tcp_offload_clear_counters(const rtlnet_tcp_offload_t *ctx)
         return rc;
     }
     wr(ctx, RTLNET_TXO_REG_CNT_CLEAR, 1u);
+    return RTLNET_TXO_OK;
+}
+
+/*
+ * rtlnet_tcp_offload_set_features -- switch ACK coalescing and receive batching.
+ *
+ * features is a combination of RTLNET_TXO_CTRL_ACK_COALESCE and RTLNET_TXO_CTRL_RX_BATCH (0 switches both off);
+ * the checksum bits of CTRL are kept as they are. Both features work on the receive trailer, so
+ * RTLNET_TXO_CTRL_RX_CSUM must be on while they are (the caller's order: rx_csum on first, features off first).
+ * Switching a feature off makes the hardware forward what it holds; wait_features_idle tells when that is done.
+ *
+ * Steps:
+ *   1. Reject other bits, and features the build does not have.
+ *   2. Read CTRL, replace the feature bits, write, read back.
+ *   3. Remember the bits so rtlnet_tcp_offload_set_ctrl keeps them.
+ * Returns: RTLNET_TXO_OK, RTLNET_TXO_ERR_ARG, RTLNET_TXO_ERR_UNSUPPORTED, RTLNET_TXO_ERR_READBACK,
+ * RTLNET_TXO_ERR_NOT_INIT.
+ */
+int rtlnet_tcp_offload_set_features(rtlnet_tcp_offload_t *ctx, uint32_t features)
+{
+    uint32_t ctrl;
+    int rc = ready(ctx);
+
+    if (rc != RTLNET_TXO_OK) {
+        return rc;
+    }
+    if ((features & ~RTLNET_TXO_CTRL_FEATURE_MASK) != 0u) {
+        return RTLNET_TXO_ERR_ARG;
+    }
+    if (((features & RTLNET_TXO_CTRL_ACK_COALESCE) != 0u && ctx->ack_present == 0u) ||
+        ((features & RTLNET_TXO_CTRL_RX_BATCH) != 0u && ctx->batch_present == 0u)) {
+        return RTLNET_TXO_ERR_UNSUPPORTED;
+    }
+    ctrl = (rd(ctx, RTLNET_TXO_REG_CTRL) & ~RTLNET_TXO_CTRL_FEATURE_MASK) | features;
+    wr(ctx, RTLNET_TXO_REG_CTRL, ctrl);
+    if (rd(ctx, RTLNET_TXO_REG_CTRL) != ctrl) {
+        return RTLNET_TXO_ERR_READBACK;
+    }
+    ctx->feat_ctrl = features;
+    return RTLNET_TXO_OK;
+}
+
+/*
+ * rtlnet_tcp_offload_wait_features_idle -- wait until the ACK coalescer and the batcher (those that are built)
+ * hold nothing: no held ACK, no open batch. Used after switching a feature off.
+ * max_polls bounds the STATUS reads (0 selects RTLNET_TXO_IDLE_POLL_DEFAULT). A held ACK or open batch is released
+ * by its timer at the latest, so the bound has to cover the timer registers.
+ * Returns: RTLNET_TXO_OK, RTLNET_TXO_ERR_TIMEOUT, RTLNET_TXO_ERR_NOT_INIT.
+ */
+int rtlnet_tcp_offload_wait_features_idle(const rtlnet_tcp_offload_t *ctx, uint32_t max_polls)
+{
+    uint32_t want;
+    uint32_t i;
+    int rc = ready(ctx);
+
+    if (rc != RTLNET_TXO_OK) {
+        return rc;
+    }
+    want = ((ctx->ack_present != 0u) ? RTLNET_TXO_STATUS_ACK_IDLE : 0u) |
+           ((ctx->batch_present != 0u) ? RTLNET_TXO_STATUS_BAT_IDLE : 0u);
+    if (max_polls == 0u) {
+        max_polls = RTLNET_TXO_IDLE_POLL_DEFAULT;
+    }
+    for (i = 0u; i < max_polls; i++) {
+        if ((rd(ctx, RTLNET_TXO_REG_STATUS) & want) == want) {
+            return RTLNET_TXO_OK;
+        }
+    }
+    return RTLNET_TXO_ERR_TIMEOUT;
+}
+
+/*
+ * rtlnet_tcp_offload_ack_config -- ACK coalescer timer and limit.
+ *
+ * timer_us: microseconds a held ACK waits at most (0..65535; 0 forwards at the next opportunity). limit: ACKs
+ * dropped per forwarded ACK at most (0..255; 0 and 1 act as 1). Written and read back.
+ * Returns: RTLNET_TXO_OK, RTLNET_TXO_ERR_ARG, RTLNET_TXO_ERR_UNSUPPORTED (no coalescer), RTLNET_TXO_ERR_READBACK,
+ * RTLNET_TXO_ERR_NOT_INIT.
+ */
+int rtlnet_tcp_offload_ack_config(const rtlnet_tcp_offload_t *ctx, uint32_t timer_us, uint32_t limit)
+{
+    int rc = ready(ctx);
+
+    if (rc != RTLNET_TXO_OK) {
+        return rc;
+    }
+    if (timer_us > 0xFFFFu || limit > 0xFFu) {
+        return RTLNET_TXO_ERR_ARG;
+    }
+    if (ctx->ack_present == 0u) {
+        return RTLNET_TXO_ERR_UNSUPPORTED;
+    }
+    wr(ctx, RTLNET_TXO_REG_ACK_TIMER, timer_us);
+    wr(ctx, RTLNET_TXO_REG_ACK_LIMIT, limit);
+    if (rd(ctx, RTLNET_TXO_REG_ACK_TIMER) != timer_us || rd(ctx, RTLNET_TXO_REG_ACK_LIMIT) != limit) {
+        return RTLNET_TXO_ERR_READBACK;
+    }
+    return RTLNET_TXO_OK;
+}
+
+/*
+ * rtlnet_tcp_offload_batch_config -- receive batcher timer and limits.
+ *
+ * timer_us: microseconds a batch waits after its first frame was complete (0..65535). max_frames: frames per batch
+ * (0..255, at most RTLNET_TXO_BATCH_MAX_FRAMES for a firmware that uses the walker as is; 0 and 1: every frame
+ * alone). max_bytes: bytes per batch, at least one full frame (RTLNET_TXO_RX_BUFFER_BYTES(1522)) and at most 65535;
+ * the hardware closes a batch as soon as a next frame of up to 2048 bytes might not fit, so the buffer of a batch
+ * is max_bytes long. Written and read back.
+ * Returns: RTLNET_TXO_OK, RTLNET_TXO_ERR_ARG, RTLNET_TXO_ERR_UNSUPPORTED (no batcher), RTLNET_TXO_ERR_READBACK,
+ * RTLNET_TXO_ERR_NOT_INIT.
+ */
+int rtlnet_tcp_offload_batch_config(const rtlnet_tcp_offload_t *ctx, uint32_t timer_us, uint32_t max_frames,
+                                    uint32_t max_bytes)
+{
+    int rc = ready(ctx);
+
+    if (rc != RTLNET_TXO_OK) {
+        return rc;
+    }
+    if (timer_us > 0xFFFFu || max_frames > RTLNET_TXO_BATCH_MAX_FRAMES || max_bytes > 0xFFFFu ||
+        max_bytes < RTLNET_TXO_RX_BUFFER_BYTES(1522u)) {
+        return RTLNET_TXO_ERR_ARG;
+    }
+    if (ctx->batch_present == 0u) {
+        return RTLNET_TXO_ERR_UNSUPPORTED;
+    }
+    wr(ctx, RTLNET_TXO_REG_BAT_TIMER, timer_us);
+    wr(ctx, RTLNET_TXO_REG_BAT_FRAMES, max_frames);
+    wr(ctx, RTLNET_TXO_REG_BAT_BYTES, max_bytes);
+    if (rd(ctx, RTLNET_TXO_REG_BAT_TIMER) != timer_us || rd(ctx, RTLNET_TXO_REG_BAT_FRAMES) != max_frames ||
+        rd(ctx, RTLNET_TXO_REG_BAT_BYTES) != max_bytes) {
+        return RTLNET_TXO_ERR_READBACK;
+    }
+    return RTLNET_TXO_OK;
+}
+
+/*
+ * rtlnet_tcp_offload_feature_counters -- read the ACK coalescer and batcher counters (0 for a feature not built).
+ * Returns: RTLNET_TXO_OK, RTLNET_TXO_ERR_ARG, RTLNET_TXO_ERR_NOT_INIT.
+ */
+int rtlnet_tcp_offload_feature_counters(const rtlnet_tcp_offload_t *ctx, rtlnet_txo_feat_counters_t *counters)
+{
+    uint32_t i;
+    int rc = ready(ctx);
+
+    if (rc != RTLNET_TXO_OK) {
+        return rc;
+    }
+    if (counters == NULL) {
+        return RTLNET_TXO_ERR_ARG;
+    }
+    for (i = 0u; i < RTLNET_TXO_NUM_ACK_COUNTERS; i++) {
+        counters->ack[i] = (ctx->ack_present != 0u) ? rd(ctx, RTLNET_TXO_REG_CNT_ACK(i)) : 0u;
+    }
+    for (i = 0u; i < RTLNET_TXO_NUM_BAT_COUNTERS; i++) {
+        counters->bat[i] = (ctx->batch_present != 0u) ? rd(ctx, RTLNET_TXO_REG_CNT_BAT(i)) : 0u;
+    }
+    return RTLNET_TXO_OK;
+}
+
+/*
+ * rtlnet_tcp_offload_batch_walk -- split one received DMA transfer into its frames.
+ *
+ * buf holds xfer_len bytes the DMA wrote. With receive batching (or rx_csum alone: a batch of one) the transfer is
+ * [frame padded to 8 bytes][trailer] repeated; the trailer, not the frame, carries the length, so the walk starts
+ * at the end: the last 8 bytes are a trailer, its length field says where its frame starts, the 8 bytes before that
+ * are the previous trailer, and so on until offset 0. Frames are returned in arrival order.
+ *
+ * Every step is bounds-checked against what remains of the buffer: a transfer that is not a multiple of 8 bytes or
+ * shorter than 16, a missing marker, a zero or oversized length, a length that points before the start of the
+ * buffer, or a remainder too short for another frame all return RTLNET_TXO_ERR_BATCH and *count 0. More than
+ * max_frames frames return RTLNET_TXO_ERR_FULL, *count 0. The padding bytes are not inspected.
+ *
+ * Steps:
+ *   1. Validate arguments and the transfer length.
+ *   2. Walk backwards, filling frames[0..n-1] from the end.
+ *   3. Reverse the array in place.
+ * Returns: RTLNET_TXO_OK with *count frames (at least 1), RTLNET_TXO_ERR_ARG, RTLNET_TXO_ERR_BATCH,
+ * RTLNET_TXO_ERR_FULL.
+ */
+int rtlnet_tcp_offload_batch_walk(const uint8_t *buf, uint32_t xfer_len, rtlnet_txo_batch_frame_t *frames,
+                                  uint32_t max_frames, uint32_t *count)
+{
+    uint32_t pos;
+    uint32_t n = 0u;
+    uint32_t i;
+
+    if (buf == NULL || frames == NULL || count == NULL || max_frames == 0u) {
+        return RTLNET_TXO_ERR_ARG;
+    }
+    *count = 0u;
+    if (xfer_len < (2u * RTLNET_TXO_TRAILER_BYTES) || (xfer_len % RTLNET_TXO_TRAILER_BYTES) != 0u) {
+        return RTLNET_TXO_ERR_BATCH;
+    }
+    pos = xfer_len;
+    while (pos != 0u) {
+        const uint8_t *t;
+        uint32_t len;
+        uint32_t span;
+
+        if (pos < (2u * RTLNET_TXO_TRAILER_BYTES)) {
+            return RTLNET_TXO_ERR_BATCH;
+        }
+        t = &buf[pos - RTLNET_TXO_TRAILER_BYTES];
+        if (t[7] != RTLNET_TXO_TRAILER_MARKER) {
+            return RTLNET_TXO_ERR_BATCH;
+        }
+        len = (uint32_t)t[0] | ((uint32_t)t[1] << 8);
+        if (len == 0u || len > RTLNET_TXO_BATCH_MAX_FRAME) {
+            return RTLNET_TXO_ERR_BATCH;
+        }
+        span = RTLNET_TXO_ROUNDUP8(len) + RTLNET_TXO_TRAILER_BYTES;
+        if (span > pos) {
+            return RTLNET_TXO_ERR_BATCH;
+        }
+        if (n >= max_frames) {
+            return RTLNET_TXO_ERR_FULL;
+        }
+        pos -= span;
+        frames[n].offset = pos;
+        frames[n].trailer.frame_len = (uint16_t)len;
+        frames[n].trailer.l4_sum = (uint16_t)((uint32_t)t[2] | ((uint32_t)t[3] << 8));
+        frames[n].trailer.flags = (uint16_t)((uint32_t)t[4] | ((uint32_t)t[5] << 8));
+        frames[n].trailer.l4_offset = t[6];
+        n++;
+    }
+    for (i = 0u; i < n / 2u; i++) {
+        rtlnet_txo_batch_frame_t tmp = frames[i];
+        frames[i] = frames[n - 1u - i];
+        frames[n - 1u - i] = tmp;
+    }
+    *count = n;
     return RTLNET_TXO_OK;
 }
 

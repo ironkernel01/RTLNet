@@ -3,11 +3,13 @@
 | Item | Value |
 |---|---|
 | Core | `rtlnet_tcp_offload` |
-| Document revision | 10-22-2026 |
+| Document revision | 11-14-2026 |
+| License | source-available (see `LICENSE.md`) |
 | Register ID / VERSION | `"TCPO"` = `0x5443504F` / `0x10222026` |
 | Protocol sub-map slot | `0x9000` (`0x44A1_9000`), instance `u_cpu_offload` in `rtlnet_eth_protocol` (`CPU_TCP_OFFLOAD_ENABLE`); wrapper `CPU_CAPS` bit 17 = TX present, bit 18 = RX present |
+| Optional receive features | `ACK_COALESCE`, `RX_BATCH` (default 0 = not built, netlist unchanged), section 12 |
 | Clock | one stream clock `clk` (the CPU stream clock); register file crossing from `s_axi_aclk` inside the core |
-| Verification | `tb_rtlnet_tcp_offload` (4906 checks, 5 regression entries), driver host test (69 checks) |
+| Verification | `tb_rtlnet_tcp_offload` (4907 checks, 5 regression entries), `tb_rtlnet_tcp_offload_feat` (receive features, 5 entries, section 13), driver host test (4449 checks) |
 | Synthesis (xc7a200t-3, 250 MHz) | WNS +0.281 ns, own logic <= 2 LUT levels, 1867 LUT, 3613 FF, 1.5 BRAM tiles |
 
 ## 1. Purpose
@@ -24,6 +26,10 @@ on the CPU DMA stream and does that work in logic:
 Both paths are bit-exact pass-through at power-up (`CTRL = 0`), so firmware that does not know the core is not
 affected. Only the pieces the CPU uses are offloaded: IPv4 header, TCP, UDP. ICMP and every other checksum stay in
 software.
+
+Two optional receive blocks cut the CPU's per-frame work further (section 12): **ACK coalescing** (hardware holds back pure TCP
+ACKs of a flow and forwards only the newest per interval) and **receive batching** (consecutive frames, each with its trailer,
+leave as one DMA transfer). Both are parameters, off after reset, and change nothing in lwIP's TCP logic.
 
 ```
           CPU DMA MM2S                                                         CPU TX FIFO
@@ -56,6 +62,12 @@ All four streams are the RTLNet stream (64-bit `tdata`, `tkeep` contiguous on th
 | `RAM_STYLE` | `"block"` | TX frame buffer RAM style |
 | `SB_RAM_STYLE` | `"distributed"` | TX sideband queue RAM style |
 | `MAX_FRAME_BYTES` | 1518 | largest frame; must give 256-word slots (1025..2048) |
+| `ACK_COALESCE` | 0 | 1 builds the ACK coalescer (`rtlnet_tcp_offload_ackco`, section 12.1) |
+| `ACK_FLOWS` | 4 | coalescer flow table entries, 2..16 |
+| `ACK_RAM_STYLE` | `"distributed"` | coalescer slot RAM, `(ACK_FLOWS + 2) x 128` bytes (a flow count, not kilobytes: under 1 KB) |
+| `RX_BATCH` | 0 | 1 builds the receive batcher (`rtlnet_tcp_offload_batch`, section 12.2) |
+| `RX_BATCH_MAX_FRAME_BYTES` | 2048 | largest frame the batch byte limit keeps room for (multiple of 8) |
+| `CLK_HZ` | 100000000 | `clk` frequency, for the microsecond tick of the two features |
 
 ## 3. Register map (4 KiB window)
 
@@ -81,6 +93,10 @@ Offsets and bits are defined once, in `driver/rtlnet_tcp_offload.h`; `hdl/rtlnet
 | 0x068 | `RX_IP_BAD` | RO | IPv4 frame whose header is malformed or whose header checksum is bad |
 | 0x06C | `RX_L4_BAD` | RO | TCP/UDP segment checked and its checksum bad |
 | 0x070 | `RX_UNVERIFIED` | RO | L4 check not possible (not IP, fragment, other protocol, UDP checksum 0, malformed) |
+
+The registers of the two receive features (`CTRL` bits 3 and 4, `STATUS` bits 2 and 3, `CAPS` bits 6 and 7, `CAPS2`, the
+configuration registers 0x020..0x030 and the counters 0x080 / 0x0A0) are appended in section 12.3; in a build without them they
+read 0 and ignore writes, and every register above is unchanged.
 
 Counters are 32-bit and wrap. Undefined offsets read 0 and ignore writes. CTRL is sampled by each datapath at the
 first beat of every frame (the first beat the core accepts into its buffer / delay line), so a CTRL write changes
@@ -326,11 +342,290 @@ xc7a200tsbg484-3, the 10G stand-in):
   the single-path and none-present builds with their bench, synthesis and host-test cases; the wrapper parameters
   `CPU_TCP_OFFLOAD_TX_ENABLE` / `CPU_TCP_OFFLOAD_RX_ENABLE`; the "same firmware binary on all builds" proof. The
   CAPS bits `TX_PRESENT` / `RX_PRESENT` and the wrapper `CPU_CAPS` bits 17 / 18 are in place for them and read 1.
+* Receive features: the ACK coalescer holds pure ACKs only for the allow-listed shapes (no options, or NOP NOP timestamp, IHL 5,
+  untagged); every other ACK passes unchanged, so a peer that sends SACK or window-scale options in its ACKs is not coalesced.
+  The batcher's byte guarantee is for frames up to `RX_BATCH_MAX_FRAME_BYTES`. Both need `CTRL.rx_csum`.
 * Integrated in the protocol wrapper's CPU path (RX after the classifier, before the DMA S2MM; TX after the DMA MM2S,
   before the CPU TX FIFO) with the `CPU_CAPS` bits 17 / 18 (phase B).
 
-## 12. Revision history
+## 12. Receive features: ACK coalescing and receive batching
+
+Two optional blocks sit on the receive path between the trailer stage and the DMA. Both are parameters (`ACK_COALESCE`,
+`RX_BATCH`, default 0 = not built: the netlist, the registers and the stream of the checksum-only core are unchanged, which
+is what the H.264 design instantiates), both are off after reset (`CTRL` bits 3 and 4 = 0) and then pass the stream
+bit-exact, and both work on the trailer, so `CTRL.rx_csum` must be on while they are. They exist because the soft CPU's
+cost per frame, not the link, limits TCP: a frame costs one DMA transfer, one lwIP input and, for a bulk sender, one
+acknowledgement frame per two segments received from the peer.
+
+```
+classifier -> [rx: delay line, trailer] -> [ackco] -> [batch] -> AXI DMA S2MM
+                 sideband "frame has a trailer" (m_axis_trl) rides with every beat through a ninth lane
+```
+
+`rtlnet_tcp_offload_rx` gets the parameter `SIDEBAND` (set when either feature is built); its output slice then carries one
+extra bit per beat, `1` for every beat of a frame that has a trailer (the padded data beats and the trailer), so the two
+blocks can tell a trailer from frame data that happens to end in `0xA5`. A frame that started while `rx_csum` was off has no
+trailer and bypasses both blocks unchanged.
+
+Clock: the CPU stream clock `clk`, as the rest of the core. One microsecond tick (`CLK_HZ / 1_000_000` clocks, parameter
+`CLK_HZ`, default 100 MHz) is shared by the two blocks.
+
+### 12.1 ACK coalescing (`rtlnet_tcp_offload_ackco`)
+
+While the board sends bulk TCP, the peer returns a stream of pure ACKs. The block holds the newest pure ACK of a flow and
+forwards it after a timer, dropping the ACKs it replaces.
+
+**Candidate.** A frame is a coalescing candidate when the trailer says (flags `& 0xFF == 0xE3`): IPv4, TCP, not UDP, not
+VLAN, not a fragment, IPv4 header checksum good, TCP checksum checked and good; and the frame bytes say: EtherType `0x0800`,
+IP version/IHL `0x45` (no IP options), TCP flags byte exactly `0x10` (ACK; SYN, FIN, RST, PSH, URG, ECE, CWR and the NS bit all
+clear), IP total length 40 (no TCP options) or 52 with exactly the options `01 01 08 0A` (NOP, NOP, timestamp), the frame at
+least `14 + total length` bytes, and the frame short enough to be staged (at most 9 data beats and the trailer). The option
+test is an allow-list: any other layout (SACK blocks, MSS, window scale, timestamp after the NOPs, any padding) makes the frame
+a non-candidate, so no option the block does not know can be swallowed. The flow key is the 4-tuple (source and destination
+address and port).
+
+**State.** `ACK_FLOWS` entries (default 4, 2..16). Per entry: key, held slot, held ack and sequence number, coalesce count,
+start time, last candidate ack, LRU rank. A candidate of an unknown flow takes an invalid entry, else the least recently used
+one; a held ACK of the victim is forwarded first (counted as an ordering flush).
+
+**Rules for a candidate N of a known flow** (sequence numbers compared in 32-bit sequence space, `(a - b)` as a signed value):
+
+| Held ACK H | Condition | Action |
+|---|---|---|
+| yes | `ack(N) > ack(H)` and `seq(N) >= seq(H)` | H is dropped (`ACK_DROPPED`), N is held, count + 1. When the count reaches `ACK_LIMIT`, N is forwarded at once instead (`ACK_FL_LIMIT`) |
+| yes | same ack (duplicate ACK, window update), lower ack, or lower seq (keep-alive shape, old ACK) | H is forwarded, then N is forwarded at once; order kept (`ACK_FL_ORDER`) |
+| no | `ack(N)` equal to or lower than the last candidate ack of the flow | N is forwarded at once |
+| no | otherwise | N is held; its timer starts |
+
+Why these rules are safe for TCP:
+
+* **Equal acknowledgement numbers are never dropped, and never delayed behind a later frame.** Duplicate ACKs (fast
+  retransmit counts three of them) and window updates (same ack, new window) reach the CPU in order and at once. This also
+  covers the zero-window case: the ACK that re-opens a window carries the same ack number as the one that closed it.
+* **A newer ACK replaces an older one only when it acknowledges more.** It carries the newest window and the newest
+  timestamp options (TSval / TSecr), so lwIP's window, RTT and PAWS state after the coalesced ACK equal the state after the
+  whole run. A smaller window with a larger ack is also the newest information.
+* **Lower sequence number.** A keep-alive probe has `seq = snd_nxt - 1`; a pure ACK with a lower sequence number than the held
+  one is never merged: the held ACK is forwarded first and the probe follows at once, so the reply a probe asks for is not
+  delayed behind a timer and its sequence number is not lost.
+* **SACK and every unknown option are forwarded untouched** (allow-list above), so loss recovery sees every SACK block.
+* **Delayed ACK interplay.** The peer's delayed-ACK timer is untouched; the block adds at most `ACK_TIMER` microseconds to the
+  newest ACK of a run and nothing to any other frame. With the default 200 us the added delay is far below a delayed-ACK
+  timer (40 ms or more) and below one wire time of a 1500-byte frame at 10 Mb/s. The count limit forces an ACK out after at
+  most `ACK_LIMIT` replacements, so ACK clocking is never starved.
+* **lwIP counts ACKs for congestion window growth** (slow start adds one MSS per ACK, congestion avoidance `MSS*MSS/cwnd`).
+  Coalescing reduces the number of ACKs, so the window grows more slowly by the coalescing ratio; the demo's send buffer (24 MSS)
+  bounds the window anyway. `ACK_LIMIT` is the control to trade ratio against growth.
+
+**Ordering.** Any non-candidate frame whose flow can be read (IPv4, IHL 5, TCP, not a fragment, not VLAN: data, bad checksum,
+other flags, options not on the allow-list) first forwards the held ACK of its own flow. A TCP frame whose flow cannot be read
+(VLAN tag, IP options, fragment) and a frame that carries no trailer forward every held ACK. Frames of other flows and frames
+that are not TCP over IPv4 (ARP, ICMP, UDP, IPv6, ...) are never delayed and never reordered against a held ACK. Within a flow
+the order of every frame is preserved.
+
+**Flush.** A held ACK is forwarded when its age (time since it became held, not restarted by a replacement) reaches `ACK_TIMER`
+(microseconds; 0 forwards at the next opportunity), when the count limit is reached, by the rules above, and when the feature
+is switched off (every held ACK, in table order). A timer flush also forgets the flow's last ack, so an idle flow starts clean;
+switching the feature off forgets the whole table.
+
+**Datapath.** The first `ACK_HEAD_BEATS` (10) beats of every frame are staged in a slot of 16 beats of one RAM
+(`rtlnet_ram_core`, `ACK_RAM_STYLE`, default distributed; `(ACK_FLOWS + 2)` slots of 128 bytes = 768 bytes for four flows; the
+parameter is a flow count, not a kilobyte count, because the block is smaller than one kilobyte). A frame of up to 10 beats
+(the candidates and every short frame) is decided as a whole; a longer frame is decided on its head and its tail passes
+cut-through after the head. Slots are never copied: a held ACK stays in its slot, a replaced one frees its slot, a forwarded one
+goes into a small emit queue that a second state machine reads out into the output slice.
+
+```
+state (input):  ARB -> CAP (beats into the slot RAM, fields into registers) -> DEC1 (key compares, sequence compares)
+                -> DEC2 (decision) -> FLUSH (held ACKs, one per clock, into the emit queue) -> FINAL (hold / replace /
+                forward the staged frame) -> ARB            (long frame: FINAL -> TAIL: pass the tail through -> ARB)
+ARB also: expired timers and "feature off" start a FLUSH; the table is cleared while the feature is off.
+
+timeline of one run (T = ACK_TIMER, 1 us ticks):
+  rx output   : A1 ....... A2 ... A3 ..............................   (frame + trailer)
+  held slot   : [A1       ][A2 replaced A1][A3 replaced A2 ...... ]  timer started when A1 was held
+  output      :                                                  A3  (at t(A1 held) + T)
+  counters    : CAND 3, DROPPED 2, FWD 1, FL_TIMER 1
+```
+
+Cost per frame: about `beats + 5` clocks between frames, with the head drain of a long frame stalling the input for about
+10 clocks; far below the 64-byte frame rate of 1 Gb/s at the 100 MHz CPU stream clock. With the feature switched off every frame
+still takes the staging path, unchanged in content (latency grows by about 20 clocks).
+
+**Choosing the timer.** ACKs are only merged when they arrive closer together than `ACK_TIMER`. A peer that acknowledges every
+second segment of a 106 Mb/s stream (1460-byte segments, one every 110 us) sends an ACK about every 220 us: the default 200 us
+then merges almost nothing, while 500..1000 us merges two to five ACKs per forwarded ACK. The cost is the delay of the newest
+ACK, which must stay well below the time the sender needs to use its window (35 KB of send buffer at 106 Mb/s: about 2.6 ms; at
+1 Gb/s: 280 us, so a timer near 100 us is the limit there). Measure with `offload ack-coalesce on <timer> <limit>` and the counters
+of `show offload`.
+
+### 12.2 Receive batching (`rtlnet_tcp_offload_batch`)
+
+Today every CPU-path frame is one DMA transfer. With batching, consecutive frames leave as one transfer.
+
+**Format of a batch (one DMA transfer, one `tlast`):**
+
+```
+offset 0                                                       transfer length (multiple of 8)
+| frame 1 (padded to 8) | trailer 1 | frame 2 (padded to 8) | trailer 2 | ... | frame n (padded) | trailer n |
+                                                                                                   tlast
+```
+
+Every trailer is the unchanged 8-byte trailer of section 5.1; its length field gives the frame boundary. The firmware cannot walk
+forward (the length stands after the frame), so it walks **backwards** from the end of the transfer: the last 8 bytes are
+trailer n, its length gives the start of frame n, the 8 bytes before that are trailer n-1, and so on until offset 0. With
+batching switched off, or for a lone frame, the transfer is `[frame padded][trailer]`, the stream of section 5 (a batch of one).
+
+**How a batch closes.** The trailer beat of a batched frame is held in a register until the next beat shows what follows:
+
+* the next frame starts and no limit has been reached: the held beat leaves with `tlast` clear and the batch continues
+  (one clock of bubble per frame);
+* a limit, the timer, the switch-off, or a frame without trailer closes the batch: the held beat leaves with `tlast` set.
+
+Limits (registers):
+
+| Register | Meaning |
+|---|---|
+| `BAT_FRAMES` | frames per batch, at most (0 and 1: every frame alone) |
+| `BAT_BYTES` | bytes per batch, at most: **no transfer is longer than this value** for frames of at most `RX_BATCH_MAX_FRAME_BYTES` (default 2048). After a frame the batch is closed when `bytes + roundup8(RX_BATCH_MAX_FRAME_BYTES) + 8 > BAT_BYTES`, so any next frame fits. The firmware sets `BAT_BYTES` to the size of its DMA buffer. A frame longer than `RX_BATCH_MAX_FRAME_BYTES` (the MAC passes at most 1518 bytes) is outside the guarantee |
+| `BAT_TIMER` | microseconds a batch waits, counted from the moment the trailer of its first frame was held; a single frame on an idle line leaves after this time at most (0: at once) |
+
+A byte limit that cannot hold even one maximum frame closes the batch after every frame; the batch of a single oversized frame
+is carried whole (the limit is a closing rule, not a drop).
+
+```
+timeline, BAT_FRAMES 3, three frames back to back:
+  rx -> batch :  F1 data.. T1 | F2 data.. T2 | F3 data.. T3
+  held trailer:        [T1 ........]  [T2 ........]  [T3]   (T1 leaves when F2's first beat arrives, T2 when F3's)
+  output      :  F1 data..      F2 data..      F3 data.. T1 T2 -> in order: F1 T1 F2 T2 F3 T3(tlast, count limit)
+single frame, idle line:  F1 data.. [T1 held ........ BAT_TIMER ........] T1(tlast)
+```
+
+`STATUS.BAT_IDLE` is 1 when no batch is open and nothing is held. Switching `CTRL.rx_batch` off closes an open batch
+(counted `other`); the transfer is delivered, so the firmware can wait on `BAT_IDLE` and then change its buffers.
+
+Events and counters: batches closed, frames carried, closes by byte limit / frame count / timer / other (feature off or a frame
+without trailer follows). Priority when several apply at the same close: count, bytes, timer, other. Sum of the closes = batches.
+
+### 12.3 Registers added (all other offsets and bits are those of section 3; the new ones read 0 and ignore writes in a build without the feature)
+
+| Offset | Name | Access | Content |
+|---:|---|---|---|
+| 0x008 bit 6 / 7 | `CAPS.ACK_COALESCE` / `CAPS.RX_BATCH` | RO | feature built |
+| 0x00C bit 3 / 4 | `CTRL.ack_coalesce` / `CTRL.rx_batch` | RW | enable; power-up 0; sampled at a frame's start and when a held item is released. Read back as written in a build that has the feature, 0 otherwise |
+| 0x010 bit 2 / 3 | `STATUS.ACK_IDLE` / `STATUS.BAT_IDLE` | RO | no held ACK and no frame inside the coalescer / no batch open |
+| 0x01C | `CAPS2` | RO | [7:0] `ACK_FLOWS`, [23:8] bytes the batch limit keeps free for a next frame (`roundup8(RX_BATCH_MAX_FRAME_BYTES) + 8`) |
+| 0x020 | `ACK_TIMER` | RW | [15:0] microseconds, reset 200 |
+| 0x024 | `ACK_LIMIT` | RW | [7:0] ACKs dropped per forwarded ACK, reset 8 (0 and 1 act as 1) |
+| 0x028 | `BAT_TIMER` | RW | [15:0] microseconds, reset 30 |
+| 0x02C | `BAT_FRAMES` | RW | [7:0] frames per batch, reset 16 |
+| 0x030 | `BAT_BYTES` | RW | [15:0] bytes per batch, reset 8192 |
+| 0x080 | `ACK_CAND` | RO | pure-ACK candidates seen |
+| 0x084 | `ACK_DROPPED` | RO | held ACKs replaced by a newer one and dropped |
+| 0x088 | `ACK_FWD` | RO | candidate ACKs forwarded; at idle `ACK_CAND = ACK_DROPPED + ACK_FWD` |
+| 0x08C | `ACK_FL_TIMER` | RO | held ACKs forwarded by the timer |
+| 0x090 | `ACK_FL_LIMIT` | RO | candidates forwarded at once because the count limit was reached |
+| 0x094 | `ACK_FL_ORDER` | RO | held ACKs forwarded by ordering (later frame of the flow, duplicate / window update / lower ack or seq, eviction, switch-off) |
+| 0x0A0 | `BAT_BATCHES` | RO | batches closed |
+| 0x0A4 | `BAT_FRAMES_CNT` | RO | frames carried in batches |
+| 0x0A8 | `BAT_CL_BYTES` | RO | closed by the byte limit |
+| 0x0AC | `BAT_CL_COUNT` | RO | closed by the frame-count limit |
+| 0x0B0 | `BAT_CL_TIMER` | RO | closed by the timer |
+| 0x0B4 | `BAT_CL_OTHER` | RO | closed by switch-off or a following frame without trailer |
+
+`CNT_CLEAR` clears these counters too. The read path has a second parallel stage for 0x080..0x0FF; the registers of the
+checksum-only core are read through the original stage, unchanged. `ID` and `VERSION` are unchanged: the firmware discovers the
+features from `CAPS`.
+
+### 12.4 Wrapper and board
+
+`rtlnet_eth_protocol` passes `CPU_TCP_OFFLOAD_ACK_COALESCE`, `CPU_TCP_OFFLOAD_RX_BATCH` and `CPU_TCP_OFFLOAD_ACK_FLOWS` (defaults
+0, 0, 4) to `u_cpu_offload`, and `CPU_AXIS_CLK_HZ` as `CLK_HZ`. The Ethernet demo top (`rtlnet_nexys_video_eth_top`) sets both
+to 1; the H.264 top keeps the defaults.
+
+### 12.5 What the firmware does
+
+The Ethernet demo firmware (`cpu/microblaze_v_ethernet/firmware`) selects the new paths at run time from the CAPS bits; a bitstream
+without them runs the code of the checksum-only firmware.
+
+* **Discovery:** `rtlnet_tcp_offload_init` reads `CAPS` and `CAPS2`; `rtlnet_offload_feat()` reports what is present.
+* **Enable (CLI `offload ack-coalesce on [timer] [limit]`, `offload rx-batch on [timer] [frames]`):** rx offload must be on.
+  rx-batch: the netif switches its receive memory from 16 buffers of 2 KiB to 4 buffers of 8 KiB (refused while a buffer is on loan
+  to lwIP), then `BAT_BYTES` is set to the buffer size and `CTRL.rx_batch` to 1. ack-coalesce: timer and limit, then the bit.
+* **Disable:** the bit first, then `STATUS.ACK_IDLE` / `BAT_IDLE` (bounded), then the buffers back to 2 KiB. Turning rx offload off
+  switches both features off first.
+* **Receive:** one DMA transfer per poll step. `rtlnet_tcp_offload_batch_walk()` splits it (bounds-checked: truncated, bad
+  length, misaligned, bad marker, more than 64 frames are refused and the transfer is dropped); each frame goes through the same
+  trailer policy as before (bad IPv4 / TCP checksum dropped and counted) and is handed to lwIP as a zero-copy `PBUF_REF` pbuf
+  with a reference count per DMA buffer. The buffer returns to the free list when the last pbuf of the batch is freed. A batch
+  that finds no buffer left to arm is copied into pool pbufs, so lwIP holding frames cannot starve the channel. `show offload`
+  prints configuration and counters of both features and the netif's batch statistics.
+* The DMA channel stays in simple mode, polled; no interrupt is added (section 12.6).
+
+### 12.6 What one frame costs today, and the transmit side
+
+Reading the firmware and the block design: the S2MM channel is a simple-mode transfer armed per frame (`XAxiDma_SimpleTransfer`)
+and **polled** from the main loop (`rtlnet_netif_poll`: status register read, buffer length read, re-arm). The DMA interrupts are wired
+to the interrupt controller but stay disabled (`dma_reset` disables them). So "one frame, one interrupt" is not what happens: it is
+one frame, one polled completion and one re-arm (register writes over the CPU's slow AXI path), plus one lwIP input per frame.
+Batching removes the completion, the re-arm and the buffer bookkeeping for all but one frame per batch; it does not remove the
+lwIP input per frame. Transmit is the same: one simple MM2S transfer per frame, completion polled in `netif_linkoutput` and
+`tx_reap`; there is no transmit ring or interrupt for Ethernet frames (`rtlnet_txring` is the console character ring), so
+transmit completions are not batched and no small change gives one interrupt per several frames: that needs the scatter-gather
+DMA with a descriptor ring and interrupt coalescing, a block design change that is not made here.
+
+## 13. Verification of the receive features
+
+`tb_rtlnet_tcp_offload_feat` (`regression.txt`: both, ACK only, batch only, generic technology, negative control). It builds the core
+with the features at `CLK_HZ` 10 MHz (10 clocks per "microsecond"), reuses the checksum reference of section 9, and checks:
+
+| Case | What it proves |
+|---|---|
+| R registers | CAPS / CAPS2 bits, defaults, read-back, undefined offsets, counters 0 at reset, `STATUS` idle bits |
+| P built, disabled | random frames leave exactly as the plain core, one frame per transfer, feature counters 0; with `rx_csum` off and the feature bits set the frames leave bit-exact without trailer |
+| D1-D19 ACK, directed | coalesced run; timestamps; duplicate ACKs; window updates; older ACK; lower and equal sequence number; SACK, MSS and timestamp-after-NOP layouts; eleven flag combinations (PSH, FIN, RST, SYN, URG, ECE, CWR, NS, none); short and long payload; bad TCP and IPv4 checksums; fragment, IP options and VLAN (flush every held ACK); two interleaved flows; table eviction; ordering against data of the same flow, other flows, UDP, ARP not delayed; timer flush latency measured; count limit; sequence-number wrap both ways; switch-off flush and `ACK_IDLE`; counters and `CAND = DROPPED + FWD` in every case |
+| AR ACK, random | 300..500 mixed frames (pure ACKs with and without timestamps, duplicates, window updates, old ACKs, lower seq, SACK, MSS, data, every flag, bad checksums, VLAN, IP options, fragments, UDP, ARP, long frames) over 5 flows and a 4-entry table, source gaps and sink stalls, timer huge so only arrival order decides: the output order and all counters equal a bench model written from the rules |
+| B batching, directed | single frame and measured timer close; count limit 4, 1 and 0; byte limit; exact fit (one beat above / below the closing rule); maximum frames 2048 bytes; a 3000-byte frame; minimum and maximum frame sizes in one run; back-to-back batches with counters adding up; backpressure at source and sink in three patterns; switch-off closes an open batch; a frame without trailer closes it; timer 0 |
+| AB both | random model run with batching behind the coalescer: frames recovered by a backward walk equal the model, transfers within the limits, counters equal |
+
+Negative controls: the `INJECT_FAILURE` run, and 21 single-edit RTL mutants of `ackco`, `batch` and `rx` were run against the
+bench (replace rule without the sequence check, sequence compare not wrap-aware, duplicate ACK held, `l4_ok` ignored, any option
+layout accepted, no flush-all, no ordering flush, limit and count off by one, timer ignored, victim not LRU, flags not exact,
+byte limit off by one, `tlast` on every trailer, timer late, frame without trailer joins the batch, data beats not counted,
+keep wrong on tail and last beat, sideband stuck): 20 fail the bench; the survivor (IHL test removed) is redundant with the total
+length and header checks of the trailer flags and is kept as defence. The board bench `tb_rtlnet_nexys_video_eth` runs one batch
+of three frames (count limit) and one coalesced run of four pure ACKs through the protocol wrapper, the MAC and the CPU stub.
+
+Driver: `driver/test/build_test.ps1` (host gcc `-Werror -pedantic`, 4449 checks including the batch walker on hand-built batches,
+malformed input — truncated, bad length, misaligned, bad marker, too many frames, stray bytes — 300 random batches and 4000 random
+buffers, negative control, `mb-gcc -Werror`). Firmware: `build.ps1 -NoFirmware -NetifTest` (batch path in all four zero-copy
+combinations) and `-Demo` (CLI).
+
+## 14. Resource estimate of the receive features
+
+Not yet measured: the synthesis check of the feature build (`rtlnet_synth_check.tcl`, `rtlnet_tcp_offload`, `ACK_COALESCE=1,RX_BATCH=1`) was
+queued behind other jobs when this section was written. The estimate below comes from the register and RAM counts of the RTL; the
+measured numbers replace it (a build without the features is the 1867 LUT / 3613 FF / 1.5 BRAM of section 10, unchanged).
+
+| Block | LUT (estimate) | FF (estimate) | RAM |
+|---|---:|---:|---|
+| `rtlnet_tcp_offload_ackco` (4 flows) | 900..1300 | 1400..1700 | 768 bytes distributed (about 130 LUT as RAM, counted in the LUT column) |
+| `rtlnet_tcp_offload_batch` | 100..150 | 220..260 | none |
+| registers and counters (12 counters, 5 configuration registers, second read stage) | 450..600 | 480..550 | none |
+| `rtlnet_tcp_offload_rx` sideband (ninth lane of the output slice) | about 10 | about 20 | none |
+| Total added | 1450..2050 | 2100..2500 | no block RAM |
+
+Flip-flop budget of the coalescer: per flow about 230 (key 96, held ack and sequence 64, last ack 32, start time 16, count 8, slot
+number, flags, LRU rank), times `ACK_FLOWS`, plus about 330 for the fields parsed from the staged frame, the emit queue, both state
+machines and the 72-bit output slice. `ACK_FLOWS` 8 adds about 1000 FF and 400 LUT; the slot RAM grows by 128 bytes per flow. No
+single path is expected above three LUT levels (the widest is the 96-bit key compare and the 32-bit sequence compares, which are
+registered in `S_DEC1` before the decision), well inside the 10 ns clock of the CPU stream; the 250 MHz timing gate of section 10
+covers the checksum-only core and does not apply to these blocks.
+
+
+## 15. Revision history
 
 | Revision | Change |
 |---|---|
+| 11-14-2026 | Optional receive features: ACK coalescing and receive batching (parameters, registers, counters, driver, bench, firmware, Ethernet demo hook-up) |
 | 10-22-2026 | Initial version: egress insert, ingress trailer, registers, counters, driver, bench, timing gate |

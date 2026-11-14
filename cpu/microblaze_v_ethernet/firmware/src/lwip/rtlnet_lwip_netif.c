@@ -28,7 +28,7 @@
  * DMA reaches the same bytes at the AXI address pointer + RTLNET_CPU_BUF_DMA_OFFSET). */
 #define NETIF_AXI_BRAM __attribute__((section(".axi_bram"), aligned(RTLNET_NETIF_BUF_ALIGN)))
 
-static uint8_t g_rx_buf[RTLNET_NETIF_RX_BUFS][RTLNET_NETIF_BUF_BYTES] NETIF_AXI_BRAM;
+static uint8_t g_rx_buf[RTLNET_NETIF_RX_POOL_UNITS][RTLNET_NETIF_BUF_BYTES] NETIF_AXI_BRAM;
 static uint8_t g_tx_buf[RTLNET_NETIF_TX_BUFS][RTLNET_NETIF_BUF_BYTES] NETIF_AXI_BRAM;
 
 #if RTLNET_NETIF_ZERO_COPY_TX
@@ -52,6 +52,23 @@ static rx_loan_t g_rx_loan[RTLNET_NETIF_RX_BUFS];
 #define DMA_ADDR(p)         ((UINTPTR)(p) + RTLNET_CPU_BUF_DMA_OFFSET)
 #endif
 
+#if RTLNET_NETIF_ZERO_COPY_RX
+/* Batch geometry, zero-copy receive: one custom pbuf per frame on loan, and the references per buffer. */
+typedef struct {
+    struct pbuf_custom pc;    /* first: lwIP's free callback receives &pc.pbuf */
+    uint8_t            idx;   /* the receive buffer the frame lives in */
+    uint8_t            next;  /* next free loan (index + 1, 0 = none) while on the free list */
+} bat_loan_t;
+
+static bat_loan_t g_bat_loan[RTLNET_NETIF_BATCH_LOANS];
+static unsigned   g_bat_loan_free;                       /* free list head (index + 1, 0 = empty) */
+static uint16_t   g_buf_ref[RTLNET_NETIF_RX_BUFS];       /* frames of a batch buffer still held by lwIP, plus the delivery loop */
+#endif
+
+static rtlnet_txo_batch_frame_t g_bat_fr[RTLNET_NETIF_BATCH_MAX_FRAMES];   /* the walker output of one transfer */
+static unsigned             g_buf_n = RTLNET_NETIF_RX_BUFS;       /* receive buffers in the current geometry */
+static uint32_t             g_buf_bytes = RTLNET_NETIF_BUF_BYTES; /* and their size */
+static int                  g_batch_geom;                         /* 1: batch geometry */
 static XAxiDma              g_dma;
 static int                  g_present;        /* DMA configured */
 static int                  g_rx_armed;       /* an S2MM transfer is outstanding into g_rx_buf[g_rx_armed_idx] */
@@ -69,7 +86,7 @@ static rtlnet_netif_stats_t g_st;
  */
 static void free_push(unsigned idx)
 {
-    if (g_free_n < RTLNET_NETIF_RX_BUFS) {
+    if (g_free_n < g_buf_n) {
         g_free[g_free_n++] = (uint8_t)idx;
     }
 }
@@ -81,9 +98,18 @@ static void free_push(unsigned idx)
 static void free_reset(void)
 {
     g_free_n = 0u;
-    for (unsigned i = RTLNET_NETIF_RX_BUFS; i > 0u; i--) {
+    for (unsigned i = g_buf_n; i > 0u; i--) {
         g_free[g_free_n++] = (uint8_t)(i - 1u);
     }
+}
+
+/*
+ * rx_buf_ptr -- start of receive buffer idx in the current geometry (the same memory, 2 KiB or batch buffers).
+ * Returns: the address.
+ */
+static uint8_t *rx_buf_ptr(unsigned idx)
+{
+    return &g_rx_buf[0][0] + (size_t)idx * g_buf_bytes;
 }
 
 /*
@@ -280,7 +306,7 @@ static void rx_arm(void)
         return;
     }
     idx = g_free[g_free_n - 1u];
-    if (XAxiDma_SimpleTransfer(&g_dma, DMA_ADDR(g_rx_buf[idx]), RTLNET_NETIF_BUF_BYTES, XAXIDMA_DEVICE_TO_DMA) ==
+    if (XAxiDma_SimpleTransfer(&g_dma, DMA_ADDR(rx_buf_ptr(idx)), g_buf_bytes, XAXIDMA_DEVICE_TO_DMA) ==
         XST_SUCCESS) {
         g_free_n--;
         g_rx_armed_idx = idx;
@@ -563,6 +589,262 @@ static void rx_deliver(struct netif *nif, unsigned idx, uint32_t xfer_len)
     PROF_ADD(prof_rx_input, t1);
 }
 
+#if RTLNET_NETIF_ZERO_COPY_RX
+/*
+ * bat_loans_reset -- every loan free, every reference count 0 (geometry change, all buffers free).
+ * Returns: nothing.
+ */
+static void bat_loans_reset(void)
+{
+    g_bat_loan_free = 0u;
+    for (unsigned i = RTLNET_NETIF_BATCH_LOANS; i > 0u; i--) {
+        g_bat_loan[i - 1u].next = (uint8_t)g_bat_loan_free;
+        g_bat_loan_free = i;
+    }
+    memset(g_buf_ref, 0, sizeof(g_buf_ref));
+}
+
+/*
+ * bat_unref -- one reference of a batch buffer is gone; the last one frees the buffer.
+ * Returns: nothing.
+ */
+static void bat_unref(unsigned idx)
+{
+    if (g_buf_ref[idx] != 0u && --g_buf_ref[idx] == 0u) {
+        free_push(idx);
+    }
+}
+
+/*
+ * bat_loan_free -- lwIP is done with one frame of a batch buffer: the loan and the reference go back.
+ * Returns: nothing.
+ */
+static void bat_loan_free(struct pbuf *p)
+{
+    bat_loan_t *l = (bat_loan_t *)(void *)p;
+    unsigned i = (unsigned)(l - g_bat_loan);
+    unsigned idx = l->idx;
+    l->next = (uint8_t)g_bat_loan_free;
+    g_bat_loan_free = i + 1u;
+    bat_unref(idx);
+}
+#endif
+
+/*
+ * bat_frame_out -- give one frame of a batch buffer to lwIP.
+ * Zero-copy receive (and not copying this batch): a custom PBUF_REF pbuf on a loan, one buffer reference; a full
+ * loan table or the copy mode: a pool pbuf with a copy of the frame.
+ * Returns: nothing; drops are counted.
+ */
+static void bat_frame_out(struct netif *nif, unsigned idx, uint32_t off, uint32_t len, int copy)
+{
+    uint8_t *base = rx_buf_ptr(idx);
+    struct pbuf *p = NULL;
+#if !RTLNET_NETIF_ZERO_COPY_RX
+    (void)copy;   /* every frame is copied */
+#endif
+    if (len < RTLNET_NETIF_MIN_FRAME || len > RTLNET_NETIF_BATCH_BUF_BYTES) {
+        g_st.rx_runts++;
+        return;
+    }
+    if (nif == NULL) {
+        g_st.rx_unbound++;
+        return;
+    }
+#if RTLNET_NETIF_ZERO_COPY_RX
+    if (!copy && g_bat_loan_free != 0u) {
+        unsigned li = g_bat_loan_free - 1u;
+        bat_loan_t *l = &g_bat_loan[li];
+        g_bat_loan_free = l->next;
+        l->idx = (uint8_t)idx;
+        l->pc.custom_free_function = bat_loan_free;
+        p = pbuf_alloced_custom(PBUF_RAW, (u16_t)len, PBUF_REF, &l->pc, base + off, (u16_t)RTLNET_TXO_ROUNDUP8(len));
+        if (p != NULL) {
+            g_buf_ref[idx]++;
+        } else {
+            l->next = (uint8_t)g_bat_loan_free;
+            g_bat_loan_free = li + 1u;
+        }
+    } else if (!copy) {
+        g_st.rx_batch_noloan++;
+    }
+#endif
+    if (p == NULL) {
+        p = pbuf_alloc(PBUF_RAW, (u16_t)len, PBUF_POOL);
+        if (p == NULL) {
+            g_st.rx_no_pbuf++;
+            LINK_STATS_INC(link.memerr);
+            return;
+        }
+        (void)pbuf_take(p, base + off, (u16_t)len);
+    }
+    g_st.rx_frames++;
+    g_st.rx_bytes += len;
+    LINK_STATS_INC(link.recv);
+    if (nif->input(p, nif) != ERR_OK) {
+        pbuf_free(p);
+    }
+}
+
+/*
+ * batch_deliver -- one completed S2MM transfer in the batch geometry: split into frames, apply the trailer policy
+ * to each, hand each to lwIP.
+ * Steps:
+ *   1. The delivery loop holds one reference of the buffer (zero-copy); a transfer that leaves no buffer free to arm
+ *      is copied frame by frame (the buffer is free at the end).
+ *   2. Trailers expected (rx offload on): rtlnet_tcp_offload_batch_walk splits the transfer. A transfer that does not
+ *      walk (a raw frame while rx offload turns off, a malformed batch) falls back to the single-frame decision of
+ *      rtlnet_offload_rx_frame on the whole transfer, which counts and drops what has no trailer.
+ *   3. Each walked frame: rtlnet_offload_rx_frame on its own span (padded frame and trailer) gives the policy; delivered
+ *      frames are the trailer's length.
+ *   4. The delivery loop's reference goes.
+ * Returns: nothing.
+ */
+static void batch_deliver(struct netif *nif, unsigned idx, uint32_t xfer_len)
+{
+    uint8_t *base = rx_buf_ptr(idx);
+    rtlnet_txo_batch_frame_t *fr = g_bat_fr;   /* static: the 8 KiB stack stays free for the lwIP input chain */
+    uint32_t n = 0u;
+    int walked = 0;
+    int copy = g_rx_armed ? 0 : 1;   /* no buffer was left to arm: free this one at once */
+    uint32_t t0 = PROF_NOW();
+#if RTLNET_NETIF_ZERO_COPY_RX
+    g_buf_ref[idx] = 1u;
+#else
+    copy = 1;
+#endif
+    if (rtlnet_offload_state()->rx_state != RTLNET_RX_TRAILER_OFF) {
+        int rc = rtlnet_tcp_offload_batch_walk(base, xfer_len, fr, RTLNET_NETIF_BATCH_MAX_FRAMES, &n);
+        walked = (rc == RTLNET_TXO_OK) ? 1 : 0;
+        if (!walked) {
+            n = 0u;
+            if (rtlnet_offload_state()->rx_state == RTLNET_RX_TRAILER_ON) {
+                g_st.rx_batch_bad++;   /* trailers are established: neither a batch nor a frame with a trailer */
+            }
+        }
+    }
+    if (copy) {
+        g_st.rx_batch_copied++;
+    }
+    if (walked) {
+        g_st.rx_batches++;
+        g_st.rx_batch_frames += n;
+        if (n > g_st.rx_batch_max) {
+            g_st.rx_batch_max = n;
+        }
+        for (uint32_t i = 0u; i < n; i++) {
+            uint32_t flen = 0u;
+            uint32_t span = RTLNET_TXO_ROUNDUP8((uint32_t)fr[i].trailer.frame_len) + RTLNET_TXO_TRAILER_BYTES;
+            switch (rtlnet_offload_rx_frame(base + fr[i].offset, span, &flen)) {
+            case RTLNET_RXA_DROP_BAD_IP:
+                g_st.rx_drop_ip++;
+                LINK_STATS_INC(link.drop);
+                break;
+            case RTLNET_RXA_DROP_BAD_L4:
+                g_st.rx_drop_l4++;
+                LINK_STATS_INC(link.drop);
+                break;
+            case RTLNET_RXA_DROP_NO_TRAILER:
+                g_st.rx_no_trailer++;
+                LINK_STATS_INC(link.drop);
+                break;
+            default:
+                bat_frame_out(nif, idx, fr[i].offset, flen, copy);
+                break;
+            }
+        }
+    } else {
+        /* Not a batch: the transfer is one frame, with a trailer (single-frame decision) or raw. */
+        uint32_t flen = xfer_len;
+        switch (rtlnet_offload_rx_frame(base, xfer_len, &flen)) {
+        case RTLNET_RXA_DROP_BAD_IP:
+            g_st.rx_drop_ip++;
+            LINK_STATS_INC(link.drop);
+            break;
+        case RTLNET_RXA_DROP_BAD_L4:
+            g_st.rx_drop_l4++;
+            LINK_STATS_INC(link.drop);
+            break;
+        case RTLNET_RXA_DROP_NO_TRAILER:
+            g_st.rx_no_trailer++;
+            LINK_STATS_INC(link.drop);
+            break;
+        default:
+            bat_frame_out(nif, idx, 0u, flen, copy);
+            break;
+        }
+    }
+    PROF_ADD(prof_rx_input, t0);
+#if RTLNET_NETIF_ZERO_COPY_RX
+    bat_unref(idx);
+#else
+    free_push(idx);
+#endif
+}
+
+/*
+ * rtlnet_netif_set_rx_batch -- switch the receive buffers between the single-frame geometry (16 x 2 KiB) and the
+ * batch geometry (RTLNET_NETIF_BATCH_BUFS x RTLNET_NETIF_BATCH_BUF_BYTES).
+ * Steps:
+ *   1. No DMA or no batch hardware (rtlnet_offload_feat): ABSENT when asked for the batch geometry.
+ *   2. Cancel the armed receive transfer (a DMA reset, so no transmit may be running) and require every buffer
+ *      free: otherwise re-arm in the old geometry and report BUSY.
+ *   3. Carve the memory, free every buffer, arm one.
+ * Returns: RTLNET_NETIF_BATCH_OK, _BUSY, _ABSENT.
+ */
+int rtlnet_netif_set_rx_batch(int on)
+{
+    if (!g_present) {
+        return RTLNET_NETIF_BATCH_ABSENT;
+    }
+    if ((on != 0) == (g_batch_geom != 0)) {
+        return RTLNET_NETIF_BATCH_OK;
+    }
+    if (on && (rtlnet_offload_feat()->present & RTLNET_OFFLOAD_FEAT_BATCH) == 0u) {
+        return RTLNET_NETIF_BATCH_ABSENT;
+    }
+    tx_reap();
+    if (chan_busy(0) || g_tx_pending != NULL) {
+        return RTLNET_NETIF_BATCH_BUSY;
+    }
+    if (g_rx_armed) {
+        free_push(g_rx_armed_idx);
+        g_rx_armed = 0;
+        (void)dma_reset();
+    }
+    if (g_free_n != g_buf_n) {
+        rx_arm();
+        return RTLNET_NETIF_BATCH_BUSY;
+    }
+    g_batch_geom = on ? 1 : 0;
+    g_buf_n = on ? RTLNET_NETIF_BATCH_BUFS : RTLNET_NETIF_RX_BUFS;
+    g_buf_bytes = on ? RTLNET_NETIF_BATCH_BUF_BYTES : RTLNET_NETIF_BUF_BYTES;
+    free_reset();
+#if RTLNET_NETIF_ZERO_COPY_RX
+    bat_loans_reset();
+#endif
+    rx_arm();
+    return RTLNET_NETIF_BATCH_OK;
+}
+
+/*
+ * rtlnet_netif_rx_batch_active -- the receive buffers have the batch geometry.
+ * Returns: 1 or 0.
+ */
+int rtlnet_netif_rx_batch_active(void)
+{
+    return g_batch_geom;
+}
+
+/*
+ * rtlnet_netif_rx_buf_bytes -- size of a receive buffer (the DMA transfer length armed) in the current geometry.
+ * Returns: bytes.
+ */
+uint32_t rtlnet_netif_rx_buf_bytes(void)
+{
+    return g_buf_bytes;
+}
+
 /*
  * rtlnet_netif_poll -- receive service, called from the main loop.
  * Steps (up to RTLNET_NETIF_RX_BUDGET frames per call):
@@ -609,7 +891,11 @@ void rtlnet_netif_poll(struct netif *nif)
         done = g_rx_armed_idx;
         g_rx_armed = 0;
         rx_arm();
-        rx_deliver(nif, done, len);
+        if (g_batch_geom) {
+            batch_deliver(nif, done, len);
+        } else {
+            rx_deliver(nif, done, len);
+        }
     }
     if (n != 0u) {
         PROF_ADD(prof_busy, t_poll);
