@@ -59,8 +59,8 @@ This demo is a prebuilt bitstream of the IronKernel RTLNet H.264 Constrained Bas
 | Engines, rate control | 2, constant bit rate or constant QP |
 | Clock | 90 MHz, encoder, DDR3 path and CPU |
 | FPGA | xc7a200tsbg484-1 |
-| Utilization | LUT 70.60 % / FF 33.25 % / block RAM 80.14 % / DSP 11.35 % |
-| Routed timing | WNS +0.135 ns |
+| Utilization | LUT 70.67 % / FF 33.26 % / block RAM 80.14 % / DSP 11.35 % |
+| Routed timing | WNS +0.156 ns |
 | Ethernet | 10/100/1000 Mb/s RGMII |
 | Time limit | none |
 | License | `LICENSE.md` |
@@ -215,15 +215,15 @@ Post-route result of this image on the XC7A200T.
 <table class="num">
 <thead><tr><th></th><th>LUTs</th><th>Flip-flops</th><th>Slices</th><th>Block RAM tiles</th><th>DSP blocks</th></tr></thead>
 <tbody>
-<tr><td>Used</td><td>94,457</td><td>88,990</td><td>31,818</td><td>292.5 (255 RAMB36 + 75 RAMB18)</td><td>84</td></tr>
-<tr><td>Share of the device</td><td>70.60 %</td><td>33.25 %</td><td>95.12 %</td><td>80.14 %</td><td>11.35 %</td></tr>
+<tr><td>Used</td><td>94,557</td><td>89,000</td><td>31,814</td><td>292.5 (255 RAMB36 + 75 RAMB18)</td><td>84</td></tr>
+<tr><td>Share of the device</td><td>70.67 %</td><td>33.26 %</td><td>95.11 %</td><td>80.14 %</td><td>11.35 %</td></tr>
 </tbody>
 </table>
 
 Clocks: `ui_clk` = `cpu_clk` 90.000 MHz (MicroBlaze V, DDR3 arbiter, video DMA, pattern generator, both encoder engines); DDR3 memory clock 360 MHz, 4:1 to `ui_clk`, from a 102.857143 MHz input of a second MMCM;
 `clk125` and `clk125_90` 125 MHz, the second shifted by 90 degrees (Ethernet MAC, RGMII); `axis_clk` 62.5 MHz (AXI4-Stream paths); `proto_clk` 50 MHz (protocol wrapper).
 
-Routed timing: WNS +0.135 ns, WHS +0.013 ns, WPWS +0.131 ns, 0 failing endpoints, first build attempt, `rtlnet_cdc: PASS`.
+Routed timing: WNS +0.156 ns, WHS +0.014 ns, WPWS +0.131 ns, 0 failing endpoints, first build attempt, `rtlnet_cdc: PASS`.
 
 ## Ethernet link
 
