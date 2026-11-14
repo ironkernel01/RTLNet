@@ -141,8 +141,8 @@ int main(int argc, char **argv)
     add_phy(1u, 0x001Cu, 0xC915u, 1);
     CHECK(rtlnet_phy_find(&m, &addr, &id) == RTLNET_MDIO_OK && addr == 1u && id == 0x001CC915u, "PHY at address 1");
     reset_bus();
-    add_phy(17u, 0x2000u, 0x5C90u, 0);
-    CHECK(rtlnet_phy_find(&m, &addr, &id) == RTLNET_MDIO_OK && addr == 17u && id == 0x20005C90u, "PHY at address 17");
+    add_phy(17u, 0x2000u, 0x7C90u, 0);
+    CHECK(rtlnet_phy_find(&m, &addr, &id) == RTLNET_MDIO_OK && addr == 17u && id == 0x20007C90u, "PHY at address 17");
     reset_bus();
     add_phy(0u, 0x0022u, 0x1622u, 1);
     CHECK(rtlnet_phy_find(&m, &addr, &id) == RTLNET_MDIO_OK && addr == 0u, "PHY at address 0 (scanned last)");
@@ -156,14 +156,14 @@ int main(int argc, char **argv)
     CHECK(d != NULL && strcmp(d->name, "RTL8211E") == 0 && !rtlnet_phy_is_generic(d), "RTL8211E ID selects its driver");
     d = rtlnet_phy_select(0x001CC91Fu);
     CHECK(strcmp(d->name, "RTL8211E") == 0, "RTL8211E, another revision");
-    d = rtlnet_phy_select(0x20005C90u);
+    d = rtlnet_phy_select(0x20007C90u);
     CHECK(rtlnet_phy_is_generic(d), "unknown ID selects the generic driver");
     CHECK(d->init != NULL && d->status != NULL && d->advertise_set != NULL && d->advertise_get != NULL &&
           d->autoneg_restart != NULL, "generic driver has every function");
 
     /* Generic driver on a 10/100 PHY at address 3. */
     reset_bus();
-    add_phy(3u, 0x2000u, 0x5C90u, 0);
+    add_phy(3u, 0x2000u, 0x7C90u, 0);
     m.phy_addr = 3u;
     CHECK(d->advertise_set(&m, RTLNET_PHY_ADV_100F) == RTLNET_PHY_OK, "advertise 100f");
     CHECK((g_regs[3][RTLNET_PHY_REG_ANAR] & RTLNET_PHY_ANAR_TECH_MASK) == RTLNET_PHY_ANAR_100F, "ANAR holds only 100F");
@@ -189,7 +189,7 @@ int main(int argc, char **argv)
 
     /* Generic driver on a gigabit PHY at address 9. */
     reset_bus();
-    add_phy(9u, 0x2000u, 0x5C90u, 1);
+    add_phy(9u, 0x2000u, 0x7C90u, 1);
     m.phy_addr = 9u;
     CHECK(d->advertise_set(&m, RTLNET_PHY_ADV_1000F | RTLNET_PHY_ADV_100F) == RTLNET_PHY_OK, "advertise 1000f and 100f");
     CHECK((g_regs[9][RTLNET_PHY_REG_GBCR] & RTLNET_PHY_GBCR_TECH_MASK) == RTLNET_PHY_GBCR_1000F, "GBCR holds 1000F only, never 1000H");
@@ -198,6 +198,29 @@ int main(int argc, char **argv)
           "gigabit partner: 1000 Mb/s");
     link_up(9u, 0x01E1u, 0u);
     CHECK(d->status(&m, &st) == RTLNET_PHY_OK && st.speed_valid && st.speed == RTLNET_PHY_SPEED_100, "10/100 partner: 100 Mb/s");
+
+    /* DP83848 (10/100 only): selected by ID 0x2000/0x5C9x, the abilities stop at 100 Mb/s. */
+    d = rtlnet_phy_select(0x20005C91u);
+    CHECK(strcmp(d->name, "DP83848") == 0 && !rtlnet_phy_is_generic(d), "DP83848 ID selects its driver");
+    CHECK(d->abilities == (RTLNET_PHY_ADV_10F | RTLNET_PHY_ADV_100F), "DP83848 abilities are 10f and 100f");
+    CHECK(strcmp(rtlnet_phy_select(0x001CC915u)->name, "RTL8211E") == 0 &&
+          (rtlnet_phy_select(0x001CC915u)->abilities & RTLNET_PHY_ADV_1000F) != 0u, "RTL8211E keeps 1000f");
+    reset_bus();
+    add_phy(1u, 0x2000u, 0x5C90u, 0);
+    m.phy_addr = 1u;
+    CHECK(d->advertise_set(&m, RTLNET_PHY_ADV_10F | RTLNET_PHY_ADV_100F) == RTLNET_PHY_OK, "DP83848 advertise 10f+100f");
+    CHECK((g_regs[1][RTLNET_PHY_REG_ANAR] & RTLNET_PHY_ANAR_TECH_MASK) == (RTLNET_PHY_ANAR_10F | RTLNET_PHY_ANAR_100F),
+          "DP83848 ANAR: full duplex only");
+    CHECK(d->advertise_get(&m, &adv) == RTLNET_PHY_OK && adv == (RTLNET_PHY_ADV_10F | RTLNET_PHY_ADV_100F), "DP83848 advertise_get");
+    g_regs[1][RTLNET_PHY_REG_BMSR] |= (uint16_t)(RTLNET_PHY_BMSR_LINK | RTLNET_PHY_BMSR_AN_COMPLETE);
+    g_regs[1][RTLNET_PHY_REG_BMCR] = RTLNET_PHY_BMCR_ANE;
+    g_regs[1][RTLNET_PHY_REG_ANLPAR] = 0x01E1u;
+    g_regs[1][RTLNET_PHY_DP83848_REG_PHYSTS] = (uint16_t)(RTLNET_PHY_DP83848_PHYSTS_LINK | RTLNET_PHY_DP83848_PHYSTS_DUPLEX |
+                                                      RTLNET_PHY_DP83848_PHYSTS_AN_COMPLETE);
+    CHECK(d->status(&m, &st) == RTLNET_PHY_OK && st.speed_valid && st.speed == RTLNET_PHY_SPEED_100 && st.full_duplex,
+          "DP83848 100 Mb/s full duplex");
+    g_regs[1][RTLNET_PHY_DP83848_REG_PHYSTS] |= RTLNET_PHY_DP83848_PHYSTS_SPEED10;
+    CHECK(d->status(&m, &st) == RTLNET_PHY_OK && st.speed_valid && st.speed == RTLNET_PHY_SPEED_10, "DP83848 10 Mb/s");
 
     if (g_neg) {
         CHECK(0, "negative control");

@@ -35,7 +35,7 @@ Overview:
   * Exit code 0 only when every requested step succeeded; prints RTLNET_FW: PASS <elf>.
 Usage:
   powershell -NoProfile -ExecutionPolicy Bypass -File cpu/microblaze_v_ethernet/firmware/build.ps1 `
-    -Xsa <xsa> [-OutDir <dir>] [-LmbKb 512] [-Bsp] [-HostHarness] [-Demo] [-LwipTest] [-NetifTest] [-NoFirmware] [-Define NAME=VALUE,...]
+    -Xsa <xsa> [-OutDir <dir>] [-LmbKb 512] [-FastOpt -O2] [-Bsp] [-HostHarness] [-Demo] [-LwipTest] [-NetifTest] [-NoFirmware] [-Define NAME=VALUE,...]
 Revision: 11-14-2026
   * 11-14-2026: initial version (derived from the H.264 CPU firmware build: no DDR3 image, video, encoder or rate control;
     -OutDir and -LmbKb; the XSA is an argument, not a default).
@@ -45,6 +45,7 @@ param(
     [string]$Xsa = '',
     [string]$OutDir = '',
     [int]$LmbKb = 512,
+    [string]$FastOpt = '-O2',
     [switch]$Bsp,
     [switch]$HostHarness,
     [switch]$Demo,
@@ -56,6 +57,8 @@ param(
 $ErrorActionPreference = 'Stop'
 # powershell -File delivers '-Define A,B' as one string: split every entry on commas.
 $Define = @($Define | ForEach-Object { $_ -split ',' } | Where-Object { $_ -ne '' })
+# A 256 KiB LMB or smaller selects the small-memory lwIP profile of src/lwip/lwipopts.h.
+if ($LmbKb -le 256) { $Define += 'RTLNET_SMALL_MEM' }
 $Fw      = $PSScriptRoot
 $Repo    = (Resolve-Path (Join-Path $Fw '..\..\..')).Path
 $Out     = if ($OutDir) { $OutDir } else { Join-Path $Fw 'build' }
@@ -88,7 +91,7 @@ $drvCores = @('rtlnet_eth_mac', 'rtlnet_mdio', 'rtlnet_eth_protocol', 'rtlnet_ar
               'rtlnet_tcp_offload')
 $drvSrcs = @(
     'cores/rtlnet_eth_mac/driver/rtlnet_eth_mac.c', 'cores/rtlnet_mdio/driver/rtlnet_mdio.c',
-    'cores/rtlnet_mdio/driver/rtlnet_phy_rtl8211e.c', 'cores/rtlnet_eth_protocol/driver/rtlnet_eth_protocol.c',
+    'cores/rtlnet_mdio/driver/rtlnet_phy_rtl8211e.c', 'cores/rtlnet_mdio/driver/rtlnet_phy_dp83848.c', 'cores/rtlnet_eth_protocol/driver/rtlnet_eth_protocol.c',
     'cores/rtlnet_arp/driver/rtlnet_arp.c', 'cores/rtlnet_icmp/driver/rtlnet_icmp.c',
     'cores/rtlnet_dhcp/driver/rtlnet_dhcp.c', 'cores/rtlnet_iperf/driver/rtlnet_iperf.c',
     'cores/rtlnet_udp_socket/driver/rtlnet_udp_socket.c', 'cores/rtlnet_udp_echo/driver/rtlnet_udp_echo.c',
@@ -209,7 +212,7 @@ MEMORY
     ) | ForEach-Object { "$Fw/$_" }
     foreach ($s in ($fwSrcs + ($drvSrcs | ForEach-Object { "$Repo/$_" }))) {
         $o = Join-Path $objDir (([System.IO.Path]::GetFileNameWithoutExtension($s)) + '.o')
-        $opt = $(if ($fastSrc -contains [System.IO.Path]::GetFileNameWithoutExtension($s)) { '-O2' } else { '-Os' })
+        $opt = $(if ($fastSrc -contains [System.IO.Path]::GetFileNameWithoutExtension($s)) { $FastOpt } else { '-Os' })
         Invoke-Step $MbGcc ($mbflags + $cflags + @($opt) + $inc + $lwipInc + $sysInc + @('-c', $s, '-o', $o))
         $objs += $o
     }

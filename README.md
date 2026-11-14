@@ -48,6 +48,7 @@ you run it.
 | Demo guide and index (what is in `demos/`, what to connect, how to run) | `demos/README.md`, `demos/demos.md` |
 | License of a time-limited demo package | `demos/LICENSE_DEMO.md` |
 | The High profile demo (bitstream, README, brief) | `demos/h264_high_profile_demo/` |
+| The Ethernet demo (10/100/1000, hardware ARP, ping, DHCP, UDP echo and iperf 2, lwIP TCP; bitstream `rtlnet_nexys_video_eth.bit`, README, brief; no time limit) | `demos/ethernet/` |
 | Refresh the demo folders from the board build folders | `demos/demorelease.bat`; it reads `demos/<demo name>/release.txt` and copies `boards/<board>/build/<tag>/rtlnet_<board>.bit` and `build_info.txt` into `demos/<demo name>/<board>/` |
 | Build the PDF of a demo brief | `demos/build_brief_pdf.ps1` (writes next to the brief) |
 | Board build output: bitstream with firmware, bitstream without firmware, `.mmi`, `.xsa`, `build_info.txt`, `build_bitstream.log`, `reports/` (timing, utilization, CDC, DRC), checkpoints | `boards/nexys_video/build/` for an untagged build, `boards/nexys_video/build/<tag>/` for `build.ps1 -Tag <tag> -Image`. Built, git-ignored (the released images are the tracked files under `demos/`). The file list is in `boards/nexys_video/README.md` |

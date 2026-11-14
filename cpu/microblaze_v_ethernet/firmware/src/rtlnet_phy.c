@@ -100,6 +100,24 @@ static void rtl8211e_show_details(const rtlnet_mdio_t *mdio)
 }
 
 /* ------------------------------------------------------------------------- */
+/* DP83848 driver (cores/rtlnet_mdio/driver/rtlnet_phy_dp83848.c), 10/100 only */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * dp83848_init -- DP83848 bring-up (LED configuration).
+ * Returns: 0, or -1 with the message in summary.
+ */
+static int dp83848_init(const rtlnet_mdio_t *mdio, char summary[RTLNET_PHY_SUMMARY_LEN])
+{
+    if (rtlnet_phy_dp83848_init(mdio) != RTLNET_PHY_OK) {
+        (void)fmt_snprintf(summary, RTLNET_PHY_SUMMARY_LEN, "DP83848 initialization failed");
+        return -1;
+    }
+    (void)fmt_snprintf(summary, RTLNET_PHY_SUMMARY_LEN, "10/100 full duplex, LEDs default");
+    return 0;
+}
+
+/* ------------------------------------------------------------------------- */
 /* Generic Clause 22 driver                                                  */
 /* ------------------------------------------------------------------------- */
 
@@ -300,9 +318,13 @@ static int gen_status(const rtlnet_mdio_t *mdio, rtlnet_phy_status_t *st)
 /* One line per PHY: name, ID, ID mask, init, advertise_set, advertise_get, autoneg_restart, status, show_details.
  * ADD A PHY DRIVER HERE (rtlnet_phy.h describes the steps). */
 static const rtlnet_phy_driver_t g_drivers[] = {
-    { "RTL8211E", ((uint32_t)RTLNET_PHY_RTL8211E_ID1 << PHY_ID_SHIFT) | RTLNET_PHY_RTL8211E_ID2, PHY_ID_REV_MASK,
+    { "RTL8211E", ((uint32_t)RTLNET_PHY_RTL8211E_ID1 << PHY_ID_SHIFT) | RTLNET_PHY_RTL8211E_ID2, PHY_ID_REV_MASK, RTLNET_PHY_ADV_FULL,
       rtl8211e_init, rtlnet_phy_rtl8211e_advertise_set, rtlnet_phy_rtl8211e_advertise_get,
       rtlnet_phy_rtl8211e_autoneg_restart, rtlnet_phy_rtl8211e_status, rtl8211e_show_details },
+    { "DP83848", ((uint32_t)RTLNET_PHY_DP83848_ID1 << PHY_ID_SHIFT) | RTLNET_PHY_DP83848_ID2,
+      ((uint32_t)0xFFFFu << PHY_ID_SHIFT) | RTLNET_PHY_DP83848_ID2_MASK, RTLNET_PHY_DP83848_ADV_FULL,
+      dp83848_init, rtlnet_phy_dp83848_advertise_set, rtlnet_phy_dp83848_advertise_get,
+      rtlnet_phy_dp83848_autoneg_restart, rtlnet_phy_dp83848_status, NULL },
 };
 
 /*
@@ -314,6 +336,7 @@ static const rtlnet_phy_driver_t *generic_driver(void)
     g_generic.name = "generic Clause 22";
     g_generic.id = 0u;
     g_generic.id_mask = 0u;
+    g_generic.abilities = RTLNET_PHY_ADV_FULL;
     g_generic.init = gen_init;
     g_generic.advertise_set = gen_advertise_set;
     g_generic.advertise_get = gen_advertise_get;

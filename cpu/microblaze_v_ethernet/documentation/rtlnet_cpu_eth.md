@@ -166,6 +166,51 @@ powershell -NoProfile -ExecutionPolicy Bypass -File cpu/microblaze_v_ethernet/fi
 | DMA netif, lwiperf loopback, txring | `firmware/test/regression.txt` | `NETIF_HOST`, `LWIPERF_LOOPBACK`, `TXRING_TEST`, `PHY_HOST_TEST` (25 checks, mock MDIO bus) PASS |
 | Hardware tests | `test/run_all.ps1 -Port <COM> -Nic <adapter> -LinkMbps 10|100|1000` | results table `test/out/results_<speed>.txt` and `.csv` |
 
+## 6a. Small memory (256 KiB LMB) and the Arty A7-100 budget
+
+`build.ps1 -LmbKb 256` defines `RTLNET_SMALL_MEM` and selects the small-memory lwIP profile of `src/lwip/lwipopts.h` (heap 24 KiB, 24-buffer
+pool, `TCP_WND` 4 x MSS, `TCP_SND_BUF` 12 x MSS, 96 TCP segments, 6 PCBs): `.bss` 232 KiB -> 168 KiB (172 KB incl. the 36 KiB in the AXI BRAM), the
+image uses about 250 KiB of the 256 KiB LMB. Measured on the Nexys Video at 1000 Mb/s (same hardware, 512 KiB LMB image with the 256 KiB firmware):
+
+| Firmware | TCP iperf PC -> board | TCP iperf board -> PC | TCP echo (4 + 8 connections) |
+|---|---|---|---|
+| 512 KiB profile (default) | 311 Mbit/s | 106 Mbit/s | PASS, 8 connections 0.03 s |
+| 256 KiB small-memory profile | 176 Mbit/s | 106 Mbit/s | PASS, 8 connections 1.02 s |
+
+Block RAM of the dev image (`post_route_utilization_hier.rpt`, 212.5 tiles of 365; Arty A7-100 has 135):
+
+| Module | Tiles | Parameter that sizes it |
+|---|---|---|
+| `lmb_bram` (CPU code and data) | 128 | `lmb_kb` of `rtlnet_cpu_eth_bd_create` (256 KiB = 64 tiles) |
+| AXI BRAM + DMA (rest of `u_cpu`) | 19 | `axi_bram_kb` (64), DMA internals 3 |
+| `u_protocol` | 60.5 | below |
+| - CPU-path classifier | 30 | `CPU_CLASSIFIER_ENABLE` (0 removes it and the storm limiter; the firmware then runs without it) |
+| - CPU receive FIFO | 8.5 | `CPU_RX_FIFO_KB` (32) |
+| - UDP socket layer | 8 | `UDP_RX_BUF_KB` (16), `UDP_TX_BUF_KB` (8), `NUM_SOCKETS` |
+| - ingress FIFO | 4.5 | `INGRESS_FIFO_KB` (16) |
+| - checksum offload, ICMP, DHCP, egress, CPU TX FIFO, rest | about 9.5 | `CPU_TX_FIFO_KB`, `ICMP_BUF_KB`, `DHCP_BUF_KB`, `EGRESS_FIFO_KB` |
+| `u_mac` | 5 | `RX_FIFO_KB`, `TX_FIFO_KB` (8 each) |
+
+Recommended Arty set (10/100, no core edits): `lmb_kb` 256 (small-memory firmware), `axi_bram_kb` 64, `CPU_CLASSIFIER_ENABLE` 0, `INGRESS_FIFO_KB` 8,
+`CPU_RX_FIFO_KB` 16, `UDP_RX_BUF_KB` 8, MAC FIFOs 4 KiB each. Estimate: 64 + 19 + 30.5 (protocol without classifier, with the smaller FIFOs about 21.5)
++ 4 = about 108 tiles (target <= 110). With the classifier kept the estimate is about 138 tiles, which does not fit the target.
+
+## 6b. TCP throughput tuning (Nexys Video, 1000 Mb/s, PC to board / board to PC)
+
+| # | Attempt | Result |
+|---|---|---|
+| 0 | baseline: 512 KiB LMB, hardware checksum insert and verify on, receive zero-copy on, transmit zero-copy off, `-O2` on the frame path | 311 / 106 Mbit/s |
+| - | `show offload` after a 5 s run each way: TX frames 113013, ip and l4 patched 113012 (skipped 0); RX frames 157925, verified 157916, bad 0, lwIP flags GEN/CHECK hw for ip, udp, tcp | hardware checksum is in use in both directions; no software checksum |
+| 1 | transmit zero-copy on (`-DRTLNET_NETIF_ZERO_COPY_TX=1`) | does not link: lwIP's heap (64 KiB) must live in the 64 KiB AXI BRAM that also holds the frame buffers (overflow 36992 bytes); earlier measurements on the H.264 design had it slower; not pursued |
+| 2 | small-memory profile (section 6a) | 176 / 106 Mbit/s (cost of the smaller window and pool) |
+| 3 | board to PC limit, from the code: every transmitted frame is copied once into the AXI BRAM by `axi_put_chain` (word writes, about 16 cycles per 32-bit access over `M_AXI_DP`, 365 words per 1460-byte segment, about 5800 cycles of about 11000 per frame at 100 MHz) | the remaining cost is the CPU's AXI access latency, not a checksum or an extra memcpy; the lever is hardware (a wider or LMB-attached transmit buffer, or a faster CPU clock) |
+
+| 4 | hardware: `-CpuOpt 2` (Frequency pipeline), `-CpuBtc 4` (branch target cache size 4), CPU clock 125 MHz (tag `eth_f125`; the same firmware) | WNS +0.009 ns, WHS +0.009 ns, WPWS +0.264 ns, LUT 22784, FF 31294, BRAM 212.5; 333 / 132 Mbit/s (+7 % / +25 %); timing met with no margin (post-route WNS -0.101 ns, recovered by the post-route phys_opt) |
+| 5 | same options at 100 MHz, other BTC sizes, `cpu_muldiv` 2 | not built |
+
+CPU configuration options of `rtlnet_cpu_eth_bd_create` (`cpu_opt`, `cpu_btc`, `cpu_muldiv`; queried from the 2026.1 IP: `C_OPTIMIZATION` 0 Performance, 1 Area,
+2 Frequency; `C_BRANCH_TARGET_CACHE_SIZE` 0..7; `C_USE_MULDIV` 0..2), exposed as `build_ethernet.ps1 -CpuOpt -CpuBtc -CpuMuldiv`. See the hand-back for the variant builds.
+
 ## 7. Limitations
 
 * The LMB is sized by `lmb_kb`; the firmware needs about 346 KiB (`.bss` 232 KiB mostly lwIP pools), so 512 KiB.

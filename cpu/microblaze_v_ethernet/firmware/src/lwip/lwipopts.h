@@ -77,22 +77,43 @@
 #define LWIP_NETIF_API                  0
 #define LWIP_TCPIP_CORE_LOCKING         0
 
-/* Memory. */
+/* Memory. Two profiles. The default (512 KiB LMB, about 346 KiB used) is the throughput profile. RTLNET_SMALL_MEM
+ * (build.ps1 defines it for -LmbKb 256 or smaller) is the small-memory profile for a 256 KiB LMB: half the heap, a
+ * 24-buffer pool, a 4-segment receive window and 12 send segments; it holds one iperf and two echo connections at once
+ * (pool rule below: (TCP_WND / TCP_MSS) x connections + 16 = 4 x 3 + 12 = 24 pbufs). The cost is measured in
+ * cpu/microblaze_v_ethernet/documentation/rtlnet_cpu_eth.md. */
 #define MEM_LIBC_MALLOC                 0
 #define MEMP_MEM_MALLOC                 0
 #define MEM_ALIGNMENT                   4
+#ifdef RTLNET_SMALL_MEM
+#define MEM_SIZE                        (24 * 1024)
+#define MEMP_NUM_PBUF                   48
+#else
 #define MEM_SIZE                        (64 * 1024)
 #define MEMP_NUM_PBUF                   96
+#endif
 #define MEMP_NUM_RAW_PCB                1
 #define MEMP_NUM_UDP_PCB                2
+#ifdef RTLNET_SMALL_MEM
+#define MEMP_NUM_TCP_PCB                6
+#else
 #define MEMP_NUM_TCP_PCB                12
+#endif
 #define MEMP_NUM_TCP_PCB_LISTEN         4
+#ifdef RTLNET_SMALL_MEM
+#define MEMP_NUM_TCP_SEG                96
+#else
 #define MEMP_NUM_TCP_SEG                256
+#endif
 #define MEMP_NUM_REASSDATA              2
 #define MEMP_NUM_FRAG_PBUF              4
 #define MEMP_NUM_ARP_QUEUE              8
 #define MEMP_NUM_SYS_TIMEOUT            (LWIP_NUM_SYS_TIMEOUT_INTERNAL + 2)
+#ifdef RTLNET_SMALL_MEM
+#define PBUF_POOL_SIZE                  24
+#else
 #define PBUF_POOL_SIZE                  64
+#endif
 #define PBUF_POOL_BUFSIZE               1536
 #define PBUF_LINK_HLEN                  14
 #define ETH_PAD_SIZE                    0
@@ -125,8 +146,13 @@
 
 /* TCP. */
 #define TCP_MSS                         1460
+#ifdef RTLNET_SMALL_MEM
+#define TCP_WND                         (4 * TCP_MSS)
+#define TCP_SND_BUF                     (12 * TCP_MSS)
+#else
 #define TCP_WND                         (8 * TCP_MSS)
 #define TCP_SND_BUF                     (24 * TCP_MSS)
+#endif
 #define TCP_SND_QUEUELEN                ((4 * (TCP_SND_BUF) + (TCP_MSS - 1)) / (TCP_MSS))
 #define TCP_QUEUE_OOSEQ                 1
 #define TCP_OVERSIZE                    TCP_MSS

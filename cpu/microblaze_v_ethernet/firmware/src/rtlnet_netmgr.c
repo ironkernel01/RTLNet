@@ -113,6 +113,7 @@ void netmgr_config_defaults(void)
  * netmgr_adv_supported -- every full-duplex mode of the board.
  * Steps:
  *   1. LINK_CAPS of the system registers (ETHS_LINK_*), mapped to RTLNET_PHY_ADV_*.
+ *   2. Intersected with the abilities of the PHY driver in use (a 10/100 PHY on a board whose LINK_CAPS lists 1000).
  * Returns: RTLNET_PHY_ADV_* mask of the supported full-duplex modes, never 0 ("speed auto").
  */
 uint32_t netmgr_adv_supported(void)
@@ -122,6 +123,12 @@ uint32_t netmgr_adv_supported(void)
     adv |= (caps & ETHS_LINK_10F) ? RTLNET_PHY_ADV_10F : 0u;
     adv |= (caps & ETHS_LINK_100F) ? RTLNET_PHY_ADV_100F : 0u;
     adv |= (caps & ETHS_LINK_1000F) ? RTLNET_PHY_ADV_1000F : 0u;
+    if (g_present.phy && g_present.phy_driver != NULL) {
+        uint32_t both = adv & g_present.phy_driver->abilities;
+        if (both != 0u) {
+            adv = both;
+        }
+    }
     return adv;
 }
 

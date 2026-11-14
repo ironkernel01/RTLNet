@@ -1,0 +1,2 @@
+# demorelease.bat: <board> <build tag> [<bitstream file>]   (boards/<board>/build/<tag>/ holds the image)
+nexys_video  eth_rel  rtlnet_nexys_video_eth.bit

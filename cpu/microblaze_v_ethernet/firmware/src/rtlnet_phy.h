@@ -12,7 +12,7 @@
  * Adding a PHY: write a driver file under cores/rtlnet_mdio/driver/ (register map and bring-up of that PHY, in the
  * style of rtlnet_phy_rtl8211e.c) and add one line to g_drivers in rtlnet_phy.c: name, ID, ID mask and the five
  * functions (init, advertise_set, advertise_get, autoneg_restart, status). Nothing else in the firmware changes.
- * Today the table holds the RTL8211E.
+ * Today the table holds the RTL8211E and the DP83848 (10/100 only).
  *
  * Every driver reports the decoded link state in rtlnet_phy_status_t (rtlnet_phy_rtl8211e.h) with the speed code of
  * the MAC (0 10M, 1 100M, 2 1000M). The advertisement mask uses RTLNET_PHY_ADV_*; half duplex is never advertised.
@@ -26,6 +26,7 @@
 
 #include "rtlnet_mdio.h"
 #include "rtlnet_phy_rtl8211e.h"
+#include "rtlnet_phy_dp83848.h"
 
 #define RTLNET_PHY_SUMMARY_LEN  120u   /* size of the bring-up summary text of a driver */
 
@@ -33,6 +34,7 @@ typedef struct rtlnet_phy_driver {
     const char *name;                 /* printed in the banner and "show phy" */
     uint32_t    id;                   /* PHYID1 << 16 | PHYID2 of the PHY */
     uint32_t    id_mask;              /* bits of the ID that must match (the revision bits are masked out) */
+    uint32_t    abilities;            /* RTLNET_PHY_ADV_* full-duplex modes the PHY itself can do (speed auto never offers more) */
     int       (*init)(const rtlnet_mdio_t *mdio, char summary[RTLNET_PHY_SUMMARY_LEN]);
     int       (*advertise_set)(const rtlnet_mdio_t *mdio, uint32_t adv_mask);
     int       (*advertise_get)(const rtlnet_mdio_t *mdio, uint32_t *adv_mask);

@@ -13,10 +13,12 @@ rem It copies only. It builds nothing and it does not touch the board.
 rem
 rem release.txt (one line per board image of the demo, # starts a comment):
 rem
-rem   <board>  <build tag>
+rem   <board>  <build tag>  [<bitstream file>]
 rem
 rem   board      = folder under boards\ and under the demo (example nexys_video)
 rem   build tag  = folder under boards\<board>\build\  (the -Tag of build.ps1)
+rem   bitstream  = optional file name in that folder; default rtlnet_<board>.bit
+rem                (the Ethernet demo uses rtlnet_nexys_video_eth.bit)
 rem
 rem To add a demo: create demos\<demo name>\ with a release.txt and a README.md
 rem that says how to run it. This file does not change.
@@ -42,7 +44,7 @@ rem ---------------------------------------------------------------------------
 set /a DEMOCOUNT=0
 for /d %%D in ("%DEMOS%\*") do if exist "%%D\release.txt" (
   set /a DEMOCOUNT+=1
-  for /f "usebackq eol=# tokens=1,2" %%A in ("%%D\release.txt") do call :image "%%~nxD" %%A %%B
+  for /f "usebackq eol=# tokens=1,2,3" %%A in ("%%D\release.txt") do call :image "%%~nxD" %%A %%B %%C
 )
 if %DEMOCOUNT% equ 0 (
   echo DEMORELEASE: FAIL no demos\*\release.txt found
@@ -60,7 +62,7 @@ echo DEMORELEASE: PASS
 endlocal & exit /b 0
 
 rem ===========================================================================
-rem :image <demo name> <board> <build tag>
+rem :image <demo name> <board> <build tag> [<bitstream file>]
 rem Copies the bitstream (firmware already merged in) and build_info.txt.
 rem ===========================================================================
 :image
@@ -68,7 +70,9 @@ set "SRC=%REPO%\boards\%~2\build\%~3"
 set "DST=%DEMOS%\%~1\%~2"
 echo [%~1 / %~2]  from boards\%~2\build\%~3
 if not exist "%DST%" mkdir "%DST%"
-call :copyone "%SRC%\rtlnet_%~2.bit" "%DST%\rtlnet_%~2.bit"
+set "BIT=rtlnet_%~2.bit"
+if not "%~4"=="" set "BIT=%~4"
+call :copyone "%SRC%\%BIT%" "%DST%\%BIT%"
 call :copyone "%SRC%\build_info.txt" "%DST%\build_info.txt"
 if not exist "%DST%\README.md" echo   NOTE: no README.md in %DST% yet, write one
 exit /b 0

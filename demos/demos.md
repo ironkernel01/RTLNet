@@ -14,10 +14,10 @@ has to be built.
 | `demorelease.bat` | maintainer script: copies freshly built images into the demo folders (section 6) |
 | `build_brief_pdf.ps1` | maintainer script: builds the PDF of a demo brief (section 6) |
 | `<demo name>/` | one demo (every folder under `demos` is one demo) |
-| `<demo name>/release.txt` | what `demorelease.bat` copies for this demo: one line `<board> <build tag>` per board image |
+| `<demo name>/release.txt` | what `demorelease.bat` copies for this demo: one line `<board> <build tag> [<bitstream file>]` per board image (the file name defaults to `rtlnet_<board>.bit`) |
 | `<demo name>/<board>/` | the demo on one board |
 | `<demo name>/<board>/README.md` | the steps to run that demo |
-| `<demo name>/<board>/rtlnet_<board>.bit` | the bitstream, firmware included |
+| `<demo name>/<board>/rtlnet_<board>.bit` | the bitstream, firmware included (the Ethernet demo: `rtlnet_nexys_video_eth.bit`) |
 | `<demo name>/<board>/build_info.txt` | source revision, timing result and utilization of the image |
 | `<demo name>/<demo name>_brief.md` and `.pdf` | the demo brief: what the demo shows, data path, test pattern, measured results, build variants, utilization and limits |
 
@@ -27,8 +27,14 @@ Every folder under `demos` is one demo. Its brief (`<demo name>/<demo name>_brie
 built, the measured results, and its time limit and license if it has any; its `README.md` (`<demo name>/<board>/`) has the
 steps to run it. This guide does not list the demos, so it is the same for every demo that is added.
 
-The images contain the complete RTLNet design for the board: the gigabit Ethernet stack, the MicroBlaze V processor
+The H.264 images contain the complete RTLNet design for the board: the gigabit Ethernet stack, the MicroBlaze V processor
 with its command-line console, the DDR3 memory path and the H.264 encoder, all on one 90 MHz clock.
+
+The Ethernet demo (`ethernet/`) is the network stack alone: 10/100/1000 Mb/s RGMII, ARP, ping, DHCP, UDP echo and UDP
+iperf 2 in FPGA fabric, lwIP TCP echo (port 7) and TCP iperf 2 server (port 5001) on a small 100 MHz MicroBlaze V, and a
+console on the UART. It has no DDR3, no camera, no video and no H.264; its image is `ethernet/nexys_video/rtlnet_nexys_video_eth.bit`
+and it has no time limit. Its steps are in `ethernet/nexys_video/README.md`: program the board as in section 4 with that
+file, then `ping` the address that `show ip` prints. It needs no player and no UDP port 5004 rule; its tests use iperf 2.
 
 ## 3. What you need
 
@@ -91,7 +97,7 @@ After a board build (`boards/<board>/scripts/build.ps1 ... -Tag <tag> -Image`) r
 demos\demorelease.bat
 ```
 
-It finds every `demos/<demo name>/release.txt` and, for each `<board> <build tag>` line in it, copies the bitstream and
+It finds every `demos/<demo name>/release.txt` and, for each `<board> <build tag> [<bitstream file>]` line in it, copies the bitstream (`rtlnet_<board>.bit` unless the line names another file) and
 `build_info.txt` from `boards/<board>/build/<tag>/` into `demos/<demo name>/<board>/`. It prints one line per file and
 ends with `DEMORELEASE: PASS`, or with `DEMORELEASE: FAIL` when a source file is missing. It builds nothing and does not
 touch the board.

@@ -109,7 +109,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File cpu/microblaze_v_ethernet/te
 | MicroBlaze load at TCP line rate | 35 % (100 MHz, no caches, BRAM only) |
 | Broadcast storm limiter | 10 frames per 100 ms toward the CPU, under a 400 frame/s flood |
 
-The video, encoder and gigabit results are in the board guide and in `demos/`.
+The video, encoder and gigabit results are in the board guide and in `demos/`. The released Ethernet image
+(`rtlnet_nexys_video_eth.bit`, build tag `eth_rel`) and its brief are in `demos/ethernet/`.
 
 ## Quick start
 

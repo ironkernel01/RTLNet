@@ -25,8 +25,12 @@ Exactly what is in a demo folder `demos/<demo name>/`:
 | `<board>/build_info.txt` | source revision, timing and utilization of that image |
 
 `demorelease.bat` copies the bitstream and `build_info.txt` from `boards/<board>/build/<build tag>/` (the folder that
-`boards/<board>/scripts/build.ps1 -Tag <build tag> -Image` writes) into `<board>/`. List the folders of `demos` to see
+`boards/<board>/scripts/build.ps1 -Tag <build tag> -Image` writes) into `<board>/`. A `release.txt` line may carry a
+third column, the bitstream file name; without it the name is `rtlnet_<board>.bit`. List the folders of `demos` to see
 which demos there are; the README and the brief of each demo say what the demo shows and under which license it is.
+
+The Ethernet demo (`ethernet/`) is the network stack alone, with no video: its image is `rtlnet_nexys_video_eth.bit`
+(built by `boards/nexys_video/scripts/build_ethernet.ps1 -Tag eth_rel`), it has no time limit and no netlist.
 
 License: `LICENSE.md` in the repository root for RTLNet. A demo that is under other terms names its license file in its
 README and brief.

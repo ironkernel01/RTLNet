@@ -16,7 +16,7 @@ $cc  = Resolve-RtlnetHostCc
 $out = Join-Path $Fw 'build\phy_test.exe'
 New-Item -ItemType Directory -Force -Path (Join-Path $Fw 'build') | Out-Null
 & $cc -std=c11 -Wall -Wextra -Werror -pedantic -O2 "-I$Fw/src" "-I$Repo/cores/rtlnet_common/driver" "-I$Repo/cores/rtlnet_mdio/driver" `
-    -o $out "$Fw/test/phy_host_test.c" "$Fw/src/rtlnet_phy.c" "$Repo/cores/rtlnet_mdio/driver/rtlnet_phy_rtl8211e.c"
+    -o $out "$Fw/test/phy_host_test.c" "$Fw/src/rtlnet_phy.c" "$Repo/cores/rtlnet_mdio/driver/rtlnet_phy_rtl8211e.c" "$Repo/cores/rtlnet_mdio/driver/rtlnet_phy_dp83848.c"
 if ($LASTEXITCODE -ne 0) { Write-Output 'PHY_HOST_TEST: FAIL build'; exit 1 }
 $a = & $out
 $ra = $LASTEXITCODE

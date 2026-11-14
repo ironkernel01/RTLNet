@@ -26,6 +26,7 @@ param(
     [int]$Percent = 90,
     [int]$Seconds = 5,
     [int]$LinkMbps = 0,
+    [switch]$NoSweep,
     [string]$Iperf = '',
     [string]$OutDir = '',
     [string]$Csv = ''
@@ -54,6 +55,20 @@ foreach ($dir in @(@{ Name = 'PC to board'; Args = @() }, @{ Name = 'board to PC
         Add-EthRow "UDP $($dir.Name): jitter" $m.Groups[2].Value 'ms' $true
     } else {
         Add-EthRow "UDP $($dir.Name): server report" 'none' '' $false
+    }
+}
+# Rate sweep: the highest offered rate (percent of the link) that loses no datagram, per direction.
+if (-not $NoSweep) {
+    foreach ($dir in @(@{ Name = 'PC to board'; Args = @() }, @{ Name = 'board to PC (-R)'; Args = @('-R') })) {
+        $best = 0
+        foreach ($pc in @(50, 70, 80, 90, 95, 98)) {
+            $rt = [int]($link * $pc / 100)
+            $r = & $ip -c $s.Board -B $s.Nic.Ip -u -b "${rt}M" -t 3 -l 1470 @($dir.Args) 2>&1 | ForEach-Object { "$_" }
+            Write-EthLog ($r -join [Environment]::NewLine)
+            $line = $r | Select-String -Pattern '([\d.]+)\s+Mbits/sec\s+([\d.]+)\s+ms\s+(\d+)/\s*(\d+)\s+\(([\d.e+-]+)%\)' | Select-Object -Last 1
+            if ($line -and $line.Matches[0].Groups[3].Value -eq '0') { $best = $pc } else { break }
+        }
+        Add-EthRow "UDP $($dir.Name): highest zero-loss offered rate (sweep 50..98 %)" ("{0} % = {1}M" -f $best, [int]($link * $best / 100)) '' ($best -gt 0)
     }
 }
 Complete-EthTest

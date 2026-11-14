@@ -70,7 +70,12 @@ foreach ($name in $scripts) {
         # The console test restarts the firmware: wait for the link and the address again.
         $sp = Open-EthConsole $Port
         [void](Enter-EthPriv $sp)
-        [void](Wait-EthBoardLink $sp $LinkMbps 40)
+        # The restart returns the link to speed auto: set the speed under test again and wait for it.
+        Start-Sleep -Seconds 5
+        [void](Send-EthCli $sp 'configure terminal'); [void](Send-EthCli $sp 'interface eth0'); [void](Send-EthCli $sp $cmd); [void](Enter-EthPriv $sp)
+        $okB2 = Wait-EthBoardLink $sp $LinkMbps 40
+        Write-Output ("eth_suite: after the console test restart, link {0} Mb/s restored: {1}" -f $LinkMbps, $okB2)
+        if (-not $okB2) { Write-Output "ETH_SUITE: FAIL link at $LinkMbps Mb/s not restored after the restart"; $sp.Close(); exit 1 }
         Start-Sleep -Seconds 5
         $nb = Get-EthBoardIp $sp
         if ($nb -and $nb -ne '0.0.0.0') { $board = $nb }
@@ -93,6 +98,12 @@ foreach ($r in $rows) { $lines += ('{0,-20} {1,-62} {2,-24} {3,-8} {4}' -f $r.te
 $lines += ''
 foreach ($r in $results) { $lines += ('{0,-22} exit {1}   {2}' -f $r.Script, $r.Exit, $r.Last) }
 Set-Content -LiteralPath $txt -Value $lines -Encoding ascii
+# Restore speed auto (the power-up default) and refresh the combined table over every speed run so far.
+$sp = Open-EthConsole $Port
+[void](Enter-EthPriv $sp)
+[void](Send-EthCli $sp 'configure terminal'); [void](Send-EthCli $sp 'interface eth0'); [void](Send-EthCli $sp 'speed auto'); [void](Enter-EthPriv $sp)
+$sp.Close()
+& (Resolve-RtlnetPython) -I (Join-Path $PSScriptRoot 'make_summary.py') $out
 Write-Output "Results: $txt"
 Write-Output "CSV: $csv"
 $failed = @($results | Where-Object { $_.Exit -ne 0 }).Count
