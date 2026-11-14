@@ -51,6 +51,7 @@
 #include "rtlnet_cpu_eth_sysregs.h"
 #include "rtlnet_cpupath.h"
 #include "rtlnet_eth_protocol.h"
+#include "rtlnet_lwip_netif.h"
 #include "rtlnet_netmgr.h"
 #include "rtlnet_offload.h"
 #include "rtlnet_platform.h"
@@ -484,6 +485,67 @@ static void demo_offload(void)
     demo_type("offload all on\r");
     demo_type("end\r");
     demo_check(host_model_txo_ctrl() == RTLNET_OFFLOAD_ALL, "offload all on: CTRL 7");
+    /* ---- Receive features: a checksum-only build refuses them, a feature build configures and shows them. */
+    host_capture_clear();
+    demo_type("configure terminal\r");
+    demo_type("offload ack-coalesce on\r");
+    demo_check(strstr(host_capture_text(), "% This build has no such feature") != NULL, "offload ack-coalesce: refused without the hardware");
+    demo_type("offload rx-batch on\r");
+    demo_check(strstr(host_capture_text(), "% This build has no such feature") != NULL, "offload rx-batch: refused without the hardware");
+    demo_type("offload tx-ip on 5\r");
+    demo_check(strstr(host_capture_text(), "belong to ack-coalesce and rx-batch") != NULL, "offload tx-ip: the timer argument is for the features");
+    demo_type("end\r");
+    demo_build(1, 1, 0x00070000u | DEMO_CPU_QUEUES, 1, DEMO_CAPS_BOTH | RTLNET_TXO_CAPS_ACK_COALESCE | RTLNET_TXO_CAPS_RX_BATCH);
+    demo_check(rtlnet_offload_feat()->present == (RTLNET_OFFLOAD_FEAT_ACK | RTLNET_OFFLOAD_FEAT_BATCH) &&
+               rtlnet_offload_feat()->ack_flows == 4u && rtlnet_offload_feat()->bat_reserve == 2056u,
+               "features: discovered with CAPS2");
+    demo_type("configure terminal\r");
+    host_capture_clear();
+    demo_type("offload ack-coalesce on\r");
+    demo_check(strstr(host_capture_text(), "turn the receive offload on first") != NULL && host_model_txo_ctrl() == 0u,
+               "offload ack-coalesce: needs rx on");
+    demo_check(rtlnet_offload_apply(RTLNET_OFFLOAD_ALL) == RTLNET_OFFLOAD_OK, "features: apply(all)");
+    host_capture_clear();
+    demo_type("offload ack-coalesce on 250 5\r");
+    demo_check((host_model_txo_ctrl() & RTLNET_TXO_CTRL_ACK_COALESCE) != 0u && host_model_txo_cfg(0) == 250u &&
+               host_model_txo_cfg(1) == 5u, "offload ack-coalesce on 250 5: CTRL bit, timer and limit written");
+    demo_type("offload rx-batch on 40 12\r");
+    demo_check((host_model_txo_ctrl() & RTLNET_TXO_CTRL_RX_BATCH) != 0u && host_model_txo_cfg(2) == 40u &&
+               host_model_txo_cfg(3) == 12u && host_model_txo_cfg(4) == RTLNET_NETIF_BATCH_BUF_BYTES,
+               "offload rx-batch on 40 12: CTRL bit, timer, frames, and the buffer size as byte limit");
+    demo_check(rtlnet_netif_rx_batch_active() == 1, "offload rx-batch on: batch buffers");
+    demo_type("offload rx-batch on 70000\r");
+    demo_check(strstr(host_capture_text(), "% Value out of range") != NULL, "offload rx-batch: timer above 16 bits refused");
+    demo_type("offload rx-batch on x\r");
+    demo_check(strstr(host_capture_text(), "% Invalid timer") != NULL, "offload rx-batch: bad timer word");
+    host_model_txo_feat_counter(RTLNET_TXO_CNT_ACK_CAND, 1000u);
+    host_model_txo_feat_counter(RTLNET_TXO_CNT_ACK_DROPPED, 700u);
+    host_model_txo_feat_counter(RTLNET_TXO_CNT_ACK_FWD, 300u);
+    host_model_txo_feat_counter(RTLNET_TXO_NUM_ACK_COUNTERS + RTLNET_TXO_CNT_BAT_BATCHES, 40u);
+    host_model_txo_feat_counter(RTLNET_TXO_NUM_ACK_COUNTERS + RTLNET_TXO_CNT_BAT_FRAMES, 120u);
+    demo_type("end\r");
+    host_capture_clear();
+    demo_type("show offload\r");
+    demo_check(strstr(host_capture_text(), "ACK coalescing  : on, timer 250 us, limit 5 ACKs per forwarded ACK, 4 flows") != NULL,
+               "show offload: ACK coalescing configuration");
+    demo_check(strstr(host_capture_text(), "RX batching     : on, timer 40 us, at most 12 frames and 8192 bytes (reserve 2056)") != NULL,
+               "show offload: batching configuration");
+    demo_check(strstr(host_capture_text(), "ACK counters    : candidates 1000, dropped 700, forwarded 300") != NULL,
+               "show offload: ACK counters");
+    demo_check(strstr(host_capture_text(), "Batch counters  : batches 40, frames 120") != NULL, "show offload: batch counters");
+    host_capture_clear();
+    demo_type("show running-config\r");
+    demo_check(strstr(host_capture_text(), "offload ack-coalesce on 250 5") != NULL &&
+               strstr(host_capture_text(), "offload rx-batch on 40 12") != NULL, "running-config lists the receive features that are on");
+    demo_type("configure terminal\r");
+    demo_type("offload rx-batch off\r");
+    demo_check((host_model_txo_ctrl() & RTLNET_TXO_CTRL_RX_BATCH) == 0u && (host_model_txo_ctrl() & RTLNET_TXO_CTRL_ACK_COALESCE) != 0u &&
+               rtlnet_netif_rx_batch_active() == 0, "offload rx-batch off: bit cleared, ack coalescing stays, single-frame buffers");
+    demo_type("offload rx off\r");
+    demo_check((host_model_txo_ctrl() & RTLNET_TXO_CTRL_FEATURE_MASK) == 0u && (host_model_txo_ctrl() & RTLNET_OFFLOAD_RX) == 0u &&
+               rtlnet_offload_feat()->on == 0u, "offload rx off: the receive features go off first");
+    demo_type("end\r");
+
     host_model_txo_set(0, 0u);
     host_model_set_wrapper(0, 0u);
     host_model_set_core(RTLNET_PLAT_PROT_BASE, 0u);

@@ -66,6 +66,9 @@ The application streams belong to the UDP socket leaf; with `UDP_ENABLE = 0` the
 | `CPU_TX_FIFO_KB` | 8 | `u_cpu_tx_fifo` (4 slots) |
 | `CPU_CLASSIFIER_ENABLE` | 1 | build `u_cpu_classifier` (`rtlnet_classifier`) between `u_cpu_rx_fifo` and `m_axis_cpu_eth` and its register window 0x8000; 0: the queue drives `m_axis_cpu_eth` through `u_cpu_rx_slice` and 0x8000 reads 0 |
 | `CPU_TCP_OFFLOAD_ENABLE` | 1 | build `u_cpu_offload` (`rtlnet_tcp_offload`): IPv4/TCP/UDP checksum insert on the CPU transmit stream (between `s_axis_cpu_eth` and `u_cpu_tx_guard`) and checksum check plus an 8-byte trailer beat on the CPU receive stream (between the classifier and `m_axis_cpu_eth`); registers at window 0x9000; 0: both streams pass as before and 0x9000 reads 0 |
+| `CPU_TCP_OFFLOAD_ACK_COALESCE` | 0 | `u_cpu_offload` builds the ACK coalescer (`ACK_COALESCE`, `cores/rtlnet_tcp_offload` section 12); needs `CTRL.rx_csum` in the core; off after reset |
+| `CPU_TCP_OFFLOAD_RX_BATCH` | 0 | `u_cpu_offload` builds the receive batcher (`RX_BATCH`): consecutive CPU receive frames, each with its trailer, in one DMA transfer |
+| `CPU_TCP_OFFLOAD_ACK_FLOWS` | 4 | coalescer flow table entries; `CPU_AXIS_CLK_HZ` also sets the core's microsecond tick (`CLK_HZ`) |
 | `CPU_AXIS_CLK_HZ` | 100 000 000 | `cpu_axis_clk` frequency, passed to the classifier as `AXIS_CLK_HZ` (policer millisecond tick) |
 | `RAM_STYLE` | `"block"` | every buffer (queues and leaf buffers) |
 

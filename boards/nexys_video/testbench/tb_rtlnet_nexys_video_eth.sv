@@ -286,6 +286,28 @@ module tb_rtlnet_nexys_video_eth;
     return q;
   endfunction
 
+  // Pure TCP ACK (20-byte header, flags ACK, no payload) with correct checksums, padded to 60 bytes.
+  function automatic bytes_t ack_frame(input bit [47:0] dst_mac, input bit [47:0] src_mac, input bit [31:0] src_ip,
+                                       input bit [31:0] dst_ip, input bit [15:0] sport, input bit [15:0] dport,
+                                       input bit [31:0] seq, input bit [31:0] ack);
+    bytes_t q;
+    bytes_t ip;
+    bytes_t seg;
+    bytes_t ps;
+    bit [15:0] c;
+    push16(seg, sport); push16(seg, dport); push32(seg, seq); push32(seg, ack);
+    push16(seg, 16'h5010); push16(seg, 16'h2000); push16(seg, 16'h0000); push16(seg, 16'h0000);
+    ip = ipv4_header(16'(20 + seg.size()), 16'h4322, 8'd6, src_ip, dst_ip);
+    push32(ps, src_ip); push32(ps, dst_ip); ps.push_back(8'h00); ps.push_back(8'd6); push16(ps, 16'(seg.size()));
+    for (int i = 0; i < $size(seg); i++) ps.push_back(seg[i]);
+    c = inet_checksum(ps, 0, ps.size());
+    seg[16] = c[15:8]; seg[17] = c[7:0];
+    q = eth_header(dst_mac, src_mac, 16'h0800);
+    for (int i = 0; i < $size(ip); i++) q.push_back(ip[i]);
+    for (int i = 0; i < $size(seg); i++) q.push_back(seg[i]);
+    return pad60(q);
+  endfunction
+
   // BOOTP/DHCP server message from the bench (op 2), options given.
   function automatic bytes_t dhcp_server_msg(input bit [31:0] xid, input bit [47:0] chaddr, input bit [7:0] msg_type);
     bytes_t b;
@@ -634,6 +656,65 @@ module tb_rtlnet_nexys_video_eth;
       expect_frame(f, "TX offload off: garbage checksums left as sent", got);
     end
 
+    // CPU-path receive batching and ACK coalescing end to end (cores/rtlnet_tcp_offload, ACK_COALESCE / RX_BATCH
+    // built for the Ethernet demo): the stub sees one DMA transfer per batch.
+    begin
+      bytes_t tf [0:2];
+      bytes_t ak [0:3];
+      bytes_t exp_t;
+      bytes_t pay;
+      bytes_t cpu_f;
+      bit     cpu_ok;
+      string  why;
+      logic [1:0] r;
+      rd(OFL + 32'h008, d);
+      tb_check(d[7:6] == 2'b11, $sformatf("offload CAPS 0x%08x: ACK coalescing and batching present", d));
+      rd(OFL + 32'h01C, d);
+      tb_check(d[7:0] == 8'd4 && d[23:8] == 16'd2056, $sformatf("offload CAPS2 0x%08x: 4 flows, 2056-byte batch reserve", d));
+      dut.u_cpu.txo_config(OFL, 32'h1F, r);
+      tb_check(r == 2'b00, $sformatf("offload batch enable resp %b", r));
+      // Three segments back to back: the frame-count limit closes the batch, one transfer carries the three frames.
+      wr(OFL + 32'h02C, 32'd3);
+      wr(OFL + 32'h028, 32'd3000);
+      exp_t = {};
+      for (int k = 0; k < 3; k++) begin
+        bytes_t one;
+        pay = rand_bytes(seed, 21 + 17 * k);
+        tf[k] = tcp_frame(BOARD_MAC, HOST_MAC, HOST_IP, BOARD_IP, 16'd40005, 16'd5001, pay, 1'b1);
+        u_phy.inject(tf[k]);
+        one = with_trailer(tf[k], 16'hFFFF, 16'h00E3, 8'd34);
+        for (int j = 0; j < one.size(); j++) exp_t.push_back(one[j]);
+      end
+      dut.u_cpu.eth_get(cpu_f, 600_000, cpu_ok);
+      tb_check(cpu_ok, "batch: the transfer arrived");
+      if (cpu_ok) tb_check(bytes_equal(cpu_f, exp_t, why), $sformatf("batch: three frames, one transfer: %s", why));
+      check_reg(OFL + 32'h0A0, 32'd1, "offload BATCHES");
+      check_reg(OFL + 32'h0A4, 32'd3, "offload BATCH_FRAMES");
+      check_reg(OFL + 32'h0AC, 32'd1, "offload BATCH_CLOSE_COUNT");
+      // A run of pure ACKs of one flow: only the newest leaves, after the coalescing timer, through the batcher.
+      wr(OFL + 32'h020, 32'd1000);
+      wr(OFL + 32'h02C, 32'd16);
+      wr(OFL + 32'h028, 32'd200);
+      for (int k = 0; k < 4; k++) begin
+        ak[k] = ack_frame(BOARD_MAC, HOST_MAC, HOST_IP, BOARD_IP, 16'd40007, 16'd5001, 32'h5000_0001, 32'h6000_0000 + 32'd1460 * (k + 1));
+        u_phy.inject(ak[k]);
+      end
+      dut.u_cpu.eth_get(cpu_f, 900_000, cpu_ok);
+      tb_check(cpu_ok, "ACK coalescing: the newest ACK arrived");
+      if (cpu_ok) tb_check(bytes_equal(cpu_f, with_trailer(ak[3], 16'hFFFF, 16'h00E3, 8'd34), why),
+                           $sformatf("ACK coalescing: only the newest ACK, with its trailer: %s", why));
+      check_reg(OFL + 32'h080, 32'd4, "offload ACK candidates");
+      check_reg(OFL + 32'h084, 32'd3, "offload ACKs dropped");
+      check_reg(OFL + 32'h088, 32'd1, "offload ACKs forwarded");
+      check_reg(OFL + 32'h08C, 32'd1, "offload ACK flushes by timer");
+      dut.u_cpu.eth_get(cpu_f, 20_000, cpu_ok);
+      tb_check(!cpu_ok, "ACK coalescing: no further frame");
+      rd(OFL + 32'h010, d);
+      tb_check(d[3:0] == 4'hF, $sformatf("offload STATUS 0x%08x: all four blocks idle", d));
+      dut.u_cpu.txo_config(OFL, 32'h0, r);
+      tb_check(r == 2'b00, $sformatf("offload batch disable resp %b", r));
+    end
+
     // DHCP with the bench as server.
     wr(DHCP + 32'h00C, 32'h1);
     expect_frame(empty, "DHCP DISCOVER", got);
@@ -685,7 +766,7 @@ module tb_rtlnet_nexys_video_eth;
 
     // Counters and PHY-side timing.
     rd(MAC + 32'h020, d);
-    tb_check(d - rx_good0 == 7 + 1 + STORM_BURST + 3, $sformatf("MAC RX_GOOD advanced %0d, expected %0d", d - rx_good0, 7 + 1 + STORM_BURST + 3));
+    tb_check(d - rx_good0 == 7 + 1 + STORM_BURST + 3 + 7, $sformatf("MAC RX_GOOD advanced %0d, expected %0d", d - rx_good0, 7 + 1 + STORM_BURST + 3 + 7));
     rd(MAC + 32'h024, d);
     tb_check(d == 0, $sformatf("MAC RX_BAD %0d", d));
     rd(MAC + 32'h02C, d);

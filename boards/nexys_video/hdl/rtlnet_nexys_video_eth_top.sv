@@ -628,6 +628,11 @@ module rtlnet_nexys_video_eth_top #(
     // IPv4/TCP/UDP checksums of CPU transmit frames, appends a checksum trailer to CPU receive frames; power-up
     // CTRL 0 is a pass-through.
     .CPU_TCP_OFFLOAD_ENABLE (1),
+    // Receive batching and ACK coalescing on the CPU receive stream (cores/rtlnet_tcp_offload): the firmware
+    // enables them through CTRL.rx_batch / CTRL.ack_coalesce (power-up 0 = plain trailer stream). Ethernet demo only.
+    .CPU_TCP_OFFLOAD_ACK_COALESCE (1),
+    .CPU_TCP_OFFLOAD_RX_BATCH     (1),
+    .CPU_TCP_OFFLOAD_ACK_FLOWS    (4),
     .CPU_AXIS_CLK_HZ (CPU_CLK_HZ),
     .RAM_STYLE       ("block")
   ) u_protocol (

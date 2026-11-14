@@ -16,6 +16,7 @@
 # duplex is never advertised; the link always auto-negotiates.
 
 REVISION:11-14-2026:Initial command set of the Ethernet demo
+REVISION:11-14-2026:OFFLOAD takes ack-coalesce and rx-batch with optional timer and limit
 
 # ---------------------------------------------------------------------------
 # Modes
@@ -97,7 +98,7 @@ cli_iperf_tcp_port:config:IPERF TCP PORT [PORT]:TCP iperf server port (default 5
 cli_tcp_echo_enable:config:TCP ECHO ENABLE:Enable the TCP echo server
 cli_tcp_echo_disable:config:TCP ECHO DISABLE:Disable the TCP echo server (open connections stay)
 cli_tcp_echo_port:config:TCP ECHO PORT [PORT]:TCP echo server port (default 7)
-cli_offload:config:OFFLOAD [WHAT] [STATE]:Checksum offload: tx-ip, tx-l4, rx or all, on or off (as far as the build has it; lwIP follows)
+cli_offload:config:OFFLOAD [WHAT] [STATE] {TIMER} {LIMIT}:Checksum offload (tx-ip, tx-l4, rx, all) and receive features (ack-coalesce, rx-batch) on or off, as far as the build has them; TIMER in microseconds, LIMIT ACKs or frames
 
 # ---------------------------------------------------------------------------
 # Interface configuration (eth0)

@@ -66,6 +66,8 @@ void        host_model_txo_idle_after(uint32_t reads);
 void        host_model_txo_stuck(uint32_t mask);
 uint32_t    host_model_txo_ctrl(void);
 void        host_model_txo_set_ctrl(uint32_t ctrl);
+void        host_model_txo_feat_counter(uint32_t index, uint32_t value);
+uint32_t    host_model_txo_cfg(uint32_t index);
 
 /* Event log: what the firmware did, in order. */
 #define HOST_EV_CTRL_WRITE   1   /* CTRL written (value as written) */

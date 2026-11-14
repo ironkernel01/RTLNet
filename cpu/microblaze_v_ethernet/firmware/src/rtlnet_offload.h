@@ -46,6 +46,13 @@
  * checksum -> drop and count; verified and good -> pass; unverified -> pass.
  * A frame without a valid trailer while rx_csum is on is dropped and counted.
  *
+ * 3. Receive features of the core (CAPS bits ACK_COALESCE and RX_BATCH, discovered with the block; absent in the
+ *    checksum-only bitstreams, where every function below reports RTLNET_OFFLOAD_ERR_ABSENT and nothing else in this
+ *    file changes): rtlnet_offload_ack_set() and rtlnet_offload_batch_set() configure and switch them. Both work on
+ *    the trailer, so rx must be on (RTLNET_OFFLOAD_ERR_NEED_RX otherwise); rtlnet_offload_apply() switches them off
+ *    before it turns rx off. rx batching changes the DMA transfers into batches: the netif owns the matching buffer
+ *    geometry (rtlnet_netif_set_rx_batch), the CLI calls both in the order that keeps the transfers within the buffer.
+ *
  * Host harness: the lwIP hooks (rtlnet_lwip_set_checksum_ctrl / _get_) are
  * provided by host/host_lwip_stub.c or the offload test, the register
  * access by the rtlnet_mmio host model.
@@ -84,6 +91,14 @@
 #define RTLNET_OFFLOAD_OK           0
 #define RTLNET_OFFLOAD_ERR_IO       (-1)    /* CTRL did not read back as written */
 #define RTLNET_OFFLOAD_ERR_TIMEOUT  (-2)    /* TX_IDLE did not come: the CTRL bit stays set */
+
+/* Receive features. */
+#define RTLNET_OFFLOAD_FEAT_ACK     0x1u    /* ACK coalescing */
+#define RTLNET_OFFLOAD_FEAT_BATCH   0x2u    /* receive batching */
+#define RTLNET_OFFLOAD_KEEP         0xFFFFFFFFu   /* "keep the current value" for a timer or limit argument */
+#define RTLNET_OFFLOAD_ERR_NEED_RX  (-3)    /* the feature works on the receive trailer: rx offload is not on */
+#define RTLNET_OFFLOAD_ERR_ABSENT   (-4)    /* the build does not have the feature */
+#define RTLNET_OFFLOAD_ERR_ARG      (-5)    /* a value outside the register range */
 
 /* Feature discovery result. */
 typedef struct {
@@ -136,6 +151,19 @@ typedef struct {
     uint32_t idle_timeouts;
 } rtlnet_offload_state_t;
 
+/* The receive features as configured (what the CLI shows and the running configuration prints). */
+typedef struct {
+    uint32_t present;           /* RTLNET_OFFLOAD_FEAT_* the build has */
+    uint32_t on;                /* RTLNET_OFFLOAD_FEAT_* switched on */
+    uint32_t ack_flows;         /* flow table entries (CAPS2) */
+    uint32_t bat_reserve;       /* bytes the batch byte limit keeps free for a next frame (CAPS2) */
+    uint32_t ack_timer_us;      /* configuration, as last written (reset value until then) */
+    uint32_t ack_limit;
+    uint32_t bat_timer_us;
+    uint32_t bat_frames;
+    uint32_t bat_bytes;
+} rtlnet_offload_feat_t;
+
 /* lwIP hooks (rtlnet_lwip.c on the target, host stubs on the PC). */
 void     rtlnet_lwip_set_checksum_ctrl(uint32_t flags);
 uint32_t rtlnet_lwip_get_checksum_ctrl(void);
@@ -155,5 +183,10 @@ int                         rtlnet_offload_status(uint32_t *status);
 int                         rtlnet_offload_ctrl_now(uint32_t *ctrl);
 uint32_t                    rtlnet_offload_buffer_kb(void);
 void                        rtlnet_offload_reset_stats(void);
+
+const rtlnet_offload_feat_t *rtlnet_offload_feat(void);
+int                         rtlnet_offload_ack_set(int on, uint32_t timer_us, uint32_t limit);
+int                         rtlnet_offload_batch_set(int on, uint32_t timer_us, uint32_t max_frames, uint32_t max_bytes);
+int                         rtlnet_offload_feat_counters(rtlnet_txo_feat_counters_t *out);
 
 #endif /* RTLNET_OFFLOAD_H */

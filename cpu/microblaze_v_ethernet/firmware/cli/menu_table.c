@@ -35,6 +35,7 @@
  *  Revision    Author                          Description
  * ---------------------------------------------------------------------------
  *  11-14-2026  MenuBuilder AI / Steve Spano    Initial command set of the Ethernet demo
+ *  11-14-2026  MenuBuilder AI / Steve Spano    OFFLOAD takes ack-coalesce and rx-batch with optional timer and limit
  * ===========================================================================
  */
 #include "menu.h"
@@ -137,8 +138,8 @@ const MenuCommandDef g_menu_commands[] = {
       "Disable the TCP echo server (open connections stay)", cli_tcp_echo_disable, MENU_MODE_NONE },
     { "cli_tcp_echo_port", MENU_MODE_CONFIG, "TCP ECHO PORT [PORT]",
       "TCP echo server port (default 7)", cli_tcp_echo_port, MENU_MODE_NONE },
-    { "cli_offload", MENU_MODE_CONFIG, "OFFLOAD [WHAT] [STATE]",
-      "Checksum offload: tx-ip, tx-l4, rx or all, on or off (as far as the build has it; lwIP follows)", cli_offload, MENU_MODE_NONE },
+    { "cli_offload", MENU_MODE_CONFIG, "OFFLOAD [WHAT] [STATE] {TIMER} {LIMIT}",
+      "Checksum offload (tx-ip, tx-l4, rx, all) and receive features (ack-coalesce, rx-batch) on or off, as far as the build has them; TIMER in microseconds, LIMIT ACKs or frames", cli_offload, MENU_MODE_NONE },
     { "cli_if_speed", MENU_MODE_CONFIG_IF, "SPEED [MBPS]",
       "Link speed, full duplex: 10, 100 or auto (auto = every mode of the board, best rate)", cli_if_speed, MENU_MODE_NONE },
     { "cli_if_shutdown", MENU_MODE_CONFIG_IF, "SHUTDOWN",

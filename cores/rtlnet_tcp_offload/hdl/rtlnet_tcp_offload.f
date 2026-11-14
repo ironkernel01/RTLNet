@@ -4,5 +4,7 @@ cores/rtlnet_tcp_offload/hdl/rtlnet_tcp_offload_pkg.sv
 cores/rtlnet_tcp_offload/hdl/rtlnet_tcp_offload_analyze.sv
 cores/rtlnet_tcp_offload/hdl/rtlnet_tcp_offload_tx.sv
 cores/rtlnet_tcp_offload/hdl/rtlnet_tcp_offload_rx.sv
+cores/rtlnet_tcp_offload/hdl/rtlnet_tcp_offload_ackco.sv
+cores/rtlnet_tcp_offload/hdl/rtlnet_tcp_offload_batch.sv
 cores/rtlnet_tcp_offload/hdl/rtlnet_tcp_offload_regs.sv
 cores/rtlnet_tcp_offload/hdl/rtlnet_tcp_offload.sv
