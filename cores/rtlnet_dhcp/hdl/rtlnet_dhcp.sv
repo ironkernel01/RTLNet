@@ -62,7 +62,11 @@
 //     0.0.0.0 or the leaf's own lease_ip, which is the effective address while
 //     lease_valid.
 // Language: SystemVerilog-2012 (synthesizable subset).
-// Revision: 10-22-2026
+// Revision: 11-14-2026
+//   * 11-14-2026: the option walk takes the RAM byte through a register (opt_byte_q, opt_go): three clocks per byte instead of two
+//     (a 100 MHz clock). Behaviour at the ports unchanged.
+//   * 11-14-2026: the IPv4 header checksum comes from rtlnet_ipv4_csum_pipe (three register stages, S_TX_CSUM takes four
+//     clocks instead of one) for a 100 MHz clock. Behaviour at the ports unchanged.
 //   * 10-22-2026: initial version.
 //   * 10-22-2026: claim output (leaf contract 7.5, CPU network path).
 // Clocks: clk = proto_clk (50 MHz on the Nexys Video, MS_CYCLES clocks per
@@ -364,6 +368,9 @@ module rtlnet_dhcp #(
   logic [63:0]       ram_rd_data;
   logic [POS_W-1:0]  opt_pos;              // frame byte read by the walk
   logic              opt_rdy;              // ram_rd_data holds the word of opt_pos
+  logic              opt_rdy_d;            // opt_rdy of the clock before
+  logic [7:0]        opt_byte_q;           // the selected byte of ram_rd_data, registered
+  logic              opt_go;               // opt_byte_q holds the byte of opt_pos (one clock after opt_rdy rose)
   logic [7:0]        opt_code;
   logic [POS_W-1:0]  opt_next;
   logic [2:0]        opt_left;
@@ -385,6 +392,8 @@ module rtlnet_dhcp #(
   logic [31:0]       tx_req_ip;
   logic [31:0]       tx_server;
   logic [15:0]       tx_csum;
+  logic [15:0]       tx_csum_w;        // IPv4 header checksum from rtlnet_ipv4_csum_pipe (3 clocks after tx_ident, tx_sip, tx_dip)
+  logic [1:0]        csum_wait;        // clocks spent in S_TX_CSUM
   logic [63:0]       tx_data;
   logic [7:0]        tx_keep;
   logic              tx_last;
@@ -448,7 +457,8 @@ module rtlnet_dhcp #(
     endcase
   end
 
-  assign opt_byte      = ram_rd_data[{opt_pos[2:0], 3'b000} +: 8];
+  assign opt_go        = opt_rdy && opt_rdy_d;
+  assign opt_byte      = opt_byte_q;
   assign opt_last_data = opt_pos + {9'd0, opt_byte};
   assign opt_want_type = (opt_code == OPT_MSG_TYPE) && (opt_byte >= OPT_LEN_TYPE);
   assign opt_want_word = ((opt_code == OPT_SERVER_ID) || (opt_code == OPT_LEASE_TIME) ||
@@ -813,6 +823,8 @@ module rtlnet_dhcp #(
       ram_wr_data   <= 64'd0;
       opt_pos       <= '0;
       opt_rdy       <= 1'b0;
+      opt_rdy_d     <= 1'b0;
+      opt_byte_q    <= 8'd0;
       opt_code      <= 8'd0;
       opt_next      <= '0;
       opt_left      <= 3'd0;
@@ -823,6 +835,8 @@ module rtlnet_dhcp #(
       ram_wr_data  <= s_axis_tdata;
       ram_wr_addr  <= rx_beat[ADDR_W-1:0];
       opt_rdy      <= 1'b1;
+      opt_rdy_d    <= opt_rdy;
+      opt_byte_q   <= ram_rd_data[{opt_pos[2:0], 3'b000} +: 8];
       case (rx_state)
         S_RX_IDLE: begin                                   // bytes 0-7: destination, source octets 0-1
           rx_beat <= '0;
@@ -889,7 +903,7 @@ module rtlnet_dhcp #(
           else                                           rx_state <= S_OPT_CODE;
         end
         S_OPT_CODE: begin                                  // RFC 2132 2: code byte
-          if (opt_rdy) begin
+          if (opt_go) begin
             if (opt_pos > rx_bound) begin                  // no end option inside the datagram
               rx_state <= S_RX_IDLE;
             end else if (opt_byte == OPT_END) begin        // RFC 2132 3.2
@@ -906,7 +920,7 @@ module rtlnet_dhcp #(
           end
         end
         S_OPT_LEN: begin                                   // length byte
-          if (opt_rdy) begin
+          if (opt_go) begin
             if ((opt_pos > rx_bound) || (opt_last_data > rx_bound)) begin
               rx_state <= S_RX_IDLE;                       // runs past the datagram
             end else if (opt_want_type || opt_want_word) begin
@@ -924,7 +938,7 @@ module rtlnet_dhcp #(
           end
         end
         S_OPT_DATA: begin                                  // first data bytes, most significant first
-          if (opt_rdy) begin
+          if (opt_go) begin
             opt_value <= {opt_value[23:0], opt_byte};
             if (opt_left == 3'd1) begin
               case (opt_code)
@@ -1025,6 +1039,7 @@ module rtlnet_dhcp #(
       tx_req_ip     <= 32'd0;
       tx_server     <= 32'd0;
       tx_csum       <= 16'd0;
+      csum_wait     <= 2'd0;
       tx_data       <= 64'd0;
       tx_keep       <= 8'd0;
       tx_last       <= 1'b0;
@@ -1060,10 +1075,14 @@ module rtlnet_dhcp #(
           end
         end
         S_TX_CSUM: begin
-          tx_csum  <= ipv4_header_checksum(8'h00, TX_IP_TOTAL_LEN, tx_ident, 16'h0000, IPV4_TTL, IP_PROTO_UDP,
-                                           tx_sip, tx_dip);
-          tx_beat  <= 6'd0;
-          tx_state <= S_TX_BEAT;
+          // The checksum pipeline needs 3 clocks after the header fields settle: leave on the fourth clock.
+          csum_wait <= csum_wait + 2'd1;
+          if (csum_wait == 2'd3) begin
+            tx_csum   <= tx_csum_w;
+            csum_wait <= 2'd0;
+            tx_beat   <= 6'd0;
+            tx_state  <= S_TX_BEAT;
+          end
         end
         S_TX_BEAT: begin
           if (!tx_valid || tx_ready) begin
@@ -1109,6 +1128,20 @@ module rtlnet_dhcp #(
   assign k_rel   = (tx_kind == K_RELEASE);
   assign k_type  = (tx_kind == K_DISCOVER) ? DHCPDISCOVER : (k_rel ? DHCPRELEASE : DHCPREQUEST);
   assign k_flags = ((tx_kind == K_DISCOVER) || k_sel) ? FLAGS_BROADCAST : 8'h00;
+
+  // IPv4 header checksum in three register stages (a one-clock nine-operand sum does not fit a 100 MHz clock).
+  rtlnet_ipv4_csum_pipe u_csum (
+    .clk            (clk),
+    .tos            (8'h00),
+    .total_length   (TX_IP_TOTAL_LEN),
+    .identification (tx_ident),
+    .flags_fragment (16'h0000),
+    .ttl            (IPV4_TTL),
+    .protocol       (IP_PROTO_UDP),
+    .src_ip         (tx_sip),
+    .dst_ip         (tx_dip),
+    .csum           (tx_csum_w)
+  );
 
   always_comb begin
     case (tx_beat)

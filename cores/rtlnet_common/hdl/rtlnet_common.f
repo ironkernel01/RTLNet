@@ -4,6 +4,7 @@ cores/rtlnet_common/hdl/rtlnet_pkg.sv
 cores/rtlnet_common/hdl/rtlnet_ram_core.sv
 cores/rtlnet_common/hdl/rtlnet_shift_reg_core.sv
 cores/rtlnet_common/hdl/rtlnet_sync.sv
+cores/rtlnet_common/hdl/rtlnet_ipv4_csum_pipe.sv
 cores/rtlnet_common/hdl/rtlnet_reset_sync.sv
 cores/rtlnet_common/hdl/rtlnet_pulse_sync.sv
 cores/rtlnet_common/hdl/rtlnet_gray_sync.sv

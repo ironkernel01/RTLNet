@@ -55,7 +55,10 @@
 //     its late verdict) is claimed in the clock after the frame's last beat,
 //     while busy is still high; gated by enable.
 // Language: SystemVerilog-2012.
-// Revision: 10-22-2026
+// Revision: 11-14-2026
+//   * 11-14-2026: the beat-4 header checksum test is an equality against the complement of the folded sum of the other words (no
+//     adder after the beat data) and the register part of the UDP checksum's pseudo-header sum is kept apart (csum_pre_fold) and joins
+//     the accumulator's folded sum in the final equality, for a 100 MHz clock. Behaviour unchanged.
 //   * 10-22-2026: initial version.
 //   * 10-22-2026: claim output.
 // Clocks: clk (proto_clk); resetn synchronous to it, active low.
@@ -180,6 +183,10 @@ module rtlnet_udp_socket_rx #(
   logic [7:0]  d_match_idx;
   logic [7:0]  d_flags;
   logic        d_beat;             // the beat-4 decision clock
+  logic [15:0] d_w4;               // header checksum word of beat 4 (destination IP low half)
+  logic [15:0] hs_fold;            // folded sum of the header words of beats 1..3
+  logic [15:0] csum_pre_fold;      // folded pseudo-header words that come from registers (source IP, destination IP high, protocol)
+  logic [15:0] csum_acc_fold;      // folded datagram part of the UDP checksum sum
 
   // ---------------------------------------------------------------------------
   // Payload capture, realignment and checksum
@@ -233,7 +240,11 @@ module rtlnet_udp_socket_rx #(
   assign d_for_us      = (d_dst_ip == local_ip) || (d_dst_ip == IPV4_LIMITED_BCAST) ||
                          (d_dst_ip == (local_ip | ~local_mask));
   assign d_candidate   = enable && (f_ethertype == ETHERTYPE_IPV4) && (f_proto == IP_PROTO_UDP) && d_for_us;
-  assign d_hdr_sum_ok  = (csum_fold16({12'd0, f_hdr_sum} + {16'd0, be16(s_axis_tdata[15:0])}) == HEADER_SUM_OK);
+  // The header (nine words of beats 1..3 plus the word of beat 4) sums to 0xFFFF in ones' complement exactly when the beat-4 word
+  // is the complement of the folded sum of the other words; a folded sum of 0xFFFF also accepts 0xFFFF (-0 + -0).
+  assign d_w4          = be16(s_axis_tdata[15:0]);
+  assign hs_fold       = csum_fold16({12'd0, f_hdr_sum});
+  assign d_hdr_sum_ok  = (d_w4 == ~hs_fold) || ((hs_fold == HEADER_SUM_OK) && (d_w4 == HEADER_SUM_OK));
   assign d_bad         = (f_ver_ihl != IPV4_VER_IHL5) || f_flags_frag[IPV4_MF_BIT] ||
                          (f_flags_frag[IPV4_MF_BIT-1:0] != '0) ||
                          (f_total_len < MIN_TOTAL_LEN) || (f_total_len > MAX_TOTAL_LEN) ||
@@ -272,7 +283,11 @@ module rtlnet_udp_socket_rx #(
   // Checksum lanes of the current beat: datagram bytes only, padding masked.
   assign csum_take  = (csum_rem >= 12'd8) ? 4'd8 : csum_rem[3:0];
   assign csum_lanes = keep_mask(csum_take);
-  assign csum_bad   = csum_on && (udp_csum_field != 16'h0000) && (csum_fold16(csum_acc) != HEADER_SUM_OK);
+  // The datagram verifies when the folded accumulator and the folded register part sum to 0xFFFF in ones' complement: the
+  // accumulator is the complement of the register part, or both are 0xFFFF (both nonzero: the length and protocol words).
+  assign csum_acc_fold = csum_fold16(csum_acc);
+  assign csum_bad   = csum_on && (udp_csum_field != 16'h0000) &&
+                      !((csum_acc_fold == ~csum_pre_fold) || ((csum_acc_fold == HEADER_SUM_OK) && (csum_pre_fold == HEADER_SUM_OK)));
 
   // FIFO write port: meta 0, meta 1, then the payload register.
   always_comb begin
@@ -468,12 +483,16 @@ module rtlnet_udp_socket_rx #(
       pay_bad        <= 1'b0;
       rx_complete    <= 1'b0;
       rx_short       <= 1'b0;
+      csum_pre_fold  <= '0;
       csum_acc       <= '0;
       csum_rem       <= '0;
       udp_csum_field <= '0;
       csum_on        <= 1'b0;
     end else begin
       if ((state == S_PAYLOAD) && fifo_fire) pay_valid <= 1'b0;
+      // Register part of the pseudo-header sum, free running: its inputs are stable from the clock after beat 3 and the
+      // verdict that uses it comes at beat 5 or later.
+      csum_pre_fold <= csum_fold16({16'd0, f_src_ip[31:16]} + {16'd0, f_src_ip[15:0]} + {16'd0, f_dst_ip_hi} + {24'd0, IP_PROTO_UDP});
 
       if (d_beat) begin
         // Start of an accepted (or not) datagram: arm capture and the checksum.
@@ -484,10 +503,8 @@ module rtlnet_udp_socket_rx #(
         rx_short    <= 1'b0;
         csum_on     <= csum_check;
         csum_rem    <= d_payload_len[11:0] + 12'd2;
-        csum_acc    <= {16'd0, f_src_ip[31:16]} + {16'd0, f_src_ip[15:0]} +
-                       {16'd0, d_dst_ip[31:16]} + {16'd0, d_dst_ip[15:0]} +
-                       {24'd0, IP_PROTO_UDP} + {16'd0, d_udp_len} +
-                       {14'd0, beat_word_sum(s_axis_tdata, LANES_UDP_HDR)};
+        // The beat-4 part of the pseudo-header and UDP header sum; the register part is csum_pre_fold.
+        csum_acc    <= {16'd0, d_w4} + {16'd0, d_udp_len} + {14'd0, beat_word_sum(s_axis_tdata, LANES_UDP_HDR)};
       end else begin
         if (track_beat) begin
           if (beat_idx == FIRST_PAY_BEAT) udp_csum_field <= be16(s_axis_tdata[15:0]);

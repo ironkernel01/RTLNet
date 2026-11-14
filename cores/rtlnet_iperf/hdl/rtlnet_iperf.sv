@@ -71,7 +71,9 @@
 //     dual tests, no enhanced (-e) report extension, sequence magnitudes and
 //     counters 32 bit, byte mode runs BYTE_MODE_MS, the upper rate word ignored.
 // Language: SystemVerilog-2012 (synthesizable subset).
-// Revision: 10-22-2026
+// Revision: 11-14-2026
+//   * 11-14-2026: the IPv4 header checksum comes from rtlnet_ipv4_csum_pipe (three register stages, S_TX_CSUM takes four
+//     clocks instead of one); the one-clock nine-operand sum failed timing at 100 MHz. Behaviour at the ports unchanged.
 //   * 10-22-2026: initial version.
 //   * 10-22-2026: claim output (leaf contract 7.5, CPU network path).
 // Clocks: clk = proto_clk, CLK_HZ hertz; resetn synchronous, active low. No
@@ -389,6 +391,8 @@ module rtlnet_iperf #(
   logic [15:0]       tx_len;
   logic [15:0]       tx_ident;
   logic [15:0]       tx_csum;
+  logic [15:0]       tx_csum_w;        // IPv4 header checksum from rtlnet_ipv4_csum_pipe (3 clocks after tx_len, tx_ident, tx_sip, tx_dip)
+  logic [1:0]        csum_wait;        // clocks spent in S_TX_CSUM
   logic [63:0]       tx_seq;
   logic [31:0]       tx_tv_sec;
   logic [31:0]       tx_tv_usec;
@@ -1056,6 +1060,7 @@ module rtlnet_iperf #(
       tx_len         <= 16'd0;
       tx_ident       <= 16'd0;
       tx_csum        <= 16'd0;
+      csum_wait      <= 2'd0;
       tx_seq         <= 64'd0;
       tx_tv_sec      <= 32'd0;
       tx_tv_usec     <= 32'd0;
@@ -1135,10 +1140,14 @@ module rtlnet_iperf #(
           end
         end
         S_TX_CSUM: begin
-          tx_csum  <= ipv4_header_checksum(8'h00, tx_len + IP_UDP_HDR_BYTES, tx_ident, 16'h0000, IPV4_TTL,
-                                           IP_PROTO_UDP, tx_sip, tx_dip);
-          tx_beat  <= '0;
-          tx_state <= S_TX_BEAT;
+          // The checksum pipeline needs 3 clocks after the header fields settle: leave on the fourth clock.
+          csum_wait <= csum_wait + 2'd1;
+          if (csum_wait == 2'd3) begin
+            tx_csum   <= tx_csum_w;
+            csum_wait <= 2'd0;
+            tx_beat   <= '0;
+            tx_state  <= S_TX_BEAT;
+          end
         end
         S_TX_BEAT: begin
           if (!tx_valid || tx_ready) begin
@@ -1192,6 +1201,20 @@ module rtlnet_iperf #(
 
   assign tx_ip_len  = tx_len + IP_UDP_HDR_BYTES;
   assign tx_udp_len = tx_len + UDP_HDR_BYTES;
+
+  // IPv4 header checksum in three register stages (a one-clock nine-operand sum does not fit a 100 MHz clock).
+  rtlnet_ipv4_csum_pipe u_csum (
+    .clk            (clk),
+    .tos            (8'h00),
+    .total_length   (tx_ip_len),
+    .identification (tx_ident),
+    .flags_fragment (16'h0000),
+    .ttl            (IPV4_TTL),
+    .protocol       (IP_PROTO_UDP),
+    .src_ip         (tx_sip),
+    .dst_ip         (tx_dip),
+    .csum           (tx_csum_w)
+  );
   assign r_len1     = tx_r_bytes[63:32];
   assign r_len2     = tx_r_bytes[31:0];
 

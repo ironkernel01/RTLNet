@@ -59,7 +59,10 @@
 //     26-29 source IP, 30-33 destination IP, 34 type, 35 code, 36-37 ICMP
 //     checksum, 38-39 identifier, 40-41 sequence, 42.. data.
 // Language: SystemVerilog-2012 (synthesizable subset).
-// Revision: 10-22-2026
+// Revision: 11-14-2026
+//   * 11-14-2026: for a 100 MHz clock: the reply's IPv4 header checksum comes from rtlnet_ipv4_csum_pipe (three register stages, settled
+//     before S_CHECK); the payload keep mask is a register (rx_keep_q, updated with rx_word); the counters act one clock after S_CHECK on
+//     verdict flags registered in S_CHECK. Behaviour and latency at the ports unchanged (the counters appear one clock later).
 //   * 10-22-2026: initial version.
 //   * 10-22-2026: claim output (leaf contract 7.5, CPU network path).
 // Clocks: clk (proto_clk) only; resetn synchronous to it, active low.
@@ -256,13 +259,23 @@ module rtlnet_icmp #(
   logic              ram_rd_en;
   logic [RAM_AW-1:0] ram_rd_addr;
   logic [31:0]       sum_request;
+  logic [7:0]        keep_next;
+  logic [7:0]        rx_keep_q;             // rx_word_keep as a register: the keep mask of payload word rx_word
+  logic              chk_d;                 // one clock after S_CHECK: the registered verdict flags below are valid
+  logic              v_echo_for_us;
+  logic              v_length_ok;
+  logic              v_total_ok;
+  logic              v_checksum_ok;
+  logic [15:0]       reply_ip_checksum_w;   // IPv4 header checksum of the reply from rtlnet_ipv4_csum_pipe (3 clocks after the fields)
 
   assign beat                = s_axis_tvalid;                  // s_axis_tready is held at 1
   assign msg_last_word       = {3'd0, msg_last_byte[15:3]};
   assign msg_last_lane       = msg_last_byte[2:0];
   assign msg_last_keep       = keep_through_lane(msg_last_lane);
   assign rx_word_in_message  = (rx_word <= msg_last_word);
-  assign rx_word_keep        = (rx_word < msg_last_word) ? 8'hFF : (rx_word == msg_last_word) ? msg_last_keep : 8'h00;
+  assign rx_word_keep        = rx_keep_q;
+  assign keep_next           = ((rx_word + 16'd1) < msg_last_word) ? 8'hFF :
+                               ((rx_word + 16'd1) == msg_last_word) ? msg_last_keep : 8'h00;   // keep mask of word rx_word + 1
 
   assign is_ipv4_no_options  = (req_ethertype == ETHERTYPE_IPV4) && (req_ver_ihl == IPV4_VER_IHL5);
   assign is_icmp             = (req_protocol == IP_PROTO_ICMP);
@@ -278,6 +291,21 @@ module rtlnet_icmp #(
   assign sum_request         = sum_rest + {16'd0, req_icmp_checksum} + {16'd0, req_icmp_type, req_icmp_code};
   assign checksum_ok         = (csum_fold16(sum_request) == 16'hFFFF);
   assign request_ok          = header_ok && length_ok && checksum_ok;
+
+  // IPv4 header checksum of the reply in three register stages. Its last input, the source IP (beat 3), is registered two clocks
+  // before the last beat of even the shortest request (6 beats) ends, so the value is valid in S_CHECK.
+  rtlnet_ipv4_csum_pipe u_csum (
+    .clk            (clk),
+    .tos            (req_tos),
+    .total_length   (req_total),
+    .identification (req_ident),
+    .flags_fragment (req_flags_frag),
+    .ttl            (IPV4_TTL),
+    .protocol       (IP_PROTO_ICMP),
+    .src_ip         (local_ip_snap),
+    .dst_ip         (req_src_ip),
+    .csum           (reply_ip_checksum_w)
+  );
 
   assign tx_is_last_word     = (16'(tx_word) == msg_last_word);
   assign tx_payload_fire     = (state == S_TX_PAYLOAD) && slice_ready;
@@ -327,6 +355,12 @@ module rtlnet_icmp #(
       msg_last_byte       <= '0;
       rx_word             <= '0;
       sum_rest            <= '0;
+      rx_keep_q           <= 8'h00;
+      chk_d               <= 1'b0;
+      v_echo_for_us       <= 1'b0;
+      v_length_ok         <= 1'b0;
+      v_total_ok          <= 1'b0;
+      v_checksum_ok       <= 1'b0;
       frame_last_word     <= '0;
       frame_last_keep     <= '0;
       reply_ip_checksum   <= '0;
@@ -334,6 +368,13 @@ module rtlnet_icmp #(
       tx_word             <= '0;
     end else begin
       claim <= 1'b0;
+      chk_d <= (state == S_CHECK);
+      if (state == S_CHECK) begin
+        v_echo_for_us <= echo_for_us;
+        v_length_ok   <= length_ok;
+        v_total_ok    <= total_length_ok;
+        v_checksum_ok <= checksum_ok;
+      end
       case (state)
         // Bytes 0-7: taken only at a frame's first beat while enabled.
         S_IDLE: begin
@@ -383,6 +424,7 @@ module rtlnet_icmp #(
             req_icmp_ident    <= be16(s_axis_tdata[63:48]);
             sum_rest          <= {14'd0, beat_word_sum(s_axis_tdata, ICMP_ID_LANES_BEAT4)};
             rx_word           <= '0;
+            rx_keep_q         <= (msg_last_word != 16'd0) ? 8'hFF : msg_last_keep;   // keep mask of word 0
             state             <= s_axis_tlast ? S_IDLE : S_RX_B5;
           end
         end
@@ -392,6 +434,7 @@ module rtlnet_icmp #(
           if (beat) begin
             sum_rest <= sum_rest + {14'd0, beat_word_sum(s_axis_tdata, rx_word_keep)};
             rx_word  <= rx_word + 1'b1;
+            rx_keep_q <= keep_next;
             if (s_axis_tlast) begin
               frame_last_word <= rx_word;
               frame_last_keep <= s_axis_tkeep;
@@ -407,6 +450,7 @@ module rtlnet_icmp #(
           if (beat) begin
             sum_rest <= sum_rest + {14'd0, beat_word_sum(s_axis_tdata, rx_word_keep)};
             rx_word  <= rx_word + 1'b1;
+            rx_keep_q <= keep_next;
             if (s_axis_tlast) begin
               frame_last_word <= rx_word;
               frame_last_keep <= s_axis_tkeep;
@@ -422,8 +466,7 @@ module rtlnet_icmp #(
         // One clock: judge the request, compute the reply checksums.
         S_CHECK: begin
           tx_word             <= '0;
-          reply_ip_checksum   <= ipv4_header_checksum(req_tos, req_total, req_ident, req_flags_frag, IPV4_TTL,
-                                                      IP_PROTO_ICMP, local_ip_snap, req_src_ip);
+          reply_ip_checksum   <= reply_ip_checksum_w;
           reply_icmp_checksum <= ~csum_fold16(sum_rest);
           if (request_ok) begin
             claim <= enable;
@@ -542,10 +585,10 @@ module rtlnet_icmp #(
         cnt_requests  <= cnt_requests + 1'b1;
         cnt_drop_size <= cnt_drop_size + 1'b1;
       end
-      if ((state == S_CHECK) && echo_for_us) begin
+      if (chk_d && v_echo_for_us) begin
         cnt_requests <= cnt_requests + 1'b1;
-        if (!total_length_ok || !length_ok) cnt_drop_size     <= cnt_drop_size + 1'b1;
-        else if (!checksum_ok)              cnt_drop_checksum <= cnt_drop_checksum + 1'b1;
+        if (!v_total_ok || !v_length_ok) cnt_drop_size     <= cnt_drop_size + 1'b1;
+        else if (!v_checksum_ok)         cnt_drop_checksum <= cnt_drop_checksum + 1'b1;
       end
       if (tx_payload_fire && tx_is_last_word) cnt_replies <= cnt_replies + 1'b1;
     end

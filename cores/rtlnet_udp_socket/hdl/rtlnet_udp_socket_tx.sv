@@ -30,7 +30,9 @@
 //     FIFO, whose read side has no bubble inside a frame, so the frame is
 //     offered without gaps; o_ready (the output slice) is the only stall.
 // Language: SystemVerilog-2012.
-// Revision: 10-22-2026
+// Revision: 11-14-2026
+//   * 11-14-2026: the IPv4 header checksum comes from rtlnet_ipv4_csum_pipe (three register stages, T_SUM takes four clocks
+//     instead of one). Behaviour at the ports unchanged.
 //   * 10-22-2026: initial version.
 // Clocks: clk (proto_clk); resetn synchronous to it, active low.
 // -----------------------------------------------------------------------------
@@ -125,11 +127,27 @@ module rtlnet_udp_socket_tx #(
   logic [15:0] h_udp_len;
   logic [15:0] h_ident;
   logic [15:0] h_csum;
+  logic [15:0] h_csum_w;           // IPv4 header checksum from rtlnet_ipv4_csum_pipe (3 clocks after the header fields)
+  logic [1:0]  csum_wait;          // clocks spent in T_SUM
   logic [15:0] ident_next;
   logic [15:0] tail;               // lanes 6-7 of the previous payload word
   logic [3:0]  flush_n;            // bytes in the final flush beat
 
   logic        o_fire;
+
+  // IPv4 header checksum in three register stages (a one-clock nine-operand sum does not fit a 100 MHz clock).
+  rtlnet_ipv4_csum_pipe u_csum (
+    .clk            (clk),
+    .tos            (IPV4_TOS_SENT),
+    .total_length   (h_total_len),
+    .identification (h_ident),
+    .flags_fragment (IPV4_FLAGS_DF),
+    .ttl            (IPV4_TTL),
+    .protocol       (IP_PROTO_UDP),
+    .src_ip         (h_src_ip),
+    .dst_ip         (h_dst_ip),
+    .csum           (h_csum_w)
+  );
   logic [3:0]  pay_bytes;
   logic [63:0] hdr_beat;
 
@@ -204,6 +222,7 @@ module rtlnet_udp_socket_tx #(
       h_udp_len        <= '0;
       h_ident          <= '0;
       h_csum           <= '0;
+      csum_wait        <= 2'd0;
       ident_next       <= '0;
       tail             <= '0;
       flush_n          <= '0;
@@ -252,9 +271,13 @@ module rtlnet_udp_socket_tx #(
           end
         end
         T_SUM: begin
-          h_csum <= ipv4_header_checksum(IPV4_TOS_SENT, h_total_len, h_ident, IPV4_FLAGS_DF, IPV4_TTL,
-                                         IP_PROTO_UDP, h_src_ip, h_dst_ip);
-          state  <= T_WAITPAY;
+          // The checksum pipeline needs 3 clocks after the header fields settle: leave on the fourth clock.
+          csum_wait <= csum_wait + 2'd1;
+          if (csum_wait == 2'd3) begin
+            h_csum    <= h_csum_w;
+            csum_wait <= 2'd0;
+            state     <= T_WAITPAY;
+          end
         end
         T_WAITPAY: begin
           hdr_idx <= '0;

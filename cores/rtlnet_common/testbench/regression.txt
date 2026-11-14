@@ -8,3 +8,5 @@ tb_rtlnet_primitives    cores/rtlnet_common/testbench/tb_rtlnet_primitives.f  ge
 tb_rtlnet_shift_reg     cores/rtlnet_common/testbench/tb_rtlnet_shift_reg.f
 tb_rtlnet_shift_reg     cores/rtlnet_common/testbench/tb_rtlnet_shift_reg.f  generic  defines=RTLNET_TECH_GENERIC
 tb_rtlnet_shift_reg     cores/rtlnet_common/testbench/tb_rtlnet_shift_reg.f  neg      plusargs=INJECT_FAILURE  expectfail
+tb_rtlnet_ipv4_csum_pipe  cores/rtlnet_common/testbench/tb_rtlnet_ipv4_csum_pipe.f
+tb_rtlnet_ipv4_csum_pipe  cores/rtlnet_common/testbench/tb_rtlnet_ipv4_csum_pipe.f  neg  plusargs=INJECT_FAILURE  expectfail
