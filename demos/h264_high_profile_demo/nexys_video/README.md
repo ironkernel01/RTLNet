@@ -90,7 +90,7 @@ speed, the advertised modes and the partner's modes.
 | Command | Effect |
 |---|---|
 | `encoder profile high` / `encoder profile baseline` | High profile (CABAC) or Constrained Baseline (CAVLC) |
-| `encoder bitrate <kb/s>` | constant bit rate; `encoder bitrate 0` returns to constant QP |
+| `encoder bitrate <kb/s>` | constant bit rate; the value is in kb/s (8000 is 8 Mb/s); `encoder bitrate 0` returns to constant QP |
 | `encoder qp <n>` | the QP for constant-QP operation |
 | `encoder gop <n>` | pictures between IDR pictures |
 | `encoder deblock on` / `encoder deblock off` | the in-loop deblocking filter |

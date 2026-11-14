@@ -76,8 +76,8 @@ The image is loaded into the FPGA only, not into the flash: a power cycle remove
 | Item | Value |
 |---|---|
 | Picture sizes | 1920 x 1080 and 1280 x 720 at 30 pictures per second |
-| Bit rate | set by `encoder bitrate <kb/s>`; 8,000 kb/s is a good start for 1080p30 |
-| Dropped pictures | 0 in `show stream` at 8,000 and 16,000 kb/s |
+| Bit rate | set by `encoder bitrate <kb/s>` (the value is in kb/s: 8000 is 8 Mb/s); 8 Mb/s is a good start for 1080p30 |
+| Dropped pictures | 0 in `show stream` at 8 and 16 Mb/s |
 | Time-limited demo | the README and the brief of such a demo say what the limit is and how `show encoder` reports the time left |
 
 If the player stays black: check the PC address in the `stream` command, the firewall rule for UDP 5004, and that
@@ -121,7 +121,7 @@ These demonstrations are planned and are not in the folder yet. Each one gets it
 | ID | Name | What it shows | Hardware |
 |---|---|---|---|
 | D1 | Camera to VLC, latency measured | Pcam 5C camera to H.264 to MPEG-TS to VLC, ffplay or OBS on a PC; glass-to-glass latency measured with an LED timer in the camera's view | Nexys Video, Pcam 5C, FMC Pcam Adapter |
-| D2 | Narrow-link video | 720p at 300 to 1000 kb/s under rate control; one slice per macroblock row, so a lost datagram damages one stripe; a link emulator on the PC adds loss and delay | Nexys Video |
+| D2 | Narrow-link video | 720p at 0.3 to 1 Mb/s under rate control; one slice per macroblock row, so a lost datagram damages one stripe; a link emulator on the PC adds loss and delay | Nexys Video |
 | D3 | Motion metadata camera | the encoder's motion vectors sent as a per-macroblock activity map next to the video; a PC viewer draws motion boxes on the live picture with no separate vision processor | Nexys Video |
 | D4 | Line-rate network tester | the RTL iperf and UDP paths at 944 Mbit/s with no CPU load; a throughput, loss and latency test run from the console | Nexys Video |
 | D5 | Ten-minute start | prebuilt image, one script, color bars streaming to VLC | Nexys Video |
