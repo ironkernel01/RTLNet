@@ -1,6 +1,6 @@
 """Purpose: check camera implementation choices and extract routed timing evidence.
 Overview: execute Tcl helpers with command mocks; do not start Vivado or qualify timing.
-Revision: 11-14-2026.
+Revision: 11-15-2026.
 """
 from pathlib import Path
 import re

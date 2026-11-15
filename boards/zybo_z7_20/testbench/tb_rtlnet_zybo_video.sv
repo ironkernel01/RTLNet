@@ -1,9 +1,15 @@
-// Purpose: PS-free end-to-end RGB camera capture, slot ownership and H.264 encode.
-// Overview: AXI-Lite GP master BFM and two AXI3 HP byte-memory slaves replace PS7.
-//   Five small camera frames in the 1080p mode prove alternate admission and a held slot's integrity; two more in the 720p mode prove that every frame is admitted.
-//   One real lossy/deblocked IDR encode dumps Annex B and rebuilt YUV for the
-//   repository decoder comparison flow. The sensor/D-PHY is outside this bench.
-// Revision: 11-14-2026. Initial board bench. No foreach loops.
+// Purpose: PS-free end-to-end camera path of the Zybo wrapper: D-PHY pins, receiver, admission, capture, slot ownership and H.264 encode.
+// Overview: the D-PHY transmitter model of the camera receiver benches (cores/rtlnet_csi2_rx/testbench, behavioural front end) sends
+//   CSI-2 RAW10 frames of 32 x 16 pixels on two lanes to the wrapper's camera pins; AXI-Lite GP master BFM and two AXI3 HP byte-memory
+//   slaves replace PS7. The frames are diagonal ramps (raw value 4 * (base + x + y)) that the receiver's bilinear demosaic reproduces
+//   exactly in the interior, so the stored luma of every interior pixel is known.
+//   Five frames in the 1080p mode prove alternate admission (3 of 5 admitted, held slot unchanged); the stored frame is checked for
+//   geometry (32 x 16, every interior pixel) and neutral chroma; two frames in the 720p mode prove that every frame is admitted.
+//   The receiver counters read back over AXI-Lite (frames received, every error counter zero). One real lossy/deblocked IDR encode dumps
+//   Annex B and rebuilt YUV for the repository decoder comparison flow (scripts/check_board_encode.ps1).
+// Plusargs: INJECT_FAILURE (the verdict fails), MUTATE (one raw pixel of the frame that is checked is changed on the wire; the
+//   luma check must fail).
+// Revision: 11-15-2026. Camera input through the receiver core. No foreach loops.
 `timescale 1ns/1ps
 package rtlnet_zybo_tb_memory;
   byte unsigned mem [0:1048575];
@@ -33,6 +39,7 @@ endpackage
 
 module tb_rtlnet_zybo_video;
   import rtlnet_tb_pkg::*;
+  import rtlnet_csi2_tb_pkg::*;
   import rtlnet_zybo_tb_memory::*;
   logic ctrl_clk = 0;
   logic enc_clk = 0;
@@ -40,13 +47,13 @@ module tb_rtlnet_zybo_video;
   logic capture_resetn = 0;
   logic enc_resetn = 0;
   always #10 ctrl_clk = ~ctrl_clk;
-  // One 90 MHz video clock drives the camera chain, capture and encoder (board clock plan 11-14-2026).
+  // One 90 MHz video clock drives the camera receiver, capture and encoder.
   always #5.555 enc_clk = ~enc_clk;
-  logic [23:0] s_axis_video_tdata = '0;
-  logic  s_axis_video_tvalid = '0;
-  logic  s_axis_video_tready;
-  logic  s_axis_video_tuser = '0;
-  logic  s_axis_video_tlast = '0;
+  logic ref_clk = 0;
+  always #2.5 ref_clk = ~ref_clk;   // 200 MHz delay reference
+  logic clk_p, clk_n;
+  logic [1:0] dat_p, dat_n, lp_clk, lp_d0, lp_d1;
+  rtlnet_csi2_tb_phy tx (.clk_p(clk_p), .clk_n(clk_n), .dat_p(dat_p), .dat_n(dat_n), .lp_clk(lp_clk), .lp_d0(lp_d0), .lp_d1(lp_d1));
   logic [31:0] s_axi_awaddr;
   logic  s_axi_awvalid;
   logic  s_axi_awready;
@@ -125,18 +132,22 @@ module tb_rtlnet_zybo_video;
   logic  m_axi_enc_rvalid;
   logic  m_axi_enc_rready;
   logic [1:0] irq;
-  rtlnet_zybo_video_bd #(.WIDTH_720(32), .HEIGHT_720(16), .WIDTH_1080(32), .HEIGHT_1080(16)) dut (
+  rtlnet_zybo_video #(.DPHY_TARGET("GENERIC"), .WIDTH_720(32), .HEIGHT_720(16), .WIDTH_1080(32), .HEIGHT_1080(16)) dut (
     .s_axi_aclk(ctrl_clk),
     .s_axi_aresetn(ctrl_resetn),
     .capture_clk(enc_clk),
     .capture_resetn(capture_resetn),
     .enc_clk(enc_clk),
     .enc_resetn(enc_resetn),
-    .s_axis_video_tdata(s_axis_video_tdata),
-    .s_axis_video_tvalid(s_axis_video_tvalid),
-    .s_axis_video_tready(s_axis_video_tready),
-    .s_axis_video_tuser(s_axis_video_tuser),
-    .s_axis_video_tlast(s_axis_video_tlast),
+    .ref_clk(ref_clk),
+    .dphy_hs_clock_clk_p(clk_p),
+    .dphy_hs_clock_clk_n(clk_n),
+    .dphy_clk_lp_p(lp_clk[1]),
+    .dphy_clk_lp_n(lp_clk[0]),
+    .dphy_data_hs_p(dat_p),
+    .dphy_data_hs_n(dat_n),
+    .dphy_data_lp_p({lp_d1[1], lp_d0[1]}),
+    .dphy_data_lp_n({lp_d1[0], lp_d0[0]}),
     .s_axi_awaddr(s_axi_awaddr),
     .s_axi_awvalid(s_axi_awvalid),
     .s_axi_awready(s_axi_awready),
@@ -300,6 +311,7 @@ module tb_rtlnet_zybo_video;
     .rready(m_axi_enc_rready)
   );
 
+  localparam logic [31:0] RX = 32'h44a09000;
   localparam logic [31:0] CAM = 32'h44a05000;
   localparam logic [31:0] DMA = 32'h44a06000;
   localparam logic [31:0] FB = 32'h44a07000;
@@ -321,50 +333,23 @@ module tb_rtlnet_zybo_video;
 
   always @(posedge ctrl_clk) if (ctrl_resetn && irq[0]) capture_irqs++;
 
-  // The camera side models the CSI-2 receiver output: pixels arrive at the sensor link rate (pace_num/pace_den
-  // pixels per video clock) into a receiver FIFO model (backlog) and are offered one per clock when the
-  // capture path accepts. The backlog peak must stay far below the receiver line buffer (2048 beats x 4 pixels).
-  integer pace_num = 1;
-  integer pace_den = 1;
-  integer pace_acc = 0;
-  integer backlog = 0;
-  integer backlog_peak = 0;
-  integer stall_cycles = 0;
-  logic pace_en = 0;
-  always @(posedge enc_clk) begin
-    if (pace_en) begin
-      pace_acc = pace_acc + pace_num;
-      if (pace_acc >= pace_den) begin pace_acc = pace_acc - pace_den; backlog = backlog + 1; end
+  bit mutate = 1'b0;
+  // One CSI-2 frame: frame start, 16 lines of 32 RAW10 pixels (diagonal ramp 4 * (base + x + y)), frame end. A line number in
+  // mutate_line (>= 0) gets one raw pixel changed on the wire.
+  task automatic send_frame(input integer seed, input real ui, input integer mutate_line);
+    pix_q_t px;
+    integer base;
+    base = 40 + 20 * seed;
+    tx.ui_ns = ui;
+    tx.send_packet(short_pkt(2'd0, 6'h00, 16'(seed + 1)));
+    for (int y = 0; y < 16; y++) begin
+      px.delete();
+      for (int x = 0; x < 32; x++) px.push_back(10'(4 * (base + x + y)));
+      if (y == mutate_line) px[8] = px[8] ^ 10'h100;
+      tx.send_packet(long_pkt(2'd0, 6'h2B, raw10_payload(px)));
     end
-    if (pace_en && s_axis_video_tvalid && s_axis_video_tready) backlog = backlog - 1;
-    if (pace_en && s_axis_video_tvalid && !s_axis_video_tready) stall_cycles = stall_cycles + 1;
-    if (backlog > backlog_peak) backlog_peak = backlog;
-  end
-  task automatic camera_frame(input integer seed, input integer num, input integer den);
-    integer gray;
-    pace_num = num; pace_den = den; pace_acc = 0; backlog = 0;
-    pace_en = (num != den);
-    for (int y=0; y<16; y++) begin
-      for (int x=0; x<32; x++) begin
-        @(negedge enc_clk);
-        if (pace_en) begin
-          s_axis_video_tvalid = 0;
-          while (backlog <= 0) @(negedge enc_clk);
-        end
-        gray = (seed*19 + x*3 + y*5) & 255;
-        s_axis_video_tdata = {3{gray[7:0]}};
-        s_axis_video_tuser = (x==0 && y==0);
-        s_axis_video_tlast = (x==31);
-        s_axis_video_tvalid = 1;
-        do @(posedge enc_clk); while (!s_axis_video_tready);
-      end
-    end
-    @(negedge enc_clk);
-    s_axis_video_tvalid = 0;
-    s_axis_video_tuser = 0;
-    s_axis_video_tlast = 0;
-    pace_en = 0;
-    repeat (50) @(negedge enc_clk);
+    tx.send_packet(short_pkt(2'd0, 6'h01, 16'(seed + 1)));
+    #30000;   // frame gap: the receiver cannot be stalled, the capture path finishes the frame before the next one starts
   endtask
   task automatic wait_published(input integer count);
     integer n;
@@ -385,14 +370,15 @@ module tb_rtlnet_zybo_video;
       cpu.rd(DMA+32'h1c,v); $display("DBG DMA bad %08x",v);
       cpu.rd(DMA+32'h20,v); $display("DBG DMA dropped %08x",v);
       $display("DBG req %b rsp %b ok %b pair valid %b ready %b, frame WH %d %d",
-               dut.u_rtl.fb_req,dut.u_rtl.fb_rsp_valid,dut.u_rtl.fb_rsp_ok,dut.u_rtl.pair_valid,dut.u_rtl.pair_ready,
-               dut.u_rtl.frame_width,dut.u_rtl.frame_height);
+               dut.fb_req,dut.fb_rsp_valid,dut.fb_rsp_ok,dut.pair_valid,dut.pair_ready,
+               dut.frame_width,dut.frame_height);
       tb_verdict("tb_rtlnet_zybo_video");
     end
   endtask
 
   initial begin
     if (!$value$plusargs("OUT=%s",out_prefix)) out_prefix="board";
+    mutate = $test$plusargs("MUTATE");
     for (int k=0;k<1048576;k++) mem[k]=8'ha5;
     repeat (15) @(negedge ctrl_clk);
     @(negedge enc_clk); capture_resetn=1;
@@ -404,13 +390,19 @@ module tb_rtlnet_zybo_video;
     cpu.rd(FB,v); tb_check(v==32'h46425546,"framebuf ID");
     cpu.rd(ENC,v); tb_check(v==32'h48323634,"encoder ID");
     cpu.rd(ENC+8,v); tb_check(v[19:16]==1 && v[22],"one engine with deblocking");
+    cpu.rd(CAM+32'h04,v); tb_check(v==32'h11152026,"camera block VERSION");
+    cpu.rd(RX,v); tb_check(v==32'h43534932,"receiver core ID");
+    cpu.rd(RX+32'h04,v); tb_check(v==32'h11152026,"receiver core VERSION (camera receiver present)");
+    cpu.wr(RX+32'h10,1);    // receiver geometry of the 1080p mode (32 x 16 in this bench)
+    cpu.wr(RX+32'h14,1);    // camera source only
     cpu.wr(DMA+32'h14,128);
     cpu.wr(CAM+32'h10,1);   // 1080p mode (geometry shrunk to 32x16 here): the sensor runs 30 fps, every second frame is admitted
     cpu.rd(CAM+32'h18,v); tb_check(v==6000,"1080p admission PTS step 6000 (15 fps stream)");
     cpu.wr(CAM+32'h0c,1);
-    camera_frame(0, 1, 1);
-    camera_frame(1, 1, 1);
-    camera_frame(2, 56, 90);   // 720p sensor mode link rate: 56 Mpixel/s at 90 MHz
+    #20000;
+    send_frame(0, 2.381, -1);                      // 420 Mb/s per lane (1080p sensor mode)
+    send_frame(1, 2.381, -1);
+    send_frame(2, 2.381, mutate ? 5 : -1);         // the frame that is stored and checked
     wait_published(2);
     cpu.wr(FB+32'h0c,1);
     cpu.rd(FB+32'h10,v); tb_check(v[1],"firmware holds a slot");
@@ -419,18 +411,16 @@ module tb_rtlnet_zybo_video;
     cpu.rd(FB+32'h48,stamp); tb_check(stamp!=0,"capture timestamp is populated");
     cpu.rd(FB+32'h4c,v); tb_check(v==32'h00100020,"captured 32x16 geometry");
     for (int k=0;k<1024;k++) snapshot[k]=mem[address(slot+(k/64)*128+(k%64))];
-    for (int y=0;y<16;y++) begin
-      for (int x=0;x<32;x++) begin
-        expected_y=$rtoi($floor(16.0 + 219.0*((38+x*3+y*5)&255)/255.0 + 0.5));
+    for (int y=1;y<15;y++) begin
+      for (int x=1;x<31;x++) begin
+        expected_y=$rtoi($floor(16.0 + 219.0*(80+x+y)/255.0 + 0.5));
         actual_y=snapshot[(y*32+x)*2];
-        tb_check(actual_y>=expected_y-1 && actual_y<=expected_y+1,"capture BT.709 luma");
-        tb_check(snapshot[(y*32+x)*2+1]==128,"capture neutral chroma");
+        tb_check(actual_y>=expected_y-1 && actual_y<=expected_y+1,"stored luma of every interior pixel (geometry and content)");
+        tb_check(snapshot[(y*32+x)*2+1]>=127 && snapshot[(y*32+x)*2+1]<=129,"stored chroma neutral");
       end
     end
-    camera_frame(3, 84, 90);   // 1080p30 sensor: lanes at 420 Mb/s (84 Mpixel/s burst) against one pixel per 90 MHz clock
-    camera_frame(4, 42, 90);   // slower link rate (the former 1080p15 table, 42 Mpixel/s)
-    tb_check(backlog_peak < 64, "receiver backlog stays far below the line buffer at the sensor link rates");
-    $display("BENCH: receiver backlog peak %0d pixels, source stall cycles %0d", backlog_peak, stall_cycles);
+    send_frame(3, 2.381, -1);
+    send_frame(4, 2.381, -1);
     wait_published(3);
     for (int k=0;k<1024;k++)
       tb_check(mem[address(slot+(k/64)*128+(k%64))]==snapshot[k],"held slot never overwritten");
@@ -519,10 +509,19 @@ module tb_rtlnet_zybo_video;
     // 720p mode: the sensor runs 30 fps and every frame is admitted (30 fps stream, PTS step 3000)
     cpu.wr(CAM+32'h10,0);
     cpu.rd(CAM+32'h18,v); tb_check(v==3000,"720p admission PTS step 3000 (30 fps stream)");
-    camera_frame(5, 1, 1);
-    camera_frame(6, 1, 1);
+    cpu.wr(RX+32'h10,0);
+    send_frame(5, 3.571, -1);                      // 280 Mb/s per lane (720p sensor mode)
+    send_frame(6, 3.571, -1);
     cpu.rd(CAM+32'h20,v); tb_check(v==7,"seven camera frames observed in total");
     cpu.rd(CAM+32'h24,v); tb_check(v==5,"720p admits every frame (two more admitted)");
+    // The receiver counters: seven frame starts, no error counter.
+    cpu.rd(RX+32'h60+4*4,v); tb_check(v==7,"receiver FRAMES counter");
+    for (int n=0;n<12;n++) begin
+      if (n!=4) begin
+        cpu.rd(RX+32'h60+4*n,v);
+        tb_check(v==0,$sformatf("receiver error counter %0d is zero",n));
+      end
+    end
     tb_verdict("tb_rtlnet_zybo_video");
   end
   initial begin

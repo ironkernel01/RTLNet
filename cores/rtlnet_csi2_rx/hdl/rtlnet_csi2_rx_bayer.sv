@@ -27,12 +27,19 @@
 //   * Green equalisation (cfg_geq = 1): at a G site the green output is (G + (the four diagonal G + 2) / 4 + 1) / 2 instead of G. The diagonals of a G site
 //     are the other kind of G (Gr and Gb), so both kinds of G come out as their mean: a sensor whose two greens differ (the OV5640 in its binned modes) otherwise
 //     shows a fixed two-pixel luma pattern in flat areas. The cost is a slightly softer green at the G sites.
-//   * Configuration (black, gains, phase, gamma, green equalisation) is taken at the start of each frame.
+//   * Highlight clamp (cfg_hl = 1): the sensor clips green, its brightest channel, below full scale, so after the white balance gain a clipped
+//     highlight has R and B above G and comes out pink. On the gained, demosaiced 10-bit triple (before the 8-bit scaling) a pixel with G >= cfg_hl_level
+//     gets G = max(G, R, B); R and B stay. Level 0 with the clamp on qualifies every pixel (G becomes the maximum of the three everywhere).
+//     With cfg_hl = 0 the output is unchanged.
+//   * Raw maxima: meas_raw_max_r, _g and _b are the largest black-level-subtracted raw values (before the gain) of the red, green (both) and
+//     blue sites of the last completed frame; the running maxima restart at a frame start and are published at the frame end like meas_lines.
+//     They show how far the sensor is from clipping per channel.
+//   * Configuration (black, gains, phase, gamma, green equalisation, highlight clamp) is taken at the start of each frame.
 //   * Storage: the line buffers are one rtlnet_ram_core of LINE_KB kilobytes counted as 4-byte words (LINE_KB = 8: 2048 pixels per line,
 //     20 bits per word); cfg_w must not exceed 256 * LINE_KB.
 // Language: SystemVerilog-2012.
 // Revision: 11-15-2026
-//   * 11-15-2026: initial version; green equalisation (cfg_geq, PROC bit 1).
+//   * 11-15-2026: initial version; green equalisation (cfg_geq, PROC bit 1); highlight clamp (cfg_hl, cfg_hl_level, PROC bit 2) and raw maxima.
 // Clocks: clk (all logic, the core clock, one pixel per clock).
 // -----------------------------------------------------------------------------
 module rtlnet_csi2_rx_bayer
@@ -60,6 +67,8 @@ module rtlnet_csi2_rx_bayer
   input  logic [1:0]       cfg_phase,
   input  logic             cfg_gamma,
   input  logic             cfg_geq,       // green equalisation: G at a G site = (G + mean of the four diagonal G) / 2
+  input  logic             cfg_hl,        // highlight clamp: G >= cfg_hl_level gives G = max(G, R, B)
+  input  logic [9:0]       cfg_hl_level,
 
   // RGB out: {R[23:16], B[15:8], G[7:0]}.
   output logic [23:0]      o_data,
@@ -71,7 +80,10 @@ module rtlnet_csi2_rx_bayer
   // Events and measurements.
   output logic             ev_size_err,
   output logic [15:0]      meas_lines,
-  output logic [15:0]      meas_pixels
+  output logic [15:0]      meas_pixels,
+  output logic [9:0]       meas_raw_max_r,   // maxima of the last frame, black level subtracted, before the gain
+  output logic [9:0]       meas_raw_max_g,
+  output logic [9:0]       meas_raw_max_b
 );
 
   localparam int ADDR_W = $clog2(LINE_KB * 256);
@@ -93,6 +105,8 @@ module rtlnet_csi2_rx_bayer
     logic [1:0]  ph;
     logic        gm;
     logic        ge;
+    logic        hl;
+    logic [9:0]  hll;
   } step_t;
 
   logic adv;
@@ -164,7 +178,9 @@ module rtlnet_csi2_rx_bayer
   logic [9:0]    lat_black;
   logic [11:0]   lat_gr, lat_gg, lat_gb;
   logic [1:0]    lat_ph;
-  logic          lat_gm, lat_ge;
+  logic          lat_gm, lat_ge, lat_hl;
+  logic [9:0]    lat_hll;
+  logic [9:0]    run_max_r, run_max_g, run_max_b;
   logic          em, em_vcol, em_vrow;
   logic [9:0]    em_pix;
   logic          stop_case;
@@ -239,6 +255,11 @@ module rtlnet_csi2_rx_bayer
       lat_ph      <= '0;
       lat_gm      <= 1'b0;
       lat_ge      <= 1'b0;
+      lat_hl      <= 1'b0;
+      lat_hll     <= '0;
+      meas_raw_max_r <= '0;
+      meas_raw_max_g <= '0;
+      meas_raw_max_b <= '0;
       meas_lines  <= '0;
       meas_pixels <= '0;
       ev_size_err <= 1'b0;
@@ -270,6 +291,8 @@ module rtlnet_csi2_rx_bayer
             lat_ph      <= cfg_phase;
             lat_gm      <= cfg_gamma;
             lat_ge      <= cfg_geq;
+            lat_hl      <= cfg_hl;
+            lat_hll     <= cfg_hl_level;
             fstate      <= F_LINE;
           end
         end
@@ -332,6 +355,9 @@ module rtlnet_csi2_rx_bayer
           if (fin_frame) begin
             ev_size_err <= early || (lines_in != {4'd0, fh}) || size_bad;
             meas_lines  <= lines_in;
+            meas_raw_max_r <= run_max_r;
+            meas_raw_max_g <= run_max_g;
+            meas_raw_max_b <= run_max_b;
             fstate      <= F_IDLE;
           end
         end
@@ -351,6 +377,8 @@ module rtlnet_csi2_rx_bayer
         s0.ph   <= lat_ph;
         s0.gm   <= lat_gm;
         s0.ge   <= lat_ge;
+        s0.hl   <= lat_hl;
+        s0.hll  <= lat_hll;
         s0_pix  <= em_pix;
       end
     end
@@ -372,6 +400,27 @@ module rtlnet_csi2_rx_bayer
   assign site_v = s0.yp ^ s0.ph[1];
   assign gain_sel = (!site_u && !site_v) ? lat_gr : ((site_u && site_v) ? lat_gb : lat_gg);
   assign prod_r   = 22'(s2_p + 22'd128) >> 8;
+
+  // Raw maxima: s1 holds the step of s1_t (black level subtracted raw value of that step); the site is decoded from s1 like the gain from s0.
+  logic s1_u, s1_v;
+  assign s1_u = s1.xp ^ s1.ph[0];
+  assign s1_v = s1.yp ^ s1.ph[1];
+
+  always_ff @(posedge clk) begin
+    if (!resetn) begin
+      run_max_r <= '0; run_max_g <= '0; run_max_b <= '0;
+    end else if ((fstate == F_IDLE) && adv && u_valid && (u_kind == K_PIX) && u_sof) begin
+      run_max_r <= '0; run_max_g <= '0; run_max_b <= '0;
+    end else if (adv && s1.v) begin
+      if (!s1_u && !s1_v) begin
+        if (s1_t > run_max_r) run_max_r <= s1_t;
+      end else if (s1_u && s1_v) begin
+        if (s1_t > run_max_b) run_max_b <= s1_t;
+      end else begin
+        if (s1_t > run_max_g) run_max_g <= s1_t;
+      end
+    end
+  end
 
   always_ff @(posedge clk) begin
     if (!resetn) begin
@@ -475,11 +524,12 @@ module rtlnet_csi2_rx_bayer
   end
 
   logic [9:0] r5, g5, b5;
-  logic       v5, sof5, eol5, gm5;
+  logic       v5, sof5, eol5, gm5, hl5;
+  logic [9:0] hll5;
 
   always_ff @(posedge clk) begin
     if (!resetn) begin
-      r5 <= '0; g5 <= '0; b5 <= '0; v5 <= 1'b0; sof5 <= 1'b0; eol5 <= 1'b0; gm5 <= 1'b0;
+      r5 <= '0; g5 <= '0; b5 <= '0; v5 <= 1'b0; sof5 <= 1'b0; eol5 <= 1'b0; gm5 <= 1'b0; hl5 <= 1'b0; hll5 <= '0;
     end else if (adv) begin
       r5   <= d_r;
       g5   <= d_g;
@@ -488,6 +538,8 @@ module rtlnet_csi2_rx_bayer
       sof5 <= s4.v && (s4.x == 12'd1) && s4.y1;
       eol5 <= s4.xW;
       gm5  <= s4.gm;
+      hl5  <= s4.hl;
+      hll5 <= s4.hll;
     end
   end
 
@@ -515,12 +567,20 @@ module rtlnet_csi2_rx_bayer
 
   logic [7:0] r6, g6, b6;
   logic       v6, sof6, eol6, gm6;
+  logic [9:0] g5_hl, gmax;
+
+  // Highlight clamp on the registered demosaic output: G >= level lifts G to the largest of the three.
+  always_comb begin
+    gmax  = (r5 > b5) ? r5 : b5;
+    if (g5 > gmax) gmax = g5;
+    g5_hl = (hl5 && (g5 >= hll5)) ? gmax : g5;
+  end
 
   always_ff @(posedge clk) begin
     if (!resetn) begin
       r6 <= '0; g6 <= '0; b6 <= '0; v6 <= 1'b0; sof6 <= 1'b0; eol6 <= 1'b0; gm6 <= 1'b0;
     end else if (adv) begin
-      r6 <= to8(r5); g6 <= to8(g5); b6 <= to8(b5);
+      r6 <= to8(r5); g6 <= to8(g5_hl); b6 <= to8(b5);
       v6 <= v5; sof6 <= sof5; eol6 <= eol5; gm6 <= gm5;
     end
   end

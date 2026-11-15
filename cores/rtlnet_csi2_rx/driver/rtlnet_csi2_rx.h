@@ -31,7 +31,7 @@
  * size, a frame of another size is padded or cut and counted in RTLNET_CSI2_CNT_SIZE. Without the camera bit the functions return
  * RTLNET_CSI2_ERR_ARG. The receiver is proven in simulation only.
  *
- * Revision: 11-15-2026
+ * Revision: 11-15-2026 (highlight clamp: PROC bit 2, HL_LEVEL, RAW_MAX)
  */
 #ifndef RTLNET_CSI2_RX_H
 #define RTLNET_CSI2_RX_H
@@ -68,8 +68,11 @@
 #define RTLNET_CSI2_REG_WB_G            0x098u   /* RW, [11:0] green gain (reset 0x100) */
 #define RTLNET_CSI2_REG_WB_B            0x09Cu   /* RW, [11:0] blue gain (reset 0x100) */
 #define RTLNET_CSI2_REG_PHASE           0x0A0u   /* RW, [1:0] Bayer phase of the first pixel of the first line (reset 0) */
-#define RTLNET_CSI2_REG_PROC            0x0A4u   /* RW, [0] gamma enable, [1] green equalisation (reset 0) */
+#define RTLNET_CSI2_REG_PROC            0x0A4u   /* RW, [0] gamma enable, [1] green equalisation, [2] highlight clamp (reset 0) */
+#define RTLNET_CSI2_REG_RAW_MAX         0x0A8u   /* RO, maxima of the raw values of the last frame, black level subtracted: [9:0] red, [19:10] green, [29:20] blue */
+#define RTLNET_CSI2_REG_HL_LEVEL        0x0ACu   /* RW, [9:0] highlight clamp level in 10-bit units after the gain (reset 0) */
 #define RTLNET_CSI2_PROC_GAMMA          (1u << 0)
+#define RTLNET_CSI2_PROC_HIGHLIGHT      (1u << 2)     /* green >= HL_LEVEL becomes max(G, R, B): lifts a clipped green, no pink highlights */
 #define RTLNET_CSI2_PROC_GREEN_EQ       (1u << 1)     /* G at a G site = mean of G and the four diagonal G (equalises Gr and Gb) */
 
 #define RTLNET_CSI2_CTRL_ENABLE         (1u << 0)
@@ -209,6 +212,10 @@ int rtlnet_csi2_rx_set_wb(uintptr_t base, uint32_t gain_r, uint32_t gain_g, uint
 int rtlnet_csi2_rx_set_phase(uintptr_t base, uint32_t phase);                       /* 0 R, 1 Gr, 2 Gb, 3 B first pixel */
 int rtlnet_csi2_rx_set_gamma(uintptr_t base, int enable);
 int rtlnet_csi2_rx_set_green_eq(uintptr_t base, int enable);                        /* both keep the other PROC bit */
+/* Highlight clamp: enable (nonzero) or off, and level 0..1023 (else ERR_ARG, nothing written); level 0 with the clamp on affects every pixel.
+ * Keeps the other PROC bits. rtlnet_csi2_rx_read_raw_max: red, green and blue raw maxima (0..1023) of the last completed frame. */
+int rtlnet_csi2_rx_set_highlight(uintptr_t base, int enable, uint32_t level);
+int rtlnet_csi2_rx_read_raw_max(uintptr_t base, uint32_t *r, uint32_t *g, uint32_t *b);
 int rtlnet_csi2_rx_read_rxstate(uintptr_t base, rtlnet_csi2_rx_rxstate_t *st);
 int rtlnet_csi2_rx_clear_counters(uintptr_t base, uint32_t mask);                   /* bit n counter n, RTLNET_CSI2_CLEAR_ALL for all */
 

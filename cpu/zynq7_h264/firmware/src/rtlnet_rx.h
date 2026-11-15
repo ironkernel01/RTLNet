@@ -1,9 +1,7 @@
-/* Purpose: own camera receiver (rtlnet_csi2_rx) bring-up and diagnostics for the Zybo Z7-20 own-receiver image.
- * Overview: the image variant is read from the camera-wrapper CAPS register (bit 4 set: own receiver; clear: the vendored Digilent chain,
- *   whose D-PHY, CSI-2 and gamma registers are at 0x43C0_0000..). Every access to the receiver window is guarded by that bit, because the
- *   window does not exist in the reference image (a read there is a bus error). Defaults below are the values the sensor and this camera
- *   need; the CLI (rx ...) changes them at run time for measurements.
- * Revision: 11-15-2026. Initial own-receiver module.
+/* Purpose: camera receiver (rtlnet_csi2_rx) bring-up and diagnostics for the Zybo Z7-20 design.
+ * Overview: the receiver core sits at RTLNET_PLAT_RX_BASE; rtlnet_rx_probe checks its ID and VERSION before anything is configured.
+ *   Defaults below are the values the sensor and this camera need; the CLI (rx ...) changes them at run time for measurements.
+ * Revision: 11-15-2026.
  */
 #ifndef RTLNET_RX_H
 #define RTLNET_RX_H
@@ -24,12 +22,18 @@
 #define RTLNET_RX_GAIN_B_1080     0x17Cu   /* 1.484 */
 #define RTLNET_RX_DEFAULT_PHASE   3u       /* BGGR: the OV5640 tables with flip/mirror and the window offset deliver blue first (phase 0 swaps red and blue) */
 #define RTLNET_RX_DEFAULT_GAMMA   1
+/* Highlight clamp per mode (core PROC bit 2). The white balance gains raise red and blue by 1.4 to 1.6, so they reach full scale at a raw value of 650 to 740 while
+ * green (gain 1.0) is still below it (1080p: raw green maxima of 790 to 800 against 660 to 710 for red and blue in bright monitor areas): a bright area then has
+ * red and blue clipped and green lower and shows pink. The clamp lifts a green at or above the level to the larger of the three channels. Levels are 10-bit values
+ * after the gain: 1080p 760, a little below the green maximum of such areas; 720p 960 (the binned mode reaches 1023 in every channel). */
+#define RTLNET_RX_HL_ON           1
+#define RTLNET_RX_HL_LEVEL_720    960u
+#define RTLNET_RX_HL_LEVEL_1080   760u
 #define RTLNET_RX_DEFAULT_GEQ     1        /* green equalisation: the sensor's two greens differ by about 8 percent in the binned modes */
 #define RTLNET_RX_DEFAULT_BITREV  0
 
-/* 1 when the image has the own receiver (CAPS bit 4 of the camera wrapper), decided once at start-up. */
-int rtlnet_rx_detect(void);
-int rtlnet_rx_present(void);
+/* 0 when the receiver core with the camera front end answers at its address (ID and VERSION), else -1 after a message that names what was read. */
+int rtlnet_rx_probe(void);
 /* Receiver set-up before the sensor streams: enable, lanes, data type, settle, taps, Bayer processing, camera-only source. */
 int rtlnet_rx_init(void);
 /* Core video mode (0 = 720p30 geometry, 1 = 1080p) and the white balance gains of that mode, while the sensor is stopped. */
@@ -41,6 +45,7 @@ int rtlnet_rx_set_black(uint32_t black);
 int rtlnet_rx_set_phase(uint32_t phase);
 int rtlnet_rx_set_gamma(int on);
 int rtlnet_rx_set_geq(int on);
+int rtlnet_rx_set_highlight(int on, uint32_t level);
 int rtlnet_rx_set_bitrev(int on);
 int rtlnet_rx_set_settle(uint32_t clocks);
 int rtlnet_rx_clear(void);

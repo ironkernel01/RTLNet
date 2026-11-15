@@ -16,11 +16,14 @@
 //      line (the clock-loss counter, the lines after it dropped as orphans until the next frame start, the frame closed early by the next
 //      frame start), a lost frame start (the eight lines are orphans and no frame appears).
 //   4. RX_CLEAR clears single counters and all counters; the soft reset bit holds the receiver in reset (no frame, no event) and releases it.
-// Plusargs: INJECT_FAILURE (the verdict fails), MUTATE (one pixel of one line is flipped on the wire, the compare must fail).
+//      Every case also writes HL_LEVEL and PROC bit 2 (highlight clamp: the small set has the clipped-highlight cases) and reads RAW_MAX after
+//      the frame, which equals the word of csi2_rx_<set>_max.mem (maxima of the black-level-subtracted raw values per site colour).
+// Plusargs: INJECT_FAILURE (the verdict fails), MUTATE (one pixel of one line is flipped on the wire, the compare must fail),
+//   MUTATE_MAX (the expected RAW_MAX word is wrong in one bit, the register check must fail).
 // Defines: TB_GEOM (0 small, 1 wide), TB_DIR (folder of the .mem files relative to the simulation work directory).
 // Language: SystemVerilog-2012 (simulation only).
 // Revision: 11-15-2026
-//   * 11-15-2026: initial version.
+//   * 11-15-2026: initial version; HL_LEVEL, PROC bit 2 and RAW_MAX checks.
 // -----------------------------------------------------------------------------
 `timescale 1ns / 1ps
 
@@ -47,7 +50,7 @@ module tb_rtlnet_csi2_rx_camera;
   localparam int R_ID = 'h000, R_VERSION = 'h004, R_CAPS = 'h008, R_VIDEO_MODE = 'h010, R_SOURCE = 'h014, R_STATUS = 'h020,
                  R_FRAME_COUNT = 'h024, R_RX_CTRL = 'h040, R_RX_STATUS = 'h044, R_RX_TAPS = 'h048, R_RX_SETTLE = 'h04C,
                  R_RX_FILTER = 'h050, R_RX_CLEAR = 'h054, R_RX_LINES = 'h058, R_RX_PIXELS = 'h05C, R_CNT = 'h060,
-                 R_BLACK = 'h090, R_WB_R = 'h094, R_WB_G = 'h098, R_WB_B = 'h09C, R_PHASE = 'h0A0, R_PROC = 'h0A4;
+                 R_BLACK = 'h090, R_WB_R = 'h094, R_WB_G = 'h098, R_WB_B = 'h09C, R_PHASE = 'h0A0, R_PROC = 'h0A4, R_RAW_MAX = 'h0A8, R_HL_LEVEL = 'h0AC;
   localparam int C_ECC_CORR = 0, C_ECC_UNC = 1, C_CRC = 2, C_SOT = 3, C_FRAMES = 4, C_DT = 5, C_TRUNC = 6, C_OVF = 7, C_SIZE = 8,
                  C_ORPHAN = 9, C_LEN = 10, C_CLKLOSS = 11;
 
@@ -103,6 +106,8 @@ module tb_rtlnet_csi2_rx_camera;
   logic [31:0] cfgA [0:1023];
   logic [9:0]  rawA [0:16383];
   logic [31:0] expA [0:8191];
+  logic [31:0] maxA [0:255];
+  bit mutate_max = 1'b0;
   logic [31:0] cfgB [0:1023];
   logic [9:0]  rawB [0:4095];
   logic [31:0] expB [0:4095];
@@ -195,6 +200,7 @@ module tb_rtlnet_csi2_rx_camera;
     wr(R_WB_R, c[7]);
     wr(R_WB_G, c[8]);
     wr(R_WB_B, c[9]);
+    wr(R_HL_LEVEL, c[15]);
     wr(R_PROC, c[10]);
   endtask
 
@@ -284,9 +290,11 @@ module tb_rtlnet_csi2_rx_camera;
     int base, W, H, iw, ih, kind, kline, roff, eoff, nlines;
     int ncA, ncB;
     mutate = $test$plusargs("MUTATE");
+    mutate_max = $test$plusargs("MUTATE_MAX");
     $readmemh($sformatf("%s/csi2_rx_%s_cfg.mem", `TB_DIR, SETNAME), cfgA);
     $readmemh($sformatf("%s/csi2_rx_%s_raw.mem", `TB_DIR, SETNAME), rawA);
     $readmemh($sformatf("%s/csi2_rx_%s_exp.mem", `TB_DIR, SETNAME), expA);
+    $readmemh($sformatf("%s/csi2_rx_%s_max.mem", `TB_DIR, SETNAME), maxA);
     if (!WIDE) begin
       $readmemh($sformatf("%s/csi2_rx_fault_cfg.mem", `TB_DIR), cfgB);
       $readmemh($sformatf("%s/csi2_rx_fault_raw.mem", `TB_DIR), rawB);
@@ -312,6 +320,8 @@ module tb_rtlnet_csi2_rx_camera;
     expect_reg(R_BLACK, 32'h0, "reset");
     expect_reg(R_PHASE, 32'h0, "reset");
     expect_reg(R_PROC, 32'h0, "reset");
+    expect_reg(R_RAW_MAX, 32'h0, "reset");
+    expect_reg(R_HL_LEVEL, 32'h0, "reset");
     for (int i = 0; i < 12; i++) expect_cnt(i, 0, "reset");
     rd(R_RX_STATUS, d);
     tb_check(d[0] === 1'b1, "RX_STATUS: HS clock not running");
@@ -327,7 +337,16 @@ module tb_rtlnet_csi2_rx_camera;
     wr(R_PHASE, 32'hFFFF_FFFF);
     expect_reg(R_PHASE, 32'h3, "phase mask");
     wr(R_PROC, 32'hFFFF_FFFF);
-    expect_reg(R_PROC, 32'h3, "proc mask (gamma, green equalisation)");
+    expect_reg(R_PROC, 32'h7, "proc mask (gamma, green equalisation, highlight clamp)");
+    wr(R_PROC, 32'h4);
+    expect_reg(R_PROC, 32'h4, "proc highlight clamp alone");
+    wr(R_HL_LEVEL, 32'hFFFF_FFFF);
+    expect_reg(R_HL_LEVEL, 32'h3FF, "hl level mask");
+    wr(R_HL_LEVEL, 32'h2B5);
+    expect_reg(R_HL_LEVEL, 32'h2B5, "hl level write");
+    wr(R_RAW_MAX, 32'hFFFF_FFFF);
+    expect_reg(R_RAW_MAX, 32'h0, "raw max is read only");
+    wr(R_HL_LEVEL, 32'h0);
     wr(R_PROC, 32'h2);
     expect_reg(R_PROC, 32'h2, "proc green equalisation alone");
     wr(R_PROC, 32'h0);
@@ -354,6 +373,7 @@ module tb_rtlnet_csi2_rx_camera;
         repeat (200) @(posedge clk);
         expect_reg(R_RX_PIXELS, iw, $sformatf("case %0d RX_PIXELS", ci));
         expect_reg(R_RX_LINES, nlines, $sformatf("case %0d RX_LINES", ci));
+        expect_reg(R_RAW_MAX, mutate_max ? (maxA[ci] ^ 32'h1) : maxA[ci], $sformatf("case %0d RAW_MAX", ci));
         expect_reg(R_FRAME_COUNT, sent_frames, $sformatf("case %0d FRAME_COUNT", ci));
       end
     end

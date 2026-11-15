@@ -17,7 +17,7 @@ if($LASTEXITCODE){throw 'menu reproducibility failed'}
 if($LASTEXITCODE){throw 'menu callback check failed'}
 $includes=@("-I$fw/src","-I$fw/src/video","-I$fw/src/drivers","-I$fw/src/lwip","-I$fw/cli",
  "-I$repo/cores/rtlnet_common/driver","-I$repo/cores/rtlnet_framebuf/driver","-I$repo/cores/rtlnet_vdma_s2mm/driver","-I$repo/cores/rtlnet_csi2_rx/driver")
-$sources=@("$fw/test/rtlnet_cli_host_test.c","$fw/test/rtlnet_host_stubs.c","$fw/src/rtlnet_camera.c","$fw/src/rtlnet_dphy.c","$fw/src/rtlnet_rx.c",
+$sources=@("$fw/test/rtlnet_cli_host_test.c","$fw/test/rtlnet_host_stubs.c","$fw/src/rtlnet_camera.c","$fw/src/rtlnet_rx.c",
  "$fw/cli/menu.c","$fw/cli/menu_table.c","$fw/cli/rtlnet_commands.c")
 $sources+=@(Get-ChildItem "$fw/src/video/*.c","$fw/src/drivers/*.c" | ForEach-Object {$_.FullName})
 $sources+=@("$repo/cores/rtlnet_framebuf/driver/rtlnet_framebuf.c","$repo/cores/rtlnet_vdma_s2mm/driver/rtlnet_vdma_s2mm.c","$repo/cores/rtlnet_csi2_rx/driver/rtlnet_csi2_rx.c")

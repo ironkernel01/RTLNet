@@ -26,7 +26,7 @@ SPDX-License-Identifier: LGPL-2.1-or-later
 |---|---|
 | Revision | 11-15-2026 (newest row of the revision history in cli/cli_commands.txt) |
 | Generated | 2026-11-15 00:00:00 -04:00 by cli/gen_menu.py from cli/cli_commands.txt |
-| Commands | 22 table entries (1 mode-entry), 4 keyword groups, 3 built-ins (exit, end, help) |
+| Commands | 23 table entries (1 mode-entry), 4 keyword groups, 3 built-ins (exit, end, help) |
 
 ## 1. Title and overview
 
@@ -207,7 +207,7 @@ token counts; exec commands are also accepted in priv.
 | 2 | cli_version | exec | `SHOW VERSION` | — | — | 2 | 2 | — | Firmware and hardware identity |
 | 3 | cli_ip | exec | `SHOW IP` | — | — | 2 | 2 | — | DHCP address and PHY identity |
 | 4 | cli_camera | exec | `SHOW CAMERA` | — | — | 2 | 2 | — | Camera mode and capture counters |
-| 5 | cli_rx | exec | `SHOW RX` | — | — | 2 | 2 | — | Own receiver state and all counters |
+| 5 | cli_rx | exec | `SHOW RX` | — | — | 2 | 2 | — | Camera receiver state, counters and raw maxima |
 | 6 | cli_encoder | exec | `SHOW ENCODER` | — | — | 2 | 2 | — | Encoder picture and error statistics |
 | 7 | cli_stream | exec | `SHOW STREAM` | — | — | 2 | 2 | — | MPEG-TS and UDP statistics |
 | 8 | cli_qp | priv | `ENCODER QP [VALUE]` | VALUE | — | 3 | 3 | — | Constant QP 0..51 |
@@ -223,8 +223,9 @@ token counts; exec commands are also accepted in priv.
 | 18 | cli_rx_phase | priv | `RX PHASE [VALUE]` | VALUE | — | 3 | 3 | — | Bayer phase 0..3 of the first pixel |
 | 19 | cli_rx_gamma | priv | `RX GAMMA [ONOFF]` | ONOFF | — | 3 | 3 | — | Gamma curve 0 or 1 |
 | 20 | cli_rx_geq | priv | `RX GEQ [ONOFF]` | ONOFF | — | 3 | 3 | — | Green equalisation 0 or 1 |
-| 21 | cli_rx_bitrev | priv | `RX BITREV [ONOFF]` | ONOFF | — | 3 | 3 | — | Deserializer bit order reversal 0 or 1 |
-| 22 | cli_rx_settle | priv | `RX SETTLE [CLOCKS]` | CLOCKS | — | 3 | 3 | — | HS settle time in 200 MHz clocks 0..255 |
+| 21 | cli_rx_hl | priv | `RX HIGHLIGHT [ONOFF] [LEVEL]` | ONOFF, LEVEL | — | 4 | 4 | — | Highlight clamp 0 or 1, level 0..1023 after the gain |
+| 22 | cli_rx_bitrev | priv | `RX BITREV [ONOFF]` | ONOFF | — | 3 | 3 | — | Deserializer bit order reversal 0 or 1 |
+| 23 | cli_rx_settle | priv | `RX SETTLE [CLOCKS]` | CLOCKS | — | 3 | 3 | — | HS settle time in 200 MHz clocks 0..255 |
 
 Built-ins (menu.c): `EXIT` (every mode), `END` (privileged and configuration modes), `HELP` and `?`
 (every mode, identical listing), `!!` (repeat the previous line), Ctrl-C (cancel the line),
@@ -237,7 +238,7 @@ Keyword groups (help text when `?` lists a keyword shared by several commands):
 | exec | `SHOW` | Show current status |
 | priv | `ENCODER` | Configure encoder |
 | priv | `STREAM` | Control MPEG-TS UDP stream |
-| priv | `RX` | Configure the own camera receiver |
+| priv | `RX` | Configure the camera receiver |
 
 ## 8. Build instructions
 

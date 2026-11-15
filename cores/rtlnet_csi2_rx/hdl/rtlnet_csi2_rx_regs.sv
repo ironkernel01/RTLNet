@@ -17,11 +17,13 @@
 //   * STATUS error flags are sticky and clear by writing 1; a new error in the clock of a clear keeps the flag set.
 //   * Camera receiver registers (CAMERA_PRESENT = 1; with 0 they read 0, writes are ignored and VERSION stays 0x11102026): RX_CTRL, RX_STATUS,
 //     RX_TAPS, RX_SETTLE, RX_FILTER, RX_CLEAR, RX_LINES, RX_PIXELS, twelve 32-bit event counters (saturating, cleared by RX_CLEAR bits or
-//     bit 31 for all), BLACK, WB_R, WB_G, WB_B, PHASE, PROC. Fields are masked to their width, reserved bits read 0 and writes to them are
+//     bit 31 for all), BLACK, WB_R, WB_G, WB_B, PHASE, PROC (bit 0 gamma, bit 1 green equalisation, bit 2 highlight clamp), RAW_MAX (0x0A8, read
+//     only: [9:0] red, [19:10] green, [29:20] blue maximum of the raw values of the last frame) and HL_LEVEL (0x0AC, [9:0] clamp level, reset 0). Fields are masked to their width, reserved bits read 0 and writes to them are
 //     ignored; there are no reject flags in this block.
 //   * Offsets are defined in driver/rtlnet_csi2_rx.h and mirrored here.
 // Language: SystemVerilog-2012.
 // Revision: 11-15-2026
+//   * 11-15-2026: PROC bit 2 (highlight clamp), RAW_MAX (0x0A8) and HL_LEVEL (0x0AC).
 //   * 11-15-2026: camera receiver registers (0x040 to 0x0A4), VERSION 0x11152026 when CAMERA_PRESENT, CAPS[5] set by it.
 //   * 11-10-2026: PATTERN (0x030), PATTERN_FRAME (0x034), STATUS.PATTERN_ERR, CAPS[6] moving patterns, VERSION 0x11102026.
 //   * 11-09-2026: initial version.
@@ -82,6 +84,11 @@ module rtlnet_csi2_rx_regs #(
   output logic [1:0]  px_phase,
   output logic        px_gamma,
   output logic        px_geq,
+  output logic        px_hl,
+  output logic [9:0]  px_hl_level,
+  input  logic [9:0]  px_raw_max_r,     // RAW_MAX of the last frame
+  input  logic [9:0]  px_raw_max_g,
+  input  logic [9:0]  px_raw_max_b,
   input  logic [11:0] rx_st,            // RX_STATUS bits [11:0]
   input  logic [15:0] rx_lines,
   input  logic [15:0] rx_pixels,
@@ -117,7 +124,9 @@ module rtlnet_csi2_rx_regs #(
   localparam logic [11:0] REG_WB_G         = 12'h098;
   localparam logic [11:0] REG_WB_B         = 12'h09C;
   localparam logic [11:0] REG_PHASE        = 12'h0A0;
-  localparam logic [11:0] REG_PROC         = 12'h0A4;
+  localparam logic [11:0] REG_PROC         = 12'h0A4;   // bit 0 gamma, bit 1 green equalisation, bit 2 highlight clamp
+  localparam logic [11:0] REG_RAW_MAX      = 12'h0A8;   // RO: [9:0] red, [19:10] green, [29:20] blue maximum of the last frame
+  localparam logic [11:0] REG_HL_LEVEL     = 12'h0AC;   // RW: [9:0] highlight clamp level
   localparam int          NUM_CNT          = 12;
 
   localparam int ST_PATTERN_BIT    = 0;
@@ -270,6 +279,8 @@ module rtlnet_csi2_rx_regs #(
       px_phase      <= 2'd0;
       px_gamma      <= 1'b0;
       px_geq        <= 1'b0;
+      px_hl         <= 1'b0;
+      px_hl_level   <= 10'd0;
     end else if (wr_cam) begin
       case (reg_wr_addr)
         REG_RX_CTRL: begin
@@ -292,7 +303,8 @@ module rtlnet_csi2_rx_regs #(
         REG_WB_G:  px_gain_g <= reg_wr_data[11:0];
         REG_WB_B:  px_gain_b <= reg_wr_data[11:0];
         REG_PHASE: px_phase  <= reg_wr_data[1:0];
-        REG_PROC:  begin px_gamma <= reg_wr_data[0]; px_geq <= reg_wr_data[1]; end
+        REG_PROC:  begin px_gamma <= reg_wr_data[0]; px_geq <= reg_wr_data[1]; px_hl <= reg_wr_data[2]; end
+        REG_HL_LEVEL: px_hl_level <= reg_wr_data[9:0];
         default: begin
         end
       endcase
@@ -356,7 +368,9 @@ module rtlnet_csi2_rx_regs #(
         REG_WB_G:         reg_rd_data <= CAMERA_PRESENT ? {20'd0, px_gain_g} : '0;
         REG_WB_B:         reg_rd_data <= CAMERA_PRESENT ? {20'd0, px_gain_b} : '0;
         REG_PHASE:        reg_rd_data <= CAMERA_PRESENT ? {30'd0, px_phase} : '0;
-        REG_PROC:         reg_rd_data <= CAMERA_PRESENT ? {30'd0, px_geq, px_gamma} : '0;
+        REG_PROC:         reg_rd_data <= CAMERA_PRESENT ? {29'd0, px_hl, px_geq, px_gamma} : '0;
+        REG_RAW_MAX:      reg_rd_data <= CAMERA_PRESENT ? {2'd0, px_raw_max_b, px_raw_max_g, px_raw_max_r} : '0;
+        REG_HL_LEVEL:     reg_rd_data <= CAMERA_PRESENT ? {22'd0, px_hl_level} : '0;
         default:          reg_rd_data <= CAMERA_PRESENT ? cnt_rd : '0;
       endcase
     end

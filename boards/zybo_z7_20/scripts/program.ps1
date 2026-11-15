@@ -1,7 +1,7 @@
 <#
 -------------------------------------------------------------------------------
 File: program.ps1
-Purpose: load the Zybo Z7-20 Baseline design over JTAG (volatile: nothing is written to QSPI or an SD card): bitstream,
+Purpose: load the Zybo Z7-20 camera and H.264 design over JTAG (volatile: nothing is written to QSPI or an SD card): bitstream,
   PS initialization from the XSA, ARM application, run.
 Overview:
   * Takes the machine-wide board lock (rtlnet_board_lock.ps1) before touching the board; the lock stays until the
@@ -13,7 +13,7 @@ Overview:
   * Output: the rtlnet_zybo_load: lines of the xsdb log (build/<Tag>/program.log); last line RTLNET_ZYBO_PROGRAM: PASS|FAIL.
 Usage:
   powershell -NoProfile -ExecutionPolicy Bypass -File boards/zybo_z7_20/scripts/program.ps1 -Tag enc13 [-FwTag enc13] [-Elf <file>]
-Revision: 11-14-2026
+Revision: 11-15-2026
   * 11-14-2026: initial version.
 -------------------------------------------------------------------------------
 #>

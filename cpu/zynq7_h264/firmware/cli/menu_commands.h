@@ -51,6 +51,7 @@ int cli_rx_black(const MenuCommandContext *ctx);
 int cli_rx_phase(const MenuCommandContext *ctx);
 int cli_rx_gamma(const MenuCommandContext *ctx);
 int cli_rx_geq(const MenuCommandContext *ctx);
+int cli_rx_hl(const MenuCommandContext *ctx);
 int cli_rx_bitrev(const MenuCommandContext *ctx);
 int cli_rx_settle(const MenuCommandContext *ctx);
 

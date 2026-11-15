@@ -1,14 +1,16 @@
-// Purpose: integrate camera capture and one Baseline H.264 engine with PS HP ports.
-// Overview: RGB/Gamma pixels remain at capture_clk; the encoder reads completed
-//   DDR frames at enc_clk. Software owns framebuf's firmware-reader handshake.
-//   GP0 AXI-Lite decodes five 4 KiB windows at 0x44A0_4000..0x44A0_8000.
+// Purpose: integrate the IronKernel CSI-2 camera receiver, capture and one Baseline H.264 engine with PS HP ports.
+// Overview: the receiver (rtlnet_csi2_rx, CAMERA_RX = 1) takes the camera D-PHY pins and delivers YUV422 pairs at capture_clk;
+//   the camera admission below selects the frames (720p every frame, 1080p every second frame), the capture DMA writes them to DDR
+//   frames and the encoder reads completed DDR frames at enc_clk. Software owns framebuf's firmware-reader handshake.
+//   GP0 AXI-Lite decodes six 4 KiB windows at 0x44A0_4000..0x44A0_9000 (receiver at 0x44A0_9000).
 //   Camera register contract is cpu/zynq7_h264/firmware/src/rtlnet_camera.h.
 //   Capture IRQ is an edge pulse at s_axi_aclk, encoder IRQ a synchronized level.
 //   Frame events are separated by at least 16 ms (>4 control clocks), satisfying
 //   the open-loop pulse synchronizer's minimum spacing. Resets assert together.
 // Language: SystemVerilog-2012.
-// Revision: 11-14-2026. Initial integration; implementation results are pending.
+// Revision: 11-15-2026.
 module rtlnet_zybo_video #(
+  parameter string DPHY_TARGET = "AMD",   // bench only: any other value selects the behavioural D-PHY front end; stays "AMD" in the board design
   parameter bit HIGH_PROFILE = 1'b0,
   parameter bit HP_T8 = 1'b1,
   parameter bit HP_T8_AUTO = 1'b1,
@@ -22,25 +24,33 @@ module rtlnet_zybo_video #(
   (* X_INTERFACE_PARAMETER = "ASSOCIATED_BUSIF S_AXI, ASSOCIATED_RESET s_axi_aresetn" *)
   input logic s_axi_aclk,
   input logic s_axi_aresetn,
-  // Video clock (90 MHz, the same clock as enc_clk in the board design), RGB stream and capture HP bus; reset releases locally.
-  (* X_INTERFACE_PARAMETER = "ASSOCIATED_BUSIF S_AXIS_VIDEO:M_AXI_CAP, ASSOCIATED_RESET capture_resetn" *)
+  // Video clock (90 MHz, the same clock as enc_clk in the board design), receiver and capture HP bus; reset releases locally.
+  (* X_INTERFACE_PARAMETER = "ASSOCIATED_BUSIF M_AXI_CAP, ASSOCIATED_RESET capture_resetn" *)
   input logic capture_clk,
   input logic capture_resetn,
   // Encoder clock 90 MHz and HP bus; reset releases locally.
   (* X_INTERFACE_PARAMETER = "ASSOCIATED_BUSIF M_AXI_ENC, ASSOCIATED_RESET enc_resetn" *)
   input logic enc_clk,
   input logic enc_resetn,
-  // Post-gamma camera pixels, capture_clk: R[23:16], B[15:8], G[7:0], SOF/EOL.
-  (* X_INTERFACE_INFO = "xilinx.com:interface:axis:1.0 S_AXIS_VIDEO TDATA" *)
-  input logic [23:0] s_axis_video_tdata,
-  (* X_INTERFACE_INFO = "xilinx.com:interface:axis:1.0 S_AXIS_VIDEO TVALID" *)
-  input logic s_axis_video_tvalid,
-  (* X_INTERFACE_INFO = "xilinx.com:interface:axis:1.0 S_AXIS_VIDEO TREADY" *)
-  output logic s_axis_video_tready,
-  (* X_INTERFACE_INFO = "xilinx.com:interface:axis:1.0 S_AXIS_VIDEO TUSER" *)
-  input logic s_axis_video_tuser,
-  (* X_INTERFACE_INFO = "xilinx.com:interface:axis:1.0 S_AXIS_VIDEO TLAST" *)
-  input logic s_axis_video_tlast,
+  // 200 MHz D-PHY delay reference and the camera pins (names equal the board pin constraints).
+  (* X_INTERFACE_IGNORE = "true" *)
+  input logic ref_clk,
+  (* X_INTERFACE_IGNORE = "true" *)
+  input logic dphy_hs_clock_clk_p,
+  (* X_INTERFACE_IGNORE = "true" *)
+  input logic dphy_hs_clock_clk_n,
+  (* X_INTERFACE_IGNORE = "true" *)
+  input logic dphy_clk_lp_p,
+  (* X_INTERFACE_IGNORE = "true" *)
+  input logic dphy_clk_lp_n,
+  (* X_INTERFACE_IGNORE = "true" *)
+  input logic [1:0] dphy_data_hs_p,
+  (* X_INTERFACE_IGNORE = "true" *)
+  input logic [1:0] dphy_data_hs_n,
+  (* X_INTERFACE_IGNORE = "true" *)
+  input logic [1:0] dphy_data_lp_p,
+  (* X_INTERFACE_IGNORE = "true" *)
+  input logic [1:0] dphy_data_lp_n,
   // S_AXI AXI4LITE: explicit physical bus, with byte enables and response IDs.
   (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 S_AXI AWADDR" *)
   (* X_INTERFACE_PARAMETER = "PROTOCOL AXI4LITE, DATA_WIDTH 32, ADDR_WIDTH 32" *)
@@ -206,23 +216,23 @@ module rtlnet_zybo_video #(
   (* X_INTERFACE_PARAMETER = "SENSITIVITY LEVEL_HIGH" *)
   output logic [1:0] irq
 );
-  logic [159:0] d_awaddr;
-  logic [4:0] d_awvalid;
-  logic [4:0] d_awready;
-  logic [159:0] d_wdata;
-  logic [19:0] d_wstrb;
-  logic [4:0] d_wvalid;
-  logic [4:0] d_wready;
-  logic [9:0] d_bresp;
-  logic [4:0] d_bvalid;
-  logic [4:0] d_bready;
-  logic [159:0] d_araddr;
-  logic [4:0] d_arvalid;
-  logic [4:0] d_arready;
-  logic [159:0] d_rdata;
-  logic [9:0] d_rresp;
-  logic [4:0] d_rvalid;
-  logic [4:0] d_rready;
+  logic [191:0] d_awaddr;
+  logic [5:0] d_awvalid;
+  logic [5:0] d_awready;
+  logic [191:0] d_wdata;
+  logic [23:0] d_wstrb;
+  logic [5:0] d_wvalid;
+  logic [5:0] d_wready;
+  logic [11:0] d_bresp;
+  logic [5:0] d_bvalid;
+  logic [5:0] d_bready;
+  logic [191:0] d_araddr;
+  logic [5:0] d_arvalid;
+  logic [5:0] d_arready;
+  logic [191:0] d_rdata;
+  logic [11:0] d_rresp;
+  logic [5:0] d_rvalid;
+  logic [5:0] d_rready;
   logic [5:0] cap_awid;
   logic [31:0] cap_awaddr;
   logic [7:0] cap_awlen;
@@ -327,15 +337,18 @@ module rtlnet_zybo_video #(
   logic pair_ready;
   logic pair_sof;
   logic pair_eol;
-  logic adapter_ready;
   logic [31:0] adp_pair;
   logic adp_valid;
   logic adp_ready;
   logic adp_sof;
   logic adp_eol;
   logic [4:0] slice_keep_unused;
+  logic [31:0] rx_tdata;
+  logic rx_tvalid;
+  logic rx_tready;
+  logic rx_tlast;
+  logic rx_tuser;
   logic [6:0] slice_data_unused;
-  logic adapter_error;
   logic encoder_irq;
   logic camera_enable;
   logic camera_mode;
@@ -374,7 +387,7 @@ module rtlnet_zybo_video #(
   logic camreg_rvalid;
   logic camreg_rready;
   // u_decode implements rtlnet_axil_decoder in its explicitly connected clock domain.
-  rtlnet_axil_decoder #(.N(5), .SLAVE_BASE({32'h44a08000,32'h44a07000,32'h44a06000,32'h44a04000,32'h44a05000}), .SLAVE_SIZE({5{32'h1000}})) u_decode (
+  rtlnet_axil_decoder #(.N(6), .SLAVE_BASE({32'h44a09000,32'h44a08000,32'h44a07000,32'h44a06000,32'h44a04000,32'h44a05000}), .SLAVE_SIZE({6{32'h1000}})) u_decode (
     .aclk(s_axi_aclk),
     .aresetn(s_axi_aresetn),
     .s_axi_awaddr(s_axi_awaddr),
@@ -482,8 +495,8 @@ module rtlnet_zybo_video #(
     .reg_rd_data(cam_reg_q)
   );
   // 720p (mode 0): the sensor runs 30 fps and every frame is admitted; 1080p (mode 1): the sensor runs 30 fps and every second frame is admitted (15 fps).
-  assign admit = s_axis_video_tuser ? (camera_enable && (!camera_mode || !skip_phase)) : frame_admit;
-  assign s_axis_video_tready = !admit || adapter_ready;
+  assign admit = rx_tuser ? (camera_enable && (!camera_mode || !skip_phase)) : frame_admit;
+  assign rx_tready = !admit || adp_ready;
   // Camera configuration and metadata live in the capture domain behind a whole-transaction CDC.
   always_ff @(posedge capture_clk) begin
     if (!capture_resetn) begin
@@ -507,7 +520,7 @@ module rtlnet_zybo_video #(
       end else capture_sub_us <= capture_sub_us + 1'b1;
       if (cam_reg_wr && cam_reg_wa == 12'h00c) camera_enable <= cam_reg_wd[0];
       if (cam_reg_wr && cam_reg_wa == 12'h010 && cam_reg_wd < 2) camera_mode <= cam_reg_wd[0];
-      if (s_axis_video_tvalid && s_axis_video_tready && s_axis_video_tuser) begin
+      if (rx_tvalid && rx_tready && rx_tuser) begin
         frames_seen <= frames_seen + 1'b1;
         skip_phase <= !skip_phase;
         frame_admit <= admit;
@@ -522,11 +535,10 @@ module rtlnet_zybo_video #(
       if (cam_reg_rd) begin
         case (cam_reg_ra)
           12'h000: cam_reg_q <= 32'h5a43414d;
-          12'h004: cam_reg_q <= 32'h11142026;
+          12'h004: cam_reg_q <= 32'h11152026;
           12'h008: cam_reg_q <= 32'h00000002;
           12'h00c: cam_reg_q <= {31'd0, camera_enable};
           12'h010: cam_reg_q <= {31'd0, camera_mode};
-          12'h014: cam_reg_q <= {31'd0, adapter_error};
           12'h018: cam_reg_q <= camera_mode ? 32'd6000 : 32'd3000;
           12'h020: cam_reg_q <= frames_seen;
           12'h024: cam_reg_q <= frames_admitted;
@@ -535,24 +547,65 @@ module rtlnet_zybo_video #(
       end
     end
   end
-  // u_rgb implements rtlnet_rgb_to_yuyv in its explicitly connected clock domain.
-  rtlnet_rgb_to_yuyv #() u_rgb (
+  // u_rx is the IronKernel CSI-2 camera receiver (rtlnet_csi2_rx, CAMERA_RX = 1): D-PHY pins in, YUV422 pairs out in capture_clk.
+  // It cannot be stalled: its byte-clock FIFO drops and counts entries when the capture path is not ready (OVF counter).
+  // The camera admission above discards the frames that are not admitted (ready high), so a skipped frame never stalls it.
+  // Register window 0x44A0_9000 (index 5 of u_decode); the window has its own clock crossing inside the core.
+  assign adp_valid = rx_tvalid && admit;
+  assign adp_pair = rx_tdata;
+  assign adp_sof = rx_tuser;
+  assign adp_eol = rx_tlast;
+  rtlnet_csi2_rx #(.CAMERA_RX(1'b1), .DPHY_TARGET(DPHY_TARGET), .NONCONT_CLOCK(1'b0), .IDELAYCTRL_INST(1'b1), .HS_DIFF_TERM(1'b0),
+                     .WIDTH_720(WIDTH_720), .HEIGHT_720(HEIGHT_720), .WIDTH_1080(WIDTH_1080), .HEIGHT_1080(HEIGHT_1080)) u_rx (
     .clk(capture_clk),
     .resetn(capture_resetn),
-    .s_axis_tdata(s_axis_video_tdata),
-    .s_axis_tvalid(s_axis_video_tvalid && admit),
-    .s_axis_tready(adapter_ready),
-    .s_axis_tuser(s_axis_video_tuser),
-    .s_axis_tlast(s_axis_video_tlast),
-    .m_axis_tdata(adp_pair),
-    .m_axis_tvalid(adp_valid),
-    .m_axis_tready(adp_ready),
-    .m_axis_tuser(adp_sof),
-    .m_axis_tlast(adp_eol),
-    .format_error(adapter_error)
+    .s_axi_aclk(s_axi_aclk),
+    .s_axi_aresetn(s_axi_aresetn),
+    .s_cam_tdata(32'd0),
+    .s_cam_tvalid(1'b0),
+    .s_cam_tready(),
+    .s_cam_tlast(1'b0),
+    .s_cam_tuser(1'b0),
+    .cam_clk_running(1'b0),
+    .ref_clk(ref_clk),
+    .dphy_clk_p(dphy_hs_clock_clk_p),
+    .dphy_clk_n(dphy_hs_clock_clk_n),
+    .dphy_clk_lp_p(dphy_clk_lp_p),
+    .dphy_clk_lp_n(dphy_clk_lp_n),
+    .dphy_dat_p(dphy_data_hs_p),
+    .dphy_dat_n(dphy_data_hs_n),
+    .dphy_dat_lp_p(dphy_data_lp_p),
+    .dphy_dat_lp_n(dphy_data_lp_n),
+    .m_axis_tdata(rx_tdata),
+    .m_axis_tvalid(rx_tvalid),
+    .m_axis_tready(rx_tready),
+    .m_axis_tlast(rx_tlast),
+    .m_axis_tuser(rx_tuser),
+    .m_frame_num(),
+    .m_timestamp(),
+    .m_width(),
+    .m_height(),
+    .m_src_pattern(),
+    .s_axi_awaddr(d_awaddr[160 +: 12]),
+    .s_axi_awvalid(d_awvalid[5 +: 1]),
+    .s_axi_awready(d_awready[5 +: 1]),
+    .s_axi_wdata(d_wdata[160 +: 32]),
+    .s_axi_wstrb(d_wstrb[20 +: 4]),
+    .s_axi_wvalid(d_wvalid[5 +: 1]),
+    .s_axi_wready(d_wready[5 +: 1]),
+    .s_axi_bresp(d_bresp[10 +: 2]),
+    .s_axi_bvalid(d_bvalid[5 +: 1]),
+    .s_axi_bready(d_bready[5 +: 1]),
+    .s_axi_araddr(d_araddr[160 +: 12]),
+    .s_axi_arvalid(d_arvalid[5 +: 1]),
+    .s_axi_arready(d_arready[5 +: 1]),
+    .s_axi_rdata(d_rdata[160 +: 32]),
+    .s_axi_rresp(d_rresp[10 +: 2]),
+    .s_axi_rvalid(d_rvalid[5 +: 1]),
+    .s_axi_rready(d_rready[5 +: 1])
   );
-  // The capture FIFO state must not reach the Digilent stream chain combinationally (its ready fans out
-  // through the gamma and Bayer stages to their clock enables): u_pair_slice ends that path at a flop.
+  // The capture FIFO state must not reach the receiver pipeline combinationally (the admission ready of the pairs would fan out
+  // through the receiver's clock enables): u_pair_slice ends that path at a flop.
   // SOF travels with the data in bit 32; bits 39:33 are zero. One extra clock of latency.
   rtlnet_axis_reg_slice #(.DATA_W(40), .RESET_DATA(1'b1)) u_pair_slice (
     .clk(capture_clk),

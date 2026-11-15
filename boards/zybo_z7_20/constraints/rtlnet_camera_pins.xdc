@@ -1,5 +1,6 @@
-# Purpose: Pcam pins from Digilent Zybo-Z7 release XDC.
-# Revision: 11-14-2026.
+# Purpose: pin assignments of the Pcam 5C connector (camera I2C, GPIO, D-PHY lanes) on the Zybo Z7-20.
+# Overview: pins and standards follow the Digilent Zybo-Z7 release constraints (HSUL_12 for the LP pins, LVDS_25 for the HS pairs).
+# Revision: 11-15-2026.
 #MIPI
 set_property PACKAGE_PIN G20 [get_ports {cam_gpio_tri_io[0]}]
 set_property IOSTANDARD LVCMOS33 [get_ports {cam_gpio_tri_io[0]}]

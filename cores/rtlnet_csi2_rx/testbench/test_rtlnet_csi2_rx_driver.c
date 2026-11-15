@@ -41,6 +41,8 @@ static uint32_t g_black;
 static uint32_t g_wb[3] = { 0x100u, 0x100u, 0x100u };
 static uint32_t g_phase;
 static uint32_t g_proc;
+static uint32_t g_hl_level;
+static uint32_t g_raw_max = (3u << 20) | (2u << 10) | 1u;   /* blue 3, green 2, red 1 */
 static uint32_t g_cnt[RTLNET_CSI2_CNT_COUNT];
 static int      g_checks;
 static int      g_fails;
@@ -100,6 +102,8 @@ uint32_t rtlnet_host_reg_read32(uintptr_t addr)
     case RTLNET_CSI2_REG_WB_B:         return g_wb[2];
     case RTLNET_CSI2_REG_PHASE:        return g_phase;
     case RTLNET_CSI2_REG_PROC:         return g_proc;
+    case RTLNET_CSI2_REG_RAW_MAX:      return g_raw_max;
+    case RTLNET_CSI2_REG_HL_LEVEL:     return g_hl_level;
     default:
         if (off >= RTLNET_CSI2_REG_CNT_BASE && off < RTLNET_CSI2_REG_CNT_BASE + 4u * RTLNET_CSI2_CNT_COUNT) {
             return g_cnt[(off - RTLNET_CSI2_REG_CNT_BASE) / 4u];
@@ -171,7 +175,9 @@ void rtlnet_host_reg_write32(uintptr_t addr, uint32_t value)
         case RTLNET_CSI2_REG_WB_G:      g_wb[1] = value & 0xFFFu; break;
         case RTLNET_CSI2_REG_WB_B:      g_wb[2] = value & 0xFFFu; break;
         case RTLNET_CSI2_REG_PHASE:     g_phase = value & 3u; break;
-        case RTLNET_CSI2_REG_PROC:      g_proc = value & 3u; break;
+        case RTLNET_CSI2_REG_PROC:      g_proc = value & 7u; break;
+        case RTLNET_CSI2_REG_HL_LEVEL:  g_hl_level = value & 0x3FFu; break;
+        case RTLNET_CSI2_REG_RAW_MAX:   break;   /* read only */
         case RTLNET_CSI2_REG_RX_CLEAR: {
             uint32_t i;
             for (i = 0u; i < RTLNET_CSI2_CNT_COUNT; i++) {
@@ -265,6 +271,11 @@ int main(void)
         check(rtlnet_csi2_rx_set_taps(TEST_BASE, 1u, 2u) == RTLNET_CSI2_ERR_ARG && g_rx_taps == 0u, "no camera: set_taps refused");
         check(rtlnet_csi2_rx_set_wb(TEST_BASE, 1u, 2u, 3u) == RTLNET_CSI2_ERR_ARG && g_wb[0] == 0x100u, "no camera: set_wb refused");
         check(rtlnet_csi2_rx_read_rxstate(TEST_BASE, &rs) == RTLNET_CSI2_ERR_ARG, "no camera: read_rxstate refused");
+        {
+            uint32_t mr = 0u, mg = 0u, mb = 0u;
+            check(rtlnet_csi2_rx_set_highlight(TEST_BASE, 1, 5u) == RTLNET_CSI2_ERR_ARG && g_hl_level == 0u && g_proc == 0u &&
+                  rtlnet_csi2_rx_read_raw_max(TEST_BASE, &mr, &mg, &mb) == RTLNET_CSI2_ERR_ARG, "no camera: set_highlight and read_raw_max refused");
+        }
         check(rtlnet_csi2_rx_clear_counters(TEST_BASE, RTLNET_CSI2_CLEAR_ALL) == RTLNET_CSI2_ERR_ARG, "no camera: clear_counters refused");
     }
 
@@ -301,6 +312,18 @@ int main(void)
         check(rtlnet_csi2_rx_set_green_eq(TEST_BASE, 1) == RTLNET_CSI2_OK && g_proc == 2u && rtlnet_csi2_rx_set_gamma(TEST_BASE, 1) == RTLNET_CSI2_OK && g_proc == 3u &&
               rtlnet_csi2_rx_set_gamma(TEST_BASE, 0) == RTLNET_CSI2_OK && g_proc == 2u && rtlnet_csi2_rx_set_green_eq(TEST_BASE, 0) == RTLNET_CSI2_OK && g_proc == 0u,
               "set_green_eq and set_gamma keep each other's bit");
+        {
+            uint32_t mr = 99u, mg = 99u, mb = 99u;
+            check(rtlnet_csi2_rx_set_highlight(TEST_BASE, 1, 700u) == RTLNET_CSI2_OK && g_hl_level == 700u && g_proc == 4u &&
+                  rtlnet_csi2_rx_set_gamma(TEST_BASE, 1) == RTLNET_CSI2_OK && g_proc == 5u &&
+                  rtlnet_csi2_rx_set_highlight(TEST_BASE, 0, 1023u) == RTLNET_CSI2_OK && g_hl_level == 1023u && g_proc == 1u &&
+                  rtlnet_csi2_rx_set_gamma(TEST_BASE, 0) == RTLNET_CSI2_OK && g_proc == 0u, "set_highlight keeps the other PROC bits, level 1023 accepted");
+            check(rtlnet_csi2_rx_set_highlight(TEST_BASE, 1, 1024u) == RTLNET_CSI2_ERR_ARG && g_hl_level == 1023u && g_proc == 0u,
+                  "set_highlight level 1024 refused, nothing written");
+            check(rtlnet_csi2_rx_read_raw_max(TEST_BASE, &mr, &mg, &mb) == RTLNET_CSI2_OK && mr == 1u && mg == 2u && mb == 3u, "read_raw_max fields");
+            check(rtlnet_csi2_rx_read_raw_max(TEST_BASE, NULL, &mg, &mb) == RTLNET_CSI2_ERR_ARG && rtlnet_csi2_rx_read_raw_max(TEST_BASE, &mr, &mg, NULL) == RTLNET_CSI2_ERR_ARG,
+                  "read_raw_max NULL refused");
+        }
         g_cnt[RTLNET_CSI2_CNT_CRC] = 7u;
         g_cnt[RTLNET_CSI2_CNT_CLKLOSS] = 9u;
         check(rtlnet_csi2_rx_read_rxstate(TEST_BASE, &rs) == RTLNET_CSI2_OK && rs.counters[RTLNET_CSI2_CNT_CRC] == 7u &&

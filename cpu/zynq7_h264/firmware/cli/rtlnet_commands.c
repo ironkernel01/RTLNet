@@ -23,12 +23,12 @@
  * Project: RTLNet Zynq-7000 camera firmware.
  * Purpose: reduced MenuBuilder callbacks for the real-camera demonstration.
  * Overview: main-loop callbacks validate numeric input before touching owners.
- * Revision: 11-15-2026. Own receiver commands; show camera does not read the Digilent D-PHY in the own-receiver image.
+ * Revision: 11-15-2026. Camera receiver commands (SHOW RX, RX ...).
  */
 /* REVISION HISTORY
  * Revision    Author                          Description
  * 11-14-2026  MenuBuilder AI / Steve Spano     Reduced ARM camera/encoder commands
- * 11-15-2026  MenuBuilder AI                    Own receiver commands
+ * 11-15-2026  MenuBuilder AI                    Camera receiver commands (RX ...)
  */
 #include "menu.h"
 #include "menu_commands.h"
@@ -37,7 +37,6 @@
 #include "rtlnet_sensor.h"
 #include "rtlnet_platform.h"
 #include "rtlnet_camera.h"
-#include "rtlnet_dphy.h"
 #include "rtlnet_rx.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -80,22 +79,12 @@ int cli_ip(const MenuCommandContext *c) { (void)c; rtlnet_network_show(); return
 int cli_camera(const MenuCommandContext *c)
 {
     rtlnet_camera_state_t s;
-    rtlnet_dphy_state_t d;
     (void)c;
     rtlnet_camera_read_state(RTLNET_PLAT_CSI2_BASE, &s);
-    printf("OV5640 mode=%s seen=%lu admitted=%lu adapter_error=%lu\r\n",
+    printf("OV5640 mode=%s seen=%lu admitted=%lu\r\n",
         rtlnet_sensor_get_mode() ? "1080p15" : "720p30",
-        (unsigned long)s.seen, (unsigned long)s.admitted, (unsigned long)s.status);
-    if (rtlnet_rx_present()) {
-        printf("receiver=own (rtlnet_csi2_rx); show rx for the lane status and counters\r\n");
-        return 0;
-    }
-    printf("receiver=reference (Digilent chain)\r\n");
-    rtlnet_dphy_read(RTLNET_DPHY_BASE, &d);
-    printf("DPHY control=0x%08lx version=0x%08lx tap_training=disabled\r\n",
-        (unsigned long)d.control, (unsigned long)d.version);
-    printf("DPHY aligned/lock/tap readback=unavailable; configured taps=%u,%u (not measured)\r\n",
-        RTLNET_DPHY_CONFIGURED_TAPS, RTLNET_DPHY_CONFIGURED_TAPS);
+        (unsigned long)s.seen, (unsigned long)s.admitted);
+    printf("receiver=rtlnet_csi2_rx; show rx for the lane status and counters\r\n");
     return 0;
 }
 /** cli_encoder -- report encoder state. */
@@ -129,7 +118,7 @@ int cli_mode(const MenuCommandContext *c)
     venc_get_status(&s); if (s.running) return -1;
     return rtlnet_sensor_mode(mode);
 }
-/** cli_rx -- show the own receiver state and counters. */
+/** cli_rx -- show the camera receiver state, counters and raw maxima. */
 int cli_rx(const MenuCommandContext *c) { (void)c; return rtlnet_rx_show(); }
 /** cli_rx_clear -- clear the receiver counters. */
 int cli_rx_clear(const MenuCommandContext *c) { (void)c; return rtlnet_rx_clear(); }
@@ -149,6 +138,12 @@ int cli_rx_phase(const MenuCommandContext *c) { uint32_t v; return number(c->arg
 int cli_rx_gamma(const MenuCommandContext *c) { uint32_t v; return (number(c->argv[0],&v) || v > 1u) ? -1 : rtlnet_rx_set_gamma((int)v); }
 /** cli_rx_geq -- enable or disable the green equalisation. */
 int cli_rx_geq(const MenuCommandContext *c) { uint32_t v; return (number(c->argv[0],&v) || v > 1u) ? -1 : rtlnet_rx_set_geq((int)v); }
+/** cli_rx_hl -- enable or disable the highlight clamp and set its level. */
+int cli_rx_hl(const MenuCommandContext *c)
+{
+    uint32_t on, level;
+    return (number(c->argv[0],&on) || on > 1u || number(c->argv[1],&level) || level > 1023u) ? -1 : rtlnet_rx_set_highlight((int)on, level);
+}
 /** cli_rx_bitrev -- select the deserializer bit order. */
 int cli_rx_bitrev(const MenuCommandContext *c) { uint32_t v; return (number(c->argv[0],&v) || v > 1u) ? -1 : rtlnet_rx_set_bitrev((int)v); }
 /** cli_rx_settle -- set the HS settle time. */

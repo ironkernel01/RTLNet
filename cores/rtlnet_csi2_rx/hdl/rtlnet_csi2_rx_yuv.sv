@@ -20,10 +20,9 @@
 //   Rounding offsets are folded into the product stage (Y: 16.5 in Q16; each
 //   chroma term: half of 128.5 in Q17 units) so the pair stage is one add, a
 //   shift and a clip; the results equal the rounded formulas above exactly.
-//   The arithmetic is that of the Zybo Z7-20 board file rtlnet_rgb_to_yuyv.sv, so both give the same words for the same pixels.
 // Language: SystemVerilog-2012.
 // Clocks: clk (90 MHz video clock, one pixel per clock at most); resetn synchronous active low.
-// Revision: 11-15-2026. Moved into rtlnet_csi2_rx from the board file (copy; the board file stays in place).
+// Revision: 11-15-2026.
 // -----------------------------------------------------------------------------
 module rtlnet_csi2_rx_yuv (
   // Core clock and synchronous active-low reset.

@@ -3,15 +3,9 @@
  * Revision: 11-14-2026. Initial host harness.
  */
 #include "rtlnet_platform.h"
-#include "rtlnet_dphy.h"
 #include <stdio.h>
 #include <stdlib.h>
-uint32_t rtlnet_host_reg_read32(uintptr_t a)
-{
-    if (a == RTLNET_DPHY_BASE) return 2u;
-    if (a == RTLNET_DPHY_BASE + 12u) return 0x00010003u;
-    return 0;
-}
+uint32_t rtlnet_host_reg_read32(uintptr_t a) { (void)a; return 0; }
 void rtlnet_host_reg_write32(uintptr_t a,uint32_t v) { (void)a;(void)v; }
 uint32_t rtlnet_host_mem_read32(uintptr_t a) { (void)a; return 0; }
 uint32_t plat_ticks(void) { static uint32_t t; return ++t; }

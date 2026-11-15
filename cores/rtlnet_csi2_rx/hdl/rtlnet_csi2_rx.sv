@@ -32,6 +32,7 @@
 // Language: SystemVerilog-2012.
 // Revision: 11-15-2026
 //   * 11-15-2026: camera receiver inside the core (CAMERA_RX), D-PHY pins and ref_clk ports, geometry parameters.
+//   * 11-15-2026: highlight clamp and raw maxima wired to the Bayer stage and the registers (PROC bit 2, HL_LEVEL, RAW_MAX).
 //   * 11-10-2026: PATTERN and PATTERN_FRAME registers, moving test patterns (rtlnet_csi2_rx_pattern).
 //   * 11-09-2026: initial version (Phase 1: registers, color bars, source switch).
 // Clocks: clk (generator, switch, registers, video stream, bayer and yuv; the memory-controller user clock); s_axi_aclk (AXI4-Lite slave
@@ -281,12 +282,12 @@ module rtlnet_csi2_rx #(
   logic        cam_tlast_i;
   logic        cam_tuser_i;
   logic        cam_run_i;
-  logic        rx_enable, rx_soft_reset, rx_bit_rev, px_gamma, px_geq;
+  logic        rx_enable, rx_soft_reset, rx_bit_rev, px_gamma, px_geq, px_hl;
   logic [1:0]  rx_lane_en, rx_vc, px_phase;
   logic [4:0]  rx_tap0, rx_tap1;
   logic [7:0]  rx_settle;
   logic [5:0]  rx_dt;
-  logic [9:0]  px_black;
+  logic [9:0]  px_black, px_hl_level, px_raw_max_r, px_raw_max_g, px_raw_max_b;
   logic [11:0] px_gain_r, px_gain_g, px_gain_b;
   logic [11:0] rx_st;
   logic [15:0] rx_lines, rx_pixels;
@@ -337,6 +338,11 @@ module rtlnet_csi2_rx #(
     .px_phase     (px_phase),
     .px_gamma     (px_gamma),
     .px_geq       (px_geq),
+    .px_hl        (px_hl),
+    .px_hl_level  (px_hl_level),
+    .px_raw_max_r (px_raw_max_r),
+    .px_raw_max_g (px_raw_max_g),
+    .px_raw_max_b (px_raw_max_b),
     .rx_st        (rx_st),
     .rx_lines     (rx_lines),
     .rx_pixels    (rx_pixels),
@@ -416,9 +422,10 @@ module rtlnet_csi2_rx #(
         .clk(clk), .resetn(rx_rstn),
         .e_valid(m_valid), .e_data(m_data), .e_ready(m_ready),
         .cfg_w(cfg_w), .cfg_h(cfg_h), .cfg_black(px_black), .cfg_gain_r(px_gain_r), .cfg_gain_g(px_gain_g), .cfg_gain_b(px_gain_b),
-        .cfg_phase(px_phase), .cfg_gamma(px_gamma), .cfg_geq(px_geq),
+        .cfg_phase(px_phase), .cfg_gamma(px_gamma), .cfg_geq(px_geq), .cfg_hl(px_hl), .cfg_hl_level(px_hl_level),
         .o_data(rgb_data), .o_valid(rgb_valid), .o_ready(rgb_ready), .o_sof(rgb_sof), .o_eol(rgb_eol),
-        .ev_size_err(bay_size_err), .meas_lines(rx_lines), .meas_pixels(rx_pixels)
+        .ev_size_err(bay_size_err), .meas_lines(rx_lines), .meas_pixels(rx_pixels),
+        .meas_raw_max_r(px_raw_max_r), .meas_raw_max_g(px_raw_max_g), .meas_raw_max_b(px_raw_max_b)
       );
 
       rtlnet_csi2_rx_yuv u_yuv (
@@ -467,6 +474,9 @@ module rtlnet_csi2_rx #(
       assign rx_st        = '0;
       assign rx_lines     = '0;
       assign rx_pixels    = '0;
+      assign px_raw_max_r = '0;
+      assign px_raw_max_g = '0;
+      assign px_raw_max_b = '0;
       assign rx_ev        = '0;
       assign cam_tdata_i  = s_cam_tdata;
       assign cam_tvalid_i = s_cam_tvalid;

@@ -280,6 +280,37 @@ int rtlnet_csi2_rx_set_green_eq(uintptr_t base, int enable)
 }
 
 /*
+ * rtlnet_csi2_rx_set_highlight -- highlight clamp on (nonzero) or off with its level (10-bit units, after the gain)
+ * Returns: OK, or ERR_ARG (level above 1023, no camera receiver); nothing is written on ERR_ARG. The other PROC bits keep their value.
+ */
+int rtlnet_csi2_rx_set_highlight(uintptr_t base, int enable, uint32_t level)
+{
+    if (level > 1023u || camera_present(base) == 0) {
+        return RTLNET_CSI2_ERR_ARG;
+    }
+    rtlnet_reg_write32(base, RTLNET_CSI2_REG_HL_LEVEL, level);
+    return proc_update(base, RTLNET_CSI2_PROC_HIGHLIGHT, enable);
+}
+
+/*
+ * rtlnet_csi2_rx_read_raw_max -- raw maxima (black level subtracted, before the gain) of the last completed frame
+ * Returns: OK, or ERR_ARG (a NULL pointer, no camera receiver).
+ */
+int rtlnet_csi2_rx_read_raw_max(uintptr_t base, uint32_t *r, uint32_t *g, uint32_t *b)
+{
+    uint32_t v;
+
+    if (r == NULL || g == NULL || b == NULL || camera_present(base) == 0) {
+        return RTLNET_CSI2_ERR_ARG;
+    }
+    v = rtlnet_reg_read32(base, RTLNET_CSI2_REG_RAW_MAX);
+    *r = v & 0x3FFu;
+    *g = (v >> 10) & 0x3FFu;
+    *b = (v >> 20) & 0x3FFu;
+    return RTLNET_CSI2_OK;
+}
+
+/*
  * rtlnet_csi2_rx_read_rxstate -- read the camera receiver registers and the twelve counters
  * Returns: OK, or ERR_ARG (NULL, no camera receiver).
  */

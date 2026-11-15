@@ -41,8 +41,11 @@ tb_rtlnet_csi2_rx_bayer  cores/rtlnet_csi2_rx/testbench/tb_rtlnet_csi2_rx_bayer.
 tb_rtlnet_csi2_rx_bayer  cores/rtlnet_csi2_rx/testbench/tb_rtlnet_csi2_rx_bayer.f   wide      defines=TB_SETNUM=2
 tb_rtlnet_csi2_rx_bayer  cores/rtlnet_csi2_rx/testbench/tb_rtlnet_csi2_rx_bayer.f   neg       defines=TB_SETNUM=0  plusargs=INJECT_FAILURE  expectfail
 tb_rtlnet_csi2_rx_bayer  cores/rtlnet_csi2_rx/testbench/tb_rtlnet_csi2_rx_bayer.f   mut       defines=TB_SETNUM=0  plusargs=MUTATE  expectfail
+tb_rtlnet_csi2_rx_bayer  cores/rtlnet_csi2_rx/testbench/tb_rtlnet_csi2_rx_bayer.f   mut_hl    defines=TB_SETNUM=0  plusargs=MUTATE_HL  expectfail
+tb_rtlnet_csi2_rx_bayer  cores/rtlnet_csi2_rx/testbench/tb_rtlnet_csi2_rx_bayer.f   mut_max   defines=TB_SETNUM=0  plusargs=MUTATE_MAX  expectfail
 # Full path: transmitter model, D-PHY, packet layer, FIFO, Bayer, YUV, registers; small = geometry 32 x 8 and 24 x 10 with the fault cases, wide = line widths 1280 and 1920.
 tb_rtlnet_csi2_rx_camera cores/rtlnet_csi2_rx/testbench/tb_rtlnet_csi2_rx_camera.f  small     defines=TB_GEOM=0
 tb_rtlnet_csi2_rx_camera cores/rtlnet_csi2_rx/testbench/tb_rtlnet_csi2_rx_camera.f  wide      defines=TB_GEOM=1
 tb_rtlnet_csi2_rx_camera cores/rtlnet_csi2_rx/testbench/tb_rtlnet_csi2_rx_camera.f  neg       defines=TB_GEOM=0  plusargs=INJECT_FAILURE  expectfail
 tb_rtlnet_csi2_rx_camera cores/rtlnet_csi2_rx/testbench/tb_rtlnet_csi2_rx_camera.f  mut       defines=TB_GEOM=0  plusargs=MUTATE  expectfail
+tb_rtlnet_csi2_rx_camera cores/rtlnet_csi2_rx/testbench/tb_rtlnet_csi2_rx_camera.f  mut_max   defines=TB_GEOM=0  plusargs=MUTATE_MAX  expectfail

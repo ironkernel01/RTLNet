@@ -1,11 +1,11 @@
 <#
 -------------------------------------------------------------------------------
 File: rx_test.ps1
-Purpose: measure the own camera receiver (rtlnet_csi2_rx) of the Zybo Z7-20 own-receiver image on the board: receiver counters over a
+Purpose: measure the camera receiver (rtlnet_csi2_rx) of the Zybo Z7-20 design on the board: receiver counters over a
   streaming interval, and the D-PHY capture margin (IDELAY tap sweep) with the errors counted at every tap.
 Overview:
   * -Port is mandatory (no automatic port selection: the second board of this PC must never be opened). The machine-wide board lock is taken
-    (rtlnet_board_lock.ps1) and released at the end of the run. The firmware (own-receiver image) must be running.
+    (rtlnet_board_lock.ps1) and released at the end of the run. The firmware must be running.
   * -Action counters: per mode (720p, 1080p, or both) "camera mode", "rx clear", "stream start <PC address> <port>", -Seconds of streaming,
     "show rx" at the start and the end. One line per criterion: frames counted at the sensor rate (30 fps), ECC uncorrectable, CRC, SOT,
     size mismatches all 0 (ECC corrected, FIFO overflow, orphan lines, word count, truncation, data type and clock loss are reported and judged
@@ -18,8 +18,8 @@ Overview:
     as no datagram received.
 Usage:
   powershell -NoProfile -ExecutionPolicy Bypass -File boards/zybo_z7_20/scripts/rx_test.ps1 -Port COM6 -Action counters [-Mode both] [-Seconds 60]
-  powershell -NoProfile -ExecutionPolicy Bypass -File boards/zybo_z7_20/scripts/rx_test.ps1 -Port COM6 -Action sweep [-Mode both] [-Dwell 3] [-Lane both] [-OtherTap 12]
-Revision: 11-15-2026. Initial version.
+  powershell -NoProfile -ExecutionPolicy Bypass -File boards/zybo_z7_20/scripts/rx_test.ps1 -Port COM6 -Action sweep [-Mode both] [-Dwell 3] [-Lane both] [-OtherTap 10]
+Revision: 11-15-2026.
 -------------------------------------------------------------------------------
 #>
 param(
@@ -31,9 +31,9 @@ param(
     [ValidateSet('both', '0', '1')][string]$Lane = 'both',
     [int]$TapFrom = 0,
     [int]$TapTo = 31,
-    [int]$OtherTap = 12,
-    [int]$DefaultTap0 = 12,
-    [int]$DefaultTap1 = 12,
+    [int]$OtherTap = 10,
+    [int]$DefaultTap0 = 11,
+    [int]$DefaultTap1 = 10,
     [string]$Tag = 'rx',
     [int]$Baud = 115200,
     [int]$UdpPort = 5004,
@@ -87,7 +87,7 @@ for ($i = 0; $i -lt 60 -and -not $ready; $i++) { $sp.Write("`r"); Start-Sleep -M
 if (-not $ready) { Write-Output 'ZYBO_RX: FAIL no console prompt'; $sp.Close(); Exit-RtlnetBoardLock; exit 2 }
 [void](Invoke-Cli 'enable')
 $cam = Invoke-Cli 'show camera'
-if ($cam -notmatch 'receiver=own') { Write-Output 'ZYBO_RX: FAIL the running image has no own receiver'; $sp.Close(); Exit-RtlnetBoardLock; exit 2 }
+if ($cam -notmatch 'receiver=rtlnet_csi2_rx') { Write-Output 'ZYBO_RX: FAIL the running image does not report the camera receiver'; $sp.Close(); Exit-RtlnetBoardLock; exit 2 }
 $ip = Invoke-Cli 'show ip'
 if ($ip -notmatch 'DHCP=1 IP (\d+\.\d+\.\d+\.\d+)') { Write-Output 'ZYBO_RX: FAIL no DHCP lease'; $sp.Close(); Exit-RtlnetBoardLock; exit 2 }
 $boardIp = $Matches[1]

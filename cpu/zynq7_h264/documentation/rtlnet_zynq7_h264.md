@@ -24,23 +24,17 @@ rings occupy fixed addresses above 0x10000000. Cache operations widen to
 32-byte lines and issue barriers. PL-written ring/index data is invalidated
 before CPU reads; CPU-written padding is flushed before encoder access.
 
-The OV5640 owner checks ID 0x5640, uses the retained Digilent register tables
+The OV5640 owner checks ID 0x5640, uses the register tables of the Pcam 5C software release
 and drives EMIO GPIO pin 54 for reset. Tables and notices are under
 `firmware/src/ov5640`. Software standby surrounds mode changes. I2C bus waits
-are bounded; driver errors stop startup with the failed API named. The D-PHY,
-CSI and gamma register addresses match the board Tcl. Mode changes require
+are bounded; driver errors stop startup with the failed API named. Mode changes require
 the stream stopped and configure admission as well as the sensor.
 
-The firmware serves two receiver variants of the PL image, told apart at start-up by CAPS bit 4 of the camera wrapper
-(`RTLNET_PLAT_CSI2_BASE` + 0x008: 0x00000002 in the reference image with the Digilent chain, 0x00000012 in the own-receiver
-image, `VERSION` 0x11152026): `rtlnet_rx_detect` reads it once. In the reference image the firmware enables the Digilent
-D-PHY, CSI-2 and gamma blocks (0x43C0_0000, 0x43C1_0000, 0x43C2_0000). In the own-receiver image these addresses do not exist
-(a read is a bus error), so nothing touches them: `rtlnet_rx_init` (`src/rtlnet_rx.c`, through the core driver
-`cores/rtlnet_csi2_rx/driver`) brings up the receiver at 0x44A0_9000 after the sensor init table and before the sensor streams: soft
-reset held while the configuration is written, two lanes, bit order 0, settle 28 clocks, virtual channel 0 and data type RAW10,
-delay taps, black level, white balance gains, Bayer phase, gamma, green equalisation and camera-only source, then the soft
-reset is released. A mode change sets the core `VIDEO_MODE` while the sensor is in standby. The defaults are the macros
-`RTLNET_RX_DEFAULT_*` in `src/rtlnet_rx.h` (values and their measurement below).
+The camera receiver `rtlnet_csi2_rx` sits at 0x44A0_9000. `rtlnet_rx_probe` (`src/rtlnet_rx.c`) reads its ID and VERSION first (0x43534932 and 0x11152026, the core with the camera front end); any other value
+stops startup with a message that names what was read. `rtlnet_rx_init` (through the core driver `cores/rtlnet_csi2_rx/driver`) brings the receiver up after the sensor init table and before the sensor streams: soft
+reset held while the configuration is written, two lanes, bit order 0, settle 28 clocks, virtual channel 0 and data type RAW10, delay taps, black level, white balance gains, Bayer phase, gamma, green equalisation,
+highlight clamp and camera-only source, then the soft reset is released. A mode change sets the core `VIDEO_MODE`, the gains and the highlight level of the mode while the sensor is in standby. The defaults are the macros
+`RTLNET_RX_DEFAULT_*`, `RTLNET_RX_GAIN_*` and `RTLNET_RX_HL_*` in `src/rtlnet_rx.h` (values and their measurement below).
 
 GEM MDIO identifies RTL8211E (001cc915) or RTL8211F (001cc916); unknown IDs
 stop startup. A CPU-local BSD-licensed emacps PHY adaptation uses the proper
@@ -78,23 +72,16 @@ rx bitrev 0
 rx settle 28
 ```
 
-`show rx` (own-receiver image only, an error line otherwise) prints three lines of `key=value` for a host script: `RX ctrl status taps settle
+`show rx` (an error line when the receiver does not answer) prints four lines of `key=value` for a host script: `RX ctrl status taps settle
 filter lines pixels`, `RX counters ECC_CORR ECC_UNC CRC SOT FRAMES DT TRUNC OVF SIZE ORPHAN LEN CLKLOSS` (all twelve counters of the core) and
-`RX proc black wb phase gamma geq bitrev clkrun dlyrdy lp frames_out`. `rx clear` clears the counters. `rx taps <lane 0> <lane 1>`
+`RX proc black wb phase gamma geq bitrev clkrun dlyrdy lp frames_out` and `RX highlight level rawmax r g b` (the raw maxima of the last frame, black level subtracted, before the gain). `rx clear` clears the counters. `rx taps <lane 0> <lane 1>`
 takes 0 to 31 (78 ps each), `rx wb <R> <G> <B>` 4.8 fixed point (256 = 1.0), `rx black` 0 to 1023 raw units, `rx phase` 0 to 3,
-`rx gamma`, `rx geq` and `rx bitrev` 0 or 1, `rx settle` 0 to 255 clocks of 200 MHz. The rx commands change the receiver at once (the Bayer
+`rx gamma`, `rx geq` and `rx bitrev` 0 or 1, `rx highlight <0|1> <level 0..1023>` (the highlight clamp of the core), `rx settle` 0 to 255 clocks of 200 MHz. The rx commands change the receiver at once (the Bayer
 processing registers take effect at the next frame); `boards/zybo_z7_20/scripts/rx_test.ps1` drives them for the counter and tap sweep measurements.
 
 Zero bitrate selects constant QP. Commands validate ranges before changing
 owners. A stream requires a DHCP lease and the expected capture/encoder IDs.
-`show camera` prints `receiver=own` in the own-receiver image (and nothing is read from the Digilent block); in the reference
-image it also reads D-PHY control (+0) and version (+12). The retained
-receiver has no AXI aligned/lock/tap readback; the command explicitly prints
-those capabilities as unavailable. Configured taps 12/12 are labeled not
-measured, and tap training is disabled: the leaf's LD/CE/INC controls are tied
-low. Per-burst byte alignment is not data-tap training. Hardware review of
-`DPHY_HS_INPUT` requires separately instrumented PPI/IDELAY-ready observations,
-not an invented software lock result.
+`show camera` prints the sensor mode, the frame counters of the admission block and a pointer to `show rx`.
 The 1080 geometry constant retains the shared driver's name `1080P30`, but
 this port writes a 15 fps SPS VUI and 6000-tick PTS step. Capture and CPU ticks
 are microseconds with independent epochs; lag is relative to the minimum
@@ -129,30 +116,30 @@ Measured on a Zybo Z7-20 with a Pcam 5C (JTAG load with `boards/zybo_z7_20/scrip
 - A stream stop with a picture in flight is drained (`venc_stop` waits at most 400 ms for the core to finish before it
   gives the input slot back); before the clock fix such a stop left the core BUSY in 3 of 6 stop and start cycles, 6 of 6 cycles
   were clean with the drain alone; `show stream` prints the wait of the last stop.
-- OV5640 tables: mode 0 (720p, PCLK 56 MHz, HTS 1896, VTS 984) runs 30.0 fps at the sensor (measured), the Digilent
+- OV5640 tables: mode 0 (720p, PCLK 56 MHz, HTS 1896, VTS 984) runs 30.0 fps at the sensor (measured), the
   1080p30 table (PCLK 84 MHz, HTS 2500, VTS 1120) is mode 1 and runs 30.0 fps (measured). The PL admits every frame in
   mode 0 (PTS step 3000) and every second frame in mode 1 (PTS step 6000, 15 fps).
 
-### Own receiver (11-15-2026, image `own6`, firmware `fw16`)
+### Receiver bring-up measurements (11-15-2026, image `own7`, firmware `fw18`)
 
-Measured on the same board with `-Receiver own`; the receiver measurements themselves are in `cores/rtlnet_csi2_rx/documentation/rtlnet_csi2_rx.md` section 12.
+The receiver measurements themselves are in `cores/rtlnet_csi2_rx/documentation/rtlnet_csi2_rx.md` section 12.
 
-- Start-up: `rtlnet_rx_detect` reads CAPS bit 4 (0x12) of the camera wrapper; `rtlnet_rx_init` brings the receiver up after the sensor init table; the receiver locks on the first burst (`show rx`: clock running, both lanes locked, IDELAYCTRL ready,
-  `lines=720 pixels=1280`, all error counters 0). The Digilent register addresses are not touched in this image.
+- Start-up: `rtlnet_rx_probe` finds the core (ID, VERSION 0x11152026); `rtlnet_rx_init` brings the receiver up after the sensor init table; the receiver locks on the first burst (`show rx`: clock running, both lanes locked, IDELAYCTRL ready,
+  all error counters 0).
 - Defaults in `src/rtlnet_rx.h`: taps 11 (lane 0) and 10 (lane 1), the centres of the measured 1080p windows of the lanes; settle 28 clocks; black level 0; Bayer phase 3 (BGGR; phase 0 swaps red and blue with the OV5640 tables of this firmware);
-  gamma on; green equalisation on; bit order 0; white balance gains loaded with each mode (720p R 0x163, G 0x100, B 0x163; 1080p R 0x195, G 0x100, B 0x17C), measured on a neutral wall, a ceiling lamp and a monitor bezel so that R:G:B is within about 5 percent in the decoded
-  picture (before: R and B 14 to 18 percent below G with gains 1.0; the reference image shows 20 percent). An `rx wb` command stays in force until the next `camera mode`.
-- The sensor tables are unchanged: the sensor flip, mirror and the window offset of `fw13` stay; the Bayer phase register only names the arrangement that results.
+  gamma on; green equalisation on; bit order 0; white balance gains loaded with each mode (720p R 0x163, G 0x100, B 0x163; 1080p R 0x195, G 0x100, B 0x17C), measured on a neutral wall, a ceiling lamp and a monitor bezel so that R:G:B is
+  within about 5 percent in the decoded picture; highlight clamp on with level 760 at 1080p and 960 at 720p (see "Highlights" in `boards/zybo_z7_20/documentation/rtlnet_zybo_z7_20.md`). An `rx wb` or `rx highlight` command stays in force until the next
+  `camera mode`.
+- The sensor tables are unchanged: the sensor flip, mirror and the window offset stay; the Bayer phase register only names the arrangement that results.
 - `ZYBO_RX_COUNTERS: PASS 22/22` (60 s per mode), `ZYBO_STREAM_TEST: PASS 16/16` in three consecutive `-Mode both` runs and `PASS 8/8` for the 120 s soak at 720p, all with `-Port COM6`.
-- Firmware tags: `fw14` (own-receiver bring-up and CLI, image `own4`), `fw15` (gains, phase 3, green equalisation, image `own6`), `fw16` (per-mode gains, taps 11 / 10, image `own6`). The host suites of `firmware/test` run with the new commands (the receiver is absent on the host:
-  `show rx` and `rx ...` return an error line and touch no register).
+- The host suites of `firmware/test` run with the commands (the receiver is absent on the host: `show rx` and `rx ...` return an error line and touch no register).
 
-The ELF is built against the XSA of the Baseline stage (the video path runs on a 90 MHz clock; the capture
+
+The ELF is built against the XSA of the design (the video path runs on a 90 MHz clock; the capture
 timestamp counts microseconds from it):
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File cpu/zynq7_h264/firmware/build.ps1 -Xsa boards/zybo_z7_20/build/enc14/rtlnet_zybo_z7_20.xsa -Tag fw10
-powershell -NoProfile -ExecutionPolicy Bypass -File cpu/zynq7_h264/firmware/build.ps1 -Xsa boards/zybo_z7_20/build/own6/rtlnet_zybo_z7_20.xsa -Tag fw16
+powershell -NoProfile -ExecutionPolicy Bypass -File cpu/zynq7_h264/firmware/build.ps1 -Xsa boards/zybo_z7_20/build/own7/rtlnet_zybo_z7_20.xsa -Tag fw17
 ```
 
 The build includes the receiver core driver (`cores/rtlnet_csi2_rx/driver`).

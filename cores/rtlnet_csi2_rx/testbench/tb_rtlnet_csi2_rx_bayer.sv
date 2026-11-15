@@ -12,11 +12,16 @@
 //   and ev_size_err (one pulse for every frame whose size differs from the mode, none otherwise) are checked; meas_lines and
 //   meas_pixels after each case; entries that do not belong to a frame are dropped; a frame start inside a frame closes the frame
 //   early (small set: three lines of one frame, then a full frame; both frames are exact against the model).
-// Plusargs: INJECT_FAILURE (the verdict fails), MUTATE (one pixel of one entry is flipped on the way in: the compare must fail).
+//   small set, highlight clamp: a clipped bright area (green raw clipped below the red and blue, gains above 1 on red and blue): clamp off
+//     (pink), on at level 700, level equal to the green of an edge pixel (the pixel qualifies) and one above (it does not), level 0, level 1023,
+//     another Bayer phase with green equalisation and gamma. After every case meas_raw_max_r/g/b equal the RAW_MAX word of csi2_rx_<set>_max.mem.
+// Plusargs: INJECT_FAILURE (the verdict fails), MUTATE (one pixel of one entry is flipped on the way in: the compare must fail),
+//   MUTATE_HL (the clamp level at the core is one above the level of the model: the boundary cases must fail),
+//   MUTATE_MAX (the expected raw maxima are wrong in one bit: the maxima check must fail).
 // Defines: TB_SETNUM (0 small, 1 fault, 2 wide; default 0), TB_DIR (folder of the .mem files relative to the simulation work directory).
 // Language: SystemVerilog-2012 (simulation only).
 // Revision: 11-15-2026
-//   * 11-15-2026: initial version.
+//   * 11-15-2026: initial version; highlight clamp cases and the raw maxima check.
 // -----------------------------------------------------------------------------
 `timescale 1ns / 1ps
 
@@ -42,6 +47,9 @@ module tb_rtlnet_csi2_rx_bayer;
   logic [31:0] cfgm [0:1023];
   logic [9:0]  rawm [0:16383];
   logic [31:0] expm [0:8191];
+  logic [31:0] maxm [0:255];
+  bit          mutate_hl = 1'b0;
+  bit          mutate_max = 1'b0;
 
   // DUT: bayer into yuv.
   logic              e_valid = 1'b0;
@@ -53,6 +61,9 @@ module tb_rtlnet_csi2_rx_bayer;
   logic [1:0]        cfg_phase = '0;
   logic              cfg_gamma = 1'b0;
   logic              cfg_geq = 1'b0;
+  logic              cfg_hl = 1'b0;
+  logic [9:0]        cfg_hl_level = '0;
+  logic [9:0]        max_r, max_g, max_b;
   logic [23:0]       rgb_data;
   logic              rgb_valid, rgb_ready, rgb_sof, rgb_eol;
   logic              ev_size_err;
@@ -63,9 +74,10 @@ module tb_rtlnet_csi2_rx_bayer;
   rtlnet_csi2_rx_bayer #(.RAM_STYLE("block"), .LINE_KB(8)) dut (
     .clk(clk), .resetn(resetn), .e_valid(e_valid), .e_data(e_data), .e_ready(e_ready),
     .cfg_w(cfg_w), .cfg_h(cfg_h), .cfg_black(cfg_black), .cfg_gain_r(cfg_gr), .cfg_gain_g(cfg_gg), .cfg_gain_b(cfg_gb),
-    .cfg_phase(cfg_phase), .cfg_gamma(cfg_gamma), .cfg_geq(cfg_geq),
+    .cfg_phase(cfg_phase), .cfg_gamma(cfg_gamma), .cfg_geq(cfg_geq), .cfg_hl(cfg_hl), .cfg_hl_level(cfg_hl_level),
     .o_data(rgb_data), .o_valid(rgb_valid), .o_ready(rgb_ready), .o_sof(rgb_sof), .o_eol(rgb_eol),
-    .ev_size_err(ev_size_err), .meas_lines(meas_lines), .meas_pixels(meas_pixels));
+    .ev_size_err(ev_size_err), .meas_lines(meas_lines), .meas_pixels(meas_pixels),
+    .meas_raw_max_r(max_r), .meas_raw_max_g(max_g), .meas_raw_max_b(max_b));
 
   rtlnet_csi2_rx_yuv u_yuv (
     .clk(clk), .resetn(resetn), .s_axis_tdata(rgb_data), .s_axis_tvalid(rgb_valid), .s_axis_tready(rgb_ready),
@@ -194,6 +206,8 @@ module tb_rtlnet_csi2_rx_bayer;
     cfg_gb    <= cfgm[base + 9][11:0];
     cfg_gamma <= cfgm[base + 10][0];
     cfg_geq   <= cfgm[base + 10][1];
+    cfg_hl    <= cfgm[base + 10][2];
+    cfg_hl_level <= mutate_hl ? 10'(cfgm[base + 15][9:0] + 10'd1) : cfgm[base + 15][9:0];
     @(posedge clk);
   endtask
 
@@ -215,9 +229,12 @@ module tb_rtlnet_csi2_rx_bayer;
     int total_frames;
     int base, iw, ih, W, H, roff, eoff, kind, kline;
     mutate = $test$plusargs("MUTATE");
+    mutate_hl = $test$plusargs("MUTATE_HL");
+    mutate_max = $test$plusargs("MUTATE_MAX");
     $readmemh({`TB_DIR, "/csi2_rx_", SETNAME, "_cfg.mem"}, cfgm);
     $readmemh({`TB_DIR, "/csi2_rx_", SETNAME, "_raw.mem"}, rawm);
     $readmemh({`TB_DIR, "/csi2_rx_", SETNAME, "_exp.mem"}, expm);
+    $readmemh({`TB_DIR, "/csi2_rx_", SETNAME, "_max.mem"}, maxm);
     ncases = int'(cfgm[0]);
     tb_check(ncases > 0, "case table is empty");
     repeat (6) @(posedge clk);
@@ -245,6 +262,12 @@ module tb_rtlnet_csi2_rx_bayer;
         wait_frames(total_frames, 2_000_000);
         repeat (30) @(posedge clk);
         tb_check(meas_lines == ((kind == 1) ? ih - 1 : ((kind == 3) ? kline : ih)), $sformatf("case %0d meas_lines %0d", ci, meas_lines));
+        begin
+          logic [31:0] em;
+          em = mutate_max ? (maxm[ci] ^ 32'h1) : maxm[ci];
+          tb_check({2'b00, max_b, max_g, max_r} === em,
+                   $sformatf("case %0d raw maxima r %0d g %0d b %0d, expected r %0d g %0d b %0d", ci, max_r, max_g, max_b, em[9:0], em[19:10], em[29:20]));
+        end
       end
     end
 

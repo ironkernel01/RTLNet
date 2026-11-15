@@ -35,7 +35,7 @@
  *  Revision    Author                          Description
  * ---------------------------------------------------------------------------
  *  11-14-2026  MenuBuilder AI / Steve Spano    Initial Zybo camera demonstration commands
- *  11-15-2026  MenuBuilder AI / Steve Spano    Own camera receiver commands (SHOW RX, RX ...)
+ *  11-15-2026  MenuBuilder AI / Steve Spano    Camera receiver commands (SHOW RX, RX ..., RX HIGHLIGHT)
  * ===========================================================================
  */
 #include "menu.h"
@@ -59,7 +59,7 @@ const MenuCommandDef g_menu_commands[] = {
     { "cli_camera", MENU_MODE_EXEC, "SHOW CAMERA",
       "Camera mode and capture counters", cli_camera, MENU_MODE_NONE },
     { "cli_rx", MENU_MODE_EXEC, "SHOW RX",
-      "Own receiver state and all counters", cli_rx, MENU_MODE_NONE },
+      "Camera receiver state, counters and raw maxima", cli_rx, MENU_MODE_NONE },
     { "cli_encoder", MENU_MODE_EXEC, "SHOW ENCODER",
       "Encoder picture and error statistics", cli_encoder, MENU_MODE_NONE },
     { "cli_stream", MENU_MODE_EXEC, "SHOW STREAM",
@@ -90,6 +90,8 @@ const MenuCommandDef g_menu_commands[] = {
       "Gamma curve 0 or 1", cli_rx_gamma, MENU_MODE_NONE },
     { "cli_rx_geq", MENU_MODE_PRIV, "RX GEQ [ONOFF]",
       "Green equalisation 0 or 1", cli_rx_geq, MENU_MODE_NONE },
+    { "cli_rx_hl", MENU_MODE_PRIV, "RX HIGHLIGHT [ONOFF] [LEVEL]",
+      "Highlight clamp 0 or 1, level 0..1023 after the gain", cli_rx_hl, MENU_MODE_NONE },
     { "cli_rx_bitrev", MENU_MODE_PRIV, "RX BITREV [ONOFF]",
       "Deserializer bit order reversal 0 or 1", cli_rx_bitrev, MENU_MODE_NONE },
     { "cli_rx_settle", MENU_MODE_PRIV, "RX SETTLE [CLOCKS]",
@@ -102,6 +104,6 @@ const MenuKeywordDef g_menu_keywords[] = {
     { MENU_MODE_EXEC, "SHOW", "Show current status" },
     { MENU_MODE_PRIV, "ENCODER", "Configure encoder" },
     { MENU_MODE_PRIV, "STREAM", "Control MPEG-TS UDP stream" },
-    { MENU_MODE_PRIV, "RX", "Configure the own camera receiver" },
+    { MENU_MODE_PRIV, "RX", "Configure the camera receiver" },
 };
 const size_t g_menu_keyword_count = sizeof(g_menu_keywords) / sizeof(g_menu_keywords[0]);

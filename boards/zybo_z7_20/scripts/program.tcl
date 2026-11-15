@@ -1,6 +1,6 @@
 # -----------------------------------------------------------------------------
 # File: program.tcl
-# Purpose: load the Zybo Z7-20 Baseline design over JTAG with xsdb: programmable logic bitstream, PS initialization
+# Purpose: load the Zybo Z7-20 camera and H.264 design over JTAG with xsdb: programmable logic bitstream, PS initialization
 #   from the XSA (ps7_init, ps7_post_config), ARM application in DDR, run. Volatile only: no QSPI, no SD card.
 # Overview:
 #   * connect (starts a local hw_server if none runs); the JTAG chain must hold an xc7z020 device and the Zynq ARM core
@@ -11,7 +11,7 @@
 #   * Exit codes: 0 running; 1 no hw_server / no Zynq xc7z020; 2 bad arguments or missing file; 3 load failed.
 #   * Every output line starts with "rtlnet_zybo_load:".
 # Usage: xsdb program.tcl <bitfile> <ps7_init.tcl> <elf>   (normally through program.ps1)
-# Revision: 11-14-2026
+# Revision: 11-15-2026
 #   * 11-14-2026: initial version.
 # -----------------------------------------------------------------------------
 proc say {s} { puts "rtlnet_zybo_load: $s" }

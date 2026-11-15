@@ -1,11 +1,11 @@
 /* Purpose: exercise generated MenuBuilder and real portable session setters.
  * Overview: target MMIO is mocked absent. Invalid commands must not change state.
- * Revision: 11-14-2026. Positive and deliberately failing negative control.
+ * Revision: 11-15-2026. Positive and deliberately failing negative control.
  */
 #include "menu.h"
 #include "rtlnet_venc.h"
 #include "rtlnet_sensor.h"
-#include "rtlnet_dphy.h"
+#include "rtlnet_rx.h"
 #include <stdio.h>
 #include <string.h>
 static int failures,checks;
@@ -48,17 +48,15 @@ int main(int argc,char **argv)
     CHECK(Menu_ProcessLine("show stream")==0);
     CHECK(Menu_ProcessLine("show ip")==0);
     CHECK(Menu_ProcessLine("show camera")==0);
-    CHECK(Menu_ProcessLine("show rx")!=0);          /* reference image / absent receiver window: refused, no register access */
+    CHECK(Menu_ProcessLine("show rx")!=0);          /* absent receiver core: refused */
     CHECK(Menu_ProcessLine("rx clear")!=0);
     CHECK(Menu_ProcessLine("rx taps 12 12")!=0);
     CHECK(Menu_ProcessLine("rx taps 40 x")!=0);
     CHECK(Menu_ProcessLine("rx gamma 2")!=0);
-    {
-        rtlnet_dphy_state_t d;
-        rtlnet_dphy_read(RTLNET_DPHY_BASE, &d);
-        CHECK(d.control == 2u);
-        CHECK(d.version == 0x00010003u);
-    }
+    CHECK(Menu_ProcessLine("rx highlight 1 700")!=0);   /* absent receiver core: refused */
+    CHECK(Menu_ProcessLine("rx highlight 2 0")!=0);
+    CHECK(Menu_ProcessLine("rx highlight 1 1024")!=0);
+    CHECK(rtlnet_rx_probe()!=0);                    /* the host has no receiver core: the probe refuses and names what it read */
     CHECK(Menu_ProcessLine("nonsense")!=0);
     if(argc>1) CHECK(0);
     printf("RTLNET_ARM_CLI: %s checks=%d failures=%d\n",failures?"FAIL":"PASS",checks,failures);

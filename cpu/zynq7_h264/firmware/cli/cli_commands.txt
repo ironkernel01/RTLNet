@@ -1,17 +1,17 @@
 # Purpose: reduced ARM camera/encoder CLI; Overview: MenuBuilder source of truth.
-# Revision: 11-14-2026.
+# Revision: 11-15-2026.
 REVISION:11-14-2026:Initial Zybo camera demonstration commands
-REVISION:11-15-2026:Own camera receiver commands (SHOW RX, RX ...)
+REVISION:11-15-2026:Camera receiver commands (SHOW RX, RX ..., RX HIGHLIGHT)
 MODE-ROOT:exec:rtlnet>:User exec
 MODE-ENTER:-:exec:ENABLE:priv:rtlnet#:Privileged exec:Enter privileged exec
 KEYWORD:exec:SHOW:Show current status
 KEYWORD:priv:ENCODER:Configure encoder
 KEYWORD:priv:STREAM:Control MPEG-TS UDP stream
-KEYWORD:priv:RX:Configure the own camera receiver
+KEYWORD:priv:RX:Configure the camera receiver
 cli_version:exec:SHOW VERSION:Firmware and hardware identity
 cli_ip:exec:SHOW IP:DHCP address and PHY identity
 cli_camera:exec:SHOW CAMERA:Camera mode and capture counters
-cli_rx:exec:SHOW RX:Own receiver state and all counters
+cli_rx:exec:SHOW RX:Camera receiver state, counters and raw maxima
 cli_encoder:exec:SHOW ENCODER:Encoder picture and error statistics
 cli_stream:exec:SHOW STREAM:MPEG-TS and UDP statistics
 cli_qp:priv:ENCODER QP [VALUE]:Constant QP 0..51
@@ -27,5 +27,6 @@ cli_rx_black:priv:RX BLACK [LEVEL]:Black level in 10-bit units 0..1023
 cli_rx_phase:priv:RX PHASE [VALUE]:Bayer phase 0..3 of the first pixel
 cli_rx_gamma:priv:RX GAMMA [ONOFF]:Gamma curve 0 or 1
 cli_rx_geq:priv:RX GEQ [ONOFF]:Green equalisation 0 or 1
+cli_rx_hl:priv:RX HIGHLIGHT [ONOFF] [LEVEL]:Highlight clamp 0 or 1, level 0..1023 after the gain
 cli_rx_bitrev:priv:RX BITREV [ONOFF]:Deserializer bit order reversal 0 or 1
 cli_rx_settle:priv:RX SETTLE [CLOCKS]:HS settle time in 200 MHz clocks 0..255

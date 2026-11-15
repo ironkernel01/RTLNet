@@ -1,6 +1,6 @@
 /* Purpose: own every access to the board camera-admission register file.
  * Overview: AXI-Lite CDC completes each transaction; statistics are live samples.
- * Revision: 11-14-2026. Initial ZCAM driver; physical base supplied by callers.
+ * Revision: 11-15-2026. Physical base supplied by callers.
  */
 #include "rtlnet_camera.h"
 #include "rtlnet_mmio.h"
@@ -26,7 +26,6 @@ void rtlnet_camera_read_state(uintptr_t base, rtlnet_camera_state_t *s)
 {
     s->enabled = rtlnet_reg_read32(base, RTLNET_ZCAM_REG_CTRL);
     s->mode = rtlnet_reg_read32(base, RTLNET_ZCAM_REG_MODE);
-    s->status = rtlnet_reg_read32(base, RTLNET_ZCAM_REG_STATUS);
     s->seen = rtlnet_reg_read32(base, RTLNET_ZCAM_REG_SEEN);
     s->admitted = rtlnet_reg_read32(base, RTLNET_ZCAM_REG_ADMITTED);
 }

@@ -1,11 +1,10 @@
 # Purpose: gate every path while recording the authorized D-PHY deviation (DPHY_HS_INPUT).
-# Overview: no constraints change; only two exact DDLY endpoints qualify for deviation.
-# Revision: 11-14-2026.
+# Overview: no constraints change; only the two ISERDESE2 DDLY inputs of the receiver's data lanes qualify for the deviation. The IDELAYE2
+#   tap is loaded at run time (RX_TAPS), so static timing sees the tap of the primitive attribute (0); a failing DDLY endpoint is the named
+#   deviation DPHY_HS_INPUT and the run-time measurement (tap sweep, scripts/rx_test.ps1) is the evidence that static timing cannot give.
+# Revision: 11-15-2026.
 namespace eval rtlnet_camera_timing {
-  variable endpoints {
-    {rtlnet_camera_i/MIPI_D_PHY_RX_0/U0/DataLaneGen[0].DPHY_LaneSFEN_X/HSDeserializerX/Deserializer/DDLY}
-    {rtlnet_camera_i/MIPI_D_PHY_RX_0/U0/DataLaneGen[1].DPHY_LaneSFEN_X/HSDeserializerX/Deserializer/DDLY}
-  }
+  variable endpoints {}
   variable limit 1000000
 }
 
@@ -39,14 +38,20 @@ proc rtlnet_camera_timing::classify {setup hold wpws pulse_failures} {
     wns [lindex [lsort -real $other_setup] 0] whs [lindex [lsort -real $other_hold] 0]]
 }
 
+# The reviewed endpoints: the DDLY input pins of the two ISERDESE2 data-lane samplers of the receiver.
+proc rtlnet_camera_timing::discover {} {
+  variable endpoints
+  set cells [get_cells -quiet -hierarchical -filter {REF_NAME == ISERDESE2}]
+  set found {}
+  foreach pin [get_pins -quiet -of_objects $cells -filter {REF_PIN_NAME == DDLY}] {lappend found [get_property NAME $pin]}
+  if {[llength $found] != 2} {error "expected two ISERDESE2 DDLY pins, found [llength $found]"}
+  set endpoints [lsort $found]
+  puts "rtlnet_build: timing endpoints of the deviation: $endpoints"
+}
+
 proc rtlnet_camera_timing::evaluate {wpws pulse_failures reports} {
   variable endpoints; variable limit
-  # Compare exact NAME properties; [] in VHDL generate labels must not act as globs.
-  foreach endpoint $endpoints {
-    set found [get_pins -quiet -hierarchical -filter [format {NAME == "%s"} $endpoint]]
-    if {[llength $found] != 1} {error "expected exactly one reviewed pin $endpoint"}
-    if {[get_property REF_NAME [get_cells -of_objects $found]] ne "ISERDESE2"} {error "reviewed endpoint primitive changes"}
-  }
+  discover
   set evidence [open [file join $reports post_route_timing_gate_paths.rpt] w]
   foreach kind {setup hold} {
     # Enumerate one worst path per endpoint, across groups. Never filter a single
@@ -71,17 +76,4 @@ proc rtlnet_camera_timing::evaluate {wpws pulse_failures reports} {
   }
   close $evidence
   return [classify $setup $hold $wpws $pulse_failures]
-}
-
-# Own receiver (rtlnet_csi2_rx): the reviewed endpoints are the two ISERDESE2 DDLY pins of its data lanes. The IDELAYE2 tap is loaded at
-# run time (RX_TAPS), so static timing sees the tap of the primitive attribute (0); a failing endpoint is the same named deviation
-# DPHY_HS_INPUT, and the run-time measurement (tap sweep) is the evidence that static timing cannot give.
-proc rtlnet_camera_timing::use_own_endpoints {} {
-  variable endpoints
-  set cells [get_cells -quiet -hierarchical -filter {REF_NAME == ISERDESE2}]
-  set found {}
-  foreach pin [get_pins -quiet -of_objects $cells -filter {REF_PIN_NAME == DDLY}] {lappend found [get_property NAME $pin]}
-  if {[llength $found] != 2} {error "own receiver: expected two ISERDESE2 DDLY pins, found [llength $found]"}
-  set endpoints [lsort $found]
-  puts "rtlnet_build: own receiver timing endpoints: $endpoints"
 }

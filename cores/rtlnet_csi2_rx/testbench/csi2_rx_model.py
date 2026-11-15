@@ -6,13 +6,17 @@
 # Overview:
 #   * Written from the behaviour in the file headers of the RTL, not from the RTL code: frame conditioning (pad or cut to the mode
 #     geometry), black level, white balance gain of the Bayer site, bilinear demosaic with mirrored borders, 10 to 8 bits, the optional
-#     piecewise-linear gamma, then the BT.709 limited-range RGB to YUV 4:2:2 conversion (the arithmetic of the Q16 matrix with the
+#     piecewise-linear gamma, the highlight clamp (green >= level becomes max(green, red, blue), applied to the gained demosaiced 10-bit
+#     values before the 8-bit scaling), then the BT.709 limited-range RGB to YUV 4:2:2 conversion (the arithmetic of the Q16 matrix with the
 #     rounding offsets, chroma from the unrounded sums of the two pixels).
 #   * The input pictures are built from a known RGB image: a smooth gradient with colour blocks and saturated corners, sampled
 #     through the Bayer mosaic of the case phase into 10-bit raw values (eight bits of the colour, two bits of a deterministic dither).
 #   * Output files per geometry set (the benches read them with $readmemh):
 #       csi2_rx_<set>_cfg.mem   case table: word 0 = number of cases, then 16 words per case
-#                               [iw, ih, W, H, mode, phase, black, gain_r, gain_g, gain_b, gamma, raw_offset, exp_offset, kind, kline, 0]
+#                               [iw, ih, W, H, mode, phase, black, gain_r, gain_g, gain_b, proc, raw_offset, exp_offset, kind, kline, hl_level]
+#                               (proc = the PROC register: bit 0 gamma, bit 1 green equalisation, bit 2 highlight clamp)
+#       csi2_rx_<set>_max.mem   expected RAW_MAX register word of every case (one 32-bit word per line): [9:0] red, [19:10] green,
+#                               [29:20] blue maximum of the black-level-subtracted raw values of the conditioned frame
 #       csi2_rx_<set>_raw.mem   raw pixels of all cases, one 10-bit value per line (three hex digits), case after case, row by row
 #       csi2_rx_<set>_exp.mem   expected video words of all cases, one 32-bit word {Cr, Y1, Cb, Y0} per line
 #   * Usage: csi2_rx_model.py --write <dir> | --verify <dir> | --selftest
@@ -20,7 +24,8 @@
 #     model (CRC-16 check value, ECC parity masks, constant picture, black and white).
 # Language: Python 3 (no packages).
 # Revision: 11-15-2026
-#   * 11-15-2026: initial version; green equalisation (gamma word bit 1).
+#   * 11-15-2026: initial version; green equalisation (gamma word bit 1); highlight clamp (proc bit 2, level in cfg word 15), raw maxima,
+#     the clipped-highlight scene.
 # -----------------------------------------------------------------------------
 import os
 import sys
@@ -28,7 +33,9 @@ import sys
 GAMMA_Y = [0, 72, 99, 119, 136, 151, 164, 175, 186, 197, 206, 215, 224, 232, 240, 248, 255]
 
 # set name -> (mode 0 geometry, mode 1 geometry, cases)
-# case: (name, iw, ih, mode, phase, black, gr, gg, gb, gamma word: bit 0 gamma, bit 1 green equalisation)
+# case: (name, iw, ih, mode, phase, black, gr, gg, gb, gamma word: bit 0 gamma, bit 1 green equalisation, bit 2 highlight clamp
+#        [, kind, kline [, scene, hl_level]])   scene 'clip' = bright area with a clipped green (see clip_scene); hl_level is an integer
+#        or ('edge', d): the green of the first edge pixel the clamp changes, plus d
 SETS = {
     'small': {
         'geom': {0: (32, 8), 1: (24, 10)},
@@ -44,6 +51,16 @@ SETS = {
             # gamma word 2 = green equalisation, 3 = green equalisation and gamma (PROC bits 1 and 0)
             ('geq_p3',     32, 8,  0, 3, 0,  0x163, 0x100, 0x163, 2),
             ('geq_p1_g',   32, 8,  0, 1, 16, 0x180, 0x100, 0x1C0, 3),
+            # Clipped highlight (green raw clipped at 720, red 560, blue 600 above the black level 16; gains of the OV5640 at 1080p):
+            # clamp off (pink), on at level 700, level equal to an edge green (that pixel qualifies), one above it (that pixel does not),
+            # level 0 (every pixel), level 1023 (none), another Bayer phase with green equalisation and gamma.
+            ('clip_off',     32, 8, 0, 0, 16, 0x195, 0x100, 0x17C, 0, 0, 0, 'clip', 0),
+            ('clip_hl',      32, 8, 0, 0, 16, 0x195, 0x100, 0x17C, 4, 0, 0, 'clip', 700),
+            ('clip_edge_eq', 32, 8, 0, 0, 16, 0x195, 0x100, 0x17C, 4, 0, 0, 'clip', ('edge', 0)),
+            ('clip_edge_p1', 32, 8, 0, 0, 16, 0x195, 0x100, 0x17C, 4, 0, 0, 'clip', ('edge', 1)),
+            ('clip_lvl0',    32, 8, 0, 0, 16, 0x195, 0x100, 0x17C, 4, 0, 0, 'clip', 0),
+            ('clip_lvl1023', 32, 8, 0, 0, 16, 0x195, 0x100, 0x17C, 4, 0, 0, 'clip', 1023),
+            ('clip_p3_all',  32, 8, 0, 3, 16, 0x195, 0x100, 0x17C, 7, 0, 0, 'clip', 700),
         ],
     },
     # Fault cases of the full-path bench (small geometry): kind 1 = line k never arrives, kind 2 = line k arrives with 4 pixels only,
@@ -226,25 +243,88 @@ def yuv_words(rgb8, W, H):
     return words
 
 
-def expected(rows, W, H, phase, black, gr, gg, gb, gamma):
+def highlight(d, hl, level):
+    """Highlight clamp on the gained demosaiced 10-bit triples: green >= level becomes max(green, red, blue)."""
+    if not hl:
+        return d
+    return [[((r, max(g, r, b), b) if g >= level else (r, g, b)) for (r, g, b) in row] for row in d]
+
+
+def raw_max(rows, W, H, phase, black):
+    """RAW_MAX of a frame: maxima of the black-level-subtracted raw values of the conditioned frame at red, green and blue sites."""
+    c = condition(rows, W, H)
+    m = {'R': 0, 'G': 0, 'B': 0}
+    for y in range(H):
+        for x in range(W):
+            k = site(x, y, phase)[0]
+            m[k] = max(m[k], max(c[y][x] - black, 0))
+    return (m['B'] << 20) | (m['G'] << 10) | m['R']
+
+
+def demosaiced(rows, W, H, phase, black, gr, gg, gb, gamma, hll=0):
     c = condition(rows, W, H)
     p = preprocess(c, W, H, phase, black, gr, gg, gb)
-    # The gamma word of a case: bit 0 gamma curve, bit 1 green equalisation (PROC register bits).
+    # The gamma word of a case: bit 0 gamma curve, bit 1 green equalisation, bit 2 highlight clamp (PROC register bits).
     d = demosaic(p, W, H, phase, (gamma >> 1) & 1)
-    rgb8 = [[tuple(gamma8(to8(v), gamma & 1) for v in px) for px in row] for row in d]
-    return yuv_words(rgb8, W, H)
+    return highlight(d, (gamma >> 2) & 1, hll)
+
+
+def expected_rgb8(rows, W, H, phase, black, gr, gg, gb, gamma, hll=0):
+    d = demosaiced(rows, W, H, phase, black, gr, gg, gb, gamma, hll)
+    return [[tuple(gamma8(to8(v), gamma & 1) for v in px) for px in row] for row in d]
+
+
+def expected(rows, W, H, phase, black, gr, gg, gb, gamma, hll=0):
+    return yuv_words(expected_rgb8(rows, W, H, phase, black, gr, gg, gb, gamma, hll), W, H)
+
+
+# Clipped-highlight scene: a bright area (x 10..21, y 1..6) on a dark gradient. The sensor clips green at 720 (the dither lowers it by
+# 0..3), red and blue are not clipped (560 and 600); all above the black level.
+CLIP_X0, CLIP_X1, CLIP_Y0, CLIP_Y1 = 10, 22, 1, 7
+
+
+def clip_scene(w, h, phase, black):
+    raw = []
+    for y in range(h):
+        row = []
+        for x in range(w):
+            k = site(x, y, phase)[0]
+            dth = (x * 3 + y * 5) & 3
+            if CLIP_X0 <= x < CLIP_X1 and CLIP_Y0 <= y < CLIP_Y1:
+                v = (560 + dth) if k == 'R' else ((600 + dth) if k == 'B' else (720 - dth))
+            else:
+                v = 50 + ((x * 7 + y * 13) % 200) + dth
+            row.append(min(1023, v + black))
+        raw.append(row)
+    return raw
+
+
+def edge_level(rows, W, H, phase, black, gr, gg, gb, gamma):
+    """Green (gained, demosaiced) of the first pixel whose green the clamp changes by a visible step, and its position."""
+    d = demosaiced(rows, W, H, phase, black, gr, gg, gb, gamma & 3, 0)
+    for y in range(H):
+        for x in range(W):
+            r_, g_, b_ = d[y][x]
+            if g_ > 300 and max(r_, b_) - g_ >= 16 and g_ < 700:
+                return g_, (x, y)
+    raise ValueError('no edge pixel')
 
 
 def build_set(name):
     s = SETS[name]
     cfg = [len(s['cases'])]
-    raws, exps = [], []
+    raws, exps, maxes = [], [], []
     for case in s['cases']:
         (cname, iw, ih, mode, phase, black, gr, gg, gb, gamma) = case[:10]
         kind, kline = (case[10], case[11]) if len(case) > 10 else (0, 0)
+        scene, hll = (case[12], case[13]) if len(case) > 12 else ('rgb', 0)
         W, H = s['geom'][mode]
-        img = rgb_image(iw, ih)
-        raw = mosaic(img, iw, ih, phase)
+        if scene == 'clip':
+            raw = clip_scene(iw, ih, phase, black)
+        else:
+            raw = mosaic(rgb_image(iw, ih), iw, ih, phase)
+        if isinstance(hll, tuple):
+            hll = edge_level([list(r) for r in raw], W, H, phase, black, gr, gg, gb, gamma)[0] + hll[1]
         rows = [list(r) for r in raw]
         if kind == 1:
             del rows[kline]
@@ -252,20 +332,22 @@ def build_set(name):
             rows[kline] = rows[kline][:4]
         elif kind == 3:
             rows = rows[:kline]
-        words = expected(rows, W, H, phase, black, gr, gg, gb, gamma)
-        cfg += [iw, ih, W, H, mode, phase, black, gr, gg, gb, gamma, len(raws), len(exps), kind, kline, 0]
+        words = expected(rows, W, H, phase, black, gr, gg, gb, gamma, hll)
+        maxes.append(raw_max(rows, W, H, phase, black))
+        cfg += [iw, ih, W, H, mode, phase, black, gr, gg, gb, gamma, len(raws), len(exps), kind, kline, hll]
         for row in raw:
             raws += row
         exps += words
-    return cfg, raws, exps
+    return cfg, raws, exps, maxes
 
 
 def files_for(name):
-    cfg, raws, exps = build_set(name)
+    cfg, raws, exps, maxes = build_set(name)
     return {
         'csi2_rx_%s_cfg.mem' % name: ''.join('%08x\n' % v for v in cfg),
         'csi2_rx_%s_raw.mem' % name: ''.join('%03x\n' % v for v in raws),
         'csi2_rx_%s_exp.mem' % name: ''.join('%08x\n' % v for v in exps),
+        'csi2_rx_%s_max.mem' % name: ''.join('%08x\n' % v for v in maxes),
     }
 
 
@@ -303,6 +385,43 @@ def selftest():
     for k in range(16):
         if not (GAMMA_Y[k] < GAMMA_Y[k + 1]):
             print('SELFTEST FAIL gamma table'); ok = False
+    # Highlight clamp: rule, boundary and the pink highlight of the clipped scene.
+    w_, h_ = 32, 8
+    gains = (0x195, 0x100, 0x17C)
+    for ph in (0, 3):
+        raw = clip_scene(w_, h_, ph, 16)
+        off = demosaiced(raw, w_, h_, ph, 16, *gains, 0)
+        for y in (3, 4):
+            for x in range(12, 20):
+                r_, g_, b_ = off[y][x]
+                if not (g_ < r_ and g_ < b_):
+                    print('SELFTEST FAIL clipped scene not pink', ph, x, y, off[y][x]); ok = False
+        on = demosaiced(raw, w_, h_, ph, 16, *gains, 4, 700)
+        for y in range(h_):
+            for x in range(w_):
+                r_, g_, b_ = off[y][x]
+                want = (r_, max(g_, r_, b_), b_) if g_ >= 700 else (r_, g_, b_)
+                if on[y][x] != want:
+                    print('SELFTEST FAIL highlight rule', ph, x, y, on[y][x], want); ok = False
+        for y in (3, 4):
+            for x in range(12, 20):
+                if on[y][x][1] != max(on[y][x][0], on[y][x][2]):
+                    print('SELFTEST FAIL highlight interior not neutral', ph, x, y, on[y][x]); ok = False
+        rgb_off = expected_rgb8(raw, w_, h_, ph, 16, *gains, 0)
+        rgb_on = expected_rgb8(raw, w_, h_, ph, 16, *gains, 4, 700)
+        if not (rgb_off[3][15][0] > rgb_off[3][15][1] + 20 and abs(rgb_on[3][15][0] - rgb_on[3][15][1]) < 8):
+            print('SELFTEST FAIL clipped highlight 8-bit', ph, rgb_off[3][15], rgb_on[3][15]); ok = False
+        lvl, (ex, ey) = edge_level(raw, w_, h_, ph, 16, *gains, 0)
+        a = demosaiced(raw, w_, h_, ph, 16, *gains, 4, lvl)[ey][ex]
+        b = demosaiced(raw, w_, h_, ph, 16, *gains, 4, lvl + 1)[ey][ex]
+        if not (a[1] > lvl and b[1] == lvl):
+            print('SELFTEST FAIL level boundary', ph, lvl, a, b); ok = False
+        if demosaiced(raw, w_, h_, ph, 16, *gains, 0, 700) != off:
+            print('SELFTEST FAIL clamp off changes the picture'); ok = False
+    # Raw maxima of a raw frame with one constant value per site kind.
+    raw = [[(100 if site(x, y, 0)[0] == 'R' else (200 if site(x, y, 0)[0] == 'G' else 300)) for x in range(4)] for y in range(4)]
+    if raw_max(raw, 4, 4, 0, 10) != ((290 << 20) | (190 << 10) | 90):
+        print('SELFTEST FAIL raw max', hex(raw_max(raw, 4, 4, 0, 10))); ok = False
     print('CSI2_RX_MODEL: %s' % ('PASS' if ok else 'FAIL'))
     return ok
 

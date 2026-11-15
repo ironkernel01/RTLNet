@@ -1,9 +1,8 @@
-# Purpose: color, HP protocol and camera-to-encoder board regressions. Revision: 11-14-2026.
-tb_rtlnet_rgb_to_yuyv boards/zybo_z7_20/testbench/tb_rtlnet_rgb_to_yuyv.f color
-tb_rtlnet_rgb_to_yuyv boards/zybo_z7_20/testbench/tb_rtlnet_rgb_to_yuyv.f neg plusargs=INJECT_FAILURE expectfail
+# Purpose: HP protocol, camera-to-encoder and build-gate regressions of the Zybo Z7-20 board. Revision: 11-15-2026.
 tb_rtlnet_axi_hp_bridge boards/zybo_z7_20/testbench/tb_rtlnet_axi_hp_bridge.f hp
 tb_rtlnet_axi_hp_bridge boards/zybo_z7_20/testbench/tb_rtlnet_axi_hp_bridge.f neg plusargs=INJECT_FAILURE expectfail
 tb_rtlnet_zybo_video boards/zybo_z7_20/testbench/tb_rtlnet_zybo_video.f board
 tb_rtlnet_zybo_video boards/zybo_z7_20/testbench/tb_rtlnet_zybo_video.f neg plusargs=INJECT_FAILURE expectfail
+tb_rtlnet_zybo_video boards/zybo_z7_20/testbench/tb_rtlnet_zybo_video.f mut plusargs=MUTATE expectfail
 zybo_decoder script:boards/zybo_z7_20/scripts/check_board_encode.ps1 -Tag decoder
 zybo_gates script:boards/zybo_z7_20/scripts/check_gates.ps1
