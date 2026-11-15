@@ -25,8 +25,8 @@ block RAM tiles, 48 DSP) with firmware `fw10`. Measured on the board:
 - `DPHY_HS_INPUT` stays open as a margin question: the AXI registers expose no D-PHY lane status or error counter. In
   the runs above no corrupted frame, no adapter error and no decode error was seen; that does not measure the sampling margin.
 - The first picture decoded from the board (720p, a lit desk with two monitors) is a real camera picture with plausible
-  colours and no tearing, rotated by 180 degrees (the camera as mounted is upside down or the sensor needs a flip, not
-  corrected). With the scene dark (later runs) the picture is nearly black and the host test reports it as a FAIL of
+  colours and no tearing. The sensor flip and mirror (OV5640 0x3820 = 0x40, 0x3821 bit 1, window offset 0x3811 plus one column) put the
+  picture upright in both modes with the Bayer phase kept. With the scene dark (later runs) the picture is nearly black and the host test reports it as a FAIL of
   its "picture" check.
 - Faults found: the firmware never started the Cortex-A9 global timer; the BSP macro behind `plat_ticks` is not parenthesised, which
   made the time wrong and let the 500 ms picture time-out fire by chance and corrupt the encoder configuration (the
@@ -51,7 +51,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File boards/zybo_z7_20/scripts/pr
 
 The console is the board USB-UART at 115200 baud (the one serial port of the FTDI device). About 40 s after the load the
 prompt appears (sensor start-up and DHCP). `scripts/stream_test.ps1` is the host test (stream receive, decode, frame
-rates, one PASS/FAIL line): `powershell -NoProfile -ExecutionPolicy Bypass -File boards/zybo_z7_20/scripts/stream_test.ps1 -Mode both`.
+rates, one PASS/FAIL line; the first GOP of a new UDP flow is reported but not judged, because the network can reorder the first burst of a new flow): `powershell -NoProfile -ExecutionPolicy Bypass -File boards/zybo_z7_20/scripts/stream_test.ps1 -Mode both`.
 
 ## Third-party IP
 

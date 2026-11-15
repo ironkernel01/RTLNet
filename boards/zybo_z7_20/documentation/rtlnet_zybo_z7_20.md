@@ -301,10 +301,11 @@ setting was changed.
 4. Power: through a weak USB port the whole board reset (SLCR REBOOT_STATUS 0x00400002, power-on reset bit only, PL configuration lost,
    `fpga -state` "not configured") 60 to 80 ms after the ARM started with the PL configured and clocked; no firmware cause was found
    (reset-cause registers, a `b .` loop and an unconfigured PL survive). A direct PC USB port removed it.
-5. Open observation: the first decoded picture is rotated by 180 degrees (see the picture note below).
+5. The picture is upright: the sensor flip bits of `0x3820` are cleared, the sensor mirror (`0x3821` bit 1) is set and the horizontal timing offset `0x3811` is one column higher, which keeps the Bayer phase.
+6. The first IDR picture of a new UDP flow can arrive out of order at the PC although the board sends the datagrams in order (trace of every `udp_sendto`); `stream_test.ps1` judges the stream from the second IDR picture and reports the continuity errors of the first GOP.
 
 Picture quality: a decoded 720p frame of a lit desk with two monitors (`boards/zybo_z7_20/build/bringup/f20.png`) is a real camera picture,
-sharp text on the monitors, plausible colours (warm light, white screens white), no tearing or shift, but dark and rotated by 180 degrees.
+sharp text on the monitors, plausible colours (warm light, white screens white), no tearing or shift, but dark; the picture is upright.
 Later runs (dark room) give nearly black pictures; the host test reports its picture check as FAIL and is not changed.
 
 ## What is verified

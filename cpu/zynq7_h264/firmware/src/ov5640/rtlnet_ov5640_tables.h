@@ -6,7 +6,7 @@
  */
 /* Purpose: C view of the unchanged Digilent OV5640 register-table data.
  * Overview: converted once from the retained OV5640.h; maintained as this file.
- * Revision: 11-14-2026. Table data and original notices remain intact.
+ * Revision: 11-15-2026. Table data and original notices remain intact except 0x3820, 0x3821 and 0x3811 (picture upright, Bayer phase kept).
  */
 #ifndef RTLNET_OV5640_TABLES_H
 #define RTLNET_OV5640_TABLES_H
@@ -119,8 +119,8 @@ static const rtlnet_sensor_reg_t cfg_init_[] = {
 		{0x3c0b, 0x40},
 		//[7]=1 color bar enable, [3:2]=00 eight color bar
 		{0x503d, 0x00},
-		//[2]=1 ISP vflip, [1]=1 sensor vflip
-		{0x3820, 0x46},
+		//[2]=0 ISP vflip, [1]=0 sensor vflip: the Digilent value 0x46 shows this camera mount upside down; with the sensor mirror of 0x3821 the picture is upright
+		{0x3820, 0x40},
 
 		//[7:5]=010 Two lane mode, [4]=0 MIPI HS TX no power down, 
         //[3]=0 MIPI LP RX no power down, [2]=1 MIPI enable, 
@@ -208,8 +208,8 @@ static const rtlnet_sensor_reg_t cfg_720p_60fps_[] = {
 
 		//[3:0]=0 timing hoffset high byte
 		{0x3810, (0 >> 8) & 0x0F},
-		//[7:0]=0 timing hoffset low byte
-		{0x3811, 0 & 0xFF},
+		//[7:0]=1 timing hoffset low byte (one column more than the Digilent table: with the mirror set it keeps the Bayer phase)
+		{0x3811, 1 & 0xFF},
 		//[2:0]=0 timing voffset high byte
 		{0x3812, (0 >> 8) & 0x07},
 		//[7:0]=0 timing voffset low byte
@@ -236,8 +236,8 @@ static const rtlnet_sensor_reg_t cfg_720p_60fps_[] = {
 		//[7:4]=0x3 vertical odd subsample increment, [3:0]=0x1 vertical even subsample increment
 		{0x3815, 0x31},
 
-		//[2]=0 ISP mirror, [1]=0 sensor mirror, [0]=1 horizontal binning
-		{0x3821, 0x01},
+		//[2]=0 ISP mirror, [1]=1 sensor mirror, [0]=1 horizontal binning
+		{0x3821, 0x03},
 
 		//little MIPI shit: global timing unit, period of PCLK in ns * 2(depends on # of lanes)
         // 1/56M*2
@@ -291,8 +291,8 @@ static const rtlnet_sensor_reg_t cfg_1080p_15fps_[] = {
 
 		// [3:0]=0 timing hoffset high byte
 		{0x3810, (16 >> 8) & 0x0F},
-		// [7:0]=0 timing hoffset low byte
-		{0x3811, 16 & 0xFF},
+		// [7:0]=17 timing hoffset low byte (16 plus one column: with the mirror set it keeps the Bayer phase)
+		{0x3811, 17 & 0xFF},
 		// [2:0]=0 timing voffset high byte
 		{0x3812, (12 >> 8) & 0x07},
 		// [7:0]=0 timing voffset low byte
@@ -319,8 +319,8 @@ static const rtlnet_sensor_reg_t cfg_1080p_15fps_[] = {
 		// [7:4]=0x1 vertical odd subsample increment, [3:0]=0x1 vertical even subsample increment
 		{0x3815, 0x11},
 
-		// [2]=0 ISP mirror, [1]=0 sensor mirror, [0]=0 no horizontal binning
-		{0x3821, 0x00},
+		// [2]=0 ISP mirror, [1]=1 sensor mirror, [0]=0 no horizontal binning
+		{0x3821, 0x02},
 
 		// little MIPI shit: global timing unit, period of PCLK in ns * 2(depends on # of lanes)
 		{0x4837, 48}, // 1/42M*2
@@ -375,8 +375,8 @@ static const rtlnet_sensor_reg_t cfg_1080p_30fps_[] = {
 
 		// [3:0]=0 timing hoffset high byte
 		{0x3810, (16 >> 8) & 0x0F},
-		// [7:0]=0 timing hoffset low byte
-		{0x3811, 16 & 0xFF},
+		// [7:0]=17 timing hoffset low byte (16 plus one column: with the mirror set it keeps the Bayer phase)
+		{0x3811, 17 & 0xFF},
 		// [2:0]=0 timing voffset high byte
 		{0x3812, (12 >> 8) & 0x07},
 		// [7:0]=0 timing voffset low byte
@@ -403,8 +403,8 @@ static const rtlnet_sensor_reg_t cfg_1080p_30fps_[] = {
 		// [7:4]=0x1 vertical odd subsample increment, [3:0]=0x1 vertical even subsample increment
 		{0x3815, 0x11},
 
-		// [2]=0 ISP mirror, [1]=0 sensor mirror, [0]=0 no horizontal binning
-		{0x3821, 0x00},
+		// [2]=0 ISP mirror, [1]=1 sensor mirror, [0]=0 no horizontal binning
+		{0x3821, 0x02},
 
 		// little MIPI shit: global timing unit, period of PCLK in ns * 2(depends on # of lanes)
 		{0x4837, 24}, // 1/84M*2

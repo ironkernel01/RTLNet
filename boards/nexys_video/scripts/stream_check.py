@@ -36,6 +36,11 @@ Role: two independent checks that need no decoder library.
   headtrim <file.ts>
        With -CcTolPct only: cuts the capture before the PAT of its first IDR picture (the first datagrams of a stream can be missing over Wi-Fi) and
        prints "HEADTRIM cut_packets=<n> cut_access_units=<m>"; stream_test.ps1 reports the cut.
+  skipidr <file.ts> [--n 2]
+       Cuts the capture before the PAT of its n-th IDR picture (random access indicator, default the second) and rewrites the file; the start-up part
+       is judged by nobody. Prints "SKIPIDR cut_packets=<p> cut_access_units=<a> cc_errors=<e>": the video-PID continuity errors that lay in the
+       cut part (reported, not judged). Without a n-th IDR picture the file is left unchanged and "SKIPIDR none" is printed (exit 1).
+       stream_test.ps1 of the Zybo Z7-20 calls it after trim; the Nexys Video test does not use it.
   trim <file.ts>
        Cuts the capture before its last video access unit (the one the capture stopped in is incomplete; FFmpeg and JM report it as a corrupted
        macroblock or an out-of-range mb_qp_delta). stream_test.ps1 calls it before every check.
@@ -44,7 +49,7 @@ Role: two independent checks that need no decoder library.
        them again and runs the pattern check; prints "CHECK selftest_<pattern> PASS|FAIL ...".
 Exit code 0 when every check passes.
 
-Revision: 11-10-2026 (phase 2c: GOP checks, access-unit sizes, every-frame PSNR without reading the whole file; phase 2d: --pattern, selftest, --target-kbps rate windows, slice QP)
+Revision: 11-15-2026 (skipidr); 11-10-2026 (phase 2c: GOP checks, access-unit sizes, every-frame PSNR without reading the whole file; phase 2d: --pattern, selftest, --target-kbps rate windows, slice QP)
 """
 import math
 import os
@@ -559,6 +564,54 @@ def headtrim_ts(path):
     return 0
 
 
+def skipidr_ts(path, n_idr=2):
+    """Cut the capture before the PAT of the n-th IDR picture; count the video continuity errors of the cut part (see the module text)."""
+    with open(path, "rb") as fh:
+        data = fh.read()
+    start = -1
+    for i in range(min(len(data), 4000)):
+        if all(i + k * 188 < len(data) and data[i + k * 188] == 0x47 for k in range(3)):
+            start = i
+            break
+    if start < 0:
+        print("SKIPIDR no sync")
+        return 1
+    npk = (len(data) - start) // 188
+    last_pat = -1
+    au = 0
+    idr = 0
+    cut = -1
+    cc_last = None
+    cc_err = 0
+    errs_at = []
+    for n in range(npk):
+        p = data[start + n * 188: start + (n + 1) * 188]
+        pid = ((p[1] & 0x1F) << 8) | p[2]
+        if pid == 0 and (p[1] & 0x40):
+            last_pat = n
+        if pid == 0x0100 and (p[3] >> 4) & 1:
+            if cc_last is not None and ((cc_last + 1) & 15) != (p[3] & 15):
+                errs_at.append(n)
+            cc_last = p[3] & 15
+        if pid == 0x0100 and (p[1] & 0x40):
+            if ((p[3] >> 4) & 3) & 2 and p[4] >= 1 and (p[5] & 0x40):
+                idr += 1
+                if idr == n_idr:
+                    cut = last_pat if (last_pat >= 0 and n - last_pat < 8) else n
+                    break
+            au += 1
+    if cut < 0:
+        print("SKIPIDR none")
+        return 1
+    cc_err = sum(1 for e in errs_at if e < cut)
+    tmp = path + ".skip"
+    with open(tmp, "wb") as dst:
+        dst.write(data[start + cut * 188:])
+    os.replace(tmp, path)
+    print("SKIPIDR cut_packets=%d cut_access_units=%d cc_errors=%d" % (cut, au, cc_err))
+    return 0
+
+
 def trim_ts(path):
     """Cut the file before the last video PES start (PID 0x100): the access unit the capture stopped in is incomplete, and a trailing partial
     datagram goes with it. Prints "TRIM kept=<bytes> cut=<bytes>" and returns 0."""
@@ -812,6 +865,8 @@ def main(argv):
         return reorder_ts(argv[1], argv[2])
     if len(argv) >= 2 and argv[0] == "headtrim":
         return headtrim_ts(argv[1])
+    if len(argv) >= 2 and argv[0] == "skipidr":
+        return skipidr_ts(argv[1], int(argv[argv.index("--n") + 1]) if "--n" in argv else 2)
     if len(argv) >= 2 and argv[0] == "trim":
         return trim_ts(argv[1])
     if len(argv) >= 2 and argv[0] == "selftest":

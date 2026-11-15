@@ -27,8 +27,13 @@ Overview:
 Usage:
   powershell -NoProfile -ExecutionPolicy Bypass -File boards/zybo_z7_20/scripts/stream_test.ps1 [-Mode both] [-Seconds 20] [-Port auto]
     [-HostIp auto] [-UdpPort 5004] [-Gop 30] [-Tag zybo_stream] [-InputTs <file> -Width 1280 -Height 720 -Fps 30 -Steps 3000]
+  * The first GOP of a new flow is not judged: the network may reorder the first burst of a new UDP flow (the board sends in order: the first IDR
+    picture leaves the board as 42 datagrams in continuity-counter order; the same capture shows datagrams displaced by up to seven positions, and a
+    run on the same flow right after is clean). After "trim" the capture is cut before the second IDR picture (stream_check.py skipidr); the ts, probe,
+    decode and picture checks run on the rest with zero tolerance, and the ts line and a "startup" line state the continuity errors of the skipped part
+    (reported, not judged). A capture without a second IDR picture fails the "startup" step.
 Revision: 11-15-2026
-  * 11-15-2026: initial version.
+  * 11-15-2026: initial version; judges the stream from the second IDR picture onward.
 -------------------------------------------------------------------------------
 #>
 param(
@@ -74,12 +79,19 @@ function Get-Field([string]$text, [string]$re) { if ($text -match $re) { return 
 function Test-Capture([string]$name, [string]$ts, [int]$w, [int]$h, [double]$fps, [int]$step) {
     $o = Join-Path $Build "${name}_ts.txt"
     [void](Invoke-Native $py @('-I', $Check, 'trim', $ts) (Join-Path $Build "${name}_trim.txt"))
+    # The first GOP of a new UDP flow is not judged (see the header): cut the capture before the second IDR picture, report the continuity errors of the cut part.
+    $skipFile = Join-Path $Build "${name}_skip.txt"
+    $skipRc = Invoke-Native $py @('-I', $Check, 'skipidr', $ts, '--n', '2') $skipFile
+    $skipLine = ((Get-Content -LiteralPath $skipFile -ErrorAction SilentlyContinue) | Select-Object -First 1)
+    [void]$script:log.AppendLine("$skipLine")
+    $skipErr = if ("$skipLine" -match 'cc_errors=(\d+)') { $Matches[1] } else { '?' }
+    Add-Result "$name startup" ($skipRc -eq 0) ("not judged, first GOP skipped: $skipLine")
     $rc = Invoke-Native $py @('-I', $Check, 'ts', $ts, '--steps', "$step", '--fps', "$fps", '--gop', "$Gop") $o
     $lines = @(Get-Content -LiteralPath $o)
     foreach ($l in $lines) { [void]$script:log.AppendLine($l) }
     $fail = @($lines | Where-Object { $_ -match '^CHECK \S+ FAIL' })
     $sum = ($lines | Where-Object { $_ -match '^TS_SUMMARY' } | Select-Object -Last 1)
-    Add-Result "$name ts" ($rc -eq 0 -and $fail.Count -eq 0) ("$sum" + $(if ($fail.Count) { ' | ' + (($fail | ForEach-Object { $_.Substring(6, [Math]::Min(90, $_.Length - 6)) }) -join ' | ') } else { '' }))
+    Add-Result "$name ts" ($rc -eq 0 -and $fail.Count -eq 0) ("(from the 2nd IDR picture; $skipErr continuity error(s) in the skipped start-up part) $sum" + $(if ($fail.Count) { ' | ' + (($fail | ForEach-Object { $_.Substring(6, [Math]::Min(90, $_.Length - 6)) }) -join ' | ') } else { '' }))
     $pj = Join-Path $Build "${name}_probe.json"
     $rc = Invoke-Native $ff.Ffprobe @('-v', 'error', '-show_streams', '-of', 'json', $ts) $pj
     $probe = $null
