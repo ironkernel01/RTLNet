@@ -1,0 +1,42 @@
+# Purpose: reviewed vendor methodology findings of the routed Baseline design (input of check_camera_deviation.py).
+# Overview: the 8 report_methodology detail blocks before any waiver. Revision: 11-14-2026.
+LUTAR-1#1 Warning
+LUT drives async reset alert  
+LUT cell rtlnet_camera_i/MIPI_D_PHY_RX_0/U0/ClockLane/SyncAsyncEnable/GenNoMMCM.cBUFR_Rst_i_1, with 2 or more inputs, drives asynchronous preset/clear pin(s) rtlnet_camera_i/MIPI_D_PHY_RX_0/U0/ClockLane/SyncAsyncLocked/oSyncStages_reg[0]/CLR
+rtlnet_camera_i/MIPI_D_PHY_RX_0/U0/ClockLane/SyncAsyncLocked/oSyncStages_reg[1]/CLR. The LUT may glitch and trigger an unexpected reset, even if it is a properly timed path.
+Related violations: <none>
+
+TIMING-9#1 Warning
+Unknown CDC Logic  
+One or more asynchronous Clock Domain Crossing has been detected between 2 clock domains through a set_false_path or a set_clock_groups or set_max_delay -datapath_only constraint but no double-registers logic synchronizer has been found on the side of the capture clock. It is recommended to run report_cdc for a complete and detailed CDC coverage. Please consider using XPM_CDC to avoid Critical severities
+Related violations: <none>
+
+TIMING-15#1 Warning
+Large hold violation  
+There is a large clock skew of 1.372 ns between dphy_data_hs_p[1] (clocked by rtlnet_dphy_hs) and rtlnet_camera_i/MIPI_D_PHY_RX_0/U0/DataLaneGen[1].DPHY_LaneSFEN_X/HSDeserializerX/Deserializer/DDLY (clocked by rtlnet_dphy_hs) that results in large hold timing violation(s) of -1.388 ns. Fixing large hold violations during routing might impact setup slack and result in more difficult timing closure
+Related violations: <none>
+
+TIMING-15#2 Warning
+Large hold violation  
+There is a large clock skew of 1.385 ns between dphy_data_hs_p[0] (clocked by rtlnet_dphy_hs) and rtlnet_camera_i/MIPI_D_PHY_RX_0/U0/DataLaneGen[0].DPHY_LaneSFEN_X/HSDeserializerX/Deserializer/DDLY (clocked by rtlnet_dphy_hs) that results in large hold timing violation(s) of -1.431 ns. Fixing large hold violations during routing might impact setup slack and result in more difficult timing closure
+Related violations: <none>
+
+TIMING-18#1 Warning
+Missing input or output delay  
+An input delay is missing on dphy_data_lp_n[0] relative to the rising and/or falling clock edge(s) of rtlnet_dphy_hs.
+Related violations: <none>
+
+TIMING-18#2 Warning
+Missing input or output delay  
+An input delay is missing on dphy_data_lp_n[1] relative to the rising and/or falling clock edge(s) of rtlnet_dphy_hs.
+Related violations: <none>
+
+TIMING-18#3 Warning
+Missing input or output delay  
+An input delay is missing on dphy_data_lp_p[0] relative to the rising and/or falling clock edge(s) of rtlnet_dphy_hs.
+Related violations: <none>
+
+TIMING-18#4 Warning
+Missing input or output delay  
+An input delay is missing on dphy_data_lp_p[1] relative to the rising and/or falling clock edge(s) of rtlnet_dphy_hs.
+Related violations: <none>

@@ -1,0 +1,763 @@
+/*
+ * test_rtlnet_h264_enc_driver.c -- host unit test of the H.264 encoder driver
+ *
+ * Copyright (C) 2026 IronKernel. All rights reserved.
+ *
+ * Role: runs driver/rtlnet_h264_enc.c on the PC against a register model (ID/VERSION/CAPS, the configuration
+ * registers read back as written, self-clearing START, write-1-to-clear DONE and ERR) through the
+ * RTLNET_HOST_TEST hooks of rtlnet_mmio.h, and checks the SPS and PPS bytes of rtlnet_h264_enc_write_sps_pps()
+ * with an independent bit reader written here from ITU-T Rec. H.264 clauses 7.3.2.1.1, 7.3.2.2 and 7.4.1:
+ * field values, emulation prevention, level selection and cropping for QCIF, 720p and 1080p (coded 1088).
+ * Phase 2c-1 adds the P picture fields: PIC_CFG bit 1 (start_picture_ex, the earlier start clears it), REF_Y_BASE / REF_U_BASE and
+ * their alignment, frame_num wrap, the two-buffer helper (alternation, reference choice, no P without a reference).
+ * Prints one line "DRIVER TEST PASS: rtlnet_h264_enc checks=<n>" or "DRIVER TEST FAIL: ..." and returns 0 / 1.
+ * The decoders (JM, OpenH264, FFmpeg) decode the same bytes in the harness.
+ *
+ * Build and run (repository root; gcc from Resolve-RtlnetHostCc in scripts/rtlnet_tools.ps1):
+ *   gcc -std=c11 -Wall -Wextra -Werror -DRTLNET_HOST_TEST -Icores/rtlnet_common/driver
+ *       -Icores/rtlnet_h264_enc/driver cores/rtlnet_h264_enc/driver/rtlnet_h264_enc.c
+ *       cores/rtlnet_h264_enc/testbench/test_rtlnet_h264_enc_driver.c -o test_h264 && ./test_h264
+ */
+#include "rtlnet_h264_enc.h"
+#include "rtlnet_mmio.h"
+
+#include <stdio.h>    /* printf */
+#include <string.h>   /* memset */
+
+#define TEST_BASE     0x44A10000u
+#define TEST_WINDOW   0x1000u
+#define MODEL_CAPS    0x00024478u   /* MAX_MB_W 120, MAX_MB_H 68, 2 engines */
+
+static uint32_t g_reg[TEST_WINDOW / 4u];
+static int      g_checks;
+static int      g_fails;
+static uint32_t g_irq_impl = 0x3Fu;   /* implemented interrupt sources of the model */
+
+static void check(int cond, const char *what)
+{
+    g_checks++;
+    if (!cond) {
+        g_fails++;
+        printf("CHECK FAILED: %s\n", what);
+    }
+}
+
+uint32_t rtlnet_host_reg_read32(uintptr_t addr)
+{
+    uint32_t off = (uint32_t)(addr - TEST_BASE);
+
+    if ((addr < TEST_BASE) || (off >= TEST_WINDOW) || ((off & 3u) != 0u)) {
+        g_fails++;
+        printf("CHECK FAILED: register read outside the window 0x%lx\n", (unsigned long)addr);
+        return 0u;
+    }
+    return g_reg[off / 4u];
+}
+
+void rtlnet_host_reg_write32(uintptr_t addr, uint32_t value)
+{
+    uint32_t off = (uint32_t)(addr - TEST_BASE);
+
+    if ((addr < TEST_BASE) || (off >= TEST_WINDOW) || ((off & 3u) != 0u)) {
+        g_fails++;
+        printf("CHECK FAILED: register write outside the window 0x%lx\n", (unsigned long)addr);
+        return;
+    }
+    if (off == RTLNET_H264_REG_STATUS) {
+        g_reg[off / 4u] &= ~(value & (RTLNET_H264_STATUS_DONE | RTLNET_H264_STATUS_ERR));
+        return;
+    }
+    if (off == RTLNET_H264_REG_IRQ_STATUS) {
+        g_reg[off / 4u] &= ~value;                            /* write 1 to clear */
+        return;
+    }
+    if (off == RTLNET_H264_REG_IRQ_FORCE) {
+        g_reg[RTLNET_H264_REG_IRQ_STATUS / 4u] |= value & g_irq_impl;
+        return;
+    }
+    if (off == RTLNET_H264_REG_IRQ_ENABLE) {
+        g_reg[off / 4u] = value & g_irq_impl;                 /* bits of sources the build lacks read 0 */
+        return;
+    }
+    if (off == RTLNET_H264_REG_DBK_STATUS) {
+        return;                                               /* read only */
+    }
+    if (off == RTLNET_H264_REG_DBK_CTRL) {
+        /* The core's rules: without the filter (CAPS bit 22 clear) the register reads 0; with it, bit 0 is the enable, each offset field takes a value
+         * of -6..+6 and keeps its old value for any other, the other bits read 0. */
+        uint32_t cur = g_reg[off / 4u];
+        uint32_t nv = 0u;
+        uint32_t sh;
+
+        if ((g_reg[RTLNET_REG_CAPS / 4u] & RTLNET_H264_CAPS_DBK) != 0u) {
+            nv = value & RTLNET_H264_DBK_CTRL_ENABLE;
+            for (sh = RTLNET_H264_DBK_CTRL_ALPHA_SHIFT; sh <= RTLNET_H264_DBK_CTRL_BETA_SHIFT; sh += 4u) {
+                uint32_t f = (value >> sh) & 0xFu;
+                int      s = (f >= 8u) ? ((int)f - 16) : (int)f;
+
+                if ((s >= RTLNET_H264_DBK_OFFSET_MIN) && (s <= RTLNET_H264_DBK_OFFSET_MAX)) {
+                    nv |= f << sh;
+                } else {
+                    nv |= cur & (0xFu << sh);
+                }
+            }
+        }
+        g_reg[off / 4u] = nv;
+        return;
+    }
+    if (off == RTLNET_H264_REG_CTRL) {
+        g_reg[off / 4u] = value & RTLNET_H264_CTRL_IRQ_EN;   /* START and RING_RESET self-clear */
+        g_reg[0x0F0u / 4u] = value;                           /* last CTRL write, for the checks */
+        return;
+    }
+    g_reg[off / 4u] = value;
+}
+
+/* Independent bit reader over an RBSP with the emulation-prevention bytes removed. */
+typedef struct {
+    uint8_t  data[128];
+    uint32_t len;
+    uint32_t pos;
+} rd_t;
+
+static uint32_t rd_bits(rd_t *r, uint32_t n)
+{
+    uint32_t v = 0u;
+    uint32_t i;
+
+    for (i = 0u; i < n; i++) {
+        v = (v << 1) | (uint32_t)((r->data[r->pos / 8u] >> (7u - (r->pos % 8u))) & 1u);
+        r->pos++;
+    }
+    return v;
+}
+
+static uint32_t rd_ue(rd_t *r)
+{
+    uint32_t zeros = 0u;
+
+    while (rd_bits(r, 1u) == 0u) {
+        zeros++;
+    }
+    return (1u << zeros) - 1u + rd_bits(r, zeros);
+}
+
+/* Split Annex B: returns the NAL start (after the 4-byte start code) and removes emulation prevention. */
+static uint32_t unwrap_nal(const uint8_t *buf, uint32_t start, uint32_t end, rd_t *r, uint32_t *next)
+{
+    uint32_t i = start + 4u;
+    uint32_t zeros = 0u;
+    uint32_t header;
+
+    check((buf[start] == 0u) && (buf[start + 1u] == 0u) && (buf[start + 2u] == 0u) && (buf[start + 3u] == 1u),
+          "start code 00 00 00 01");
+    header = buf[i++];
+    r->len = 0u;
+    r->pos = 0u;
+    while (i < end) {
+        if ((buf[i] == 0u) && (buf[i + 1u] == 0u) && (i + 3u < end) && (buf[i + 2u] == 0u) && (buf[i + 3u] == 1u)) {
+            break;   /* next start code */
+        }
+        if ((zeros >= 2u) && (buf[i] == 3u)) {
+            zeros = 0u;
+            i++;
+            continue;
+        }
+        zeros = (buf[i] == 0u) ? (zeros + 1u) : 0u;
+        r->data[r->len++] = buf[i++];
+    }
+    *next = i;
+    return header;
+}
+
+/* high 0: Constrained Baseline form (rtlnet_h264_enc_write_sps_pps); high 1: the High profile form (rtlnet_h264_enc_write_sps_pps_profile). */
+static void check_sps_pps_profile(const rtlnet_h264_enc_sps_cfg_t *cfg, uint32_t exp_level, uint32_t exp_crop_b, int high, const char *name)
+{
+    uint8_t  buf[RTLNET_H264_SPS_PPS_MAX_BYTES];
+    size_t   len = 0u;
+    rd_t     r;
+    uint32_t next, hdr, v;
+
+    if (high != 0) {
+        check(rtlnet_h264_enc_write_sps_pps_profile(buf, sizeof(buf), cfg, 1, &len) == 0, name);
+    } else {
+        check(rtlnet_h264_enc_write_sps_pps(buf, sizeof(buf), cfg, &len) == 0, name);
+    }
+    check(len > 0u, "length");
+    hdr = unwrap_nal(buf, 0u, (uint32_t)len, &r, &next);
+    check(hdr == 0x67u, "SPS NAL header 0x67");
+    check(rd_bits(&r, 8u) == ((high != 0) ? 100u : 66u), "profile_idc 66 (Constrained Baseline) or 100 (High)");
+    check(rd_bits(&r, 1u) == 0u, "constraint_set0_flag");
+    check(rd_bits(&r, 1u) == ((high != 0) ? 0u : 1u), "constraint_set1_flag (1 for Constrained Baseline)");
+    check(rd_bits(&r, 2u) == 0u, "constraint_set2/3_flag");
+    check(rd_bits(&r, 4u) == 0u, "reserved_zero_4bits");
+    v = rd_bits(&r, 8u);
+    check(v == exp_level, "level_idc");
+    check(rd_ue(&r) == 0u, "seq_parameter_set_id");
+    if (high != 0) {
+        check(rd_ue(&r) == 1u, "chroma_format_idc 1 (4:2:0)");
+        check(rd_ue(&r) == 0u, "bit_depth_luma_minus8");
+        check(rd_ue(&r) == 0u, "bit_depth_chroma_minus8");
+        check(rd_bits(&r, 1u) == 0u, "qpprime_y_zero_transform_bypass_flag");
+        check(rd_bits(&r, 1u) == 0u, "seq_scaling_matrix_present_flag");
+    }
+    check(rd_ue(&r) == (cfg->log2_max_frame_num - 4u), "log2_max_frame_num_minus4");
+    check(rd_ue(&r) == 2u, "pic_order_cnt_type 2");
+    check(rd_ue(&r) == 1u, "max_num_ref_frames 1");
+    check(rd_bits(&r, 1u) == 0u, "gaps_in_frame_num_value_allowed_flag");
+    check(rd_ue(&r) == (cfg->width / 16u - 1u), "pic_width_in_mbs_minus1");
+    check(rd_ue(&r) == (cfg->height / 16u - 1u), "pic_height_in_map_units_minus1");
+    check(rd_bits(&r, 1u) == 1u, "frame_mbs_only_flag");
+    check(rd_bits(&r, 1u) == 1u, "direct_8x8_inference_flag");
+    if (exp_crop_b != 0u) {
+        check(rd_bits(&r, 1u) == 1u, "frame_cropping_flag");
+        check(rd_ue(&r) == 0u, "crop left");
+        check(rd_ue(&r) == 0u, "crop right");
+        check(rd_ue(&r) == 0u, "crop top");
+        check(rd_ue(&r) == exp_crop_b, "crop bottom");
+    } else {
+        check(rd_bits(&r, 1u) == 0u, "frame_cropping_flag 0");
+    }
+    check(rd_bits(&r, 1u) == 0u, "vui_parameters_present_flag");
+    check(rd_bits(&r, 1u) == 1u, "SPS stop bit");
+
+    hdr = unwrap_nal(buf, next, (uint32_t)len, &r, &next);
+    check(hdr == 0x68u, "PPS NAL header 0x68");
+    check(rd_ue(&r) == 0u, "pic_parameter_set_id");
+    check(rd_ue(&r) == 0u, "PPS seq_parameter_set_id");
+    check(rd_bits(&r, 1u) == ((high != 0) ? 1u : 0u), "entropy_coding_mode_flag: 0 (CAVLC), 1 (CABAC) for High");
+    check(rd_bits(&r, 1u) == 0u, "bottom_field_pic_order_in_frame_present_flag");
+    check(rd_ue(&r) == 0u, "num_slice_groups_minus1");
+    check(rd_ue(&r) == 0u, "num_ref_idx_l0_default_active_minus1");
+    check(rd_ue(&r) == 0u, "num_ref_idx_l1_default_active_minus1");
+    check(rd_bits(&r, 1u) == 0u, "weighted_pred_flag");
+    check(rd_bits(&r, 2u) == 0u, "weighted_bipred_idc");
+    check(rd_ue(&r) == 0u, "pic_init_qp_minus26 = 0 (pic_init_qp 26)");
+    check(rd_ue(&r) == 0u, "pic_init_qs_minus26");
+    check(rd_ue(&r) == 0u, "chroma_qp_index_offset");
+    check(rd_bits(&r, 1u) == 1u, "deblocking_filter_control_present_flag");
+    check(rd_bits(&r, 1u) == 0u, "constrained_intra_pred_flag");
+    check(rd_bits(&r, 1u) == 0u, "redundant_pic_cnt_present_flag");
+    check(rd_bits(&r, 1u) == 1u, "PPS stop bit");
+    check(next == (uint32_t)len, "PPS ends the output");
+}
+
+static void check_sps_pps(const rtlnet_h264_enc_sps_cfg_t *cfg, uint32_t exp_level, uint32_t exp_crop_b, const char *name)
+{
+    check_sps_pps_profile(cfg, exp_level, exp_crop_b, 0, name);
+}
+
+int main(void)
+{
+    rtlnet_h264_enc_sps_cfg_t sps;
+    rtlnet_h264_enc_caps_t caps;
+    rtlnet_h264_enc_cfg_t cfg;
+    rtlnet_h264_enc_index_entry_t ent;
+    rtlnet_h264_enc_stats_t stats;
+    uint32_t words[4];
+    uint32_t err = 0u;
+    uint8_t  small[8];
+    size_t   len = 0u;
+
+    /* SPS and PPS bytes. */
+    sps.width = 176u; sps.height = 144u; sps.display_width = 176u; sps.display_height = 144u;
+    sps.fps = 30u; sps.log2_max_frame_num = 4u;
+    check_sps_pps(&sps, 11u, 0u, "QCIF");
+    check_sps_pps_profile(&sps, 11u, 0u, 1, "QCIF High");
+    sps.width = 1280u; sps.height = 720u; sps.display_width = 1280u; sps.display_height = 720u;
+    check_sps_pps(&sps, 31u, 0u, "720p30");
+    check_sps_pps_profile(&sps, 31u, 0u, 1, "720p30 High");
+    sps.width = 1920u; sps.height = 1088u; sps.display_width = 1920u; sps.display_height = 1080u;
+    sps.log2_max_frame_num = 8u;
+    check_sps_pps(&sps, 40u, 4u, "1080p30");
+    check_sps_pps_profile(&sps, 40u, 4u, 1, "1080p30 High");
+    sps.fps = 60u;
+    check_sps_pps(&sps, 42u, 4u, "1080p60");
+    sps.width = 3840u; sps.height = 2160u; sps.display_width = 3840u; sps.display_height = 2160u; sps.fps = 30u;
+    check_sps_pps(&sps, 51u, 0u, "4K30");
+    sps.height = 2176u;
+    sps.display_height = 2160u;
+    check_sps_pps(&sps, 51u, 8u, "4K30 coded 2176");
+
+    /* Rejections. */
+    sps.width = 1920u; sps.height = 1088u; sps.display_width = 1920u; sps.display_height = 1080u; sps.fps = 30u;
+    sps.log2_max_frame_num = 17u;
+    check(rtlnet_h264_enc_write_sps_pps(small, sizeof(small), &sps, &len) != 0, "log2_max_frame_num 17 rejected");
+    sps.log2_max_frame_num = 8u;
+    check(rtlnet_h264_enc_write_sps_pps(small, sizeof(small), &sps, &len) != 0, "buffer too small rejected");
+    check(rtlnet_h264_enc_write_sps_pps_profile(small, sizeof(small), &sps, 1, &len) != 0, "High form: buffer too small rejected");
+    sps.display_height = 1090u;
+    check(rtlnet_h264_enc_write_sps_pps(small, 64u, &sps, &len) != 0, "crop beyond the picture rejected");
+    sps.display_height = 1080u;
+    sps.width = 1921u;
+    check(rtlnet_h264_enc_write_sps_pps(small, 64u, &sps, &len) != 0, "width not a macroblock multiple rejected");
+    sps.width = 8192u; sps.height = 8192u; sps.display_width = 8192u; sps.display_height = 8192u;
+    check(rtlnet_h264_enc_write_sps_pps(small, 64u, &sps, &len) != 0, "level above 5.2 rejected");
+
+    /* Register access. */
+    memset(g_reg, 0, sizeof(g_reg));
+    check(rtlnet_h264_enc_probe(TEST_BASE, &caps) != 0, "probe rejects an unidentified core");
+    g_reg[RTLNET_REG_ID / 4u] = RTLNET_H264_ID_VALUE;
+    g_reg[RTLNET_REG_VERSION / 4u] = RTLNET_H264_VERSION_VALUE;
+    g_reg[RTLNET_REG_CAPS / 4u] = MODEL_CAPS;
+    check(rtlnet_h264_enc_probe(TEST_BASE, &caps) == 0, "probe");
+    check((caps.max_mb_w == 120u) && (caps.max_mb_h == 68u) && (caps.num_engines == 2u), "caps decode");
+
+    /* Video modes: 720p30 default, 1080p30; band split of two engines. */
+    {
+        rtlnet_h264_enc_mode_t m;
+        rtlnet_h264_enc_sps_cfg_t ms;
+        uint32_t f0, r0, f1, r1;
+
+        check((rtlnet_h264_enc_get_mode(RTLNET_H264_MODE_DEFAULT, &m) == 0) && (m.mb_w == 80u) && (m.mb_h == 45u) &&
+              (m.display_height == 720u) && (m.level_idc == 31u), "720p30 mode");
+        check((rtlnet_h264_enc_get_mode(RTLNET_H264_MODE_1080P30, &m) == 0) && (m.mb_w == 120u) && (m.mb_h == 68u) &&
+              (m.height == 1088u) && (m.display_height == 1080u) && (m.level_idc == 40u), "1080p30 mode");
+        check(rtlnet_h264_enc_get_mode(2u, &m) != 0, "unknown mode rejected");
+        check((rtlnet_h264_enc_band_rows(45u, 2u, 0u, &f0, &r0) == 0) && (rtlnet_h264_enc_band_rows(45u, 2u, 1u, &f1, &r1) == 0) &&
+              (f0 == 0u) && (r0 == 23u) && (f1 == 23u) && (r1 == 22u), "720p bands 23 and 22");
+        check((rtlnet_h264_enc_band_rows(68u, 2u, 0u, &f0, &r0) == 0) && (rtlnet_h264_enc_band_rows(68u, 2u, 1u, &f1, &r1) == 0) &&
+              (f0 == 0u) && (r0 == 34u) && (f1 == 34u) && (r1 == 34u), "1080p bands 34 and 34");
+        check(rtlnet_h264_enc_band_rows(1u, 2u, 1u, &f1, &r1) != 0, "empty band rejected");
+        check(rtlnet_h264_enc_set_mode(TEST_BASE, RTLNET_H264_MODE_DEFAULT, &ms) == 0, "set_mode 720p30");
+        check((g_reg[RTLNET_H264_REG_MB_W / 4u] == 80u) && (g_reg[RTLNET_H264_REG_MB_H / 4u] == 45u), "720p MB_W and MB_H written");
+        check((ms.width == 1280u) && (ms.height == 720u) && (ms.display_height == 720u) && (ms.log2_max_frame_num == 4u),
+              "720p SPS parameters");
+        check_sps_pps(&ms, 31u, 0u, "720p30 SPS from the mode");
+        check(rtlnet_h264_enc_set_mode(TEST_BASE, RTLNET_H264_MODE_1080P30, &ms) == 0, "set_mode 1080p30");
+        check((g_reg[RTLNET_H264_REG_MB_W / 4u] == 120u) && (g_reg[RTLNET_H264_REG_MB_H / 4u] == 68u), "1080p MB_W and MB_H written");
+        check_sps_pps(&ms, 40u, 4u, "1080p30 SPS from the mode (crop_bottom 4)");
+        check(rtlnet_h264_enc_set_mode(TEST_BASE, 5u, &ms) != 0, "set_mode rejects an unknown mode");
+    }
+
+
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.mb_w = 11u; cfg.mb_h = 9u; cfg.slices = 3u; cfg.qp = 26u; cfg.log2_max_frame_num = 4u;
+    cfg.in_base = 0u; cfg.in_stride = 384u; cfg.ry_base = 0x10000u;
+    cfg.ru_base = 0x20000u;
+    cfg.ring_base = 0x40000u; cfg.ring_size = 0x8000u; cfg.idx_base = 0x50000u; cfg.idx_entries = 64u;
+    check(rtlnet_h264_enc_configure(TEST_BASE, &cfg) == 0, "configure");
+    check(g_reg[RTLNET_H264_REG_MB_W / 4u] == 11u, "MB_W written");
+    check(g_reg[RTLNET_H264_REG_SLICES / 4u] == 3u, "SLICES written");
+    check(g_reg[RTLNET_H264_REG_RY_BASE / 4u] == 0x10000u, "RY_BASE (luma tile base) written");
+    check(g_reg[RTLNET_H264_REG_RU_BASE / 4u] == 0x20000u, "RU_BASE (chroma tile base) written");
+    cfg.in_stride = 352u;
+    check(rtlnet_h264_enc_configure(TEST_BASE, &cfg) != 0, "configure rejects an input stride that is not a multiple of 128");
+    cfg.in_stride = 384u; cfg.ry_base = 0x10080u;
+    check(rtlnet_h264_enc_configure(TEST_BASE, &cfg) != 0, "configure rejects a luma tile base that is not a multiple of 256");
+    cfg.ry_base = 0x10000u; cfg.idx_base = 0x50010u;
+    check(rtlnet_h264_enc_configure(TEST_BASE, &cfg) != 0, "configure rejects an index base that is not a multiple of 128");
+    cfg.idx_base = 0x50000u;
+    check(g_reg[RTLNET_H264_REG_IDX_ENTRIES / 4u] == 64u, "IDX_ENTRIES written");
+    check(g_reg[RTLNET_H264_REG_QP / 4u] == 26u, "QP written");
+    check(g_reg[RTLNET_H264_REG_MB_MODE / 4u] == 0u, "MB_MODE 0 (Intra16x16) by default");
+    cfg.qp = 5u;
+    check(rtlnet_h264_enc_configure(TEST_BASE, &cfg) == 0, "configure with QP 5");
+    check(g_reg[RTLNET_H264_REG_QP / 4u] == RTLNET_H264_QP_MIN_REALTIME, "QP 5 clamped to the real-time minimum");
+    cfg.qp = RTLNET_H264_QP_MIN_REALTIME;
+    check(rtlnet_h264_enc_configure(TEST_BASE, &cfg) == 0, "configure with the minimum QP");
+    check(g_reg[RTLNET_H264_REG_QP / 4u] == RTLNET_H264_QP_MIN_REALTIME, "minimum QP written as is");
+    cfg.qp = 51u;
+    check(rtlnet_h264_enc_configure(TEST_BASE, &cfg) == 0, "configure with QP 51");
+    check(g_reg[RTLNET_H264_REG_QP / 4u] == 51u, "QP 51 written as is");
+    cfg.qp = 26u;
+    check(rtlnet_h264_enc_configure(TEST_BASE, &cfg) == 0, "configure with QP 26 again");
+    cfg.mb_pcm = 1u;
+    check(rtlnet_h264_enc_configure(TEST_BASE, &cfg) == 0, "configure with mb_pcm");
+    check(g_reg[RTLNET_H264_REG_MB_MODE / 4u] == 1u, "MB_MODE 1 (I_PCM) written");
+    cfg.mb_pcm = 0u;
+    check(rtlnet_h264_enc_configure(TEST_BASE, &cfg) == 0, "configure back to Intra16x16");
+    check(g_reg[RTLNET_H264_REG_MB_MODE / 4u] == 0u, "MB_MODE cleared");
+    cfg.mb_w = 121u;
+    check(rtlnet_h264_enc_configure(TEST_BASE, &cfg) != 0, "picture wider than the build rejected");
+    check(g_reg[RTLNET_H264_REG_MB_W / 4u] == 11u, "rejected configure writes nothing");
+    cfg.mb_w = 11u; cfg.in_stride = 336u;
+    check(rtlnet_h264_enc_configure(TEST_BASE, &cfg) != 0, "input stride below the picture width rejected");
+    cfg.in_stride = 352u; cfg.slices = 10u;
+    check(rtlnet_h264_enc_configure(TEST_BASE, &cfg) != 0, "more slices than rows rejected");
+
+    rtlnet_h264_enc_ring_reset(TEST_BASE);
+    check((g_reg[0x0F0u / 4u] & RTLNET_H264_CTRL_RING_RESET) != 0u, "ring reset strobe written");
+    check(rtlnet_h264_enc_start_picture(TEST_BASE, 0u, 1u, 1) == 0, "start picture");
+    check((g_reg[0x0F0u / 4u] & RTLNET_H264_CTRL_START) != 0u, "START written");
+    check(g_reg[RTLNET_H264_REG_IDR_PIC_ID / 4u] == 1u, "idr_pic_id written");
+    check((g_reg[RTLNET_H264_REG_PIC_CFG / 4u] & RTLNET_H264_PIC_CFG_IDR) != 0u, "IDR flag set");
+    check(((g_reg[RTLNET_H264_REG_PIC_CFG / 4u] >> 8) & 0x1Fu) == 4u, "log2_max_frame_num kept");
+    g_reg[RTLNET_H264_REG_STATUS / 4u] = RTLNET_H264_STATUS_BUSY;
+    check(rtlnet_h264_enc_start_picture(TEST_BASE, 0u, 2u, 1) != 0, "start while busy rejected");
+    g_reg[RTLNET_H264_REG_STATUS / 4u] = RTLNET_H264_STATUS_DONE;
+    check(rtlnet_h264_enc_wait_done(TEST_BASE, 3u, &err) == 0, "wait_done on DONE");
+    g_reg[RTLNET_H264_REG_STATUS / 4u] = RTLNET_H264_STATUS_ERR;
+    g_reg[RTLNET_H264_REG_ERR_CODE / 4u] = RTLNET_H264_ERR_CONFIG;
+    check((rtlnet_h264_enc_wait_done(TEST_BASE, 3u, &err) != 0) && (err == RTLNET_H264_ERR_CONFIG), "wait_done on ERR");
+    rtlnet_h264_enc_clear_status(TEST_BASE);
+    check(rtlnet_h264_enc_status(TEST_BASE) == 0u, "DONE and ERR cleared");
+    check((rtlnet_h264_enc_wait_done(TEST_BASE, 3u, &err) != 0) && (err == 0xFFu), "wait_done timeout");
+    rtlnet_h264_enc_set_read_pointers(TEST_BASE, 0x1230u, 5u);
+    check((g_reg[RTLNET_H264_REG_RING_RPTR / 4u] == 0x1230u) && (g_reg[RTLNET_H264_REG_IDX_RPTR / 4u] == 5u), "read pointers");
+    g_reg[RTLNET_H264_REG_IDX_WPTR / 4u] = 7u;
+    check(rtlnet_h264_enc_index_wptr(TEST_BASE) == 7u, "index wptr");
+
+    words[0] = 0x100u; words[1] = 0x2345u; words[2] = (2u << 16) | 3u;
+    words[3] = 7u | (26u << 8) | RTLNET_H264_IDX_LAST | RTLNET_H264_IDX_IDR;
+    rtlnet_h264_enc_decode_index_entry(words, &ent);
+    check((ent.offset == 0x100u) && (ent.length == 0x2345u) && (ent.picture == 3u) && (ent.slice == 2u) &&
+          (ent.slice_type == 7u) && (ent.qp == 26u) && ent.last_slice && ent.idr && !ent.is_picture, "slice entry decode");
+    words[3] |= RTLNET_H264_IDX_KIND_PICTURE;
+    rtlnet_h264_enc_decode_index_entry(words, &ent);
+    check(ent.is_picture, "picture entry decode");
+
+    g_reg[RTLNET_H264_REG_MB_COUNT / 4u] = 99u; g_reg[RTLNET_H264_REG_CYC_MAX / 4u] = 391u;
+    rtlnet_h264_enc_read_stats(TEST_BASE, &stats);
+    check((stats.mb_count == 99u) && (stats.cyc_max == 391u), "stats");
+
+    /* P pictures (phase 2c-1): PIC_CFG bit 1, the reference registers, frame_num, the two-buffer helper. */
+    {
+        rtlnet_h264_enc_buffers_t bufs;
+
+        check(RTLNET_H264_VERSION_VALUE == 0x11122C04u, "VERSION with the deblocking filter registers");
+        check(RTLNET_H264_VERSION_PRE_DBK == 0x11122C03u, "VERSION with the interrupt registers");
+        check(RTLNET_H264_VERSION_PRE_IRQ == 0x11102C02u, "VERSION of phase 2c-2");
+        check((RTLNET_H264_REG_REFY_BASE == 0x054u) && (RTLNET_H264_REG_REFU_BASE == 0x058u), "reference register offsets");
+        g_reg[RTLNET_H264_REG_STATUS / 4u] = 0u;
+        g_reg[RTLNET_H264_REG_PIC_CFG / 4u] = (4u << RTLNET_H264_PIC_CFG_LOG2FN_SHIFT) | RTLNET_H264_PIC_CFG_IDR;
+        check(rtlnet_h264_enc_start_picture_ex(TEST_BASE, 5u, 9u, RTLNET_H264_PIC_P) == 0, "start P picture");
+        check((g_reg[RTLNET_H264_REG_PIC_CFG / 4u] & RTLNET_H264_PIC_CFG_P) != 0u, "P flag set");
+        check((g_reg[RTLNET_H264_REG_PIC_CFG / 4u] & RTLNET_H264_PIC_CFG_IDR) == 0u, "IDR flag cleared for a P picture");
+        check(((g_reg[RTLNET_H264_REG_PIC_CFG / 4u] >> RTLNET_H264_PIC_CFG_LOG2FN_SHIFT) & 0x1Fu) == 4u, "log2_max_frame_num kept by a P start");
+        check(g_reg[RTLNET_H264_REG_FRAME_NUM / 4u] == 5u, "P frame_num written");
+        check(g_reg[RTLNET_H264_REG_IDR_PIC_ID / 4u] == 0u, "idr_pic_id 0 for a P picture");
+        check((g_reg[0x0F0u / 4u] & RTLNET_H264_CTRL_START) != 0u, "START written for a P picture");
+        check(rtlnet_h264_enc_start_picture_ex(TEST_BASE, 16u, 0u, RTLNET_H264_PIC_P) != 0, "P frame_num beyond log2_max_frame_num rejected");
+        check(rtlnet_h264_enc_start_picture_ex(TEST_BASE, 1u, 0u, 7u) != 0, "unknown picture type rejected");
+        g_reg[RTLNET_H264_REG_STATUS / 4u] = RTLNET_H264_STATUS_BUSY;
+        check(rtlnet_h264_enc_start_picture_ex(TEST_BASE, 1u, 0u, RTLNET_H264_PIC_P) != 0, "P start while busy rejected");
+        g_reg[RTLNET_H264_REG_STATUS / 4u] = 0u;
+        check(rtlnet_h264_enc_start_picture_ex(TEST_BASE, 3u, 4u, RTLNET_H264_PIC_IDR) == 0, "start IDR picture with the extended start");
+        check(((g_reg[RTLNET_H264_REG_PIC_CFG / 4u] & RTLNET_H264_PIC_CFG_IDR) != 0u) &&
+              ((g_reg[RTLNET_H264_REG_PIC_CFG / 4u] & RTLNET_H264_PIC_CFG_P) == 0u), "IDR flag set, P flag cleared");
+        check((g_reg[RTLNET_H264_REG_FRAME_NUM / 4u] == 0u) && (g_reg[RTLNET_H264_REG_IDR_PIC_ID / 4u] == 4u), "IDR: frame_num 0, idr_pic_id written");
+        g_reg[RTLNET_H264_REG_PIC_CFG / 4u] |= RTLNET_H264_PIC_CFG_P;
+        check(rtlnet_h264_enc_start_picture(TEST_BASE, 0u, 1u, 1) == 0, "the earlier start still works");
+        check((g_reg[RTLNET_H264_REG_PIC_CFG / 4u] & RTLNET_H264_PIC_CFG_P) == 0u, "the earlier start clears the P flag");
+
+        check(rtlnet_h264_enc_next_frame_num(0u, 4u) == 1u, "next frame_num after the IDR picture");
+        check(rtlnet_h264_enc_next_frame_num(14u, 4u) == 15u, "next frame_num below the wrap");
+        check(rtlnet_h264_enc_next_frame_num(15u, 4u) == 0u, "frame_num wraps at 2^log2_max_frame_num (16)");
+        check(rtlnet_h264_enc_next_frame_num(0xFFFFu, 16u) == 0u, "frame_num wraps at 65536");
+        check(rtlnet_h264_enc_next_frame_num(3u, 3u) == 0u, "log2_max_frame_num 3 rejected (0)");
+        check(rtlnet_h264_enc_next_frame_num(3u, 17u) == 0u, "log2_max_frame_num 17 rejected (0)");
+
+        g_reg[RTLNET_H264_REG_REFY_BASE / 4u] = 0xAAAAu;
+        check(rtlnet_h264_enc_set_reference(TEST_BASE, 0x30080u, 0x40000u) != 0, "luma reference base not a multiple of 256 rejected");
+        check(rtlnet_h264_enc_set_reference(TEST_BASE, 0x30000u, 0x40040u) != 0, "chroma reference base not a multiple of 128 rejected");
+        check(g_reg[RTLNET_H264_REG_REFY_BASE / 4u] == 0xAAAAu, "a rejected reference writes nothing");
+        check(rtlnet_h264_enc_set_reference(TEST_BASE, 0x30100u, 0x40080u) == 0, "set_reference");
+        check((g_reg[RTLNET_H264_REG_REFY_BASE / 4u] == 0x30100u) && (g_reg[RTLNET_H264_REG_REFU_BASE / 4u] == 0x40080u), "reference bases written");
+
+        check(rtlnet_h264_enc_buffers_init(&bufs, 0x10000u, 0x20000u, 0x10080u, 0x20000u) != 0, "buffer init rejects a misaligned luma base");
+        check(rtlnet_h264_enc_buffers_init(&bufs, 0x10000u, 0x20000u, 0x50000u, 0x60040u) != 0, "buffer init rejects a misaligned chroma base");
+        check(rtlnet_h264_enc_buffers_init(&bufs, 0x10000u, 0x20000u, 0x50000u, 0x60000u) == 0, "buffer init");
+        g_reg[RTLNET_H264_REG_RY_BASE / 4u] = 0x1111u; g_reg[RTLNET_H264_REG_REFY_BASE / 4u] = 0x2222u;
+        check(rtlnet_h264_enc_buffers_begin(TEST_BASE, &bufs, RTLNET_H264_PIC_P) != 0, "a P picture without a reference is rejected");
+        check((g_reg[RTLNET_H264_REG_RY_BASE / 4u] == 0x1111u) && (g_reg[RTLNET_H264_REG_REFY_BASE / 4u] == 0x2222u), "a rejected begin writes nothing");
+        check(rtlnet_h264_enc_buffers_begin(TEST_BASE, &bufs, RTLNET_H264_PIC_IDR) == 0, "begin the first (IDR) picture");
+        check((g_reg[RTLNET_H264_REG_RY_BASE / 4u] == 0x10000u) && (g_reg[RTLNET_H264_REG_RU_BASE / 4u] == 0x20000u), "picture 0 writes buffer 0");
+        check(g_reg[RTLNET_H264_REG_REFY_BASE / 4u] == 0x2222u, "an IDR picture leaves the reference registers alone");
+        rtlnet_h264_enc_buffers_end(&bufs);
+        check(rtlnet_h264_enc_buffers_begin(TEST_BASE, &bufs, RTLNET_H264_PIC_P) == 0, "begin the first P picture");
+        check((g_reg[RTLNET_H264_REG_RY_BASE / 4u] == 0x50000u) && (g_reg[RTLNET_H264_REG_RU_BASE / 4u] == 0x60000u), "picture 1 writes buffer 1");
+        check((g_reg[RTLNET_H264_REG_REFY_BASE / 4u] == 0x10000u) && (g_reg[RTLNET_H264_REG_REFU_BASE / 4u] == 0x20000u), "picture 1 reads buffer 0");
+        rtlnet_h264_enc_buffers_end(&bufs);
+        check(rtlnet_h264_enc_buffers_begin(TEST_BASE, &bufs, RTLNET_H264_PIC_P) == 0, "begin the second P picture");
+        check((g_reg[RTLNET_H264_REG_RY_BASE / 4u] == 0x10000u) && (g_reg[RTLNET_H264_REG_REFY_BASE / 4u] == 0x50000u) &&
+              (g_reg[RTLNET_H264_REG_REFU_BASE / 4u] == 0x60000u), "picture 2 writes buffer 0 and reads buffer 1");
+        check(rtlnet_h264_enc_buffers_begin(TEST_BASE, &bufs, 9u) != 0, "unknown type rejected by the buffer helper");
+        check(rtlnet_h264_enc_buffers_begin(TEST_BASE, NULL, RTLNET_H264_PIC_P) != 0, "NULL buffers rejected");
+        rtlnet_h264_enc_buffers_init(&bufs, 0x10000u, 0x20000u, 0x50000u, 0x60000u);
+        check((bufs.cur == 0u) && (bufs.has_ref == 0u), "a new IDR picture restarts the buffers");
+    }
+
+    /* High profile seam: CAPS bit 20, HP_STATUS decode, the profile selection and its named errors, PROFILE_CHG. */
+    {
+        rtlnet_h264_enc_hp_t hp;
+        rtlnet_h264_enc_caps_t c2;
+
+        g_reg[RTLNET_REG_CAPS / 4u] = MODEL_CAPS;
+        check((rtlnet_h264_enc_probe(TEST_BASE, &c2) == 0) && (c2.hp_seam == 0u), "no seam: CAPS bit 20 clear");
+        check(rtlnet_h264_enc_hp_status(TEST_BASE, &hp) == RTLNET_H264_HP_ERR_NO_SEAM, "hp_status without the seam");
+        check(rtlnet_h264_enc_set_profile(TEST_BASE, 1) == RTLNET_H264_HP_ERR_NO_SEAM, "profile high without the seam refused");
+        check(rtlnet_h264_enc_set_profile(TEST_BASE, 0) == 0, "profile baseline without the seam is a no-op");
+        check(rtlnet_h264_enc_hp_clear_change(TEST_BASE) == -1, "clear_change without the seam");
+        g_reg[RTLNET_REG_CAPS / 4u] = MODEL_CAPS | RTLNET_H264_CAPS_HP_SEAM;
+        check((rtlnet_h264_enc_probe(TEST_BASE, &c2) == 0) && (c2.hp_seam == 1u), "seam: CAPS bit 20 set");
+        check(rtlnet_h264_enc_hp_status(TEST_BASE, NULL) == -1, "hp_status NULL");
+        /* The stub: seam built, module not present. */
+        g_reg[RTLNET_H264_REG_HP_STATUS / 4u] = 0u;
+        check(rtlnet_h264_enc_set_profile(TEST_BASE, 1) == RTLNET_H264_HP_ERR_NO_MODULE, "profile high with the stub refused: no module");
+        /* Stage 1 netlist, unlimited: present, licensed, caps 0, seconds 0xFFFF. */
+        g_reg[RTLNET_H264_REG_HP_STATUS / 4u] = RTLNET_H264_HP_STATUS_PRESENT | RTLNET_H264_HP_STATUS_LICENSED | (0xFFFFu << 16);
+        g_reg[RTLNET_H264_REG_HP_CTRL / 4u] = 0xA1u;
+        check((rtlnet_h264_enc_hp_status(TEST_BASE, &hp) == 0) && hp.present && hp.licensed && !hp.active && !hp.enabled &&
+              (hp.caps == 0u) && (hp.seconds_left == RTLNET_H264_HP_SECONDS_UNLIMITED), "hp_status decode, stage 1 unlimited");
+        check(rtlnet_h264_enc_set_profile(TEST_BASE, 1) == RTLNET_H264_HP_ERR_NO_CAPS, "profile high refused: hp_caps is 0");
+        check(g_reg[RTLNET_H264_REG_HP_CTRL / 4u] == 0xA1u, "a refused profile change writes nothing");
+        /* A netlist with CABAC, licensed with 90 s left, then expired. */
+        g_reg[RTLNET_H264_REG_HP_STATUS / 4u] = RTLNET_H264_HP_STATUS_PRESENT | RTLNET_H264_HP_STATUS_LICENSED |
+                                                (RTLNET_H264_HP_CAP_CABAC << 8) | (90u << 16);
+        check((rtlnet_h264_enc_hp_status(TEST_BASE, &hp) == 0) && (hp.caps == RTLNET_H264_HP_CAP_CABAC) && (hp.seconds_left == 90u),
+              "hp_status decode, CABAC");
+        check(rtlnet_h264_enc_set_profile(TEST_BASE, 1) == 0, "profile high accepted with caps and license");
+        check(g_reg[RTLNET_H264_REG_HP_CTRL / 4u] == 1u, "hp_enable written 1");
+        check(rtlnet_h264_enc_set_profile(TEST_BASE, 0) == 0, "profile baseline");
+        check(g_reg[RTLNET_H264_REG_HP_CTRL / 4u] == 0u, "hp_enable written 0");
+        g_reg[RTLNET_H264_REG_HP_STATUS / 4u] = RTLNET_H264_HP_STATUS_PRESENT | (RTLNET_H264_HP_CAP_CABAC << 8);
+        check(rtlnet_h264_enc_set_profile(TEST_BASE, 1) == RTLNET_H264_HP_ERR_NOT_LICENSED, "profile high refused: license ended");
+        /* PROFILE_CHG: read, cleared by a write of 1 (the model stores the written value). */
+        g_reg[RTLNET_H264_REG_HP_STATUS / 4u] = RTLNET_H264_HP_STATUS_PRESENT | RTLNET_H264_HP_STATUS_CHG;
+        check(rtlnet_h264_enc_hp_clear_change(TEST_BASE) == 1, "clear_change reports a set flag");
+        check(g_reg[RTLNET_H264_REG_HP_STATUS / 4u] == RTLNET_H264_HP_STATUS_CHG, "clear_change writes 1 to bit 4");
+        g_reg[RTLNET_H264_REG_HP_STATUS / 4u] = RTLNET_H264_HP_STATUS_PRESENT;
+        check(rtlnet_h264_enc_hp_clear_change(TEST_BASE) == 0, "clear_change with the flag clear");
+    }
+
+    /* Stage 3: the 8x8 transform request (HP_CTRL bit 1), its named errors, the profile functions keeping the bit, the PPS extension. */
+    {
+        rtlnet_h264_enc_hp_t hp;
+        rtlnet_h264_enc_sps_cfg_t sps3;
+        uint8_t  buf4[RTLNET_H264_SPS_PPS_MAX_BYTES];
+        uint8_t  buf8[RTLNET_H264_SPS_PPS_MAX_BYTES];
+        size_t   len4 = 0u;
+        size_t   len8 = 0u;
+        size_t   k;
+
+        g_reg[RTLNET_REG_CAPS / 4u] = MODEL_CAPS;
+        check(rtlnet_h264_enc_set_transform8x8(TEST_BASE, 1) == RTLNET_H264_HP_ERR_NO_SEAM, "transform8x8 on without the seam refused");
+        check(rtlnet_h264_enc_set_transform8x8(TEST_BASE, 0) == 0, "transform8x8 off without the seam is a no-op");
+        g_reg[RTLNET_REG_CAPS / 4u] = MODEL_CAPS | RTLNET_H264_CAPS_HP_SEAM;
+        g_reg[RTLNET_H264_REG_HP_STATUS / 4u] = 0u;
+        check(rtlnet_h264_enc_set_transform8x8(TEST_BASE, 1) == RTLNET_H264_HP_ERR_NO_MODULE, "transform8x8 on with the stub refused");
+        g_reg[RTLNET_H264_REG_HP_STATUS / 4u] = RTLNET_H264_HP_STATUS_PRESENT | RTLNET_H264_HP_STATUS_LICENSED | (RTLNET_H264_HP_CAP_CABAC << 8);
+        g_reg[RTLNET_H264_REG_HP_CTRL / 4u] = 0xA5u;
+        check(rtlnet_h264_enc_set_transform8x8(TEST_BASE, 1) == RTLNET_H264_HP_ERR_NO_T8, "transform8x8 on refused: hp_caps bit 1 is 0");
+        check(g_reg[RTLNET_H264_REG_HP_CTRL / 4u] == 0xA5u, "a refused transform8x8 request writes nothing");
+        g_reg[RTLNET_H264_REG_HP_STATUS / 4u] = RTLNET_H264_HP_STATUS_PRESENT | RTLNET_H264_HP_STATUS_LICENSED |
+                                                ((RTLNET_H264_HP_CAP_CABAC | RTLNET_H264_HP_CAP_TRANSFORM8X8) << 8) | RTLNET_H264_HP_STATUS_T8ENABLED;
+        check((rtlnet_h264_enc_hp_status(TEST_BASE, &hp) == 0) && (hp.caps == 3u) && (hp.t8_enabled == 1u), "hp_status decode, CABAC and 8x8, t8 enabled");
+        g_reg[RTLNET_H264_REG_HP_CTRL / 4u] = 0u;
+        check(rtlnet_h264_enc_set_transform8x8(TEST_BASE, 1) == 0, "transform8x8 on accepted with hp_caps bit 1");
+        check(g_reg[RTLNET_H264_REG_HP_CTRL / 4u] == 2u, "HP_CTRL bit 1 written, hp_enable kept clear");
+        check(rtlnet_h264_enc_set_profile(TEST_BASE, 1) == 0 && g_reg[RTLNET_H264_REG_HP_CTRL / 4u] == 3u, "profile high keeps the transform8x8 request");
+        check(rtlnet_h264_enc_set_transform8x8(TEST_BASE, 0) == 0 && g_reg[RTLNET_H264_REG_HP_CTRL / 4u] == 1u, "transform8x8 off keeps hp_enable");
+        check(rtlnet_h264_enc_set_transform8x8(TEST_BASE, 1) == 0 && g_reg[RTLNET_H264_REG_HP_CTRL / 4u] == 3u, "transform8x8 on keeps hp_enable");
+        check(rtlnet_h264_enc_set_profile(TEST_BASE, 0) == 0 && g_reg[RTLNET_H264_REG_HP_CTRL / 4u] == 2u, "profile baseline keeps the transform8x8 request");
+        /* Stage 3a: the adaptive choice (HP_CTRL bit 2 with bit 1), the macroblock counts. */
+        g_reg[RTLNET_H264_REG_HP_CTRL / 4u] = 0x41u;
+        g_reg[RTLNET_H264_REG_HP_STATUS / 4u] = RTLNET_H264_HP_STATUS_PRESENT | RTLNET_H264_HP_STATUS_LICENSED |
+                                                ((RTLNET_H264_HP_CAP_CABAC | RTLNET_H264_HP_CAP_TRANSFORM8X8) << 8);
+        check(rtlnet_h264_enc_set_transform8x8(TEST_BASE, RTLNET_H264_T8_AUTO) == RTLNET_H264_HP_ERR_NO_AUTO && g_reg[RTLNET_H264_REG_HP_CTRL / 4u] == 0x41u,
+              "transform8x8 auto refused: hp_caps bit 2 is 0, nothing written");
+        check(rtlnet_h264_enc_set_transform8x8(TEST_BASE, 1) == 0 && g_reg[RTLNET_H264_REG_HP_CTRL / 4u] == 3u, "transform8x8 on accepted without hp_caps bit 2");
+        g_reg[RTLNET_H264_REG_HP_STATUS / 4u] = RTLNET_H264_HP_STATUS_PRESENT | RTLNET_H264_HP_STATUS_LICENSED |
+                                                ((RTLNET_H264_HP_CAP_CABAC | RTLNET_H264_HP_CAP_TRANSFORM8X8 | RTLNET_H264_HP_CAP_ADAPTIVE) << 8);
+        g_reg[RTLNET_H264_REG_HP_CTRL / 4u] = 2u;
+        check(rtlnet_h264_enc_set_transform8x8(TEST_BASE, RTLNET_H264_T8_AUTO) == 0 && g_reg[RTLNET_H264_REG_HP_CTRL / 4u] == 6u, "transform8x8 auto: bits 1 and 2 written");
+        check(rtlnet_h264_enc_set_profile(TEST_BASE, 1) == 0 && g_reg[RTLNET_H264_REG_HP_CTRL / 4u] == 7u, "profile high keeps the auto request");
+        check(rtlnet_h264_enc_set_profile(TEST_BASE, 0) == 0 && g_reg[RTLNET_H264_REG_HP_CTRL / 4u] == 6u, "profile baseline keeps the auto request");
+        check(rtlnet_h264_enc_set_profile(TEST_BASE, 1) == 0 && rtlnet_h264_enc_set_transform8x8(TEST_BASE, 1) == 0 && g_reg[RTLNET_H264_REG_HP_CTRL / 4u] == 3u,
+              "transform8x8 on clears the auto request, keeps hp_enable");
+        check(rtlnet_h264_enc_set_transform8x8(TEST_BASE, RTLNET_H264_T8_AUTO) == 0 && rtlnet_h264_enc_set_transform8x8(TEST_BASE, 0) == 0 &&
+              g_reg[RTLNET_H264_REG_HP_CTRL / 4u] == 1u, "transform8x8 off clears bits 1 and 2");
+        check(rtlnet_h264_enc_set_transform8x8(TEST_BASE, 7) == 0 && g_reg[RTLNET_H264_REG_HP_CTRL / 4u] == 3u, "any other non-zero mode is on");
+        g_reg[RTLNET_H264_REG_HP_CTRL / 4u] = 0xA5u;
+        g_reg[RTLNET_H264_REG_HP_STATUS / 4u] = RTLNET_H264_HP_STATUS_PRESENT | RTLNET_H264_HP_STATUS_LICENSED | (RTLNET_H264_HP_CAP_CABAC << 8);
+        check(rtlnet_h264_enc_set_transform8x8(TEST_BASE, RTLNET_H264_T8_AUTO) == RTLNET_H264_HP_ERR_NO_T8 && g_reg[RTLNET_H264_REG_HP_CTRL / 4u] == 0xA5u,
+              "transform8x8 auto refused: hp_caps bit 1 is 0, nothing written");
+        g_reg[RTLNET_H264_REG_HP_STATUS / 4u] = 0u;
+        check(rtlnet_h264_enc_set_transform8x8(TEST_BASE, RTLNET_H264_T8_AUTO) == RTLNET_H264_HP_ERR_NO_MODULE, "transform8x8 auto refused with the stub");
+        g_reg[RTLNET_REG_CAPS / 4u] = MODEL_CAPS;
+        check(rtlnet_h264_enc_set_transform8x8(TEST_BASE, RTLNET_H264_T8_AUTO) == RTLNET_H264_HP_ERR_NO_SEAM, "transform8x8 auto refused without the seam");
+        g_reg[RTLNET_REG_CAPS / 4u] = MODEL_CAPS | RTLNET_H264_CAPS_HP_SEAM;
+        g_reg[RTLNET_H264_REG_HP_STATUS / 4u] = RTLNET_H264_HP_STATUS_PRESENT | RTLNET_H264_HP_STATUS_LICENSED | ((RTLNET_H264_HP_CAP_CABAC | RTLNET_H264_HP_CAP_TRANSFORM8X8 | RTLNET_H264_HP_CAP_ADAPTIVE) << 8) |
+                                                RTLNET_H264_HP_STATUS_T8ENABLED | RTLNET_H264_HP_STATUS_T8AUTO;
+        check((rtlnet_h264_enc_hp_status(TEST_BASE, &hp) == 0) && (hp.t8_enabled == 1u) && (hp.t8_auto == 1u), "hp_status decode, t8 enabled and auto");
+        g_reg[RTLNET_H264_REG_HP_STATUS / 4u] = RTLNET_H264_HP_STATUS_PRESENT | (7u << 8) | RTLNET_H264_HP_STATUS_T8ENABLED;
+        check((rtlnet_h264_enc_hp_status(TEST_BASE, &hp) == 0) && (hp.t8_enabled == 1u) && (hp.t8_auto == 0u), "hp_status decode, t8 enabled, not auto");
+        {
+            uint32_t n8 = 99u;
+            uint32_t n4 = 99u;
+            g_reg[RTLNET_H264_REG_HP_T8COUNT / 4u] = (7u << 16) | 1234u;
+            check(rtlnet_h264_enc_t8_counts(TEST_BASE, &n8, &n4) == 0 && n8 == 1234u && n4 == 7u, "t8_counts: 8x8 low half, 4x4 high half");
+            g_reg[RTLNET_H264_REG_HP_T8COUNT / 4u] = 0xFFFFFFFFu;
+            check(rtlnet_h264_enc_t8_counts(TEST_BASE, &n8, &n4) == 0 && n8 == 0xFFFFu && n4 == 0xFFFFu, "t8_counts: full 16 bit fields");
+            check(rtlnet_h264_enc_t8_counts(TEST_BASE, NULL, &n4) == -1 && rtlnet_h264_enc_t8_counts(TEST_BASE, &n8, NULL) == -1, "t8_counts: NULL pointer");
+            g_reg[RTLNET_REG_CAPS / 4u] = MODEL_CAPS;
+            check(rtlnet_h264_enc_t8_counts(TEST_BASE, &n8, &n4) == RTLNET_H264_HP_ERR_NO_SEAM, "t8_counts without the seam");
+            g_reg[RTLNET_REG_CAPS / 4u] = MODEL_CAPS | RTLNET_H264_CAPS_HP_SEAM;
+        }
+        /* The parameter sets with the 8x8 transform: the same SPS, the PPS gains transform_8x8_mode_flag 1, pic_scaling_matrix_present_flag 0,
+         * second_chroma_qp_index_offset se(0): three bits, so the PPS is as long or one byte longer. */
+        sps3.width = 176u; sps3.height = 144u; sps3.display_width = 176u; sps3.display_height = 144u; sps3.fps = 30u; sps3.log2_max_frame_num = 4u;
+        check(rtlnet_h264_enc_write_sps_pps_tools(buf4, sizeof(buf4), &sps3, 1, 0, &len4) == 0, "write_sps_pps_tools High, 4x4 transform");
+        check(rtlnet_h264_enc_write_sps_pps_tools(buf8, sizeof(buf8), &sps3, 1, 1, &len8) == 0, "write_sps_pps_tools High, 8x8 transform");
+        {
+            uint8_t  bufp[RTLNET_H264_SPS_PPS_MAX_BYTES];
+            size_t   lenp = 0u;
+            check((rtlnet_h264_enc_write_sps_pps_profile(bufp, sizeof(bufp), &sps3, 1, &lenp) == 0) && (lenp == len4), "write_sps_pps_profile is the 4x4 form");
+            for (k = 0u; (k < lenp) && (bufp[k] == buf4[k]); k++) { }
+            check(k == lenp, "write_sps_pps_profile bytes equal tools(t8 0)");
+        }
+        check((len8 >= len4) && (len8 <= len4 + 1u), "PPS with the extension is at most one byte longer");
+        {
+            size_t i;
+            size_t sps_end = 0u;
+            size_t d = 0u;
+            for (i = 4u; i + 4u < len4; i++) {          /* the PPS start code: the second 00 00 00 01 (or 00 00 01) */
+                if ((buf4[i] == 0u) && (buf4[i + 1u] == 0u) && ((buf4[i + 2u] == 1u) || ((buf4[i + 2u] == 0u) && (buf4[i + 3u] == 1u)))) {
+                    sps_end = i;
+                    break;
+                }
+            }
+            check(sps_end > 0u, "PPS start code found");
+            for (i = 0u; i < sps_end; i++) { if (buf4[i] != buf8[i]) { d++; } }
+            check(d == 0u, "the SPS is identical with and without the 8x8 transform");
+            check(rtlnet_h264_enc_write_sps_pps_tools(buf8, sizeof(buf8), &sps3, 0, 1, &len8) == 0, "write_sps_pps_tools Baseline ignores t8");
+            check(rtlnet_h264_enc_write_sps_pps(buf4, sizeof(buf4), &sps3, &len4) == 0 && len4 == len8, "Baseline form with t8 requested equals the plain Baseline form");
+            for (i = 0u; (i < len4) && (buf4[i] == buf8[i]); i++) { }
+            check(i == len4, "Baseline bytes equal");
+        }
+    }
+
+    /* Interrupt registers: capability detection, enable, global enable, status, acknowledge, force. */
+    {
+        uint32_t src = 0xFFu;
+        rtlnet_h264_enc_caps_t c;
+
+        memset(g_reg, 0, sizeof(g_reg));
+        g_reg[RTLNET_REG_ID / 4u] = RTLNET_H264_ID_VALUE;
+        /* An older core (VERSION 0x11102C02, CAPS bits 21 and [31:24] clear): probe accepts it, no interrupt capability, the writers refuse. */
+        g_reg[RTLNET_REG_VERSION / 4u] = RTLNET_H264_VERSION_PRE_IRQ;
+        g_reg[RTLNET_REG_CAPS / 4u] = MODEL_CAPS;
+        check((rtlnet_h264_enc_probe(TEST_BASE, &c) == 0) && (c.irq == 0u) && (c.irq_sources == 0u) && (c.version == RTLNET_H264_VERSION_PRE_IRQ),
+              "an older core probes with caps.irq 0");
+        check(rtlnet_h264_enc_irq_capable(TEST_BASE, &src) == 0 && src == 0u, "irq_capable: older core");
+        check(rtlnet_h264_enc_irq_set_enable(TEST_BASE, 1u) == -1, "irq_set_enable refused on an older core");
+        check(rtlnet_h264_enc_irq_global(TEST_BASE, 1) == -1, "irq_global refused on an older core");
+        check(rtlnet_h264_enc_irq_force(TEST_BASE, 1u) == -1, "irq_force refused on an older core");
+        check(g_reg[RTLNET_H264_REG_IRQ_ENABLE / 4u] == 0u && g_reg[RTLNET_H264_REG_CTRL / 4u] == 0u, "an older core: nothing written");
+        /* A core with the registers: CAPS bit 21, source mask 0x27 (no High profile sources) or 0x3F. */
+        g_irq_impl = 0x27u;
+        g_reg[RTLNET_REG_VERSION / 4u] = RTLNET_H264_VERSION_VALUE;
+        g_reg[RTLNET_REG_CAPS / 4u] = MODEL_CAPS | RTLNET_H264_CAPS_IRQ | (g_irq_impl << RTLNET_H264_CAPS_IRQ_SRC_SHIFT);
+        check((rtlnet_h264_enc_probe(TEST_BASE, &c) == 0) && (c.irq == 1u) && (c.irq_sources == 0x27u), "caps.irq and the source mask");
+        check(rtlnet_h264_enc_irq_capable(TEST_BASE, &src) == 1 && src == 0x27u, "irq_capable: source mask 0x27");
+        /* CAPS bit 21 with the older VERSION is not a capability. */
+        g_reg[RTLNET_REG_VERSION / 4u] = RTLNET_H264_VERSION_PRE_IRQ;
+        check(rtlnet_h264_enc_irq_capable(TEST_BASE, NULL) == 0, "irq_capable needs the current VERSION");
+        g_reg[RTLNET_REG_VERSION / 4u] = RTLNET_H264_VERSION_VALUE;
+        check(rtlnet_h264_enc_irq_set_enable(TEST_BASE, RTLNET_H264_IRQ_PIC_DONE | RTLNET_H264_IRQ_ERR | RTLNET_H264_IRQ_PROFILE_CHG) == 0, "irq_set_enable");
+        check(rtlnet_h264_enc_irq_get_enable(TEST_BASE) == (RTLNET_H264_IRQ_PIC_DONE | RTLNET_H264_IRQ_ERR), "irq_get_enable: bits of absent sources drop");
+        check(rtlnet_h264_enc_irq_global(TEST_BASE, 1) == 0 && (g_reg[RTLNET_H264_REG_CTRL / 4u] & RTLNET_H264_CTRL_IRQ_EN) != 0u, "irq_global on");
+        check(rtlnet_h264_enc_irq_global(TEST_BASE, 0) == 0 && (g_reg[RTLNET_H264_REG_CTRL / 4u] & RTLNET_H264_CTRL_IRQ_EN) == 0u, "irq_global off");
+        check(rtlnet_h264_enc_irq_status(TEST_BASE) == 0u, "irq_status after reset");
+        check(rtlnet_h264_enc_irq_force(TEST_BASE, RTLNET_H264_IRQ_RING_STALL | 0xC0u) == 0, "irq_force");
+        check(rtlnet_h264_enc_irq_status(TEST_BASE) == RTLNET_H264_IRQ_RING_STALL, "irq_force sets implemented bits only");
+        rtlnet_h264_enc_irq_ack(TEST_BASE, RTLNET_H264_IRQ_PIC_DONE);
+        check(rtlnet_h264_enc_irq_status(TEST_BASE) == RTLNET_H264_IRQ_RING_STALL, "acknowledge of another bit clears nothing");
+        rtlnet_h264_enc_irq_ack(TEST_BASE, RTLNET_H264_IRQ_RING_STALL);
+        check(rtlnet_h264_enc_irq_status(TEST_BASE) == 0u, "acknowledge clears the bit");
+        /* The polled start keeps the global enable (the earlier start functions preserve CTRL.IRQ_EN). */
+        (void)rtlnet_h264_enc_irq_global(TEST_BASE, 1);
+        g_reg[RTLNET_H264_REG_PIC_CFG / 4u] = 4u << RTLNET_H264_PIC_CFG_LOG2FN_SHIFT;
+        check(rtlnet_h264_enc_start_picture_ex(TEST_BASE, 0u, 0u, RTLNET_H264_PIC_IDR) == 0, "start with the global enable set");
+        check((g_reg[RTLNET_H264_REG_CTRL / 4u] & RTLNET_H264_CTRL_IRQ_EN) != 0u, "start_picture_ex keeps the global enable");
+        rtlnet_h264_enc_ring_reset(TEST_BASE);
+        check((g_reg[RTLNET_H264_REG_CTRL / 4u] & RTLNET_H264_CTRL_IRQ_EN) != 0u, "ring_reset keeps the global enable");
+        g_irq_impl = 0x3Fu;
+    }
+
+    /* Deblocking filter (CAPS bit 22, VERSION 0x11122C04): DBK_CTRL and DBK_STATUS. */
+    {
+        rtlnet_h264_enc_dbk_t dbk;
+        rtlnet_h264_enc_caps_t c;
+
+        check((RTLNET_H264_REG_DBK_CTRL == 0x0E0u) && (RTLNET_H264_REG_DBK_STATUS == 0x0E4u), "DBK register offsets");
+        check(RTLNET_H264_CAPS_DBK == (1u << 22), "CAPS bit 22 is DBK");
+        check((RTLNET_H264_DBK_ERR_NOT_PRESENT < -1) && (RTLNET_H264_DBK_ERR_RANGE < -1) && (RTLNET_H264_DBK_ERR_NOT_PRESENT != RTLNET_H264_DBK_ERR_RANGE) &&
+              (RTLNET_H264_DBK_ERR_NOT_PRESENT != RTLNET_H264_HP_ERR_NO_AUTO) && (RTLNET_H264_DBK_ERR_RANGE != RTLNET_H264_HP_ERR_NO_AUTO), "named DBK errors are distinct");
+        memset(g_reg, 0, sizeof(g_reg));
+        g_reg[RTLNET_REG_ID / 4u] = RTLNET_H264_ID_VALUE;
+        g_reg[RTLNET_REG_VERSION / 4u] = RTLNET_H264_VERSION_VALUE;
+        /* A build without the filter (DEBLOCK = 0): CAPS bit 22 clear; the registers read 0 and a write of 1 is ignored. */
+        g_reg[RTLNET_REG_CAPS / 4u] = MODEL_CAPS;
+        check((rtlnet_h264_enc_probe(TEST_BASE, &c) == 0) && (c.dbk == 0u), "caps.dbk 0 without CAPS bit 22");
+        rtlnet_reg_write32(TEST_BASE, RTLNET_H264_REG_DBK_CTRL, 0x6A1u);
+        check(g_reg[RTLNET_H264_REG_DBK_CTRL / 4u] == 0u, "model: DBK_CTRL without the filter reads 0, writes ignored");
+        g_reg[RTLNET_H264_REG_DBK_CTRL / 4u] = 0xA5u;   /* sentinel: a refused call must leave it */
+        check(rtlnet_h264_enc_set_deblock(TEST_BASE, 1) == RTLNET_H264_DBK_ERR_NOT_PRESENT, "set_deblock on refused without the filter");
+        check(g_reg[RTLNET_H264_REG_DBK_CTRL / 4u] == 0xA5u, "a refused set_deblock writes nothing");
+        check(rtlnet_h264_enc_set_deblock(TEST_BASE, 0) == 0 && g_reg[RTLNET_H264_REG_DBK_CTRL / 4u] == 0xA5u, "set_deblock off without the filter is an accepted no-op");
+        check(rtlnet_h264_enc_set_deblock_offsets(TEST_BASE, 1, 2) == RTLNET_H264_DBK_ERR_NOT_PRESENT && g_reg[RTLNET_H264_REG_DBK_CTRL / 4u] == 0xA5u,
+              "set_deblock_offsets refused without the filter, nothing written");
+        check(rtlnet_h264_enc_set_deblock_offsets(TEST_BASE, 9, 0) == RTLNET_H264_DBK_ERR_RANGE, "range is checked before presence");
+        dbk.present = 7u;
+        check((rtlnet_h264_enc_deblock_status(TEST_BASE, &dbk) == RTLNET_H264_DBK_ERR_NOT_PRESENT) && (dbk.present == 0u) && (dbk.enable == 0u) &&
+              (dbk.applied == 0u) && (dbk.alpha_applied == 0) && (dbk.alpha_req == 0), "deblock_status without the filter: named error, zeroed");
+        check(rtlnet_h264_enc_deblock_status(TEST_BASE, NULL) == -1, "deblock_status NULL");
+        /* The previous core (VERSION 0x11122C03) probes: no filter, the interrupt registers exist. */
+        g_reg[RTLNET_REG_VERSION / 4u] = RTLNET_H264_VERSION_PRE_DBK;
+        g_reg[RTLNET_REG_CAPS / 4u] = MODEL_CAPS | RTLNET_H264_CAPS_IRQ | (0x27u << RTLNET_H264_CAPS_IRQ_SRC_SHIFT);
+        check((rtlnet_h264_enc_probe(TEST_BASE, &c) == 0) && (c.dbk == 0u) && (c.irq == 1u) && (c.irq_sources == 0x27u) && (c.version == RTLNET_H264_VERSION_PRE_DBK),
+              "VERSION 0x11122C03 probes with caps.dbk 0 and the interrupt registers");
+        check(rtlnet_h264_enc_irq_capable(TEST_BASE, NULL) == 1, "irq_capable on VERSION 0x11122C03");
+        /* CAPS bit 22 with an older VERSION is not a capability. */
+        g_reg[RTLNET_REG_CAPS / 4u] = MODEL_CAPS | RTLNET_H264_CAPS_DBK;
+        check((rtlnet_h264_enc_probe(TEST_BASE, &c) == 0) && (c.dbk == 0u), "caps.dbk needs the current VERSION");
+        /* A build with the filter: reset value enable 1, offsets 0. */
+        g_reg[RTLNET_REG_VERSION / 4u] = RTLNET_H264_VERSION_VALUE;
+        g_reg[RTLNET_H264_REG_DBK_CTRL / 4u] = 1u;
+        g_reg[RTLNET_H264_REG_DBK_STATUS / 4u] = RTLNET_H264_DBK_STATUS_PRESENT;
+        check((rtlnet_h264_enc_probe(TEST_BASE, &c) == 0) && (c.dbk == 1u) && (c.version == RTLNET_H264_VERSION_VALUE), "caps.dbk 1 with CAPS bit 22");
+        check((rtlnet_h264_enc_deblock_status(TEST_BASE, &dbk) == 0) && (dbk.present == 1u) && (dbk.enable == 1u) && (dbk.applied == 0u) &&
+              (dbk.alpha_req == 0) && (dbk.beta_req == 0) && (dbk.alpha_applied == 0) && (dbk.beta_applied == 0), "deblock_status: reset state, on, offsets 0");
+        check(rtlnet_h264_enc_set_deblock(TEST_BASE, 0) == 0 && g_reg[RTLNET_H264_REG_DBK_CTRL / 4u] == 0u, "set_deblock off clears the enable bit");
+        check((rtlnet_h264_enc_deblock_status(TEST_BASE, &dbk) == 0) && (dbk.enable == 0u), "deblock_status: off");
+        check(rtlnet_h264_enc_set_deblock(TEST_BASE, 1) == 0 && g_reg[RTLNET_H264_REG_DBK_CTRL / 4u] == 1u, "set_deblock on sets the enable bit");
+        check(rtlnet_h264_enc_set_deblock(TEST_BASE, 5) == 0 && g_reg[RTLNET_H264_REG_DBK_CTRL / 4u] == 1u, "any non-zero value is on");
+        check(rtlnet_h264_enc_set_deblock_offsets(TEST_BASE, -6, 6) == 0 && g_reg[RTLNET_H264_REG_DBK_CTRL / 4u] == 0x6A1u,
+              "offsets -6 and +6: alpha field 0xA, beta field 6, enable kept");
+        check((rtlnet_h264_enc_deblock_status(TEST_BASE, &dbk) == 0) && (dbk.enable == 1u) && (dbk.alpha_req == -6) && (dbk.beta_req == 6), "deblock_status: offsets requested decode");
+        check(rtlnet_h264_enc_set_deblock(TEST_BASE, 0) == 0 && g_reg[RTLNET_H264_REG_DBK_CTRL / 4u] == 0x6A0u, "set_deblock off keeps the offsets");
+        check(rtlnet_h264_enc_set_deblock_offsets(TEST_BASE, 0, -1) == 0 && g_reg[RTLNET_H264_REG_DBK_CTRL / 4u] == 0xF00u, "offsets 0 and -1 keep the enable bit (off)");
+        check(rtlnet_h264_enc_set_deblock(TEST_BASE, 1) == 0 && g_reg[RTLNET_H264_REG_DBK_CTRL / 4u] == 0xF01u, "set_deblock on keeps the offsets");
+        /* Range: both limits accepted, any value outside refused with nothing written. */
+        check(rtlnet_h264_enc_set_deblock_offsets(TEST_BASE, 6, -6) == 0 && g_reg[RTLNET_H264_REG_DBK_CTRL / 4u] == 0xA61u, "offsets +6 and -6 accepted");
+        check(rtlnet_h264_enc_set_deblock_offsets(TEST_BASE, 7, 0) == RTLNET_H264_DBK_ERR_RANGE && g_reg[RTLNET_H264_REG_DBK_CTRL / 4u] == 0xA61u, "alpha +7 refused, nothing written");
+        check(rtlnet_h264_enc_set_deblock_offsets(TEST_BASE, 0, -7) == RTLNET_H264_DBK_ERR_RANGE && g_reg[RTLNET_H264_REG_DBK_CTRL / 4u] == 0xA61u, "beta -7 refused, nothing written");
+        check(rtlnet_h264_enc_set_deblock_offsets(TEST_BASE, -7, 7) == RTLNET_H264_DBK_ERR_RANGE && rtlnet_h264_enc_set_deblock_offsets(TEST_BASE, 100, 0) == RTLNET_H264_DBK_ERR_RANGE &&
+              rtlnet_h264_enc_set_deblock_offsets(TEST_BASE, 0, -100) == RTLNET_H264_DBK_ERR_RANGE && g_reg[RTLNET_H264_REG_DBK_CTRL / 4u] == 0xA61u, "larger values refused, nothing written");
+        /* The model's write masks (the core's rules): a field outside -6..+6 stays, the other fields are written, other bits read 0. */
+        g_reg[RTLNET_H264_REG_DBK_STATUS / 4u] = RTLNET_H264_DBK_STATUS_PRESENT | RTLNET_H264_DBK_STATUS_APPLIED | (0xAu << 8) | (0x6u << 12);
+        check((rtlnet_h264_enc_deblock_status(TEST_BASE, &dbk) == 0) && (dbk.applied == 1u) && (dbk.alpha_applied == -6) && (dbk.beta_applied == 6),
+              "deblock_status: applied to the last picture, alpha -6, beta +6");
+        check((dbk.alpha_req == 6) && (dbk.beta_req == -6), "deblock_status: requested and applied offsets are separate");
+        g_reg[RTLNET_H264_REG_DBK_STATUS / 4u] = RTLNET_H264_DBK_STATUS_PRESENT | (0xFu << 8) | (0x7u << 12);
+        check((rtlnet_h264_enc_deblock_status(TEST_BASE, &dbk) == 0) && (dbk.applied == 0u) && (dbk.alpha_applied == -1) && (dbk.beta_applied == 7),
+              "deblock_status: not applied, alpha -1, beta 7");
+        rtlnet_reg_write32(TEST_BASE, RTLNET_H264_REG_DBK_CTRL, 0xFFFFFFFFu);
+        check(g_reg[RTLNET_H264_REG_DBK_CTRL / 4u] == 0xFF1u, "model: all-ones write: enable 1, both fields -1, the other bits read 0");
+        rtlnet_reg_write32(TEST_BASE, RTLNET_H264_REG_DBK_CTRL, 0xFFFFF970u);
+        check(g_reg[RTLNET_H264_REG_DBK_CTRL / 4u] == 0xFF0u, "model: alpha 7 and beta 9 are outside -6..+6 and stay, enable 0");
+        rtlnet_reg_write32(TEST_BASE, RTLNET_H264_REG_DBK_CTRL, 0x831u);
+        check(g_reg[RTLNET_H264_REG_DBK_CTRL / 4u] == 0xF31u, "model: alpha 3 written, beta 8 outside the range stays, enable 1");
+        rtlnet_reg_write32(TEST_BASE, RTLNET_H264_REG_DBK_STATUS, 0u);
+        check(g_reg[RTLNET_H264_REG_DBK_STATUS / 4u] != 0u, "model: DBK_STATUS is read only");
+    }
+
+    if (g_fails == 0) {
+        printf("DRIVER TEST PASS: rtlnet_h264_enc checks=%d\n", g_checks);
+        return 0;
+    }
+    printf("DRIVER TEST FAIL: rtlnet_h264_enc fails=%d checks=%d\n", g_fails, g_checks);
+    return 1;
+}

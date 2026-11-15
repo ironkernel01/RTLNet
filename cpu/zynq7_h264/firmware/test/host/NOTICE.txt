@@ -1,0 +1,7 @@
+Purpose: retained portable encoder-session test provenance.
+Revision: 11-14-2026.
+Sources: cpu/microblaze_v_h264/firmware/host public models and test/venc_irq_host_test.c.
+The extraction script selects DDR, framebuf, IRQ and UDP portions; network/CLI models are absent.
+ARM adaptations: DDR base zero, 32-byte platform cache contract, microsecond stamps,
+ZCAM mode/PTS register map, one model engine, Cortex-A9 opaque IRQ-mask bit.
+Original notices remain. This models logical platform APIs, not PS GIC/cache/GEM hardware.

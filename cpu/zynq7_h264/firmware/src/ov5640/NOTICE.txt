@@ -1,0 +1,9 @@
+Purpose: provenance of OV5640 register-table data.
+Revision: 11-14-2026.
+Origin: Digilent Zybo-Z7-20 Pcam-5C software release 20/Pcam-5C/2025.1-1.
+Source snapshot identified by the collection: 06f2b4d8efe9b156e18a291537e0cd680a4d1d5b.
+The original OV5640.h is retained byte for byte. Its original author notice is
+preserved in the C table view. The collected software source archive contains
+no separately named LICENSE/COPYING file; no unverified MIT grant is invented
+for these software tables. Review the vendor software terms before release.
+Only the C table view is compiled; the vendor C++ camera class is not used.
