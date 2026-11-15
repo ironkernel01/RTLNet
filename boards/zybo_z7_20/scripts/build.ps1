@@ -1,7 +1,7 @@
 <#
 Purpose: build the Zybo Z7-20 camera baseline through the shared Vivado launcher.
 Overview: each tag owns its project, reports and gated exports; no programming.
-Revision: 11-14-2026. Initial camera baseline flow.
+Revision: 11-15-2026. -Receiver reference|own selects the camera receiver of the Baseline stage (reference = vendored Digilent chain, own = IronKernel rtlnet_csi2_rx).
 #>
 param(
     [ValidatePattern('^[A-Za-z0-9_]{1,24}$')][string]$Tag = 'camera',
@@ -11,7 +11,8 @@ param(
     [ValidateSet('cabac','t8','all')][string]$HpTools = 'all',
     [string]$HpNetlist = '',
     [ValidateSet('original','explore','holdfix')][string]$Implementation = 'holdfix',
-    [ValidateSet('none','bd')][string]$StopAfter = 'none'
+    [ValidateSet('none','bd')][string]$StopAfter = 'none',
+    [ValidateSet('reference','own')][string]$Receiver = 'reference'
 )
 $ErrorActionPreference = 'Stop'
 $ReturnCode=1
@@ -41,6 +42,7 @@ if ($HighProfile -ne 'none') {
         throw 'RTLNET_BUILD: FAIL netlist_info.txt must identify xc7z020clg400-1 delivery'
     }
 }
+if ($Receiver -eq 'own' -and $Stage -ne 'baseline') { throw 'RTLNET_BUILD: FAIL -Receiver own exists for -Stage baseline only' }
 if ($Stage -eq 'baseline') {
     $CameraInfo = Join-Path $Board "build/$CameraTag/build_info.txt"
     if (-not (Test-Path -LiteralPath $CameraInfo) -or
@@ -58,7 +60,7 @@ New-Item -ItemType Directory -Force -Path $Build | Out-Null
 $Python = Resolve-RtlnetPython
 if($Python.Contains(',')){throw 'Resolved Python path contains an unsupported Tcl argument separator'}
 if($Stage -eq 'baseline') {
-    & $Python -I (Join-Path $PSScriptRoot 'check_baseline_sources.py') --manifest (Join-Path $Build 'baseline_sources.tcl')
+    & $Python -I (Join-Path $PSScriptRoot 'check_baseline_sources.py') --receiver $Receiver --manifest (Join-Path $Build 'baseline_sources.tcl')
     if($LASTEXITCODE -ne 0){throw 'Baseline source closure check fails before Vivado'}
 }
 & $Python -I (Join-Path $PSScriptRoot 'rtlnet_prepare_camera_ip.py') $Build
@@ -68,7 +70,7 @@ if($HighProfile -ne 'none') {
     $provenance="hp_edif_sha256 $hash`nhp_variant $HighProfile`nhp_tools $HpTools`n"+[System.IO.File]::ReadAllText($deliveryInfo)
     [System.IO.File]::WriteAllText((Join-Path $Build 'hp_delivery.txt'),$provenance,(New-Object System.Text.UTF8Encoding($false)))
 }
-$BuildArgs = "tag,$Tag,stage,$Stage,highprofile,$HighProfile,implementation,$Implementation,stop,$StopAfter,python," + ($Python -replace '\\','/')
+$BuildArgs = "tag,$Tag,stage,$Stage,receiver,$Receiver,highprofile,$HighProfile,implementation,$Implementation,stop,$StopAfter,python," + ($Python -replace '\\','/')
 if ($HighProfile -ne 'none') {
     $BuildArgs += ',hp_netlist,' + ((Resolve-Path -LiteralPath $HpNetlist).Path -replace '\\','/')
     $BuildArgs += ",hp_t8,$(if ($HpTools -eq 'cabac') {0} else {1}),hp_auto,$(if ($HpTools -eq 'all') {1} else {0})"

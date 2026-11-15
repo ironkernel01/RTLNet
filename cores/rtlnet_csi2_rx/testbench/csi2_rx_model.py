@@ -20,7 +20,7 @@
 #     model (CRC-16 check value, ECC parity masks, constant picture, black and white).
 # Language: Python 3 (no packages).
 # Revision: 11-15-2026
-#   * 11-15-2026: initial version.
+#   * 11-15-2026: initial version; green equalisation (gamma word bit 1).
 # -----------------------------------------------------------------------------
 import os
 import sys
@@ -28,7 +28,7 @@ import sys
 GAMMA_Y = [0, 72, 99, 119, 136, 151, 164, 175, 186, 197, 206, 215, 224, 232, 240, 248, 255]
 
 # set name -> (mode 0 geometry, mode 1 geometry, cases)
-# case: (name, iw, ih, mode, phase, black, gr, gg, gb, gamma)
+# case: (name, iw, ih, mode, phase, black, gr, gg, gb, gamma word: bit 0 gamma, bit 1 green equalisation)
 SETS = {
     'small': {
         'geom': {0: (32, 8), 1: (24, 10)},
@@ -41,6 +41,9 @@ SETS = {
             ('short_pad',  12, 6,  0, 0, 0,  0x100, 0x100, 0x100, 0),
             ('long_cut',   40, 10, 0, 2, 8,  0x140, 0x100, 0x140, 0),
             ('cut3',       32, 8,  0, 0, 0,  0x100, 0x100, 0x100, 0, 3, 3),
+            # gamma word 2 = green equalisation, 3 = green equalisation and gamma (PROC bits 1 and 0)
+            ('geq_p3',     32, 8,  0, 3, 0,  0x163, 0x100, 0x163, 2),
+            ('geq_p1_g',   32, 8,  0, 1, 16, 0x180, 0x100, 0x1C0, 3),
         ],
     },
     # Fault cases of the full-path bench (small geometry): kind 1 = line k never arrives, kind 2 = line k arrives with 4 pixels only,
@@ -162,7 +165,7 @@ def mirror(i, n):
     return i
 
 
-def demosaic(p, W, H, phase):
+def demosaic(p, W, H, phase, geq=0):
     out = []
     for y in range(H):
         row = []
@@ -182,9 +185,9 @@ def demosaic(p, W, H, phase):
             elif kind == 'B':
                 rgb = (diag, cross, c)
             elif u == 1 and v == 0:          # G on a red row
-                rgb = (horz, c, vert)
+                rgb = (horz, (c + diag + 1) >> 1 if geq else c, vert)
             else:                            # G on a blue row
-                rgb = (vert, c, horz)
+                rgb = (vert, (c + diag + 1) >> 1 if geq else c, horz)
             row.append(rgb)
         out.append(row)
     return out
@@ -226,8 +229,9 @@ def yuv_words(rgb8, W, H):
 def expected(rows, W, H, phase, black, gr, gg, gb, gamma):
     c = condition(rows, W, H)
     p = preprocess(c, W, H, phase, black, gr, gg, gb)
-    d = demosaic(p, W, H, phase)
-    rgb8 = [[tuple(gamma8(to8(v), gamma) for v in px) for px in row] for row in d]
+    # The gamma word of a case: bit 0 gamma curve, bit 1 green equalisation (PROC register bits).
+    d = demosaic(p, W, H, phase, (gamma >> 1) & 1)
+    rgb8 = [[tuple(gamma8(to8(v), gamma & 1) for v in px) for px in row] for row in d]
     return yuv_words(rgb8, W, H)
 
 

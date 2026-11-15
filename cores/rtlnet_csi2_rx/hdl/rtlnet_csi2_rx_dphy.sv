@@ -29,6 +29,7 @@ module rtlnet_csi2_rx_dphy #(
   parameter string TARGET          = "GENERIC",   // "AMD" selects the 7-series primitives of rtlnet_csi2_rx_dphy_io
   parameter bit    NONCONT_CLOCK   = 1'b0,        // 1: the BUFR divider is held in reset while the clock lane is in the stop state
   parameter bit    IDELAYCTRL_INST = 1'b1,
+  parameter bit    HS_DIFF_TERM    = 1'b1,        // see rtlnet_csi2_rx_dphy_io
   parameter int    SYNC_WINDOW     = 24,
   parameter int    MAX_SKEW        = 3,
   parameter int    CLK_STOP_CLKS   = 64
@@ -107,7 +108,7 @@ module rtlnet_csi2_rx_dphy #(
     .clk(byte_clk), .resetn(byte_resetn_g), .d({cfg_lane_en, cfg_bit_rev}), .q({lane_en_b, bit_rev_b})
   );
 
-  rtlnet_csi2_rx_dphy_io #(.TARGET(TARGET), .IDELAYCTRL_INST(IDELAYCTRL_INST)) u_io (
+  rtlnet_csi2_rx_dphy_io #(.TARGET(TARGET), .IDELAYCTRL_INST(IDELAYCTRL_INST), .HS_DIFF_TERM(HS_DIFF_TERM)) u_io (
     .ref_clk(ref_clk), .ref_resetn(ref_resetn),
     .hs_clk_p(hs_clk_p), .hs_clk_n(hs_clk_n), .hs_dat_p(hs_dat_p), .hs_dat_n(hs_dat_n),
     .tap0(tap0_r), .tap1(tap1_r), .bufr_clr(NONCONT_CLOCK && clk_stop),

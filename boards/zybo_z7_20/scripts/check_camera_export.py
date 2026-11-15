@@ -38,7 +38,7 @@ def check_tcl(board, root):
             tcl.eval('proc exit {code} {return -code error -errorcode [list MOCK_EXIT $code] "MOCK_EXIT $code"}')
             tcl.call('source', (board / 'scripts/rtlnet_camera_export.tcl').as_posix())
             for name, value in [('board', board.as_posix()), ('build', build.as_posix()),
-                                ('opt(stage)', stage), ('opt(python)', sys.executable),
+                                ('opt(stage)', stage), ('opt(receiver)', 'reference'), ('::rtlnet_own', 0), ('opt(python)', sys.executable),
                                 ('::rtlnet_dphy_deviation', 1), ('::rtlnet_failure_code', 99)]:
                 tcl.setvar(name, value)
             settings = {}

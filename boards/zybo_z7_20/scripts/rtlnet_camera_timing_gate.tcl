@@ -72,3 +72,16 @@ proc rtlnet_camera_timing::evaluate {wpws pulse_failures reports} {
   close $evidence
   return [classify $setup $hold $wpws $pulse_failures]
 }
+
+# Own receiver (rtlnet_csi2_rx): the reviewed endpoints are the two ISERDESE2 DDLY pins of its data lanes. The IDELAYE2 tap is loaded at
+# run time (RX_TAPS), so static timing sees the tap of the primitive attribute (0); a failing endpoint is the same named deviation
+# DPHY_HS_INPUT, and the run-time measurement (tap sweep) is the evidence that static timing cannot give.
+proc rtlnet_camera_timing::use_own_endpoints {} {
+  variable endpoints
+  set cells [get_cells -quiet -hierarchical -filter {REF_NAME == ISERDESE2}]
+  set found {}
+  foreach pin [get_pins -quiet -of_objects $cells -filter {REF_PIN_NAME == DDLY}] {lappend found [get_property NAME $pin]}
+  if {[llength $found] != 2} {error "own receiver: expected two ISERDESE2 DDLY pins, found [llength $found]"}
+  set endpoints [lsort $found]
+  puts "rtlnet_build: own receiver timing endpoints: $endpoints"
+}

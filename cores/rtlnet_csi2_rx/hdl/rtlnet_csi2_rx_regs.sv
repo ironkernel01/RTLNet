@@ -81,6 +81,7 @@ module rtlnet_csi2_rx_regs #(
   output logic [11:0] px_gain_b,
   output logic [1:0]  px_phase,
   output logic        px_gamma,
+  output logic        px_geq,
   input  logic [11:0] rx_st,            // RX_STATUS bits [11:0]
   input  logic [15:0] rx_lines,
   input  logic [15:0] rx_pixels,
@@ -268,6 +269,7 @@ module rtlnet_csi2_rx_regs #(
       px_gain_b     <= 12'h100;
       px_phase      <= 2'd0;
       px_gamma      <= 1'b0;
+      px_geq        <= 1'b0;
     end else if (wr_cam) begin
       case (reg_wr_addr)
         REG_RX_CTRL: begin
@@ -290,7 +292,7 @@ module rtlnet_csi2_rx_regs #(
         REG_WB_G:  px_gain_g <= reg_wr_data[11:0];
         REG_WB_B:  px_gain_b <= reg_wr_data[11:0];
         REG_PHASE: px_phase  <= reg_wr_data[1:0];
-        REG_PROC:  px_gamma  <= reg_wr_data[0];
+        REG_PROC:  begin px_gamma <= reg_wr_data[0]; px_geq <= reg_wr_data[1]; end
         default: begin
         end
       endcase
@@ -354,7 +356,7 @@ module rtlnet_csi2_rx_regs #(
         REG_WB_G:         reg_rd_data <= CAMERA_PRESENT ? {20'd0, px_gain_g} : '0;
         REG_WB_B:         reg_rd_data <= CAMERA_PRESENT ? {20'd0, px_gain_b} : '0;
         REG_PHASE:        reg_rd_data <= CAMERA_PRESENT ? {30'd0, px_phase} : '0;
-        REG_PROC:         reg_rd_data <= CAMERA_PRESENT ? {31'd0, px_gamma} : '0;
+        REG_PROC:         reg_rd_data <= CAMERA_PRESENT ? {30'd0, px_geq, px_gamma} : '0;
         default:          reg_rd_data <= CAMERA_PRESENT ? cnt_rd : '0;
       endcase
     end

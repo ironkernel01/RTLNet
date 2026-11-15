@@ -16,6 +16,7 @@
 #define RTLNET_PLAT_S2MM_BASE      0x44a06000u
 #define RTLNET_PLAT_FB_BASE        0x44a07000u
 #define RTLNET_PLAT_H264_BASE      0x44a08000u
+#define RTLNET_PLAT_RX_BASE        0x44a09000u   /* own receiver (rtlnet_csi2_rx), own-receiver image only */
 #define RTLNET_CPU_IRQ_CAPTURE     0u
 #define RTLNET_CPU_IRQ_H264        1u
 #define RTLNET_PS_GEM_BASE         0xe000b000u

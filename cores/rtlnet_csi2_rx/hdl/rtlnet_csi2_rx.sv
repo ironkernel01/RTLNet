@@ -55,6 +55,7 @@ module rtlnet_csi2_rx #(
   parameter string DPHY_TARGET     = `RTLNET_TARGET,   // "AMD": 7-series primitives in the D-PHY front end, else behavioural
   parameter bit    NONCONT_CLOCK   = 1'b0,        // 1: the sensor stops the HS clock between bursts
   parameter bit    IDELAYCTRL_INST = 1'b1,        // 1: IDELAYCTRL inside the front end
+  parameter bit    HS_DIFF_TERM    = 1'b1,        // 1: internal 100 ohm termination of the HS inputs (VCCO 2.5 V); 0: terminated on the board
   parameter int    FIFO_KB         = 4,           // byte clock to clk FIFO: kilobytes of 8-byte words (power of two entries)
   parameter int    LINE_KB         = 8,           // Bayer line buffers: kilobytes of 4-byte words (pixels per line = 256 * LINE_KB)
   parameter string RAM_STYLE       = "block",     // "block" | "distributed" for both RAMs
@@ -280,7 +281,7 @@ module rtlnet_csi2_rx #(
   logic        cam_tlast_i;
   logic        cam_tuser_i;
   logic        cam_run_i;
-  logic        rx_enable, rx_soft_reset, rx_bit_rev, px_gamma;
+  logic        rx_enable, rx_soft_reset, rx_bit_rev, px_gamma, px_geq;
   logic [1:0]  rx_lane_en, rx_vc, px_phase;
   logic [4:0]  rx_tap0, rx_tap1;
   logic [7:0]  rx_settle;
@@ -335,6 +336,7 @@ module rtlnet_csi2_rx #(
     .px_gain_b    (px_gain_b),
     .px_phase     (px_phase),
     .px_gamma     (px_gamma),
+    .px_geq       (px_geq),
     .rx_st        (rx_st),
     .rx_lines     (rx_lines),
     .rx_pixels    (rx_pixels),
@@ -383,7 +385,7 @@ module rtlnet_csi2_rx #(
       assign cfg_h = (video_mode == MODE_1080P30) ? 12'(HEIGHT_1080) : 12'(HEIGHT_720);
 
       rtlnet_csi2_rx_dphy #(
-        .TARGET(DPHY_TARGET), .NONCONT_CLOCK(NONCONT_CLOCK), .IDELAYCTRL_INST(IDELAYCTRL_INST)
+        .TARGET(DPHY_TARGET), .NONCONT_CLOCK(NONCONT_CLOCK), .IDELAYCTRL_INST(IDELAYCTRL_INST), .HS_DIFF_TERM(HS_DIFF_TERM)
       ) u_dphy (
         .ref_clk(ref_clk), .arstn(rx_rstn),
         .hs_clk_p(dphy_clk_p), .hs_clk_n(dphy_clk_n), .hs_dat_p(dphy_dat_p), .hs_dat_n(dphy_dat_n),
@@ -414,7 +416,7 @@ module rtlnet_csi2_rx #(
         .clk(clk), .resetn(rx_rstn),
         .e_valid(m_valid), .e_data(m_data), .e_ready(m_ready),
         .cfg_w(cfg_w), .cfg_h(cfg_h), .cfg_black(px_black), .cfg_gain_r(px_gain_r), .cfg_gain_g(px_gain_g), .cfg_gain_b(px_gain_b),
-        .cfg_phase(px_phase), .cfg_gamma(px_gamma),
+        .cfg_phase(px_phase), .cfg_gamma(px_gamma), .cfg_geq(px_geq),
         .o_data(rgb_data), .o_valid(rgb_valid), .o_ready(rgb_ready), .o_sof(rgb_sof), .o_eol(rgb_eol),
         .ev_size_err(bay_size_err), .meas_lines(rx_lines), .meas_pixels(rx_pixels)
       );

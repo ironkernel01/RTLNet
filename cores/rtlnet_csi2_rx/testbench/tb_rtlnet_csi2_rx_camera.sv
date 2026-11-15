@@ -85,7 +85,7 @@ module tb_rtlnet_csi2_rx_camera;
     .arvalid(arvalid), .arready(arready), .rdata(rdata), .rresp(rresp), .rvalid(rvalid), .rready(rready));
 
   rtlnet_csi2_rx #(
-    .CAMERA_RX(1'b1), .DPHY_TARGET("GENERIC"), .FIFO_KB(4), .LINE_KB(8),
+    .CAMERA_RX(1'b1), .DPHY_TARGET("GENERIC"), .HS_DIFF_TERM(1'b0), .FIFO_KB(4), .LINE_KB(8),
     .WIDTH_720(W0), .HEIGHT_720(H0), .WIDTH_1080(W1), .HEIGHT_1080(H1)
   ) dut (
     .clk(clk), .resetn(resetn), .s_axi_aclk(cfg_clk), .s_axi_aresetn(cfg_resetn),
@@ -326,6 +326,11 @@ module tb_rtlnet_csi2_rx_camera;
     wr(R_RX_FILTER, 32'h0000_2B00);
     wr(R_PHASE, 32'hFFFF_FFFF);
     expect_reg(R_PHASE, 32'h3, "phase mask");
+    wr(R_PROC, 32'hFFFF_FFFF);
+    expect_reg(R_PROC, 32'h3, "proc mask (gamma, green equalisation)");
+    wr(R_PROC, 32'h2);
+    expect_reg(R_PROC, 32'h2, "proc green equalisation alone");
+    wr(R_PROC, 32'h0);
     wr(R_BLACK, 32'hFFFF_FFFF);
     expect_reg(R_BLACK, 32'h3FF, "black mask");
     wr(R_WB_G, 32'hFFFF_FFFF);

@@ -25,7 +25,7 @@ set ::rtlnet_failure_code 99
 if {[catch {
 set board [file normalize [file join [file dirname [info script]] ..]]
 set repo [file normalize [file join $board .. ..]]
-array set opt {tag camera stage camera highprofile none hp_netlist {} hp_t8 1 hp_auto 1 implementation holdfix python {} stop none}
+array set opt {tag camera receiver reference stage camera highprofile none hp_netlist {} hp_t8 1 hp_auto 1 implementation holdfix python {} stop none}
 set toks [split [join $argv ,] ,]
 if {[llength $toks] % 2} {error "expected name,value pairs"}
 foreach {name value} $toks {
@@ -33,6 +33,8 @@ foreach {name value} $toks {
   set opt($name) $value
 }
 set tag $opt(tag)
+if {$opt(receiver) ni {reference own}} {error "invalid receiver $opt(receiver)"}
+set ::rtlnet_own [expr {$opt(receiver) eq "own"}]
 if {![regexp {^[A-Za-z0-9_]{1,24}$} $tag]} {error "invalid tag"}
 if {$opt(python) eq "" || ![file isfile $opt(python)]} {fail 11 "missing Python path from the central resolver"}
 set build [file join $board build $tag]
@@ -111,11 +113,27 @@ if {$::rtlnet_baseline} {
     add_files -norecurse [file join $repo cores rtlnet_h264_enc hdl hp rtlnet_h264_hp_bb.sv]
     read_edif [file join $opt(hp_netlist) rtlnet_h264_hp.edf]
   }
-  set_property STEPS.OPT_DESIGN.TCL.PRE [file join $board scripts rtlnet_cdc_hook.tcl] [get_runs impl_1]
+  set_property STEPS.OPT_DESIGN.TCL.PRE [file join $board scripts [expr {$::rtlnet_own ? "rtlnet_cdc_hook_own.tcl" : "rtlnet_cdc_hook.tcl"}]] [get_runs impl_1]
 }
 set_property ip_repo_paths [list [file join $build ip_repo]] [current_project]
 update_ip_catalog
-if {[catch {source [file join $board bd rtlnet_camera.tcl]} detail]} {fail 12 $detail}
+if {$::rtlnet_own} {
+  # Own receiver: the camera Tcl is the reference Tcl up to its final tail. The tail (vendor recipe source and the
+  # three vendor address assignments) is replaced by the own recipe; every anchor must exist exactly once.
+  set in [open [file join $board bd rtlnet_camera.tcl] r]; set camera_text [read $in]; close $in
+  set tail_start [string first "if \{\[info exists ::rtlnet_baseline\] && \$::rtlnet_baseline\} \{" $camera_text]
+  set tail_end [string first "assign_bd_address
+validate_bd_design" $camera_text]
+  if {$tail_start < 0 || $tail_end < $tail_start} {fail 12 "rtlnet_camera.tcl tail anchors not found"}
+  set own_text "[string range $camera_text 0 [expr {$tail_start - 1}]]source \{[file join $board bd rtlnet_baseline_own.tcl]\}
+[string range $camera_text $tail_end end]"
+  set camera_own [file join $build rtlnet_camera_own.tcl]
+  set out [open $camera_own w]; puts -nonewline $out $own_text; close $out
+  set bd_script $camera_own
+} else {
+  set bd_script [file join $board bd rtlnet_camera.tcl]
+}
+if {[catch {source $bd_script} detail]} {fail 12 $detail}
 set bd [get_files *.bd]
 if {$opt(stop) eq "bd"} {
   # Debug stop: block design created and validated, no synthesis, no artifacts.
@@ -123,13 +141,16 @@ if {$opt(stop) eq "bd"} {
   exit 0
 }
 set_property synth_checkpoint_mode None $bd
+if {!$::rtlnet_own} {
 # Check actual IP parameters before generation; Python also checks source Tcl.
 foreach cell {MIPI_CSI_2_RX_0 MIPI_D_PHY_RX_0} {
   if {[get_property CONFIG.kDebug [get_bd_cells $cell]] ni {false 0}} {
     fail 13 "staged ILA exception removal requires kDebug=false on $cell"
   }
 }
+}
 generate_target all $bd
+if {!$::rtlnet_own} {
 # Firmware labels these as configured defaults, never as measured taps.
 foreach parameter {kAddDelayClk_ps kAddDelayData0_ps kAddDelayData1_ps} {
   if {[get_property CONFIG.$parameter [get_bd_cells MIPI_D_PHY_RX_0]] != 0} {
@@ -159,6 +180,7 @@ set gamma_xdc [get_files -all -quiet */AXI_GammaCorrection.xdc]
 if {[llength $gamma_xdc] != 1} {fail 13 "expected one gamma constraint file, found [llength $gamma_xdc]"}
 set_property USED_IN_SYNTHESIS false $gamma_xdc
 set_property USED_IN_IMPLEMENTATION false $gamma_xdc
+}
 set wrapper [make_wrapper -files $bd -top]
 add_files -norecurse $wrapper
 set_property top rtlnet_camera_wrapper [current_fileset]
@@ -167,6 +189,11 @@ add_files -fileset constrs_1 [file join $board constraints rtlnet_camera_clocks.
 set_property PROCESSING_ORDER EARLY [get_files rtlnet_camera_clocks.xdc]
 add_files -fileset constrs_1 [file join $board constraints rtlnet_camera_timing.xdc]
 set_property PROCESSING_ORDER LATE [get_files rtlnet_camera_timing.xdc]
+if {$::rtlnet_own} {
+  # Own receiver: byte clock, LP inputs and the IODELAY group of the IronKernel front end (after the netlist exists).
+  add_files -fileset constrs_1 [file join $board constraints rtlnet_own_rx.xdc]
+  set_property PROCESSING_ORDER LATE [get_files rtlnet_own_rx.xdc]
+}
 set ::rtlnet_failure_code 10
 launch_runs synth_1 -jobs 2
 wait_on_run synth_1
@@ -229,6 +256,7 @@ for {set i 0} {$i < [llength $ts_lines]} {incr i} {
   }
 }
 puts "rtlnet_build: timing WNS $wns ns, WHS $whs ns, WPWS $wpws ns"
+if {$::rtlnet_own} {rtlnet_camera_timing::use_own_endpoints}
 if {[catch {rtlnet_camera_timing::evaluate $wpws [lindex $nums 10] $reports} timing_result]} {
   fail 20 "timing gate: $timing_result"
 }
@@ -241,7 +269,13 @@ set ::rtlnet_dphy_deviation [dict get $timing_result deviation]
 set qualified_wns [dict get $timing_result wns]
 set qualified_whs [dict get $timing_result whs]
 puts "rtlnet_build: timing excluding DPHY_HS_INPUT WNS $qualified_wns ns, WHS $qualified_whs ns"
-if {[catch {rtlnet_camera_review::apply $reports $::rtlnet_dphy_deviation} detail]} {
+if {$::rtlnet_own} {
+  # No vendor IP: the findings of the own receiver that remain after the CDC hook are the reviewed list in rtlnet_own_waivers.tcl;
+  # every other finding is rejected by the gates below.
+  report_cdc -details -name rtlnet_camera_raw_cdc -file [file join $reports post_route_cdc_unwaived.rpt]
+  source [file join $board scripts rtlnet_own_waivers.tcl]
+  if {[catch {rtlnet_own_review::apply $reports $::rtlnet_dphy_deviation} detail]} {fail 27 "own receiver review: $detail"}
+} elseif {[catch {rtlnet_camera_review::apply $reports $::rtlnet_dphy_deviation} detail]} {
   fail 27 "vendor review: $detail"
 }
 report_cdc -details -file [file join $reports post_route_cdc.rpt]
@@ -256,14 +290,18 @@ set crit_impl_run [audit_run_critical_warnings impl_1]
 puts "rtlnet_build: implementation parent critical warnings: $crit_impl_parent"
 set info [open [file join $build build_info.txt] w]
 puts $info "design rtlnet_camera_wrapper\npart xc7z020clg400-1\ntool [version -short]"
-puts $info "stage $opt(stage)\nhigh_profile $opt(highprofile)\nhp_t8 $opt(hp_t8)\nhp_t8_auto $opt(hp_auto)"
+puts $info "stage $opt(stage)\nreceiver $opt(receiver)\nhigh_profile $opt(highprofile)\nhp_t8 $opt(hp_t8)\nhp_t8_auto $opt(hp_auto)"
 puts $info "implementation $opt(implementation)"
 puts $info "git_hash [exec git -C $repo rev-parse --short=8 HEAD]"
 puts $info "git_dirty [expr {[string trim [exec git -C $repo status --porcelain]] ne {}}]"
 puts $info "wns_ns $wns\nwhs_ns $whs\nwpws_ns $wpws"
 puts $info "qualified_wns_ns $qualified_wns\nqualified_whs_ns $qualified_whs"
 puts $info "deviation_DPHY_HS_INPUT $::rtlnet_dphy_deviation\ndphy_tap_training 0\ndphy_hardware_verification open"
-puts $info "deviation_reason matches_published_reference_static_timing_not_closable_no_tap_training"
+if {$::rtlnet_own} {
+  puts $info "deviation_reason own_receiver_static_hs_input_model_tap_set_at_run_time"
+} else {
+  puts $info "deviation_reason matches_published_reference_static_timing_not_closable_no_tap_training"
+}
 if {$::rtlnet_hp} {
   set delivery [open [file join $build hp_delivery.txt] r]
   puts $info [read $delivery]
@@ -296,7 +334,8 @@ set latches [get_cells -quiet -hierarchical -filter {PRIMITIVE_SUBGROUP == latch
 if {[llength $latches] > 0} {fail 23 "latches: $latches"}
 set async_cells [get_cells -quiet -hierarchical -filter {REF_NAME == FDCE || REF_NAME == FDPE}]
 foreach cell $async_cells {
-  if {[string match */u_video/* $cell]} {fail 23 "user video asynchronous reset $cell"}
+  # The own receiver's rtlnet_reset_sync cells (asynchronous assertion, synchronous release, u_rx) are the documented exception.
+  if {[string match */u_video/* $cell] && !($::rtlnet_own && [string match */u_rx/* $cell] && [string match *pipe_reg* $cell])} {fail 23 "user video asynchronous reset $cell"}
 }
 set f [open [file join $reports post_route_async_resets.rpt] w]
 puts $f [join $async_cells \n]
@@ -335,7 +374,11 @@ puts $info $manifest
 puts $info "gate_pass 1"
 close $info
 if {$::rtlnet_dphy_deviation} {
-  puts "rtlnet_build: PASS with deviation DPHY_HS_INPUT (2 endpoints, reference configuration; hardware verification open)"
+  if {$::rtlnet_own} {
+    puts "rtlnet_build: PASS with deviation DPHY_HS_INPUT (2 endpoints, own receiver; run-time tap sweep is the evidence)"
+  } else {
+    puts "rtlnet_build: PASS with deviation DPHY_HS_INPUT (2 endpoints, reference configuration; hardware verification open)"
+  }
 } else {
   puts "rtlnet_build: PASS $opt(stage)"
 }

@@ -10,11 +10,18 @@ import re
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from rtlnet_generate_video_wrapper import check as check_wrapper
+from rtlnet_generate_own_video import check as check_own_wrapper
 
-ROOT_LIST = 'boards/zybo_z7_20/hdl/rtlnet_zybo_video.f'
+# Receiver variants: filelist, Tcl recipe that creates the module reference, and the expected module-reference top.
+VARIANTS = {
+    'reference': ('boards/zybo_z7_20/hdl/rtlnet_zybo_video.f', 'rtlnet_baseline.tcl', 'rtlnet_zybo_video_bd'),
+    'own': ('boards/zybo_z7_20/hdl/rtlnet_zybo_video_own.f', 'rtlnet_baseline_own.tcl', 'rtlnet_zybo_video_own_bd'),
+}
+ROOT_LIST = VARIANTS['reference'][0]
 # Exact external definitions provided by Vivado project XPM_LIBRARIES and
 # the device's UNISIM library. Other unknown modules fail the check.
-LIBRARY_MODULES = {'xpm_memory_sdpram': 'XPM_MEMORY', 'SRLC32E': 'UNISIM'}
+LIBRARY_MODULES = {'xpm_memory_sdpram': 'XPM_MEMORY', 'SRLC32E': 'UNISIM', 'IBUFDS': 'UNISIM', 'BUFIO': 'UNISIM', 'BUFR': 'UNISIM',
+                   'IDELAYE2': 'UNISIM', 'IDELAYCTRL': 'UNISIM', 'ISERDESE2': 'UNISIM'}
 KEYWORDS = set(('module endmodule package endpackage function endfunction task endtask '
                 'automatic static input output inout wire logic reg bit int integer '
                 'longint shortint byte string signed unsigned localparam parameter '
@@ -160,11 +167,15 @@ def tcl_list(values):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--manifest', type=Path)
+    parser.add_argument('--receiver', choices=sorted(VARIANTS), default='reference')
     args = parser.parse_args()
+    root_list, recipe, expected_top = VARIANTS[args.receiver]
     board = Path(__file__).resolve().parents[1]
     repo = board.parents[1]
     check_wrapper(board)
-    sources, incdirs, defines, lists = filelists(repo)
+    if args.receiver == 'own':
+        check_own_wrapper(board)
+    sources, incdirs, defines, lists = filelists(repo, root_list)
     # AMD technology is explicit for synthesis. No generic simulation substitute
     # replaces the production RAM/shift-register wrappers or their XPM/UNISIMs.
     if any(d.split('=')[0] in {'RTLNET_TECH_GENERIC', 'RTLNET_TECH_ALTERA', 'RTLNET_TECH_LATTICE'} for d in defines):
@@ -173,14 +184,14 @@ def main():
         defines.append('RTLNET_TECH_AMD')
     headers = closure(repo, sources, incdirs)
     modules, packages, libs = audit(repo, sources, headers, incdirs)
-    bd = (board / 'bd/rtlnet_baseline.tcl').read_text(encoding='utf-8')
+    bd = (board / 'bd' / recipe).read_text(encoding='utf-8')
     tops = re.findall(r'create_bd_cell\s+-type\s+module\s+-reference\s+(\w+)', bd)
     all_refs = []
-    for path in sorted((board / 'bd').glob('*.tcl')):
+    for path in sorted(p for p in (board / 'bd').glob('*.tcl') if p.name in ('rtlnet_camera.tcl', recipe)):
         all_refs.extend(re.findall(r'create_bd_cell\s+-type\s+module\s+-reference\s+(\w+)', path.read_text(encoding='utf-8')))
     if all_refs != tops:
         raise ValueError('Additional module references require a boundary review')
-    if tops != ['rtlnet_zybo_video_bd']:
+    if tops != [expected_top]:
         raise ValueError('Module-reference inventory changes: review every boundary')
     for top in tops:
         path = modules.get(top, '')

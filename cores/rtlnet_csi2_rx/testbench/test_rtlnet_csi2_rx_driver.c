@@ -171,7 +171,7 @@ void rtlnet_host_reg_write32(uintptr_t addr, uint32_t value)
         case RTLNET_CSI2_REG_WB_G:      g_wb[1] = value & 0xFFFu; break;
         case RTLNET_CSI2_REG_WB_B:      g_wb[2] = value & 0xFFFu; break;
         case RTLNET_CSI2_REG_PHASE:     g_phase = value & 3u; break;
-        case RTLNET_CSI2_REG_PROC:      g_proc = value & 1u; break;
+        case RTLNET_CSI2_REG_PROC:      g_proc = value & 3u; break;
         case RTLNET_CSI2_REG_RX_CLEAR: {
             uint32_t i;
             for (i = 0u; i < RTLNET_CSI2_CNT_COUNT; i++) {
@@ -298,6 +298,9 @@ int main(void)
               g_phase == 3u, "set_phase");
         check(rtlnet_csi2_rx_set_gamma(TEST_BASE, 1) == RTLNET_CSI2_OK && g_proc == 1u && rtlnet_csi2_rx_set_gamma(TEST_BASE, 0) == RTLNET_CSI2_OK && g_proc == 0u,
               "set_gamma");
+        check(rtlnet_csi2_rx_set_green_eq(TEST_BASE, 1) == RTLNET_CSI2_OK && g_proc == 2u && rtlnet_csi2_rx_set_gamma(TEST_BASE, 1) == RTLNET_CSI2_OK && g_proc == 3u &&
+              rtlnet_csi2_rx_set_gamma(TEST_BASE, 0) == RTLNET_CSI2_OK && g_proc == 2u && rtlnet_csi2_rx_set_green_eq(TEST_BASE, 0) == RTLNET_CSI2_OK && g_proc == 0u,
+              "set_green_eq and set_gamma keep each other's bit");
         g_cnt[RTLNET_CSI2_CNT_CRC] = 7u;
         g_cnt[RTLNET_CSI2_CNT_CLKLOSS] = 9u;
         check(rtlnet_csi2_rx_read_rxstate(TEST_BASE, &rs) == RTLNET_CSI2_OK && rs.counters[RTLNET_CSI2_CNT_CRC] == 7u &&

@@ -48,6 +48,11 @@ int main(int argc,char **argv)
     CHECK(Menu_ProcessLine("show stream")==0);
     CHECK(Menu_ProcessLine("show ip")==0);
     CHECK(Menu_ProcessLine("show camera")==0);
+    CHECK(Menu_ProcessLine("show rx")!=0);          /* reference image / absent receiver window: refused, no register access */
+    CHECK(Menu_ProcessLine("rx clear")!=0);
+    CHECK(Menu_ProcessLine("rx taps 12 12")!=0);
+    CHECK(Menu_ProcessLine("rx taps 40 x")!=0);
+    CHECK(Menu_ProcessLine("rx gamma 2")!=0);
     {
         rtlnet_dphy_state_t d;
         rtlnet_dphy_read(RTLNET_DPHY_BASE, &d);

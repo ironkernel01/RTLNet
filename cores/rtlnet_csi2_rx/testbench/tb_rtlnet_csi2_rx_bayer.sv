@@ -52,6 +52,7 @@ module tb_rtlnet_csi2_rx_bayer;
   logic [11:0]       cfg_gr = 12'h100, cfg_gg = 12'h100, cfg_gb = 12'h100;
   logic [1:0]        cfg_phase = '0;
   logic              cfg_gamma = 1'b0;
+  logic              cfg_geq = 1'b0;
   logic [23:0]       rgb_data;
   logic              rgb_valid, rgb_ready, rgb_sof, rgb_eol;
   logic              ev_size_err;
@@ -62,7 +63,7 @@ module tb_rtlnet_csi2_rx_bayer;
   rtlnet_csi2_rx_bayer #(.RAM_STYLE("block"), .LINE_KB(8)) dut (
     .clk(clk), .resetn(resetn), .e_valid(e_valid), .e_data(e_data), .e_ready(e_ready),
     .cfg_w(cfg_w), .cfg_h(cfg_h), .cfg_black(cfg_black), .cfg_gain_r(cfg_gr), .cfg_gain_g(cfg_gg), .cfg_gain_b(cfg_gb),
-    .cfg_phase(cfg_phase), .cfg_gamma(cfg_gamma),
+    .cfg_phase(cfg_phase), .cfg_gamma(cfg_gamma), .cfg_geq(cfg_geq),
     .o_data(rgb_data), .o_valid(rgb_valid), .o_ready(rgb_ready), .o_sof(rgb_sof), .o_eol(rgb_eol),
     .ev_size_err(ev_size_err), .meas_lines(meas_lines), .meas_pixels(meas_pixels));
 
@@ -192,6 +193,7 @@ module tb_rtlnet_csi2_rx_bayer;
     cfg_gg    <= cfgm[base + 8][11:0];
     cfg_gb    <= cfgm[base + 9][11:0];
     cfg_gamma <= cfgm[base + 10][0];
+    cfg_geq   <= cfgm[base + 10][1];
     @(posedge clk);
   endtask
 

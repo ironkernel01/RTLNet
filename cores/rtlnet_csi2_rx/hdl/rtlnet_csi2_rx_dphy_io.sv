@@ -16,12 +16,13 @@
 //     ref_clk. bufr_clr holds the BUFR divider in reset (non-continuous HS clock: the divider restarts with the clock).
 // Language: SystemVerilog-2012.
 // Revision: 11-15-2026
-//   * 11-15-2026: initial version.
+//   * 11-15-2026: initial version; HS_DIFF_TERM (the Zybo Z7-20 bank 35 runs at 3.3 V and the Pcam adapter terminates the lanes: no internal termination).
 // Clocks: hs_clk (the HS clock pair; the byte clock is derived), ref_clk (IDELAY reference and tap load clock).
 // -----------------------------------------------------------------------------
 module rtlnet_csi2_rx_dphy_io #(
   parameter string TARGET          = "GENERIC",   // "AMD" or any other string for the behavioural model
-  parameter bit    IDELAYCTRL_INST = 1'b1
+  parameter bit    IDELAYCTRL_INST = 1'b1,
+  parameter bit    HS_DIFF_TERM    = 1'b1         // 1: internal 100 ohm termination of the HS inputs (needs VCCO 2.5 V); 0: board termination
 )(
   // Reference clock (200 MHz) and its synchronous active-low reset.
   input  logic       ref_clk,
@@ -64,7 +65,7 @@ module rtlnet_csi2_rx_dphy_io #(
       logic [4:0] cnt_in [0:1];
       logic [7:0] q0, q1;
 
-      IBUFDS #(.DIFF_TERM("TRUE"), .IOSTANDARD("LVDS_25")) u_ibuf_clk (.I(hs_clk_p), .IB(hs_clk_n), .O(clk_ibuf));
+      IBUFDS #(.DIFF_TERM(HS_DIFF_TERM ? "TRUE" : "FALSE"), .IOSTANDARD("LVDS_25")) u_ibuf_clk (.I(hs_clk_p), .IB(hs_clk_n), .O(clk_ibuf));
       BUFIO u_bufio (.I(clk_ibuf), .O(io_clk));
       BUFR #(.BUFR_DIVIDE("4"), .SIM_DEVICE("7SERIES")) u_bufr (.I(clk_ibuf), .CE(1'b1), .CLR(bufr_clr), .O(byte_clk));
 
@@ -95,7 +96,7 @@ module rtlnet_csi2_rx_dphy_io #(
           end
         end
 
-        IBUFDS #(.DIFF_TERM("TRUE"), .IOSTANDARD("LVDS_25")) u_ibuf (.I(hs_dat_p[i]), .IB(hs_dat_n[i]), .O(dat_ibuf[i]));
+        IBUFDS #(.DIFF_TERM(HS_DIFF_TERM ? "TRUE" : "FALSE"), .IOSTANDARD("LVDS_25")) u_ibuf (.I(hs_dat_p[i]), .IB(hs_dat_n[i]), .O(dat_ibuf[i]));
 
         (* IODELAY_GROUP = "rtlnet_csi2_dly" *)
         IDELAYE2 #(

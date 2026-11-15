@@ -8,8 +8,8 @@
 | Position | video source of the camera design |
 | Register map revision | `VERSION` = `0x11152026` with the camera receiver (`CAMERA_RX` = 1), `0x11102026` without it; `ID` = `0x43534932` ("CSI2") |
 | Contents of the core | register block, test-pattern generator (static bars, scrolling bars, moving box, noise band), source switch; with `CAMERA_RX` = 1 the camera receiver: D-PHY front end (two data lanes and a clock lane), CSI-2 packet layer, byte-clock FIFO, Bayer to RGB, RGB to YUV422 |
-| Hardware status | the camera receiver is proven in simulation only. It has not run on hardware: no real D-PHY signal, no IDELAY setting and no LP threshold of a board has been measured |
-| Verification | Active-HDL 11.1: the pattern benches (`tb_rtlnet_csi2_rx`, `tb_rtlnet_csi2_rx_pattern`, `tb_rtlnet_video_path`) and the camera receiver benches (`tb_rtlnet_csi2_rx_dphy`, `_packet`, `_cdc`, `_bayer`, `_camera`) with a bench D-PHY transmitter model and the Python model `csi2_rx_model.py`; host driver test; results in section 9 |
+| Hardware status | the camera receiver runs on the Digilent Zybo Z7-20 with a Pcam 5C (OV5640, two lanes, RAW10, 720p and 1080p at 30 fps): section 12 lists what is measured there and what is not; every other board and sensor is untested |
+| Verification | Active-HDL 11.1: the pattern benches (`tb_rtlnet_csi2_rx`, `tb_rtlnet_csi2_rx_pattern`, `tb_rtlnet_video_path`) and the camera receiver benches (`tb_rtlnet_csi2_rx_dphy`, `_packet`, `_cdc`, `_bayer`, `_camera`) with a bench D-PHY transmitter model and the Python model `csi2_rx_model.py`; host driver test; results in section 9; board measurements in section 12 |
 | Synthesis | section 8 |
 
 The core sends one YUV422 video stream to `rtlnet_vdma_s2mm`. The stream comes from the test-pattern generator (eight static
@@ -19,7 +19,7 @@ CSI-2 packets decoded, RAW10 Bayer converted to YUV422. A source switch in front
 `CAMERA_RX` = 0 the camera comes in through the `s_cam_*` stream port (a board without a camera ties it off).
 
 Contents: 1 interface, 2 frame timing, 3 pattern, 4 source switch, 5 camera receiver, 6 registers, 7 clocks and crossings,
-8 resources, 9 verification, 10 integration, 11 limitations.
+8 resources, 9 verification, 10 integration, 11 limitations, 12 board measurements.
 
 ---
 
@@ -57,6 +57,7 @@ Sideband: `m_frame_num` is `FRAME_COUNT` after the frame started (the first fram
 | `DPHY_TARGET` | `` `RTLNET_TARGET `` ("AMD") | "AMD" selects the 7-series primitives (IBUFDS, BUFIO, BUFR, IDELAYE2, ISERDESE2, IDELAYCTRL) in `rtlnet_csi2_rx_dphy_io`; any other string a behavioural model for simulation and other vendors |
 | `NONCONT_CLOCK` | 0 | 1 for a sensor that stops the HS clock between bursts (section 5.2) |
 | `IDELAYCTRL_INST` | 1 | 1 puts the IDELAYCTRL inside the front end (IODELAY group `rtlnet_csi2_dly`) |
+| `HS_DIFF_TERM` | 1 | 1 enables the internal 100 ohm termination of the HS clock and data inputs (needs the bank at VCCO 2.5 V); 0 for a board that terminates the lanes itself and runs the bank at another voltage (the Zybo Z7-20 bank 35 runs at 3.3 V: 0) |
 | `FIFO_KB` | 4 | byte-clock FIFO size in kilobytes of 8-byte words (depth = 128 x `FIFO_KB` entries, a power of two; one entry holds four pixels) |
 | `LINE_KB` | 8 | Bayer line buffer size in kilobytes of 4-byte words (pixels per line = 256 x `LINE_KB`, 2048) |
 | `RAM_STYLE` | "block" | "block" or "distributed" for both RAMs (through `rtlnet_ram_core`) |
@@ -274,7 +275,9 @@ padded with zero lines at the frame end, extra lines dropped, so the source swit
 *Processing* (one pixel per clock, every stage advances together while the output is ready; a frame takes (W + 1) x (H + 1) steps because the last column and row are completed by one virtual step):
 black level subtraction (`BLACK`, floored at 0); white balance gain of the Bayer site (unsigned 4.8 fixed point, 1.0 = 0x100; `clip10((t x gain + 128) >> 8)`); two line buffers in one `rtlnet_ram_core` word;
 bilinear demosaic over a 3 x 3 window with mirrored borders (the missing row or column is replaced by the opposite one, which keeps the colour of every site); `PHASE` is the site of the
-first pixel (0 R of RGGB, 1 G on a red row, 2 G on a blue row, 3 B; bit 0 mirrors columns, bit 1 rows); 10 to 8 bits `(v + 2) >> 2`; with `PROC.GAMMA` a 16-segment piecewise-linear curve (about 1/2.2,
+first pixel (0 R of RGGB, 1 G on a red row, 2 G on a blue row, 3 B; bit 0 mirrors columns, bit 1 rows); with `PROC.GREEN_EQ` (reset 0) the green of a G site is the mean of that G and the
+mean of its four diagonal neighbours, `(G + (D sum + 2) / 4 + 1) / 2`: the diagonals of a G site are the other kind of G, so Gr and Gb come out equal and a sensor whose two greens differ shows no two-pixel luma pattern
+(the Pcam 5C OV5640 in its binned 720p mode: Gr and Gb differ by about 8 percent, a fixed pattern of +-6 percent luma in flat areas); the price is a slightly softer green at the G sites; 10 to 8 bits `(v + 2) >> 2`; with `PROC.GAMMA` a 16-segment piecewise-linear curve (about 1/2.2,
 breakpoints 0, 72, 99, 119, 136, 151, 164, 175, 186, 197, 206, 215, 224, 232, 240, 248, 255 at multiples of 16); then `rtlnet_csi2_rx_yuv`. The reset gains are 1.0 each; no gain is tuned for a sensor. Configuration is taken at each frame start.
 Demosaic formulas: R or B site G = (N + S + W + E + 2) / 4 and the other colour (sum of the four diagonals + 2) / 4; G site on a red row R = (W + E + 1) / 2, B = (N + S + 1) / 2; G site on a blue row B = (W + E + 1) / 2, R = (N + S + 1) / 2.
 
@@ -319,10 +322,10 @@ Undefined offsets read 0 and ignore writes.
 | 0x090 | `BLACK` | RW | 0 | `[9:0]` black level in 10-bit raw units |
 | 0x094, 0x098, 0x09C | `WB_R`, `WB_G`, `WB_B` | RW | 0x100 | `[11:0]` gain, unsigned 4.8 fixed point, 0x100 = 1.0 |
 | 0x0A0 | `PHASE` | RW | 0 | `[1:0]` Bayer site of the first pixel of the first line |
-| 0x0A4 | `PROC` | RW | 0 | `[0]` gamma enable |
+| 0x0A4 | `PROC` | RW | 0 | `[0]` gamma enable, `[1]` green equalisation |
 
 The camera registers (0x040 and up) exist with `CAMERA_RX` = 1; without it they read 0 and ignore writes. Fields are masked to their width, reserved bits read 0, no reject flags. `RX_CTRL`, `RX_TAPS`, `RX_SETTLE`, `RX_FILTER` are written while the receiver is idle. Driver functions: `rtlnet_csi2_rx_rx_control`, `_set_taps`,
-`_set_settle`, `_set_filter`, `_set_black`, `_set_wb`, `_set_phase`, `_set_gamma`, `_read_rxstate`, `_clear_counters`; `_probe` accepts both VERSION values.
+`_set_settle`, `_set_filter`, `_set_black`, `_set_wb`, `_set_phase`, `_set_gamma`, `_set_green_eq` (each of the two read-modify-writes `PROC` and keeps the other bit), `_read_rxstate`, `_clear_counters`; `_probe` accepts both VERSION values.
 
 Because the mode write checks the period and the period write checks the mode, `FRAME_PERIOD` is never below the minimum of
 `VIDEO_MODE`. A `PATTERN` write in mid-frame leaves that frame as it is; the next frame starts with the new pattern at `k` = 0.
@@ -353,7 +356,9 @@ and the byte clock (BUFR output, a quarter of the HS clock; at 420 Mb/s per lane
 | status levels `ref_clk` and byte clock to `clk` | two-flop `rtlnet_sync` |
 | soft reset `clk` to `ref_clk` and byte clock | asynchronous assertion through `rtlnet_reset_sync` |
 
-Timing constraints of the HS inputs, the IDELAY group and the CDC bounds belong to the board design (a camera board's constraint files).
+Timing constraints of the HS inputs, the IDELAY group and the CDC bounds belong to the board design (a camera board's constraint files). The Zybo Z7-20 design
+(`boards/zybo_z7_20`) constrains the HS clock at 4.762 ns, the HS data input delays against it, the false path of the LP pins and the CDC bounds of `scripts/rtlnet_constrain_cdc.tcl`
+(33 `rtlnet_sync`, 3 `rtlnet_reset_sync`, 2 Gray pointers, one `rtlnet_axil_cdc`); Vivado derives the byte clock at the BUFR output itself.
 
 ---
 
@@ -381,6 +386,11 @@ Estimated timing with clocks `clk` 11.111 ns (90 MHz), the HS clock 4.762 ns (21
 The crossings between these clocks show negative slack in this run because no CDC bound is applied; the board constraints bound them (`scripts/rtlnet_constrain_cdc.tcl`
 bounds the Gray pointers and the pulse and level synchronizers of the core; the configuration levels that cross into `ref_clk` and the byte clock are static while the receiver runs).
 The pattern-only core (`CAMERA_RX` = 0) has the resources of the pattern generator and switch only (about 1,100 LUT, 1,100 FF, no RAM).
+
+Placed and routed in the Zybo Z7-20 design (Vivado 2026.1, image `own6`, hierarchical report): `u_rx` 2,665 LUT, 2,923 registers, 2 RAMB36 and 1 RAMB18, 11 DSP48. The 90 MHz domain of that design closes
+with +0.404 ns setup and +0.051 ns hold; the byte clock (`g_cam.byte_clk`) with +4.816 ns and +0.063 ns; the 200 MHz reference with +0.942 ns and +0.119 ns. The two HS data samplers
+(`ISERDESE2` `DDLY` pins, clock `rtlnet_dphy_hs`) meet setup with +0.584 and +0.623 ns and fail hold with -1.385 and -1.429 ns at the IDELAY tap attribute 0 (static timing does not know the tap loaded at run time):
+see section 12.
 
 ---
 
@@ -440,12 +450,13 @@ data least significant bit first, HS trail, per-lane skew in bit times, settable
 | `tb_rtlnet_csi2_rx_dphy` (`cont`, `noncont`) | clock detection; packets at 420, 280, 140 and 100 Mb/s; lengths 4 to 1602 bytes; the shortest and a long HS trail (no real pair lost); lane skew of 0 to 23 bit times either side (pair stream exact) and 40 bit times (no pair, one `SOT` event); missing sync on lane 0, lane 1, both; single lane; the non-continuous clock (`noncont`); a clock freeze in the middle of a burst (`cont`: clock-running flag falls, one `SOT` event, next packet exact); disabled receiver; six back-to-back bursts |
 | `tb_rtlnet_csi2_rx_packet` | frame and line packets to FIFO entries; line lengths 4 to 1920 pixels; all 32 single-bit header errors on a line packet and on a frame start (corrected, packet used); all 496 double-bit errors on a frame start and 120 on a line (detected, dropped); each of the 16 CRC bits and a payload bit flipped (counted, pixels pushed); other virtual channel, wrong and reserved data types, line start / end, line outside a frame; word counts 0 to 14; truncation after 1, 2, 3, 5, 10 and N - 1 pairs, burst restart; trail pairs and a chained second packet ignored; gapped pair stream; frame start inside a frame |
 | `tb_rtlnet_csi2_rx_cdc` | 4,000 entries in order with a fast and a slow reader and the reverse clock ratio; overflow with a stalled reader (71 pulses, the first 129 entries read in order); sustained overflow (every accepted entry out once, in order, none of the dropped ones) |
-| `tb_rtlnet_csi2_rx_bayer` (`small`, `fault`, `wide`) | Bayer to YUV words equal `csi2_rx_model.py` bit for bit: four phases with black level, gains and gamma, both mode geometries, short lines and fewer lines than the mode (padded), long lines and more lines (cut), a lost line, a line closed by a marker after four pixels, a frame cut after three lines, a frame start inside a frame, lines of 1280 and 1920 pixels; with random entry gaps and random output ready and at full speed; `ev_size_err` pulses; `RX_LINES` / `RX_PIXELS` source values |
-| `tb_rtlnet_csi2_rx_camera` (`small`, `wide`) | the whole core with `CAMERA_RX` = 1 over the pins: register reset values and masks; every case of the set exact against the model with the sideband, the counters and `RX_LINES` / `RX_PIXELS`; faults, each counted and each followed by an exact recovery frame: one-bit header error, two-bit header error, CRC error, missing sync, packet cut after four pixels, other data type, five-byte lane skew, HS clock frozen in the middle of a line (clock loss, orphan lines, the cut frame closed by the next frame start), lost frame start; `RX_CLEAR` for one and all counters; soft reset |
+| `tb_rtlnet_csi2_rx_bayer` (`small`, `fault`, `wide`) | Bayer to YUV words equal `csi2_rx_model.py` bit for bit: four phases with black level, gains and gamma, two cases with green equalisation (phase 3 with gains, phase 1 with black level, gains and gamma), both mode geometries, short lines and fewer lines than the mode (padded), long lines and more lines (cut), a lost line, a line closed by a marker after four pixels, a frame cut after three lines, a frame start inside a frame, lines of 1280 and 1920 pixels; with random entry gaps and random output ready and at full speed; `ev_size_err` pulses; `RX_LINES` / `RX_PIXELS` source values |
+| `tb_rtlnet_csi2_rx_camera` (`small`, `wide`) | the whole core with `CAMERA_RX` = 1 over the pins (also with `HS_DIFF_TERM` 0, which the behavioural front end ignores): register reset values and masks (`PROC` bits 1:0); every case of the set exact against the model with the sideband, the counters and `RX_LINES` / `RX_PIXELS`; faults, each counted and each followed by an exact recovery frame: one-bit header error, two-bit header error, CRC error, missing sync, packet cut after four pixels, other data type, five-byte lane skew, HS clock frozen in the middle of a line (clock loss, orphan lines, the cut frame closed by the next frame start), lost frame start; `RX_CLEAR` for one and all counters; soft reset |
 | `csi2_rx_model_xcheck` | self test of the Python model (CRC-16 check value 0x6F91, ECC columns, constant picture, black, white) and the committed `.mem` files equal the model |
 
 Each bench has a negative control (`neg`: `+INJECT_FAILURE` fails the verdict) and a mutation entry (`mut`: `+MUTATE` perturbs one expected or driven value and the compare must fail).
-Not simulated: the AMD primitive branch of `rtlnet_csi2_rx_dphy_io` (the ISERDESE2 model is encrypted and is not compiled by the simulation scripts): it is covered by the Vivado synthesis only.
+Not simulated: the AMD primitive branch of `rtlnet_csi2_rx_dphy_io` (the ISERDESE2 model is encrypted and is not compiled by the simulation scripts): it is covered by the Vivado synthesis and implementation of the board design and by the board measurements of section 12.
+A mutation of the green equalisation rounding (`+ 1` to `+ 0` in `g_eq`) fails `tb_rtlnet_csi2_rx_bayer` `small` with 70 word mismatches (RTL restored byte for byte afterwards).
 
 Results (Active-HDL 11.1, 11-15-2026, `.sim/<bench>_<tag>/simulation.log`):
 
@@ -463,7 +474,7 @@ Results (Active-HDL 11.1, 11-15-2026, `.sim/<bench>_<tag>/simulation.log`):
 | `tb_rtlnet_video_path` `neg` | expected `TEST FAIL ... first=INJECT_FAILURE negative control` |
 | driver host test | `DRIVER TEST PASS: rtlnet_csi2_rx checks=55` |
 | `pattern_model_xcheck` | `PATTERN_MODEL_XCHECK PASS: 220 frames compared with the C model, 0 mismatches`, `CSI2_BARS_MODEL: PASS` |
-| camera receiver benches | `dphy` cont 328 checks and noncont 343, `packet` 1688, `cdc` 18, `bayer` small 6920, fault 4646, wide 38417, `camera` small 10495 and wide 19335, `csi2_rx_model_xcheck` PASS, each negative control and mutation fails as required |
+| camera receiver benches | `dphy` cont 328 checks and noncont 343, `packet` 1688, `cdc` 18, `bayer` small 8468, fault 4646, wide 38417, `camera` small 11304 and wide 19342, `csi2_rx_model_xcheck` PASS, each negative control and mutation fails as required; driver host test `DRIVER TEST PASS: rtlnet_csi2_rx checks=56` |
 
 Mutations (RTL restored to the identical SHA-256 `1d493f2b...80ab9` afterwards): the box chroma Cb 90 changed to 91 fails `tb_rtlnet_csi2_rx`
 `patfull` with 48 failed checks, the first "mode 0 pattern 2 speed 4 k 0 (frame 18): CRC 0x4501913b, C model 0x5e00af14"; the LFSR tap s[21]
@@ -483,22 +494,72 @@ Run: `powershell -File scripts/rtlnet_run_sim.ps1 -Bench tb_rtlnet_csi2_rx -File
    and drops entries when full (`OVF`).
 3. Without a camera (`CAMERA_RX` = 0): tie `s_cam_tvalid`, `s_cam_tlast`, `s_cam_tuser`, `cam_clk_running` to 0, leave `s_cam_tready` and the pin ports open.
 4. With the camera (`CAMERA_RX` = 1): connect the eleven pin ports to the camera connector, a 200 MHz `ref_clk`, and constrain the HS clock (a clock-capable pin pair, the clock created on it at the sensor's
-   rate, the HS data input delays against it), the `rtlnet_csi2_dly` IODELAY group with one IDELAYCTRL (or `IDELAYCTRL_INST` = 0 and one outside), the LP pins in an LVCMOS or HSUL_12 bank that reads the connector levels, and the CDC bounds of `scripts/rtlnet_constrain_cdc.tcl`.
-   Program the sensor first (two lanes, RAW10, the HS clock continuous or `NONCONT_CLOCK`), then set `RX_FILTER`, `PHASE`, gains and `RX_TAPS` and let the sensor stream.
+   rate, the HS data input delays against it), the `rtlnet_csi2_dly` IODELAY group with one IDELAYCTRL (or `IDELAYCTRL_INST` = 0 and one outside), the LP pins in an LVCMOS or HSUL_12 bank that reads the connector levels (the LP receivers are false paths), and the CDC bounds of `scripts/rtlnet_constrain_cdc.tcl`.
+   Set `HS_DIFF_TERM` to 0 when the HS inputs are terminated on the board or the bank does not run at 2.5 V (an LVDS_25 input with the internal termination in a 3.3 V bank fails the placer DRC BIVC-1).
+   Program the sensor first (two lanes, RAW10, the HS clock continuous or `NONCONT_CLOCK`), then set `RX_FILTER`, `PHASE`, gains, green equalisation and `RX_TAPS` and let the sensor stream. `PHASE` is the Bayer arrangement of the sensor mode after any flip, mirror and window offset:
+   a wrong phase swaps red and blue (phase 0 against 3) or gives a pink or violet picture (phases 1 and 2); check it on a picture with a known colour.
 5. Map the 4 KiB window and call `rtlnet_csi2_rx_probe`. `camera mode`, `camera source` and `camera rate` of the firmware CLI go through the driver.
 
 ---
 
 ## 11. Limitations
 
-- The camera receiver is proven in simulation only. Open until a board run: the real D-PHY electrical behaviour (HS input levels and termination, the clock-to-data eye and the IDELAY tap that centres it), the LP receiver thresholds on the board's resistor network, the ISERDESE2 bit order (`RX_CTRL.BIT_REV`), the
-  BUFR and ISERDESE2 reset sequence at the start and after a clock stop, the settle time of the sensor, and the latency of the AMD primitive branch against the output hold of 4 byte clocks.
+- Hardware evidence exists for one board, one sensor module and one lane configuration (section 12). Not measured: other boards, sensors and cables, temperature and supply variation, the non-continuous clock mode
+  on a real sensor (`NONCONT_CLOCK` = 1), the behaviour after the HS clock stops on a real sensor (the sensor is never stopped while streaming in the measurements), a single-lane sensor (lane enable 1), the LP receiver thresholds on another resistor network,
+  and the burst-end hold of 4 byte clocks against other primitive latencies (it needed no change on the Zybo).
+- The two greens of the Pcam 5C differ by about 8 percent in the binned 720p mode; the core equalises them with `PROC.GREEN_EQ` at the cost of a slightly softer green at the G sites; no other sensor was looked at.
 - Two data lanes (or lane 0 alone); one packet per HS burst; RAW10 only (the data type register selects which type is read as RAW10).
 - Lane skew up to three byte clocks is removed; a bigger skew drops the burst (`SOT`).
 - A packet that is short by fewer than about 16 bytes is counted as a CRC error instead of a truncation.
 - A CRC error does not drop the line: its pixels are used.
 - Two modes (720p30, 1080p30); other modes are later `VIDEO_MODE` values. Change `VIDEO_MODE` while the camera does not stream.
-- White balance gains reset to 1.0; no value is tuned for a sensor or a light source.
+- White balance gains reset to 1.0; the core carries no value for a sensor or a light source (the Zybo firmware loads gains per sensor mode, section 12).
 - `k` restarts on a `VIDEO_MODE` change as well as on a `PATTERN` write (one set of running registers); the box phase must lie inside the frame (192, 96 are inside both modes).
 - The pattern models are exact for k below 2^32 (4.5 years at 30 fps); the counter then wraps and the sequence restarts from the running values.
 - A camera frame that is cut off by the switch is closed short; `FRAME_COUNT` and the timestamp wrap at 32 bits.
+
+---
+
+## 12. Board measurements (Digilent Zybo Z7-20, Pcam 5C, 11-15-2026)
+
+Design `own6` of `boards/zybo_z7_20` (receiver variant `own`), firmware `fw16`, one board on a direct PC USB port, one Pcam 5C (OV5640, two lanes, RAW10, continuous HS clock, 420 Mb/s per lane at 1080p and
+280 Mb/s at 720p), a lit room scene, room temperature. Everything below is measured unless marked.
+
+| Item | Result |
+|---|---|
+| Lane order and bit order | `RX_CTRL.BIT_REV` 0 is right (the receiver locked at the first start); the sync byte is found on both lanes in every burst |
+| Counters over 60 s, 720p | `FRAMES` 1,808 (30.03 fps), `ECC_UNC` 0, `CRC` 0, `SOT` 0, `SIZE` 0, `DT` 0, `TRUNC` 0, `OVF` 0, `ORPHAN` 0, `LEN` 0, `CLKLOSS` 0, `ECC_CORR` 0; `RX_LINES` 720, `RX_PIXELS` 1,280 |
+| Counters over 60 s, 1080p | `FRAMES` 1,806 (29.99 fps), all error counters and `ECC_CORR` 0; `RX_LINES` 1,080, `RX_PIXELS` 1,920 |
+| Bayer arrangement | the OV5640 tables with the board's flip, mirror and window offset deliver the arrangement `PHASE` 3 (BGGR); `PHASE` 0 swaps red and blue, 1 and 2 give a pink and a violet picture |
+| Green imbalance | green level of the four pixel parities (x, y) = (0,0), (1,0), (0,1), (1,1) of a flat wall in the decoded picture: 190 / 201 / 178 / 190 (a two-pixel pattern of +-6 percent) without `GREEN_EQ`, 188.2 / 187.9 / 188.5 / 188.3 with it |
+| White balance | gains per mode (4.8 fixed point): 720p R 0x163, G 0x100, B 0x163; 1080p R 0x195, G 0x100, B 0x17C; neutral wall, ceiling lamp and bezel R:G:B within about 5 percent (R/G 0.97 to 1.02 at 720p, 1.00 to 1.01 at 1080p; B/G 0.93 to 1.09) after; before (gains 1.0) R and B 14 to 18 percent below G |
+| Black level | `BLACK` 0; raising it only darkens the picture (32 and 64 measured), the dark areas stay red-brown (sensor and scene) |
+| IDELAY window | section 12.1 |
+
+### 12.1 D-PHY capture margin
+
+`boards/zybo_z7_20/scripts/rx_test.ps1 -Action sweep`: the stream runs, at each IDELAY tap (78 ps at the 200 MHz reference) `RX_TAPS` is written, the counters are cleared and read 3 s later. A tap is clean when `ECC_UNC`, `CRC`, `SOT`,
+`SIZE`, `ORPHAN`, `LEN`, `TRUNC`, `OVF` and `DT` stay 0, `CLKLOSS` is 0 and the frame rate is within 1 fps of the sensor. Both lanes at the same tap:
+
+| Mode | Clean taps | Window | First tap with errors | Taps with errors | Next clean taps |
+|---|---|---|---|---|---|
+| 720p30 (280 Mb/s, UI 3.57 ns) | 0 to 29 | 30 taps, 2,340 ps (lower edge below tap 0) | 30 (`CRC` 27,997 and `SOT` 229 in 3 s) | 30, 31 | none to tap 31 |
+| 1080p30 (420 Mb/s, UI 2.38 ns) | 0 to 21 | 22 taps, 1,716 ps (lower edge below tap 0) | 22 (`CRC` 35, `ECC_CORR` 11) | 22 to 26 | 27 to 31 (the next bit period) |
+
+The errors at taps 23 to 25 at 1080p are a burst of lost headers and sync bytes (`SOT` 166,558 to 310,485, `ECC_UNC` up to 103,537, `FRAMES` between 0 and 55 per second); at taps 22 and 26 single bits fail. One bit period at
+420 Mb/s is 30.5 taps, so the clean taps 27 to 31 are the next eye and the error band repeats every 30.5 taps: the band at 22 to 26 has its previous occurrence at about -9 to -4, which puts the clean region at taps -4 to 21 and its
+centre at about tap 9; only the part from 0 is measured. Independent lanes (the other lane at tap 10):
+
+| Mode | Lane 0 clean taps | Lane 0 error taps | Lane 1 clean taps | Lane 1 error taps |
+|---|---|---|---|---|
+| 720p30 | 0 to 30 (31 taps, 2,418 ps) | 31 | 0 to 29 (30 taps, 2,340 ps) | 30, 31 |
+| 1080p30 | 0 to 22 (23 taps, 1,794 ps) | 23 to 26 | 0 to 21 (22 taps, 1,716 ps) | 22 to 25 |
+
+The lanes differ by about one tap (78 ps) in skew: lane 1 sees its eye edge one tap earlier.
+
+Default taps: lane 0 at 11 and lane 1 at 10, the centres of the measured 1080p windows of the lanes (0 to 22 and 0 to 21). At 1080p the distance to the upper edge is 11 and 12 taps (about 0.9 ns) and the measured distance to tap 0 is the same,
+so the default sits between the measured edge and the extrapolated lower edge within about two taps.
+
+What this does and does not prove. The static timing of the two HS samplers (setup +0.58 and +0.62 ns met, hold -1.39 and -1.43 ns failed at the tap attribute 0) cannot be closed by any tap (the tap loaded at run time is unknown to static timing) and is the named deviation `DPHY_HS_INPUT` of the
+build. The measurement shows that this board samples both lanes correctly over at least 22 taps (1.7 ns) of a 2.38 ns bit period at 420 Mb/s and over at least 30 taps at 280 Mb/s, with 0 errors in 3 s per tap (about 10^9 bits per lane per tap) and in the 60 s counter runs and the 112 s soak at the default taps.
+It is not a closure of the static model, not a statistical error rate (no bit error rate below 10^-9 is claimed), and not a margin over temperature, supply, board and cable variation: one unit, one cable, one room temperature, one sensor module.

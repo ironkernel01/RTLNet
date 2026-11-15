@@ -21,7 +21,7 @@
  */
 /*
  * File:      menu_commands.h
- * Generated: 2026-11-14 00:00:00 -04:00
+ * Generated: 2026-11-15 00:00:00 -04:00
  * Project:   RTLNet Zynq-7000 camera firmware, reduced hierarchical CLI
  * Purpose:   Prototypes of every command callback named in
  *            cli/cli_commands.txt; cli/rtlnet_commands.c defines them.
@@ -35,6 +35,7 @@
 int cli_version(const MenuCommandContext *ctx);
 int cli_ip(const MenuCommandContext *ctx);
 int cli_camera(const MenuCommandContext *ctx);
+int cli_rx(const MenuCommandContext *ctx);
 int cli_encoder(const MenuCommandContext *ctx);
 int cli_stream(const MenuCommandContext *ctx);
 int cli_qp(const MenuCommandContext *ctx);
@@ -43,5 +44,14 @@ int cli_bitrate(const MenuCommandContext *ctx);
 int cli_start(const MenuCommandContext *ctx);
 int cli_stop(const MenuCommandContext *ctx);
 int cli_mode(const MenuCommandContext *ctx);
+int cli_rx_clear(const MenuCommandContext *ctx);
+int cli_rx_taps(const MenuCommandContext *ctx);
+int cli_rx_wb(const MenuCommandContext *ctx);
+int cli_rx_black(const MenuCommandContext *ctx);
+int cli_rx_phase(const MenuCommandContext *ctx);
+int cli_rx_gamma(const MenuCommandContext *ctx);
+int cli_rx_geq(const MenuCommandContext *ctx);
+int cli_rx_bitrev(const MenuCommandContext *ctx);
+int cli_rx_settle(const MenuCommandContext *ctx);
 
 #endif /* MENU_COMMANDS_H */

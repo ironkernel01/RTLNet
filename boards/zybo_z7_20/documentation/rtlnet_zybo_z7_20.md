@@ -2,8 +2,10 @@
 
 Revision: 11-15-2026.
 
-The target is the Digilent Zybo Z7-20 (`xc7z020clg400-1`). The design keeps the Digilent Pcam 5C physical
-receiver, CSI-2 receiver, Bayer conversion and gamma IP and encodes the camera picture with one RTLNet H.264
+The target is the Digilent Zybo Z7-20 (`xc7z020clg400-1`). The camera (Digilent Pcam 5C, OV5640, two MIPI lanes) is received by
+one of two selectable receivers (build parameter `-Receiver reference|own`, default `reference`): the vendored Digilent chain
+(D-PHY receiver, CSI-2 receiver, Bayer conversion and gamma IP, followed by the RTLNet RGB-to-YUYV adapter) or the IronKernel
+receiver `rtlnet_csi2_rx` (`cores/rtlnet_csi2_rx`, section "Receiver variants"). The camera picture is encoded with one RTLNet H.264
 Baseline engine (deblocking filter on). The ARM application streams the result over the PS Gigabit Ethernet.
 
 There are two build stages. Stage 0 (the camera stage) rebuilds the Digilent capture chain to an AMD AXI VDMA
@@ -12,6 +14,43 @@ DMA with its frame buffer, one deblocking encoder, the arbiter and two 128-to-64
 ports. The Baseline stage rebuilds the whole design and uses its camera stage only as an admission check
 (`build_info.txt` of the camera tag: stage camera, part `xc7z020clg400-1`, `gate_pass 1`).
 
+## Receiver variants
+
+| | `reference` (default) | `own` |
+|---|---|---|
+| Receiver | vendored Digilent D-PHY, CSI-2, Bayer-to-RGB and gamma IP, `rtlnet_rgb_to_yuyv` | `rtlnet_csi2_rx` with `CAMERA_RX` = 1 (D-PHY front end, packet layer, Bayer, YUV422) |
+| Video wrapper | `hdl/rtlnet_zybo_video.sv` (+ generated `rtlnet_zybo_video_bd.v`) | `hdl/rtlnet_zybo_video_own.sv` (+ `rtlnet_zybo_video_own_bd.v`), both generated |
+| BD recipe | `bd/rtlnet_baseline.tcl` | `bd/rtlnet_baseline_own.tcl` |
+| Camera pins, HS clock | the Digilent D-PHY block | the receiver core itself (`dphy_hs_clock_clk_p/n`, `dphy_data_hs_*`, `dphy_clk_lp_*`, `dphy_data_lp_*`) |
+| 200 MHz reference | Digilent D-PHY `RefClk` | `ref_clk` of the receiver (its IDELAYCTRL, IODELAY group `rtlnet_csi2_dly`) |
+| Register windows | 0x43C0_0000 D-PHY, 0x43C1_0000 CSI-2, 0x43C2_0000 gamma | 0x44A0_9000 receiver |
+| Camera wrapper `VERSION` / `CAPS` | 0x11142026 / 0x00000002 | 0x11152026 / 0x00000012 (bit 4: own receiver; the firmware reads it) |
+| Build command | `build.ps1 -Stage baseline -CameraTag <tag> -Tag <tag>` | the same with `-Receiver own` |
+
+The own wrapper is derived from the reference wrapper by `scripts/rtlnet_generate_own_video.py` (exact text patches, every anchor must occur
+once; `--check` is part of `scripts/check_gates.ps1`), so capture DMA, frame buffer, encoder, arbiter, HP bridges and the camera admission
+registers are the same text in both variants; `rtlnet_zybo_video.sv` is not edited by the variant. Differences in the
+wrapper: the D-PHY pins and `ref_clk` replace the RGB stream ports, `rtlnet_csi2_rx` (parameters `CAMERA_RX` 1, `DPHY_TARGET` "AMD", `NONCONT_CLOCK` 0,
+`IDELAYCTRL_INST` 1, `HS_DIFF_TERM` 0, the frame geometry of the wrapper) replaces the RGB adapter, a sixth register window at 0x44A0_9000 (index 5 of the
+GP0 decoder) carries the receiver, and the admission logic takes the YUV422 words of the receiver directly (`m_axis_tready` is high while a frame is not admitted, otherwise the capture slice
+ready, so a skipped frame never stalls the receiver; the receiver cannot be stalled: its byte-clock FIFO counts dropped entries in `OVF`). The HS inputs run without the internal
+100 ohm termination (`HS_DIFF_TERM` 0): bank 35 is at 3.3 V because of the camera GPIO and I2C pins, an LVDS_25 input with internal termination needs 2.5 V (DRC BIVC-1), and the Pcam adapter
+terminates the lanes (the Digilent IP also sets `DIFF_TERM` false).
+
+The reference variant is unchanged in result: the sources `rtlnet_zybo_video.sv`, `rtlnet_zybo_video_bd.v`, `bd/rtlnet_baseline.tcl`, `bd/rtlnet_camera.tcl` and the three existing constraint files are not edited, and the reference image rebuilt with the variant-aware scripts (tag `ref2`) gives the
+gate result of `enc14`: WNS -0.223 ns, WHS -1.431 ns, qualified +0.287 ns and +0.050 ns, 33,427 LUT, 26,371 registers (the two bitstream files are not byte-identical and were not compared further).
+
+`build_bitstream.tcl` (argument `receiver`) differs for `own` as follows. The camera Tcl of the reference stage is reused: a copy in the build folder
+(`rtlnet_camera_own.tcl`) replaces its tail (the vendor address assignments) by `bd/rtlnet_baseline_own.tcl`, which deletes the vendor chain, the stage 0
+VDMA and its interconnect, reduces the GP0 interconnect to one master and connects the pins and `clk_wiz_0/clk_out3` (200 MHz) to the wrapper; the vendor IP checks, the vendor
+debug and gamma constraint handling and the vendor waivers are skipped; `constraints/rtlnet_own_rx.xdc` adds the false path of the LP inputs (Vivado derives the byte clock at the BUFR
+output itself; an explicit generated clock is rejected as an override, Constraints 18-1056); the CDC hook `scripts/rtlnet_cdc_hook_own.tcl` requires and counts the classes `sync` 33, `reset` 3, `gray` 2, `axil_cdc` 6;
+`scripts/rtlnet_own_waivers.tcl` waives exactly the reviewed findings that remain (CDC findings on the combination of `hs_go` and the clock-running level in front of two
+synchronizers and on the two-source asynchronous clear of the byte-clock reset, with both registers that `report_cdc` may name as the source; and three methodology findings: the LUT in front of the
+asynchronous clear, the TIMING-9 summary and the two hold findings of the deviation), each with its reason in `reports/own_receiver_waivers.rpt`; any other finding fails the build (code 27). The
+asynchronous-reset inventory allows only the `pipe_reg` cells of the receiver's `rtlnet_reset_sync` (asynchronous assertion, synchronous release) inside `u_video`. The timing gate uses the two
+`ISERDESE2` `DDLY` pins of the receiver as the reviewed endpoints of the deviation `DPHY_HS_INPUT` (below).
+
 ## Clock plan
 
 | Clock | Source | Consumers |
@@ -19,9 +58,9 @@ ports. The Baseline stage rebuilds the whole design and uses its camera stage on
 | 100 MHz | PS FCLK0 | both clocking wizards |
 | 50 MHz | clk_wiz_0, 600 MHz VCO / 12 | GP0, receiver and D-PHY AXI-Lite control, RTLNet register window |
 | 90 MHz | rtlnet_video_clock | CSI-2 receiver video side, Bayer, gamma, adapter, capture DMA, frame buffer, encoder, HP0 and HP2, stage 0 VDMA |
-| 200 MHz | clk_wiz_0, 600 MHz VCO / 3 | D-PHY delay reference |
+| 200 MHz | clk_wiz_0, 600 MHz VCO / 3 | D-PHY delay reference (`own`: `ref_clk` of the receiver, also its LP trackers and clock detector) |
 | 140 / 210 MHz | sensor forwarded clock, 720p / 1080p30 | DDR HS input sampling |
-| 35 / 52.5 MHz | D-PHY HS clock / 4 | recovered byte stream |
+| 35 / 52.5 MHz | D-PHY HS clock / 4 | recovered byte stream (`own`: BUFR output, the clock Vivado names `g_cam.byte_clk`) |
 
 The 150 MHz output of the Digilent reference clocking wizard is not used: it stays unconnected and unbuffered
 in clk_wiz_0 so that the wizard's port numbering (clk_out3 = 200 MHz) is unchanged. The constraint model of the
@@ -105,6 +144,28 @@ Both stages print `rtlnet_build: PASS with deviation DPHY_HS_INPUT`; the deviati
 Timing without the deviation endpoints: WNS +0.287 ns, WHS +0.050 ns (Baseline), WNS +0.942 ns, WHS +0.052 ns
 (camera stage).
 
+### Own-receiver image (`own6`, `-Receiver own`, 11-15-2026)
+
+| Resource | Used | Device | Percent |
+|---|---|---|---|
+| Slice LUTs | 33,820 | 53,200 | 63.57 |
+| Slice registers | 27,678 | 106,400 | 26.01 |
+| Block RAM tiles | 27 | 140 | 19.29 |
+| DSPs | 50 | 220 | 22.73 |
+
+| Clock pair | Setup slack | Hold slack |
+|---|---|---|
+| 90 MHz video clock, intra-clock (77,154 endpoints) | +0.404 ns | +0.051 ns |
+| 50 MHz control clock, intra-clock | +7.167 ns | +0.052 ns |
+| 200 MHz reference, intra-clock | +0.942 ns | +0.119 ns |
+| byte clock `g_cam.byte_clk`, intra-clock (1,261 endpoints) | +4.816 ns | +0.063 ns |
+| byte clock to 90 MHz / 90 MHz to byte clock | +17.656 ns / +9.501 ns | |
+| `rtlnet_dphy_hs` (the deviation, 2 endpoints) | +0.584 ns | -1.429 ns |
+
+Worst pulse-width slack is +0.264 ns. The gates print `rtlnet_build: PASS with deviation DPHY_HS_INPUT (2 endpoints, own receiver; run-time tap sweep is the evidence)`; timing without the two
+endpoints: WNS +0.404 ns, WHS +0.051 ns. The receiver core takes 2,665 LUT, 2,923 registers, 2 RAMB36, 1 RAMB18 and 11 DSP48 of it. The vendor chain and the stage 0 sink are absent from this image, the
+receiver core brings its pattern generator (about 1,100 LUT), so the total is 393 LUT above the reference image. Two builds of identical sources (`own5` and `own6`) gave identical numbers.
+
 ## Timing deviation `DPHY_HS_INPUT`
 
 The two high-speed lane sampler inputs of the Digilent D-PHY receiver cannot close static timing; the published
@@ -166,6 +227,17 @@ the corresponding reviewed CDC summary, the vendor reset LUT finding, four async
 conditionally, the two deviation hold findings. Raw and waived reports remain beside the effective reports. There
 is no rule-wide severity downgrade.
 
+### `DPHY_HS_INPUT` in the own-receiver image
+
+The deviation is the same named one with the two `ISERDESE2` `DDLY` pins of the own receiver
+(`...u_rx/g_cam.u_dphy/u_io/g_amd.g_lane[0].u_iserdes/DDLY` and `[1]`) as its endpoints; the gate accepts the deviation only when exactly these two fail
+(`rtlnet_camera_timing::use_own_endpoints`). Measured: setup +0.623 ns (lane 0) and +0.584 ns (lane 1) met, hold -1.429 ns and -1.385 ns failed (clock skew of 2.94 ns between the pin and the sampler, the data path
+IBUFDS, IDELAYE2, ISERDESE2 without fabric routing). The IDELAYE2 of the own receiver is `VAR_LOAD` and is loaded from `RX_TAPS` at run time; static timing uses its attribute `IDELAY_VALUE` 0 and cannot see the loaded tap, so no tap makes the static model close
+(setup and hold slack move in opposite directions by 78 ps per tap, and their sum is -0.80 ns for both lanes). The input delay model (data valid 0.357 to 2.024 ns after each clock edge) is the one of the reference build.
+
+What the own receiver adds is the measurement the reference chain could not give: the tap sweep in "Hardware bring-up, own-receiver image". It shows the receiver error-free over a wide range of taps; it does not replace the static model
+(one board, one cable, room temperature) and the deviation stays named and open in `build_info.txt` (`dphy_hardware_verification open`).
+
 ## Publication and stage inputs
 
 Both stages save the gated design as `post_route.dcp`, resume `impl_1` to `write_bitstream`, and use a pre-hook
@@ -211,7 +283,7 @@ lexical audit supplements the Active-HDL compiler. Tcl registers headers first (
 include for `rtlnet_technology.svh`), sets include directories, explicit AMD selection and the XPM libraries,
 adds the RTL in derived order in one `add_files` call and updates the compile order before creating the BD.
 
-The only Baseline module-reference top is `rtlnet_zybo_video_bd.v`. It uses plain Verilog scalar and vector wire
+The only Baseline module-reference top is `rtlnet_zybo_video_bd.v` (`rtlnet_zybo_video_own_bd.v` in the own-receiver variant, checked the same way by `check_baseline_sources.py --receiver own`). It uses plain Verilog scalar and vector wire
 ports and simple parameters, preserves all interface, clock, reset and interrupt attributes (the interrupt
 carries `SENSITIVITY LEVEL_HIGH`), and instantiates the SystemVerilog implementation as `u_rtl`.
 `scripts/rtlnet_generate_video_wrapper.py` generates it and the source-closure check verifies it. The register
@@ -235,6 +307,7 @@ decoders (a mutated reconstruction and a damaged stream are negative controls).
 | 0x44a06000 | RTLNet capture DMA |
 | 0x44a07000 | Three-slot frame buffer |
 | 0x44a08000 | One-engine H.264 encoder |
+| 0x44a09000 | Own camera receiver `rtlnet_csi2_rx` (own-receiver image only; the 0x43c0_0000 addresses above exist in the reference image only) |
 
 | Physical DDR region | Use |
 |---|---|
@@ -287,6 +360,39 @@ and no decode error, on one board, one cable and room temperature. The two endpo
 the margins above, so this is a hardware observation of one unit and not a timing closure; the margin question needs the instrumented image
 described in the deviation section (per-lane HS sync/valid, IDELAY ready) and a temperature and cable review. No tap value or clock
 setting was changed.
+
+### Own-receiver image (`own6` with firmware `fw16`, 11-15-2026)
+
+Load: `scripts/program.ps1 -Tag own6 -FwTag fw16` (volatile JTAG, serial console COM6). Host tests with the explicit port: `scripts/stream_test.ps1 -Port COM6` and `scripts/rx_test.ps1 -Port COM6`.
+
+| Stage | Result | Evidence |
+|---|---|---|
+| a to d | pass | console, DHCP, OV5640 as before; `show camera` prints `receiver=own`; `show rx` after boot: `status=0x07f` (clock running, both lanes in a burst and locked, IDELAYCTRL ready, in frame), `FRAMES` 940 at the first look, `lines=720 pixels=1280`, all error counters 0 |
+| e Receiver counters, 60 s | pass | `ZYBO_RX_COUNTERS: PASS 22/22`: 720p `FRAMES` 3 to 1,811 in 60.2 s (30.03 fps), 1080p 3 to 1,809 (29.99 fps); `ECC_CORR`, `ECC_UNC`, `CRC`, `SOT`, `DT`, `TRUNC`, `OVF`, `SIZE`, `ORPHAN`, `LEN`, `CLKLOSS` all 0 at both |
+| f `stream_test.ps1 -Mode both -Port COM6` | pass | `ZYBO_STREAM_TEST: PASS 16/16` in three consecutive runs (sensor 30.0 fps, admitted 30.0 fps at 720p and 15.0 fps at 1080p, no encoder error, no dropped picture, continuity counters and decode clean from the second IDR picture, picture check) |
+| g Soak | pass | `stream_test.ps1 -Mode 720p -Seconds 120`: `ZYBO_STREAM_TEST: PASS 8/8`, 3,573 access units in 112 s, `cc_errors=0`, 0 decode errors, 6,581 datagrams sent and received |
+| h IDELAY sweep | see below | window per mode and lane |
+
+Picture (decoded frames `build/final_*_720p_frame.png`, `final_*_1080p_frame.png`; scene: a room with a ceiling fan, a monitor, a window and a bed; the camera looks at this scene, not at a colour chart): upright in both modes,
+the same field of view as the reference image `enc14` with `fw13` on the same scene (ceiling fan, window frame, monitor corner, lamp at the same pixel positions in the 720p and the 1080p frame, no shifted or missing column or line).
+Colours: the walls, ceiling and the white bezel are neutral, the fan blades are brown, the blanket blue-grey; the sunlit window is clipped and shows pink at 1080p (a clipped green channel with red and blue
+raised by the white balance gains), the lower wall is slightly violet at 1080p (lens shading, not corrected), the black monitor and shadows are red-brown (as in the reference image). Sharpness (|gradient| of the luma, fan blades 720p, 90th and 99th percentile: reference 21 / 84,
+own 26 / 82; window frame 15 / 69 against 13 / 59; 1080p ceiling and bed 3 / 24 and 11 / 51 against 3 / 22 and 12 / 48): the same within the differences of exposure; the own picture is smoother in flat areas (Laplacian variance of the whole 720p frame
+22.6 against 66.3 for the reference).
+
+White balance (mean R:G:B of 8-bit decoded PNG regions, neutral wall at 700,330,150x80 of the 720p frame): reference image 147:184:149 (R/G 0.80, B/G 0.81); own receiver with gains 1.0 and without green equalisation 167:195:162 (R/G 0.86, B/G 0.83);
+with the firmware default gains 182:187:187 (R/G 0.97, B/G 1.00). Five neutral regions at 720p (wall, wall left, bed linen, bezel, ceiling lamp dome): R/G 0.97 to 1.02 and B/G 0.96 to 1.09 (the bezel, the brightest, is the high one). At 1080p (the wall at 1000,300,300x200, with gains 0x195 / 0x100 / 0x17C): reference 98:129:102
+(R/G 0.76, B/G 0.79), own with the 720p gains 132:143:139 (R/G 0.92, B/G 0.97), own with the 1080p gains 141:141:145 (R/G 1.00, B/G 1.03); four 1080p regions R/G 1.00 to 1.01, B/G 0.93 to 1.03. The gains are applied before the gamma curve, so the linear
+gain is about the square of the correction seen in the decoded picture.
+
+A two-pixel luma pattern (+-6 percent) showed in flat areas in the first pictures with the own receiver (green level of the four pixel parities (0,0), (1,0), (0,1), (1,1) of a wall: 190 / 201 / 178 / 190): the OV5640 in its binned 720p mode delivers two greens that differ by about 8 percent, which the 2 x 2 averaging of the Digilent Bayer block hides
+and the 3 x 3 bilinear demosaic of the own receiver shows. The green equalisation of the core (`PROC` bit 1) removes it: the green level of the four parities (0,0), (1,0), (0,1), (1,1) is 188.2 / 187.9 / 188.5 / 188.3 afterwards (190 / 201 / 178 / 190 before).
+
+Margin (`rx_test.ps1 -Action sweep`, 3 s per tap, section 12.1 of `cores/rtlnet_csi2_rx/documentation/rtlnet_csi2_rx.md`): both lanes at one tap, 720p error-free taps 0 to 29 (30 taps, 2,340 ps; errors at 30 and 31), 1080p error-free taps 0 to 21 (22 taps, 1,716 ps; errors at 22 to 26, clean again from 27, the next bit
+period). Independent lanes (the other lane at tap 10): 720p lane 0 taps 0 to 30, lane 1 taps 0 to 29; 1080p lane 0 taps 0 to 22 (errors 23 to 26), lane 1 taps 0 to 21 (errors 22 to 25); the lanes differ by about one tap. Default taps 11 (lane 0) and 10 (lane 1). The lower edge of the window lies below tap 0 and is not measured (extrapolated at about tap -4 at 1080p from the 30.5-tap bit period). Not measured: temperature, supply, other cables and boards.
+
+Faults found with the own receiver and corrected in the core: the HS inputs of the receiver had the internal 100 ohm termination on (`DIFF_TERM` TRUE), which the placer rejected in bank 35 at 3.3 V (DRC BIVC-1); the receiver has the parameter `HS_DIFF_TERM` and the board sets it to 0.
+The two-pixel pattern above led to the green equalisation. No sync, ECC, CRC or clock fault was found on the board; the burst-end hold and the bit order needed no change.
 
 ### Faults found on the board
 

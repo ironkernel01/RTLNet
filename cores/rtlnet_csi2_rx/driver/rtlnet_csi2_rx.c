@@ -253,10 +253,30 @@ int rtlnet_csi2_rx_set_phase(uintptr_t base, uint32_t phase)
     return cam_write(base, RTLNET_CSI2_REG_PHASE, phase);
 }
 
-/* rtlnet_csi2_rx_set_gamma -- gamma curve on (1) or off (0). */
+/* proc_update -- change the bits of mask in PROC and keep the others (read, modify, write after the presence check). */
+static int proc_update(uintptr_t base, uint32_t mask, int on)
+{
+    uint32_t v;
+
+    if (camera_present(base) == 0) {
+        return RTLNET_CSI2_ERR_ARG;
+    }
+    v = rtlnet_reg_read32(base, RTLNET_CSI2_REG_PROC);
+    v = (on != 0) ? (v | mask) : (v & ~mask);
+    rtlnet_reg_write32(base, RTLNET_CSI2_REG_PROC, v);
+    return RTLNET_CSI2_OK;
+}
+
+/* rtlnet_csi2_rx_set_gamma -- gamma curve on (1) or off (0); the other PROC bits keep their value. */
 int rtlnet_csi2_rx_set_gamma(uintptr_t base, int enable)
 {
-    return cam_write(base, RTLNET_CSI2_REG_PROC, (enable != 0) ? 1u : 0u);
+    return proc_update(base, RTLNET_CSI2_PROC_GAMMA, enable);
+}
+
+/* rtlnet_csi2_rx_set_green_eq -- green equalisation on (1) or off (0); the other PROC bits keep their value. */
+int rtlnet_csi2_rx_set_green_eq(uintptr_t base, int enable)
+{
+    return proc_update(base, RTLNET_CSI2_PROC_GREEN_EQ, enable);
 }
 
 /*

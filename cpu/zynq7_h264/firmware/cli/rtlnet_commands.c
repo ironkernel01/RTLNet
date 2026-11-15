@@ -23,11 +23,12 @@
  * Project: RTLNet Zynq-7000 camera firmware.
  * Purpose: reduced MenuBuilder callbacks for the real-camera demonstration.
  * Overview: main-loop callbacks validate numeric input before touching owners.
- * Revision: 11-14-2026. Initial ARM CLI.
+ * Revision: 11-15-2026. Own receiver commands; show camera does not read the Digilent D-PHY in the own-receiver image.
  */
 /* REVISION HISTORY
  * Revision    Author                          Description
  * 11-14-2026  MenuBuilder AI / Steve Spano     Reduced ARM camera/encoder commands
+ * 11-15-2026  MenuBuilder AI                    Own receiver commands
  */
 #include "menu.h"
 #include "menu_commands.h"
@@ -37,6 +38,7 @@
 #include "rtlnet_platform.h"
 #include "rtlnet_camera.h"
 #include "rtlnet_dphy.h"
+#include "rtlnet_rx.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -84,6 +86,11 @@ int cli_camera(const MenuCommandContext *c)
     printf("OV5640 mode=%s seen=%lu admitted=%lu adapter_error=%lu\r\n",
         rtlnet_sensor_get_mode() ? "1080p15" : "720p30",
         (unsigned long)s.seen, (unsigned long)s.admitted, (unsigned long)s.status);
+    if (rtlnet_rx_present()) {
+        printf("receiver=own (rtlnet_csi2_rx); show rx for the lane status and counters\r\n");
+        return 0;
+    }
+    printf("receiver=reference (Digilent chain)\r\n");
     rtlnet_dphy_read(RTLNET_DPHY_BASE, &d);
     printf("DPHY control=0x%08lx version=0x%08lx tap_training=disabled\r\n",
         (unsigned long)d.control, (unsigned long)d.version);
@@ -122,3 +129,27 @@ int cli_mode(const MenuCommandContext *c)
     venc_get_status(&s); if (s.running) return -1;
     return rtlnet_sensor_mode(mode);
 }
+/** cli_rx -- show the own receiver state and counters. */
+int cli_rx(const MenuCommandContext *c) { (void)c; return rtlnet_rx_show(); }
+/** cli_rx_clear -- clear the receiver counters. */
+int cli_rx_clear(const MenuCommandContext *c) { (void)c; return rtlnet_rx_clear(); }
+/** cli_rx_taps -- set the input delay tap of both data lanes. */
+int cli_rx_taps(const MenuCommandContext *c) { uint32_t a,b; return (number(c->argv[0],&a) || number(c->argv[1],&b)) ? -1 : rtlnet_rx_set_taps(a,b); }
+/** cli_rx_wb -- set the white balance gains. */
+int cli_rx_wb(const MenuCommandContext *c)
+{
+    uint32_t r,g,b;
+    return (number(c->argv[0],&r) || number(c->argv[1],&g) || number(c->argv[2],&b)) ? -1 : rtlnet_rx_set_wb(r,g,b);
+}
+/** cli_rx_black -- set the black level. */
+int cli_rx_black(const MenuCommandContext *c) { uint32_t v; return number(c->argv[0],&v) ? -1 : rtlnet_rx_set_black(v); }
+/** cli_rx_phase -- set the Bayer phase. */
+int cli_rx_phase(const MenuCommandContext *c) { uint32_t v; return number(c->argv[0],&v) ? -1 : rtlnet_rx_set_phase(v); }
+/** cli_rx_gamma -- enable or disable the gamma curve. */
+int cli_rx_gamma(const MenuCommandContext *c) { uint32_t v; return (number(c->argv[0],&v) || v > 1u) ? -1 : rtlnet_rx_set_gamma((int)v); }
+/** cli_rx_geq -- enable or disable the green equalisation. */
+int cli_rx_geq(const MenuCommandContext *c) { uint32_t v; return (number(c->argv[0],&v) || v > 1u) ? -1 : rtlnet_rx_set_geq((int)v); }
+/** cli_rx_bitrev -- select the deserializer bit order. */
+int cli_rx_bitrev(const MenuCommandContext *c) { uint32_t v; return (number(c->argv[0],&v) || v > 1u) ? -1 : rtlnet_rx_set_bitrev((int)v); }
+/** cli_rx_settle -- set the HS settle time. */
+int cli_rx_settle(const MenuCommandContext *c) { uint32_t v; return number(c->argv[0],&v) ? -1 : rtlnet_rx_set_settle(v); }

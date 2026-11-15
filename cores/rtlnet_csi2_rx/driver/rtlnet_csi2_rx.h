@@ -68,7 +68,9 @@
 #define RTLNET_CSI2_REG_WB_G            0x098u   /* RW, [11:0] green gain (reset 0x100) */
 #define RTLNET_CSI2_REG_WB_B            0x09Cu   /* RW, [11:0] blue gain (reset 0x100) */
 #define RTLNET_CSI2_REG_PHASE           0x0A0u   /* RW, [1:0] Bayer phase of the first pixel of the first line (reset 0) */
-#define RTLNET_CSI2_REG_PROC            0x0A4u   /* RW, [0] gamma enable (reset 0) */
+#define RTLNET_CSI2_REG_PROC            0x0A4u   /* RW, [0] gamma enable, [1] green equalisation (reset 0) */
+#define RTLNET_CSI2_PROC_GAMMA          (1u << 0)
+#define RTLNET_CSI2_PROC_GREEN_EQ       (1u << 1)     /* G at a G site = mean of G and the four diagonal G (equalises Gr and Gb) */
 
 #define RTLNET_CSI2_CTRL_ENABLE         (1u << 0)
 #define RTLNET_CSI2_CTRL_SOFT_RESET     (1u << 1)
@@ -206,6 +208,7 @@ int rtlnet_csi2_rx_set_black(uintptr_t base, uint32_t black);                   
 int rtlnet_csi2_rx_set_wb(uintptr_t base, uint32_t gain_r, uint32_t gain_g, uint32_t gain_b);   /* each 0..0xFFF, 0x100 = 1.0 */
 int rtlnet_csi2_rx_set_phase(uintptr_t base, uint32_t phase);                       /* 0 R, 1 Gr, 2 Gb, 3 B first pixel */
 int rtlnet_csi2_rx_set_gamma(uintptr_t base, int enable);
+int rtlnet_csi2_rx_set_green_eq(uintptr_t base, int enable);                        /* both keep the other PROC bit */
 int rtlnet_csi2_rx_read_rxstate(uintptr_t base, rtlnet_csi2_rx_rxstate_t *st);
 int rtlnet_csi2_rx_clear_counters(uintptr_t base, uint32_t mask);                   /* bit n counter n, RTLNET_CSI2_CLEAR_ALL for all */
 

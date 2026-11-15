@@ -24,9 +24,9 @@ SPDX-License-Identifier: LGPL-2.1-or-later
 
 | Item | Value |
 |---|---|
-| Revision | 11-14-2026 (newest row of the revision history in cli/cli_commands.txt) |
-| Generated | 2026-11-14 00:00:00 -04:00 by cli/gen_menu.py from cli/cli_commands.txt |
-| Commands | 12 table entries (1 mode-entry), 3 keyword groups, 3 built-ins (exit, end, help) |
+| Revision | 11-15-2026 (newest row of the revision history in cli/cli_commands.txt) |
+| Generated | 2026-11-15 00:00:00 -04:00 by cli/gen_menu.py from cli/cli_commands.txt |
+| Commands | 22 table entries (1 mode-entry), 4 keyword groups, 3 built-ins (exit, end, help) |
 
 ## 1. Title and overview
 
@@ -207,14 +207,24 @@ token counts; exec commands are also accepted in priv.
 | 2 | cli_version | exec | `SHOW VERSION` | — | — | 2 | 2 | — | Firmware and hardware identity |
 | 3 | cli_ip | exec | `SHOW IP` | — | — | 2 | 2 | — | DHCP address and PHY identity |
 | 4 | cli_camera | exec | `SHOW CAMERA` | — | — | 2 | 2 | — | Camera mode and capture counters |
-| 5 | cli_encoder | exec | `SHOW ENCODER` | — | — | 2 | 2 | — | Encoder picture and error statistics |
-| 6 | cli_stream | exec | `SHOW STREAM` | — | — | 2 | 2 | — | MPEG-TS and UDP statistics |
-| 7 | cli_qp | priv | `ENCODER QP [VALUE]` | VALUE | — | 3 | 3 | — | Constant QP 0..51 |
-| 8 | cli_gop | priv | `ENCODER GOP [VALUE]` | VALUE | — | 3 | 3 | — | IDR period 1..255 |
-| 9 | cli_bitrate | priv | `ENCODER BITRATE [KBPS]` | KBPS | — | 3 | 3 | — | Target kbps 0..100000; zero selects constant QP |
-| 10 | cli_start | priv | `STREAM START [IP] [PORT]` | IP, PORT | — | 4 | 4 | — | Start H264 MPEG-TS UDP to IPv4 destination |
-| 11 | cli_stop | priv | `STREAM STOP` | — | — | 2 | 2 | — | Stop stream and release capture slot |
-| 12 | cli_mode | priv | `CAMERA MODE [MODE]` | MODE | — | 3 | 3 | — | 720p30 or 1080p15; requires stream stopped |
+| 5 | cli_rx | exec | `SHOW RX` | — | — | 2 | 2 | — | Own receiver state and all counters |
+| 6 | cli_encoder | exec | `SHOW ENCODER` | — | — | 2 | 2 | — | Encoder picture and error statistics |
+| 7 | cli_stream | exec | `SHOW STREAM` | — | — | 2 | 2 | — | MPEG-TS and UDP statistics |
+| 8 | cli_qp | priv | `ENCODER QP [VALUE]` | VALUE | — | 3 | 3 | — | Constant QP 0..51 |
+| 9 | cli_gop | priv | `ENCODER GOP [VALUE]` | VALUE | — | 3 | 3 | — | IDR period 1..255 |
+| 10 | cli_bitrate | priv | `ENCODER BITRATE [KBPS]` | KBPS | — | 3 | 3 | — | Target kbps 0..100000; zero selects constant QP |
+| 11 | cli_start | priv | `STREAM START [IP] [PORT]` | IP, PORT | — | 4 | 4 | — | Start H264 MPEG-TS UDP to IPv4 destination |
+| 12 | cli_stop | priv | `STREAM STOP` | — | — | 2 | 2 | — | Stop stream and release capture slot |
+| 13 | cli_mode | priv | `CAMERA MODE [MODE]` | MODE | — | 3 | 3 | — | 720p30 or 1080p15; requires stream stopped |
+| 14 | cli_rx_clear | priv | `RX CLEAR` | — | — | 2 | 2 | — | Clear the receiver counters |
+| 15 | cli_rx_taps | priv | `RX TAPS [LANE0] [LANE1]` | LANE0, LANE1 | — | 4 | 4 | — | Input delay taps 0..31 of the two data lanes (78 ps each) |
+| 16 | cli_rx_wb | priv | `RX WB [R] [G] [B]` | R, G, B | — | 5 | 5 | — | White balance gains, 256 = 1.0, 0..4095 |
+| 17 | cli_rx_black | priv | `RX BLACK [LEVEL]` | LEVEL | — | 3 | 3 | — | Black level in 10-bit units 0..1023 |
+| 18 | cli_rx_phase | priv | `RX PHASE [VALUE]` | VALUE | — | 3 | 3 | — | Bayer phase 0..3 of the first pixel |
+| 19 | cli_rx_gamma | priv | `RX GAMMA [ONOFF]` | ONOFF | — | 3 | 3 | — | Gamma curve 0 or 1 |
+| 20 | cli_rx_geq | priv | `RX GEQ [ONOFF]` | ONOFF | — | 3 | 3 | — | Green equalisation 0 or 1 |
+| 21 | cli_rx_bitrev | priv | `RX BITREV [ONOFF]` | ONOFF | — | 3 | 3 | — | Deserializer bit order reversal 0 or 1 |
+| 22 | cli_rx_settle | priv | `RX SETTLE [CLOCKS]` | CLOCKS | — | 3 | 3 | — | HS settle time in 200 MHz clocks 0..255 |
 
 Built-ins (menu.c): `EXIT` (every mode), `END` (privileged and configuration modes), `HELP` and `?`
 (every mode, identical listing), `!!` (repeat the previous line), Ctrl-C (cancel the line),
@@ -227,6 +237,7 @@ Keyword groups (help text when `?` lists a keyword shared by several commands):
 | exec | `SHOW` | Show current status |
 | priv | `ENCODER` | Configure encoder |
 | priv | `STREAM` | Control MPEG-TS UDP stream |
+| priv | `RX` | Configure the own camera receiver |
 
 ## 8. Build instructions
 

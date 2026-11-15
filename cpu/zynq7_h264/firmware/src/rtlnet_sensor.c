@@ -1,12 +1,13 @@
 /* Purpose: initialize the retained Digilent camera chain and OV5640 tables.
  * Overview: PS I2C0 owns address 0x3c; PS GPIO EMIO0 (pin 54) owns camera reset.
  *   Polling operations return errors; bus-idle waits have a 100 ms deadline.
- * Revision: 11-14-2026. Initial ARM sensor owner; no HDMI dependency.
+ * Revision: 11-15-2026. Own-receiver image: the receiver is brought up instead of the Digilent D-PHY, CSI-2 and gamma registers.
  */
 #include "rtlnet_sensor.h"
 #include "rtlnet_platform.h"
 #include "rtlnet_camera.h"
 #include "rtlnet_dphy.h"
+#include "rtlnet_rx.h"
 #include "ov5640/rtlnet_ov5640_tables.h"
 #include "xiicps.h"
 #include "xgpiops.h"
@@ -56,6 +57,7 @@ int rtlnet_sensor_mode(unsigned mode)
     if (mode > 1u) return -1;
     rtlnet_camera_enable(RTLNET_PLAT_CSI2_BASE, 0);
     if (write_reg(0x3008, 0x42) != 0) return -1;
+    if (rtlnet_rx_present() && rtlnet_rx_set_mode(mode) != 0) return -1;
     if ((mode == 0u ? TABLE(cfg_720p_60fps_) : TABLE(cfg_1080p_30fps_)) != 0) return -1;
     if (TABLE(cfg_advanced_awb_) != 0 || write_reg(0x3008, 0x02) != 0) return -1;
     plat_delay_ms(100u);
@@ -71,11 +73,12 @@ int rtlnet_sensor_init(void)
     XGpioPs_Config *gc = XGpioPs_LookupConfig(0);
     uint8_t hi = 0, lo = 0;
     if (rtlnet_camera_probe(RTLNET_PLAT_CSI2_BASE)) return -1;
+    rtlnet_rx_detect();
     if (!ic || !gc) return -1;
     if (XIicPs_CfgInitialize(&iic, ic, ic->BaseAddress) != XST_SUCCESS ||
         XIicPs_SetSClk(&iic, 100000u) != XST_SUCCESS ||
         XGpioPs_CfgInitialize(&gpio, gc, gc->BaseAddr) != XST_SUCCESS) return -1;
-    Xil_Out32(DPHY_BASE, 1u); Xil_Out32(CSI_BASE, 1u);
+    if (!rtlnet_rx_present()) { Xil_Out32(DPHY_BASE, 1u); Xil_Out32(CSI_BASE, 1u); }
     XGpioPs_SetDirectionPin(&gpio, 54u, 1u);
     XGpioPs_SetOutputEnablePin(&gpio, 54u, 1u);
     XGpioPs_WritePin(&gpio, 54u, 0u); plat_delay_ms(1000u);
@@ -84,7 +87,11 @@ int rtlnet_sensor_init(void)
     if (write_reg(0x3103, 0x11) || write_reg(0x3008, 0x82)) return -1;
     plat_delay_ms(1000u);
     if (TABLE(cfg_init_)) return -1;
-    Xil_Out32(GAMMA_BASE, 3u);
-    Xil_Out32(CSI_BASE, 2u); Xil_Out32(DPHY_BASE, 2u);
+    if (rtlnet_rx_present()) {
+        if (rtlnet_rx_init() != 0) return -1;
+    } else {
+        Xil_Out32(GAMMA_BASE, 3u);
+        Xil_Out32(CSI_BASE, 2u); Xil_Out32(DPHY_BASE, 2u);
+    }
     return rtlnet_sensor_mode(0u);
 }

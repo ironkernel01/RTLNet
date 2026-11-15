@@ -24,12 +24,15 @@
 //     blue row (GBRG), 3 B (BGGR); bit 0 mirrors the columns, bit 1 the rows of the RGGB tile, so a sensor flip or mirror needs no offset.
 //   * Output stage: 10 bits to 8 bits ((v + 2) >> 2, clipped to 255), then with cfg_gamma = 1 a piecewise-linear gamma curve of 16
 //     segments (about 1/2.2, breakpoints GAMMA_Y at multiples of 16), then {R, B, G} with the frame start and line end flags.
-//   * Configuration (black, gains, phase, gamma) is taken at the start of each frame.
+//   * Green equalisation (cfg_geq = 1): at a G site the green output is (G + (the four diagonal G + 2) / 4 + 1) / 2 instead of G. The diagonals of a G site
+//     are the other kind of G (Gr and Gb), so both kinds of G come out as their mean: a sensor whose two greens differ (the OV5640 in its binned modes) otherwise
+//     shows a fixed two-pixel luma pattern in flat areas. The cost is a slightly softer green at the G sites.
+//   * Configuration (black, gains, phase, gamma, green equalisation) is taken at the start of each frame.
 //   * Storage: the line buffers are one rtlnet_ram_core of LINE_KB kilobytes counted as 4-byte words (LINE_KB = 8: 2048 pixels per line,
 //     20 bits per word); cfg_w must not exceed 256 * LINE_KB.
 // Language: SystemVerilog-2012.
 // Revision: 11-15-2026
-//   * 11-15-2026: initial version.
+//   * 11-15-2026: initial version; green equalisation (cfg_geq, PROC bit 1).
 // Clocks: clk (all logic, the core clock, one pixel per clock).
 // -----------------------------------------------------------------------------
 module rtlnet_csi2_rx_bayer
@@ -56,6 +59,7 @@ module rtlnet_csi2_rx_bayer
   input  logic [11:0]      cfg_gain_b,
   input  logic [1:0]       cfg_phase,
   input  logic             cfg_gamma,
+  input  logic             cfg_geq,       // green equalisation: G at a G site = (G + mean of the four diagonal G) / 2
 
   // RGB out: {R[23:16], B[15:8], G[7:0]}.
   output logic [23:0]      o_data,
@@ -88,6 +92,7 @@ module rtlnet_csi2_rx_bayer
     logic        xp, yp, xW, x0, y0, y1, yH, vcol;
     logic [1:0]  ph;
     logic        gm;
+    logic        ge;
   } step_t;
 
   logic adv;
@@ -159,7 +164,7 @@ module rtlnet_csi2_rx_bayer
   logic [9:0]    lat_black;
   logic [11:0]   lat_gr, lat_gg, lat_gb;
   logic [1:0]    lat_ph;
-  logic          lat_gm;
+  logic          lat_gm, lat_ge;
   logic          em, em_vcol, em_vrow;
   logic [9:0]    em_pix;
   logic          stop_case;
@@ -233,6 +238,7 @@ module rtlnet_csi2_rx_bayer
       lat_gb      <= 12'h100;
       lat_ph      <= '0;
       lat_gm      <= 1'b0;
+      lat_ge      <= 1'b0;
       meas_lines  <= '0;
       meas_pixels <= '0;
       ev_size_err <= 1'b0;
@@ -263,6 +269,7 @@ module rtlnet_csi2_rx_bayer
             lat_gb      <= cfg_gain_b;
             lat_ph      <= cfg_phase;
             lat_gm      <= cfg_gamma;
+            lat_ge      <= cfg_geq;
             fstate      <= F_LINE;
           end
         end
@@ -343,6 +350,7 @@ module rtlnet_csi2_rx_bayer
         s0.vcol <= em_vcol;
         s0.ph   <= lat_ph;
         s0.gm   <= lat_gm;
+        s0.ge   <= lat_ge;
         s0_pix  <= em_pix;
       end
     end
@@ -434,7 +442,7 @@ module rtlnet_csi2_rx_bayer
   logic [29:0]  lc, cc, rc;
   logic [9:0]   n_p, s_p, w_p, e_p, nw_p, ne_p, sw_p, se_p, c_p;
   logic [11:0]  cross4, diag4, horz2, vert2;
-  logic [9:0]   d_r, d_g, d_b;
+  logic [9:0]   d_r, d_g, d_b, g_eq;
   logic         cu, cv;
   logic         d_v, d_sof, d_eol, d_gm;
   step_t        s5;
@@ -451,6 +459,7 @@ module rtlnet_csi2_rx_bayer
     diag4  = 12'(nw_p) + 12'(ne_p) + 12'(sw_p) + 12'(se_p) + 12'd2;
     horz2  = 12'(w_p) + 12'(e_p) + 12'd1;
     vert2  = 12'(n_p) + 12'(s_p) + 12'd1;
+    g_eq   = 10'((12'(c_p) + 12'(diag4 >> 2) + 12'd1) >> 1);
     cu = !s4.xp ^ s4.ph[0];
     cv = !s4.yp ^ s4.ph[1];
     d_r = c_p; d_g = c_p; d_b = c_p;
@@ -459,9 +468,9 @@ module rtlnet_csi2_rx_bayer
     end else if (cu && cv) begin     // B site
       d_b = c_p; d_g = 10'(cross4 >> 2); d_r = 10'(diag4 >> 2);
     end else if (cu && !cv) begin    // G on a red row
-      d_g = c_p; d_r = 10'(horz2 >> 1); d_b = 10'(vert2 >> 1);
+      d_g = s4.ge ? g_eq : c_p; d_r = 10'(horz2 >> 1); d_b = 10'(vert2 >> 1);
     end else begin                   // G on a blue row
-      d_g = c_p; d_b = 10'(horz2 >> 1); d_r = 10'(vert2 >> 1);
+      d_g = s4.ge ? g_eq : c_p; d_b = 10'(horz2 >> 1); d_r = 10'(vert2 >> 1);
     end
   end
 
