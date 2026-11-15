@@ -3,11 +3,13 @@
  *
  * Copyright (C) 2026 IronKernel. All rights reserved.
  *
- * Role: runs driver/rtlnet_csi2_rx.c on the PC against a register model of the Phase 1 window (header, VIDEO_MODE,
+ * Role: runs driver/rtlnet_csi2_rx.c on the PC against a register model of the window (header, VIDEO_MODE,
  * SOURCE, FRAME_PERIOD, CAM_TIMEOUT, STATUS with write-1-to-clear error flags, FRAME_COUNT, ACTIVE, PATTERN, PATTERN_FRAME) through
  * the RTLNET_HOST_TEST hooks of rtlnet_mmio.h. The model rejects as the RTL does: a mode above 1 (MODE_ERR), a mode or a
  * period below the minimum of the selected mode (PERIOD_ERR), a source of 3 (SOURCE_ERR), a PATTERN value with a pattern above 4,
- * a bit set outside [2:0] and [15:8], or a speed beyond +-32 (PATTERN_ERR). Prints one line
+ * a bit set outside [2:0] and [15:8], or a speed beyond +-32 (PATTERN_ERR). The model runs twice: as the core without the camera receiver
+ * (VERSION 0x11102026, the camera registers read 0) and as the core with it (VERSION 0x11152026, CAPS camera bit, the camera registers with the
+ * field masks of the RTL, counters that clear by RX_CLEAR). Prints one line
  * "DRIVER TEST PASS: rtlnet_csi2_rx checks=<n>" or "DRIVER TEST FAIL: ..." and returns 0 / 1.
  *
  * Build and run: cores/rtlnet_csi2_rx/testbench/rtlnet_csi2_rx_driver_test.ps1
@@ -30,6 +32,16 @@ static uint32_t g_frames = 42u;
 static uint32_t g_pattern = 0x00000400u;
 static uint32_t g_pat_frames = 5u;
 static int      g_bad_access;
+static int      g_camera;                 /* 1: the model is the core with the camera receiver */
+static uint32_t g_rx_ctrl = 0x0Du;
+static uint32_t g_rx_taps;
+static uint32_t g_rx_settle = 28u;
+static uint32_t g_rx_filter = 0x2B00u;
+static uint32_t g_black;
+static uint32_t g_wb[3] = { 0x100u, 0x100u, 0x100u };
+static uint32_t g_phase;
+static uint32_t g_proc;
+static uint32_t g_cnt[RTLNET_CSI2_CNT_COUNT];
 static int      g_checks;
 static int      g_fails;
 
@@ -56,8 +68,9 @@ uint32_t rtlnet_host_reg_read32(uintptr_t addr)
     }
     switch (off) {
     case RTLNET_REG_ID:                return g_id;
-    case RTLNET_REG_VERSION:           return RTLNET_CSI2_VERSION_VALUE;
-    case RTLNET_REG_CAPS:              return RTLNET_CSI2_MODE_COUNT | RTLNET_CSI2_CAPS_PATTERN | RTLNET_CSI2_CAPS_MOVING;
+    case RTLNET_REG_VERSION:           return g_camera ? RTLNET_CSI2_VERSION_CAMERA : RTLNET_CSI2_VERSION_VALUE;
+    case RTLNET_REG_CAPS:              return RTLNET_CSI2_MODE_COUNT | RTLNET_CSI2_CAPS_PATTERN | RTLNET_CSI2_CAPS_MOVING |
+                                              (g_camera ? RTLNET_CSI2_CAPS_CAMERA : 0u);
     case RTLNET_CSI2_REG_VIDEO_MODE:   return g_mode;
     case RTLNET_CSI2_REG_SOURCE:       return g_source;
     case RTLNET_CSI2_REG_FRAME_PERIOD: return g_period;
@@ -67,7 +80,31 @@ uint32_t rtlnet_host_reg_read32(uintptr_t addr)
     case RTLNET_CSI2_REG_ACTIVE:       return g_mode;
     case RTLNET_CSI2_REG_PATTERN:      return g_pattern;
     case RTLNET_CSI2_REG_PATTERN_FRAME: return g_pat_frames;
-    default:                           return 0u;
+    default:
+        break;
+    }
+    if (!g_camera) {
+        return 0u;
+    }
+    switch (off) {
+    case RTLNET_CSI2_REG_RX_CTRL:      return g_rx_ctrl;
+    case RTLNET_CSI2_REG_RX_STATUS:    return RTLNET_CSI2_RXST_CLK_RUN | (3u << RTLNET_CSI2_RXST_LP_D0_SHIFT) | (3u << RTLNET_CSI2_RXST_LP_D1_SHIFT);
+    case RTLNET_CSI2_REG_RX_TAPS:      return g_rx_taps;
+    case RTLNET_CSI2_REG_RX_SETTLE:    return g_rx_settle;
+    case RTLNET_CSI2_REG_RX_FILTER:    return g_rx_filter;
+    case RTLNET_CSI2_REG_RX_LINES:     return 720u;
+    case RTLNET_CSI2_REG_RX_PIXELS:    return 1280u;
+    case RTLNET_CSI2_REG_BLACK:        return g_black;
+    case RTLNET_CSI2_REG_WB_R:         return g_wb[0];
+    case RTLNET_CSI2_REG_WB_G:         return g_wb[1];
+    case RTLNET_CSI2_REG_WB_B:         return g_wb[2];
+    case RTLNET_CSI2_REG_PHASE:        return g_phase;
+    case RTLNET_CSI2_REG_PROC:         return g_proc;
+    default:
+        if (off >= RTLNET_CSI2_REG_CNT_BASE && off < RTLNET_CSI2_REG_CNT_BASE + 4u * RTLNET_CSI2_CNT_COUNT) {
+            return g_cnt[(off - RTLNET_CSI2_REG_CNT_BASE) / 4u];
+        }
+        return 0u;
     }
 }
 
@@ -121,6 +158,32 @@ void rtlnet_host_reg_write32(uintptr_t addr, uint32_t value)
         g_err &= ~(value & RTLNET_CSI2_STATUS_ERR_MASK);
         break;
     default:
+        if (!g_camera) {
+            break;
+        }
+        switch (off) {
+        case RTLNET_CSI2_REG_RX_CTRL:   g_rx_ctrl = value & 0x1Fu; break;
+        case RTLNET_CSI2_REG_RX_TAPS:   g_rx_taps = value & 0x1F1Fu; break;
+        case RTLNET_CSI2_REG_RX_SETTLE: g_rx_settle = value & 0xFFu; break;
+        case RTLNET_CSI2_REG_RX_FILTER: g_rx_filter = value & 0x3F03u; break;
+        case RTLNET_CSI2_REG_BLACK:     g_black = value & 0x3FFu; break;
+        case RTLNET_CSI2_REG_WB_R:      g_wb[0] = value & 0xFFFu; break;
+        case RTLNET_CSI2_REG_WB_G:      g_wb[1] = value & 0xFFFu; break;
+        case RTLNET_CSI2_REG_WB_B:      g_wb[2] = value & 0xFFFu; break;
+        case RTLNET_CSI2_REG_PHASE:     g_phase = value & 3u; break;
+        case RTLNET_CSI2_REG_PROC:      g_proc = value & 1u; break;
+        case RTLNET_CSI2_REG_RX_CLEAR: {
+            uint32_t i;
+            for (i = 0u; i < RTLNET_CSI2_CNT_COUNT; i++) {
+                if ((value & RTLNET_CSI2_CLEAR_ALL) != 0u || (value & (1u << i)) != 0u) {
+                    g_cnt[i] = 0u;
+                }
+            }
+            break;
+        }
+        default:
+            break;
+        }
         break;
     }
 }
@@ -195,6 +258,55 @@ int main(void)
     check(rtlnet_csi2_rx_set_pattern(TEST_BASE, RTLNET_CSI2_PATTERN_BARS, RTLNET_CSI2_SPEED_RESET) == RTLNET_CSI2_OK && g_pattern == 0x00000400u && g_err == 0u,
           "a stale PATTERN_ERR does not fail a good write; back to the reset value");
     check(g_bad_access == 0, "no unaligned or out-of-window access");
+
+    /* Without the camera receiver every camera function refuses and writes nothing. */
+    {
+        rtlnet_csi2_rx_rxstate_t rs;
+        check(rtlnet_csi2_rx_set_taps(TEST_BASE, 1u, 2u) == RTLNET_CSI2_ERR_ARG && g_rx_taps == 0u, "no camera: set_taps refused");
+        check(rtlnet_csi2_rx_set_wb(TEST_BASE, 1u, 2u, 3u) == RTLNET_CSI2_ERR_ARG && g_wb[0] == 0x100u, "no camera: set_wb refused");
+        check(rtlnet_csi2_rx_read_rxstate(TEST_BASE, &rs) == RTLNET_CSI2_ERR_ARG, "no camera: read_rxstate refused");
+        check(rtlnet_csi2_rx_clear_counters(TEST_BASE, RTLNET_CSI2_CLEAR_ALL) == RTLNET_CSI2_ERR_ARG, "no camera: clear_counters refused");
+    }
+
+    /* The core with the camera receiver. */
+    g_camera = 1;
+    {
+        rtlnet_csi2_rx_rxstate_t rs;
+        check(rtlnet_csi2_rx_probe(TEST_BASE, &caps) == RTLNET_CSI2_OK && caps.camera == 1, "camera core: probe accepts VERSION 0x11152026, camera bit set");
+        check(rtlnet_csi2_rx_read_rxstate(TEST_BASE, NULL) == RTLNET_CSI2_ERR_ARG, "read_rxstate NULL");
+        check(rtlnet_csi2_rx_read_rxstate(TEST_BASE, &rs) == RTLNET_CSI2_OK && rs.ctrl == 0x0Du && rs.settle == 28u && rs.filter == 0x2B00u &&
+              rs.taps == 0u && (rs.status & RTLNET_CSI2_RXST_CLK_RUN) != 0u && ((rs.status >> RTLNET_CSI2_RXST_LP_D0_SHIFT) & 3u) == 3u &&
+              rs.lines == 720u && rs.pixels == 1280u, "camera reset state");
+        check(rtlnet_csi2_rx_rx_control(TEST_BASE, 1, 1, 3u, 0) == RTLNET_CSI2_OK && g_rx_ctrl == 0x0Fu, "rx_control: soft reset set");
+        check(rtlnet_csi2_rx_rx_control(TEST_BASE, 1, 0, 1u, 1) == RTLNET_CSI2_OK && g_rx_ctrl == 0x15u, "rx_control: one lane, bit order");
+        check(rtlnet_csi2_rx_rx_control(TEST_BASE, 1, 0, 4u, 0) == RTLNET_CSI2_ERR_ARG && g_rx_ctrl == 0x15u, "rx_control: lane_en 4 refused");
+        check(rtlnet_csi2_rx_rx_control(TEST_BASE, 1, 0, 3u, 0) == RTLNET_CSI2_OK && g_rx_ctrl == 0x0Du, "rx_control: back to the reset value");
+        check(rtlnet_csi2_rx_set_taps(TEST_BASE, 31u, 5u) == RTLNET_CSI2_OK && g_rx_taps == 0x051Fu, "set_taps 31 and 5");
+        check(rtlnet_csi2_rx_set_taps(TEST_BASE, 32u, 0u) == RTLNET_CSI2_ERR_ARG && rtlnet_csi2_rx_set_taps(TEST_BASE, 0u, 32u) == RTLNET_CSI2_ERR_ARG &&
+              g_rx_taps == 0x051Fu, "set_taps 32 refused, nothing written");
+        check(rtlnet_csi2_rx_set_settle(TEST_BASE, 255u) == RTLNET_CSI2_OK && g_rx_settle == 255u &&
+              rtlnet_csi2_rx_set_settle(TEST_BASE, 256u) == RTLNET_CSI2_ERR_ARG && g_rx_settle == 255u, "set_settle 255 accepted, 256 refused");
+        check(rtlnet_csi2_rx_set_filter(TEST_BASE, 3u, 0x12u) == RTLNET_CSI2_OK && g_rx_filter == 0x1203u &&
+              rtlnet_csi2_rx_set_filter(TEST_BASE, 4u, 0x12u) == RTLNET_CSI2_ERR_ARG && rtlnet_csi2_rx_set_filter(TEST_BASE, 0u, 64u) == RTLNET_CSI2_ERR_ARG &&
+              g_rx_filter == 0x1203u, "set_filter");
+        check(rtlnet_csi2_rx_set_black(TEST_BASE, 16u) == RTLNET_CSI2_OK && g_black == 16u && rtlnet_csi2_rx_set_black(TEST_BASE, 1024u) == RTLNET_CSI2_ERR_ARG &&
+              g_black == 16u, "set_black");
+        check(rtlnet_csi2_rx_set_wb(TEST_BASE, 0x180u, 0x100u, 0x1C0u) == RTLNET_CSI2_OK && g_wb[0] == 0x180u && g_wb[1] == 0x100u && g_wb[2] == 0x1C0u,
+              "set_wb");
+        check(rtlnet_csi2_rx_set_wb(TEST_BASE, 0x1000u, 1u, 1u) == RTLNET_CSI2_ERR_ARG && g_wb[0] == 0x180u && g_wb[1] == 0x100u, "set_wb 0x1000 refused, nothing written");
+        check(rtlnet_csi2_rx_set_phase(TEST_BASE, 3u) == RTLNET_CSI2_OK && g_phase == 3u && rtlnet_csi2_rx_set_phase(TEST_BASE, 4u) == RTLNET_CSI2_ERR_ARG &&
+              g_phase == 3u, "set_phase");
+        check(rtlnet_csi2_rx_set_gamma(TEST_BASE, 1) == RTLNET_CSI2_OK && g_proc == 1u && rtlnet_csi2_rx_set_gamma(TEST_BASE, 0) == RTLNET_CSI2_OK && g_proc == 0u,
+              "set_gamma");
+        g_cnt[RTLNET_CSI2_CNT_CRC] = 7u;
+        g_cnt[RTLNET_CSI2_CNT_CLKLOSS] = 9u;
+        check(rtlnet_csi2_rx_read_rxstate(TEST_BASE, &rs) == RTLNET_CSI2_OK && rs.counters[RTLNET_CSI2_CNT_CRC] == 7u &&
+              rs.counters[RTLNET_CSI2_CNT_CLKLOSS] == 9u && rs.counters[RTLNET_CSI2_CNT_ECC_CORR] == 0u, "read_rxstate reads the counters in index order");
+        check(rtlnet_csi2_rx_clear_counters(TEST_BASE, 1u << RTLNET_CSI2_CNT_CRC) == RTLNET_CSI2_OK && g_cnt[RTLNET_CSI2_CNT_CRC] == 0u &&
+              g_cnt[RTLNET_CSI2_CNT_CLKLOSS] == 9u, "clear one counter");
+        check(rtlnet_csi2_rx_clear_counters(TEST_BASE, RTLNET_CSI2_CLEAR_ALL) == RTLNET_CSI2_OK && g_cnt[RTLNET_CSI2_CNT_CLKLOSS] == 0u, "clear all counters");
+        check(g_bad_access == 0, "camera registers: no unaligned or out-of-window access");
+    }
 
     if (g_fails == 0) {
         printf("DRIVER TEST PASS: rtlnet_csi2_rx checks=%d\n", g_checks);

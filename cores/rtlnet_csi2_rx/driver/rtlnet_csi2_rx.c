@@ -1,5 +1,5 @@
 /*
- * rtlnet_csi2_rx.c -- RTLNet CSI-2 capture core driver (Phase 1, test patterns)
+ * rtlnet_csi2_rx.c -- RTLNet CSI-2 capture core driver (test patterns, source switch, camera receiver)
  *
  * Copyright (C) 2026 IronKernel. All rights reserved.
  *
@@ -14,7 +14,7 @@
 /*
  * rtlnet_csi2_rx_probe -- identify the core and read its capabilities
  * Steps:
- *   1. Check ID and VERSION.
+ *   1. Check ID and VERSION (the core with or without the camera receiver).
  *   2. Decode CAPS into caps when caps is not NULL.
  * Returns: RTLNET_CSI2_OK when present and matching, RTLNET_CSI2_ERR_ARG otherwise.
  */
@@ -25,7 +25,8 @@ int rtlnet_csi2_rx_probe(uintptr_t base, rtlnet_csi2_rx_caps_t *caps)
     if (rtlnet_reg_read32(base, RTLNET_REG_ID) != RTLNET_CSI2_ID_VALUE) {
         return RTLNET_CSI2_ERR_ARG;
     }
-    if (rtlnet_reg_read32(base, RTLNET_REG_VERSION) != RTLNET_CSI2_VERSION_VALUE) {
+    c = rtlnet_reg_read32(base, RTLNET_REG_VERSION);
+    if (c != RTLNET_CSI2_VERSION_VALUE && c != RTLNET_CSI2_VERSION_CAMERA) {
         return RTLNET_CSI2_ERR_ARG;
     }
     if (caps != NULL) {
@@ -149,6 +150,143 @@ int rtlnet_csi2_rx_set_rate_fps(uintptr_t base, uint32_t fps)
         return RTLNET_CSI2_ERR_ARG;
     }
     return rtlnet_csi2_rx_set_frame_period(base, RTLNET_CSI2_UI_CLK_HZ / fps);
+}
+
+/*
+ * camera_present -- the core has the camera receiver (CAPS camera bit)
+ * Returns: 1 when present, 0 otherwise.
+ */
+static int camera_present(uintptr_t base)
+{
+    return ((rtlnet_reg_read32(base, RTLNET_REG_CAPS) & RTLNET_CSI2_CAPS_CAMERA) != 0u) ? 1 : 0;
+}
+
+/*
+ * cam_write -- write one camera receiver register after the presence check
+ * Returns: RTLNET_CSI2_OK, or ERR_ARG without the camera receiver.
+ */
+static int cam_write(uintptr_t base, uint32_t offset, uint32_t value)
+{
+    if (camera_present(base) == 0) {
+        return RTLNET_CSI2_ERR_ARG;
+    }
+    rtlnet_reg_write32(base, offset, value);
+    return RTLNET_CSI2_OK;
+}
+
+/*
+ * rtlnet_csi2_rx_rx_control -- enable, soft reset, lane enable and bit order of the receiver
+ * Returns: OK, or ERR_ARG (lane_en above 3, no camera receiver).
+ */
+int rtlnet_csi2_rx_rx_control(uintptr_t base, int enable, int soft_reset, uint32_t lane_en, int bit_rev)
+{
+    uint32_t v;
+
+    if (lane_en > 3u) {
+        return RTLNET_CSI2_ERR_ARG;
+    }
+    v = ((enable != 0) ? RTLNET_CSI2_CTRL_ENABLE : 0u) | ((soft_reset != 0) ? RTLNET_CSI2_CTRL_SOFT_RESET : 0u) |
+        (lane_en << RTLNET_CSI2_CTRL_LANE_SHIFT) | ((bit_rev != 0) ? RTLNET_CSI2_CTRL_BIT_REV : 0u);
+    return cam_write(base, RTLNET_CSI2_REG_RX_CTRL, v);
+}
+
+/* rtlnet_csi2_rx_set_taps -- input delay taps (0..31) of the two data lanes. */
+int rtlnet_csi2_rx_set_taps(uintptr_t base, uint32_t tap0, uint32_t tap1)
+{
+    if (tap0 > 31u || tap1 > 31u) {
+        return RTLNET_CSI2_ERR_ARG;
+    }
+    return cam_write(base, RTLNET_CSI2_REG_RX_TAPS, tap0 | (tap1 << 8));
+}
+
+/* rtlnet_csi2_rx_set_settle -- HS settle time in clocks of the 200 MHz reference (0..255). */
+int rtlnet_csi2_rx_set_settle(uintptr_t base, uint32_t clocks)
+{
+    if (clocks > 255u) {
+        return RTLNET_CSI2_ERR_ARG;
+    }
+    return cam_write(base, RTLNET_CSI2_REG_RX_SETTLE, clocks);
+}
+
+/* rtlnet_csi2_rx_set_filter -- virtual channel (0..3) and data type (0..63) the receiver accepts. */
+int rtlnet_csi2_rx_set_filter(uintptr_t base, uint32_t vc, uint32_t dt)
+{
+    if (vc > 3u || dt > 63u) {
+        return RTLNET_CSI2_ERR_ARG;
+    }
+    return cam_write(base, RTLNET_CSI2_REG_RX_FILTER, vc | (dt << 8));
+}
+
+/* rtlnet_csi2_rx_set_black -- black level in 10-bit raw units (0..1023). */
+int rtlnet_csi2_rx_set_black(uintptr_t base, uint32_t black)
+{
+    if (black > 1023u) {
+        return RTLNET_CSI2_ERR_ARG;
+    }
+    return cam_write(base, RTLNET_CSI2_REG_BLACK, black);
+}
+
+/*
+ * rtlnet_csi2_rx_set_wb -- white balance gains, unsigned 4.8 fixed point (0x100 = 1.0)
+ * Returns: OK, or ERR_ARG (a gain above 0xFFF, no camera receiver); nothing is written on ERR_ARG.
+ */
+int rtlnet_csi2_rx_set_wb(uintptr_t base, uint32_t gain_r, uint32_t gain_g, uint32_t gain_b)
+{
+    if (gain_r > 0xFFFu || gain_g > 0xFFFu || gain_b > 0xFFFu) {
+        return RTLNET_CSI2_ERR_ARG;
+    }
+    if (camera_present(base) == 0) {
+        return RTLNET_CSI2_ERR_ARG;
+    }
+    rtlnet_reg_write32(base, RTLNET_CSI2_REG_WB_R, gain_r);
+    rtlnet_reg_write32(base, RTLNET_CSI2_REG_WB_G, gain_g);
+    rtlnet_reg_write32(base, RTLNET_CSI2_REG_WB_B, gain_b);
+    return RTLNET_CSI2_OK;
+}
+
+/* rtlnet_csi2_rx_set_phase -- Bayer phase of the first pixel of the first line (0 R, 1 Gr, 2 Gb, 3 B). */
+int rtlnet_csi2_rx_set_phase(uintptr_t base, uint32_t phase)
+{
+    if (phase > 3u) {
+        return RTLNET_CSI2_ERR_ARG;
+    }
+    return cam_write(base, RTLNET_CSI2_REG_PHASE, phase);
+}
+
+/* rtlnet_csi2_rx_set_gamma -- gamma curve on (1) or off (0). */
+int rtlnet_csi2_rx_set_gamma(uintptr_t base, int enable)
+{
+    return cam_write(base, RTLNET_CSI2_REG_PROC, (enable != 0) ? 1u : 0u);
+}
+
+/*
+ * rtlnet_csi2_rx_read_rxstate -- read the camera receiver registers and the twelve counters
+ * Returns: OK, or ERR_ARG (NULL, no camera receiver).
+ */
+int rtlnet_csi2_rx_read_rxstate(uintptr_t base, rtlnet_csi2_rx_rxstate_t *st)
+{
+    uint32_t i;
+
+    if (st == NULL || camera_present(base) == 0) {
+        return RTLNET_CSI2_ERR_ARG;
+    }
+    st->ctrl   = rtlnet_reg_read32(base, RTLNET_CSI2_REG_RX_CTRL);
+    st->status = rtlnet_reg_read32(base, RTLNET_CSI2_REG_RX_STATUS);
+    st->taps   = rtlnet_reg_read32(base, RTLNET_CSI2_REG_RX_TAPS);
+    st->settle = rtlnet_reg_read32(base, RTLNET_CSI2_REG_RX_SETTLE);
+    st->filter = rtlnet_reg_read32(base, RTLNET_CSI2_REG_RX_FILTER);
+    st->lines  = rtlnet_reg_read32(base, RTLNET_CSI2_REG_RX_LINES);
+    st->pixels = rtlnet_reg_read32(base, RTLNET_CSI2_REG_RX_PIXELS);
+    for (i = 0u; i < RTLNET_CSI2_CNT_COUNT; i++) {
+        st->counters[i] = rtlnet_reg_read32(base, RTLNET_CSI2_REG_CNT_BASE + 4u * i);
+    }
+    return RTLNET_CSI2_OK;
+}
+
+/* rtlnet_csi2_rx_clear_counters -- clear the counters whose bit is set in mask (bit n = counter n), or all with RTLNET_CSI2_CLEAR_ALL. */
+int rtlnet_csi2_rx_clear_counters(uintptr_t base, uint32_t mask)
+{
+    return cam_write(base, RTLNET_CSI2_REG_RX_CLEAR, mask);
 }
 
 /* rtlnet_csi2_rx_mode_width -- pixels per line of a mode, 0 for an unknown mode. */

@@ -20,3 +20,29 @@ tb_rtlnet_csi2_rx   cores/rtlnet_csi2_rx/testbench/tb_rtlnet_csi2_rx.f  patfull 
 # TB_CRC1080 (decimal) are the values csi2_bars_model.c prints for 720p30 and 1080p30.
 tb_rtlnet_video_path   cores/rtlnet_csi2_rx/testbench/tb_rtlnet_video_path.f  crc_model   defines=TB_CRC720=1832777744,TB_CRC1080=2396646443
 tb_rtlnet_video_path   cores/rtlnet_csi2_rx/testbench/tb_rtlnet_video_path.f  neg         defines=TB_CRC720=1832777744,TB_CRC1080=2396646443  plusargs=INJECT_FAILURE  expectfail
+# Camera receiver (CAMERA_RX): the video path model and the files the benches read (selftest and committed .mem files equal the model).
+csi2_rx_model_xcheck   script:cores/rtlnet_csi2_rx/testbench/csi2_rx_model.ps1
+# D-PHY front end with the bench transmitter model: tag cont = continuous clock build, noncont = NONCONT_CLOCK build.
+tb_rtlnet_csi2_rx_dphy   cores/rtlnet_csi2_rx/testbench/tb_rtlnet_csi2_rx_dphy.f  cont      defines=TB_NONCONT=0
+tb_rtlnet_csi2_rx_dphy   cores/rtlnet_csi2_rx/testbench/tb_rtlnet_csi2_rx_dphy.f  noncont   defines=TB_NONCONT=1
+tb_rtlnet_csi2_rx_dphy   cores/rtlnet_csi2_rx/testbench/tb_rtlnet_csi2_rx_dphy.f  neg       defines=TB_NONCONT=0  plusargs=INJECT_FAILURE  expectfail
+tb_rtlnet_csi2_rx_dphy   cores/rtlnet_csi2_rx/testbench/tb_rtlnet_csi2_rx_dphy.f  mut       defines=TB_NONCONT=0  plusargs=MUTATE  expectfail
+# Packet layer (ECC, CRC, filter, RAW10, truncation).
+tb_rtlnet_csi2_rx_packet cores/rtlnet_csi2_rx/testbench/tb_rtlnet_csi2_rx_packet.f  pass
+tb_rtlnet_csi2_rx_packet cores/rtlnet_csi2_rx/testbench/tb_rtlnet_csi2_rx_packet.f  neg       plusargs=INJECT_FAILURE  expectfail
+tb_rtlnet_csi2_rx_packet cores/rtlnet_csi2_rx/testbench/tb_rtlnet_csi2_rx_packet.f  mut       plusargs=MUTATE  expectfail
+# Byte clock to clk FIFO.
+tb_rtlnet_csi2_rx_cdc    cores/rtlnet_csi2_rx/testbench/tb_rtlnet_csi2_rx_cdc.f     pass
+tb_rtlnet_csi2_rx_cdc    cores/rtlnet_csi2_rx/testbench/tb_rtlnet_csi2_rx_cdc.f     neg       plusargs=INJECT_FAILURE  expectfail
+tb_rtlnet_csi2_rx_cdc    cores/rtlnet_csi2_rx/testbench/tb_rtlnet_csi2_rx_cdc.f     mut       plusargs=MUTATE  expectfail
+# Bayer to YUV against the Python model, three case sets (TB_SETNUM 0 small, 1 fault, 2 wide).
+tb_rtlnet_csi2_rx_bayer  cores/rtlnet_csi2_rx/testbench/tb_rtlnet_csi2_rx_bayer.f   small     defines=TB_SETNUM=0
+tb_rtlnet_csi2_rx_bayer  cores/rtlnet_csi2_rx/testbench/tb_rtlnet_csi2_rx_bayer.f   fault     defines=TB_SETNUM=1
+tb_rtlnet_csi2_rx_bayer  cores/rtlnet_csi2_rx/testbench/tb_rtlnet_csi2_rx_bayer.f   wide      defines=TB_SETNUM=2
+tb_rtlnet_csi2_rx_bayer  cores/rtlnet_csi2_rx/testbench/tb_rtlnet_csi2_rx_bayer.f   neg       defines=TB_SETNUM=0  plusargs=INJECT_FAILURE  expectfail
+tb_rtlnet_csi2_rx_bayer  cores/rtlnet_csi2_rx/testbench/tb_rtlnet_csi2_rx_bayer.f   mut       defines=TB_SETNUM=0  plusargs=MUTATE  expectfail
+# Full path: transmitter model, D-PHY, packet layer, FIFO, Bayer, YUV, registers; small = geometry 32 x 8 and 24 x 10 with the fault cases, wide = line widths 1280 and 1920.
+tb_rtlnet_csi2_rx_camera cores/rtlnet_csi2_rx/testbench/tb_rtlnet_csi2_rx_camera.f  small     defines=TB_GEOM=0
+tb_rtlnet_csi2_rx_camera cores/rtlnet_csi2_rx/testbench/tb_rtlnet_csi2_rx_camera.f  wide      defines=TB_GEOM=1
+tb_rtlnet_csi2_rx_camera cores/rtlnet_csi2_rx/testbench/tb_rtlnet_csi2_rx_camera.f  neg       defines=TB_GEOM=0  plusargs=INJECT_FAILURE  expectfail
+tb_rtlnet_csi2_rx_camera cores/rtlnet_csi2_rx/testbench/tb_rtlnet_csi2_rx_camera.f  mut       defines=TB_GEOM=0  plusargs=MUTATE  expectfail

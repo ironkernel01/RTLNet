@@ -1,5 +1,5 @@
 /*
- * rtlnet_csi2_rx.h -- RTLNet CSI-2 capture core driver (Phase 1: test pattern and source switch)
+ * rtlnet_csi2_rx.h -- RTLNet CSI-2 capture core driver (test pattern, source switch and the camera receiver)
  *
  * Copyright (C) 2026 IronKernel. All rights reserved.
  *
@@ -22,7 +22,16 @@
  * in pixels per frame of the scroll and the box (-32 to +32); a write takes effect at the next frame start and restarts the
  * pattern frame counter (PATTERN_FRAME) at 0, as does a VIDEO_MODE change. The pattern reset default is static bars, speed 4.
  *
- * Revision: 11-10-2026
+ * Camera receiver (CAPS camera bit set, VERSION 0x11152026). The core receives the camera itself: two D-PHY data lanes and a clock lane
+ * in, CSI-2 packets decoded (header ECC, CRC-16, virtual channel and data type filter, RAW10), Bayer to RGB and YUV422 out into the same
+ * source switch. The functions below configure the receiver and read its status and counters. Configuration written to RX_CTRL, RX_TAPS,
+ * RX_SETTLE, RX_FILTER should be written while the receiver is idle (before the sensor streams); the Bayer processing registers take
+ * effect at the next frame start. The twelve event counters are saturating, read as 32-bit values and cleared by rtlnet_csi2_rx_clear_counters.
+ * The frame geometry of the camera path is that of VIDEO_MODE (1280 x 720 or 1920 x 1080): every frame that starts is output at exactly that
+ * size, a frame of another size is padded or cut and counted in RTLNET_CSI2_CNT_SIZE. Without the camera bit the functions return
+ * RTLNET_CSI2_ERR_ARG. The receiver is proven in simulation only.
+ *
+ * Revision: 11-15-2026
  */
 #ifndef RTLNET_CSI2_RX_H
 #define RTLNET_CSI2_RX_H
@@ -30,7 +39,8 @@
 #include <stdint.h>   /* uint32_t, uintptr_t */
 
 #define RTLNET_CSI2_ID_VALUE            0x43534932u   /* "CSI2" */
-#define RTLNET_CSI2_VERSION_VALUE       0x11102026u
+#define RTLNET_CSI2_VERSION_VALUE       0x11102026u   /* core without the camera receiver */
+#define RTLNET_CSI2_VERSION_CAMERA      0x11152026u   /* core with the camera receiver (CAPS camera bit set) */
 
 /* Registers (ID, VERSION, CAPS at RTLNET_REG_* of rtlnet_mmio.h). */
 #define RTLNET_CSI2_REG_VIDEO_MODE      0x010u   /* RW, [1:0] mode, other values rejected (STATUS.MODE_ERR) */
@@ -43,10 +53,57 @@
 #define RTLNET_CSI2_REG_PATTERN         0x030u   /* RW, [2:0] pattern 0..4, [15:8] signed speed -32..+32, else rejected (STATUS.PATTERN_ERR) */
 #define RTLNET_CSI2_REG_PATTERN_FRAME   0x034u   /* RO, pattern frames started since the last PATTERN write or VIDEO_MODE change */
 
+/* Camera receiver registers (read 0 and ignore writes when the camera bit of CAPS is 0). */
+#define RTLNET_CSI2_REG_RX_CTRL         0x040u   /* RW, [0] enable (reset 1), [1] soft reset (reset 0), [3:2] lane enable (reset 3), [4] bit order */
+#define RTLNET_CSI2_REG_RX_STATUS       0x044u   /* RO, see RTLNET_CSI2_RXST_* */
+#define RTLNET_CSI2_REG_RX_TAPS         0x048u   /* RW, [4:0] input delay tap of lane 0, [12:8] of lane 1 (reset 0) */
+#define RTLNET_CSI2_REG_RX_SETTLE       0x04Cu   /* RW, [7:0] HS settle time in 200 MHz clocks (reset 28 = 140 ns) */
+#define RTLNET_CSI2_REG_RX_FILTER       0x050u   /* RW, [1:0] virtual channel (reset 0), [13:8] data type (reset 0x2B, RAW10) */
+#define RTLNET_CSI2_REG_RX_CLEAR        0x054u   /* WO, bit n clears counter n, bit 31 all; reads 0 */
+#define RTLNET_CSI2_REG_RX_LINES        0x058u   /* RO, lines of the last frame as received */
+#define RTLNET_CSI2_REG_RX_PIXELS       0x05Cu   /* RO, pixels of the last line as received */
+#define RTLNET_CSI2_REG_CNT_BASE        0x060u   /* RO, twelve 32-bit counters, 4 bytes apart (RTLNET_CSI2_CNT_*) */
+#define RTLNET_CSI2_REG_BLACK           0x090u   /* RW, [9:0] black level in 10-bit raw units (reset 0) */
+#define RTLNET_CSI2_REG_WB_R            0x094u   /* RW, [11:0] red gain, unsigned 4.8 fixed point (reset 0x100 = 1.0) */
+#define RTLNET_CSI2_REG_WB_G            0x098u   /* RW, [11:0] green gain (reset 0x100) */
+#define RTLNET_CSI2_REG_WB_B            0x09Cu   /* RW, [11:0] blue gain (reset 0x100) */
+#define RTLNET_CSI2_REG_PHASE           0x0A0u   /* RW, [1:0] Bayer phase of the first pixel of the first line (reset 0) */
+#define RTLNET_CSI2_REG_PROC            0x0A4u   /* RW, [0] gamma enable (reset 0) */
+
+#define RTLNET_CSI2_CTRL_ENABLE         (1u << 0)
+#define RTLNET_CSI2_CTRL_SOFT_RESET     (1u << 1)
+#define RTLNET_CSI2_CTRL_LANE_SHIFT     2u            /* [3:2] lane enable: 3 two lanes, 1 lane 0 only */
+#define RTLNET_CSI2_CTRL_BIT_REV        (1u << 4)     /* deserializer delivers the earliest bit in bit 7 */
+
+#define RTLNET_CSI2_RXST_CLK_RUN        (1u << 0)     /* HS clock detected */
+#define RTLNET_CSI2_RXST_HS_MASK        (3u << 1)     /* [2:1] lane in an HS burst (settle over) */
+#define RTLNET_CSI2_RXST_LOCKED_MASK    (3u << 3)     /* [4:3] lane found its sync byte in the burst */
+#define RTLNET_CSI2_RXST_DLYCTL_RDY     (1u << 5)     /* IDELAYCTRL ready */
+#define RTLNET_CSI2_RXST_IN_FRAME       (1u << 6)     /* a frame start was seen and the frame end not yet */
+#define RTLNET_CSI2_RXST_FMT_ERR        (1u << 7)     /* YUV conversion saw a malformed line (sticky until reset) */
+#define RTLNET_CSI2_RXST_LP_D0_SHIFT    8u            /* [9:8] LP state {Dp, Dn} of lane 0: 3 = stop */
+#define RTLNET_CSI2_RXST_LP_D1_SHIFT    10u           /* [11:10] of lane 1 */
+
+/* Counter indexes. */
+#define RTLNET_CSI2_CNT_ECC_CORR        0u            /* header errors corrected (packet used) */
+#define RTLNET_CSI2_CNT_ECC_UNC         1u            /* header errors not correctable (packet dropped) */
+#define RTLNET_CSI2_CNT_CRC             2u            /* payload CRC errors (the pixels are still used) */
+#define RTLNET_CSI2_CNT_SOT             3u            /* bursts without a sync byte, or lane skew beyond three bytes */
+#define RTLNET_CSI2_CNT_FRAMES          4u            /* frame starts received */
+#define RTLNET_CSI2_CNT_DT              5u            /* packets of an unexpected data type (same virtual channel) */
+#define RTLNET_CSI2_CNT_TRUNC           6u            /* packets that ended before their word count */
+#define RTLNET_CSI2_CNT_OVF             7u            /* FIFO entries dropped (clk side did not keep up) */
+#define RTLNET_CSI2_CNT_SIZE            8u            /* frames whose lines or line width differ from the mode */
+#define RTLNET_CSI2_CNT_ORPHAN          9u            /* lines outside a frame (no frame start) */
+#define RTLNET_CSI2_CNT_LEN             10u           /* word count zero or not a multiple of five */
+#define RTLNET_CSI2_CNT_CLKLOSS         11u           /* HS clock stops (every burst with a non-continuous clock) */
+#define RTLNET_CSI2_CNT_COUNT           12u
+#define RTLNET_CSI2_CLEAR_ALL           0x80000000u
+
 /* CAPS fields. */
 #define RTLNET_CSI2_CAPS_MODES_MASK     0x0000000Fu   /* [3:0] number of video modes */
 #define RTLNET_CSI2_CAPS_PATTERN        (1u << 4)     /* test-pattern generator present */
-#define RTLNET_CSI2_CAPS_CAMERA         (1u << 5)     /* camera front end present (0 in Phase 1) */
+#define RTLNET_CSI2_CAPS_CAMERA         (1u << 5)     /* camera receiver present (CAMERA_RX build) */
 #define RTLNET_CSI2_CAPS_MOVING         (1u << 6)     /* moving patterns (PATTERN register) present */
 
 /* VIDEO_MODE values. */
@@ -105,6 +162,17 @@ typedef struct {
 } rtlnet_csi2_rx_caps_t;
 
 typedef struct {
+    uint32_t ctrl;                              /* RX_CTRL */
+    uint32_t status;                            /* RX_STATUS */
+    uint32_t taps;                              /* RX_TAPS */
+    uint32_t settle;                            /* RX_SETTLE */
+    uint32_t filter;                            /* RX_FILTER */
+    uint32_t lines;                             /* RX_LINES */
+    uint32_t pixels;                            /* RX_PIXELS */
+    uint32_t counters[RTLNET_CSI2_CNT_COUNT];   /* RTLNET_CSI2_CNT_* */
+} rtlnet_csi2_rx_rxstate_t;
+
+typedef struct {
     uint32_t video_mode;
     uint32_t source;
     uint32_t frame_period;
@@ -129,6 +197,18 @@ int rtlnet_csi2_rx_set_frame_period(uintptr_t base, uint32_t period);
 int rtlnet_csi2_rx_set_pattern(uintptr_t base, uint32_t pattern, int32_t speed);
 /* Frame period for fps frames per second (RTLNET_CSI2_UI_CLK_HZ / fps); fps 1..RTLNET_CSI2_FPS_MAX, else ERR_ARG. */
 int rtlnet_csi2_rx_set_rate_fps(uintptr_t base, uint32_t fps);
+/* Camera receiver. Each returns RTLNET_CSI2_OK, or RTLNET_CSI2_ERR_ARG for a value that does not fit its field or when the core has no camera. */
+int rtlnet_csi2_rx_rx_control(uintptr_t base, int enable, int soft_reset, uint32_t lane_en, int bit_rev);
+int rtlnet_csi2_rx_set_taps(uintptr_t base, uint32_t tap0, uint32_t tap1);          /* each 0..31 */
+int rtlnet_csi2_rx_set_settle(uintptr_t base, uint32_t clocks);                     /* 0..255 clocks of 200 MHz */
+int rtlnet_csi2_rx_set_filter(uintptr_t base, uint32_t vc, uint32_t dt);            /* vc 0..3, dt 0..63 */
+int rtlnet_csi2_rx_set_black(uintptr_t base, uint32_t black);                       /* 0..1023 */
+int rtlnet_csi2_rx_set_wb(uintptr_t base, uint32_t gain_r, uint32_t gain_g, uint32_t gain_b);   /* each 0..0xFFF, 0x100 = 1.0 */
+int rtlnet_csi2_rx_set_phase(uintptr_t base, uint32_t phase);                       /* 0 R, 1 Gr, 2 Gb, 3 B first pixel */
+int rtlnet_csi2_rx_set_gamma(uintptr_t base, int enable);
+int rtlnet_csi2_rx_read_rxstate(uintptr_t base, rtlnet_csi2_rx_rxstate_t *st);
+int rtlnet_csi2_rx_clear_counters(uintptr_t base, uint32_t mask);                   /* bit n counter n, RTLNET_CSI2_CLEAR_ALL for all */
+
 /* Frame width and height in pixels of a mode; 0 for an unknown mode. */
 uint32_t rtlnet_csi2_rx_mode_width(uint32_t mode);
 uint32_t rtlnet_csi2_rx_mode_height(uint32_t mode);
