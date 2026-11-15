@@ -7,7 +7,7 @@
 | Wrapper module | `rtlnet_cpu_eth` (`hdl/rtlnet_cpu_eth.sv`), block design `rtlnet_cpu_eth_bd` (`hdl/rtlnet_cpu_eth_bd.tcl`), simulation stub `rtlnet_cpu_eth_sim_stub` |
 | Board dependence | none: the folder names no board, pin, part, PHY type or clock rate |
 | First board | Nexys Video (`boards/nexys_video/hdl/rtlnet_nexys_video_eth_top.sv`) |
-| Second board | Arty A7-100T (`boards/arty_a7_100/hdl/rtlnet_arty_a7_100_eth_top.sv`, MII, 10/100): the same sources, `-LmbKb 256 -BufKb 64`; simulated and built with timing met (section 6a), not yet run on the board |
+| Second board | Arty A7-100T (`boards/arty_a7_100/hdl/rtlnet_arty_a7_100_eth_top.sv`, MII, 10/100): the same sources, `-LmbKb 256 -BufKb 64`; simulated, built with timing met and measured on the board at 10 and 100 Mb/s (section 6a, release image `arty_rel`) |
 
 ## 1. Purpose
 
@@ -149,7 +149,7 @@ masked ID matches (the revision bits are masked). Each entry gives the driver fu
 | ID (masked) | Driver |
 |---|---|
 | 0x001CC91x | RTL8211E (`cores/rtlnet_mdio/driver/rtlnet_phy_rtl8211e.c`): RX clock delay, LEDs, EEE off |
-| 0x20005C9x | DP83848 (Arty A7-100T, `cores/rtlnet_mdio/driver/rtlnet_phy_dp83848.c`): 10/100 full duplex only, PHYSTS (register 0x10) for link, speed and duplex, no gigabit register is touched |
+| 0x20005C9x | DP83848 (Arty A7-100T, `cores/rtlnet_mdio/driver/rtlnet_phy_dp83848.c`): 10/100 full duplex only, PHYSTS (register 0x10) for link, speed and duplex, no gigabit register is touched. Measured on the board: ID 0x20005C90 at MDIO address 1 (the reference manual says 1, the strap resistors read from the schematic say 5; the scan finds 1) |
 | any other | generic Clause 22: BMCR, BMSR, ANAR, ANLPAR, GBCR/GBSR (when BMSR extended status shows 1000BASE-T), speed and duplex resolved from the advertised and partner abilities; the ID is printed at boot and in `show phy` |
 
 To add a PHY: write its driver file under `cores/rtlnet_mdio/driver/`, add one line to
@@ -280,7 +280,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File cpu/microblaze_v_ethernet/fi
 | Hardware suite on the final image `eth_cc100c` | `run_all.ps1 -LinkMbps 10`, `100`, `1000` | ETH_SUITE: PASS 8/8 scripts at each speed |
 | Release campaign on `eth_rel` (11-14-2026, Nexys Video through a switch) | `run_all.ps1 -LinkMbps 1000`, `100`, `10`; `flood_test.ps1 -Rate 1000` (all kinds) and `-Rate 20000` (four kinds) | `ETH_SUITE: PASS 8/8 scripts` at each speed; `FLOOD_TEST: PASS 95/95` and `PASS 50/50`; TCP iperf (mean of 3 x 10 s) PC to board / board to PC 349.7 / 283.3 Mb/s at 1000, 94.7 / 94.6 at 100, 9.5 / 9.5 at 10 Mb/s; UDP iperf 942.0 / 944.0 (71 of 401242 datagrams lost board to PC) at 1000, 94.1 / 94.4 at 100, 9.4 / 9.4 at 10, zero loss otherwise; UDP echo 64 B mean 0.163 ms at 100 and 1000, 1.287 ms at 10; TCP echo 64 B mean 0.198 / 0.231 / 1.350 ms at 1000 / 100 / 10; with ACK coalescing off board to PC reads 257.7 and with receive batching 30 us PC to board reads 314.7 Mb/s; details in `demos/ethernet/ethernet_brief.md` |
 | Arty A7-100T board bench, 10 and 100 Mb/s with negative control | `boards/arty_a7_100/testbench/tb_rtlnet_arty_a7_100_eth.sv` (`regression.txt`: `m100`, `m10`, `neg`) | 338 checks per speed, 339 with `INJECT_FAILURE` (expected failure) |
-| Arty A7-100T build `arty_dev`, firmware `-LmbKb 256 -BufKb 64` | `boards/arty_a7_100/scripts/build_ethernet.ps1 -Tag arty_dev` | timing met (WNS +0.290 ns), 105.5 of 135 block RAM tiles, `RTLNET_FW: PASS`, `RTLNET_BUILD_ETH: PASS`; hardware suite not run (no board) |
+| Arty A7-100T build `arty_dev`, firmware `-LmbKb 256 -BufKb 64` | `boards/arty_a7_100/scripts/build_ethernet.ps1 -Tag arty_dev` | timing met (WNS +0.290 ns), 105.5 of 135 block RAM tiles, `RTLNET_FW: PASS`, `RTLNET_BUILD_ETH: PASS`; superseded by the release build `arty_rel` below; hardware results in the next row |
+| Arty A7-100T release image `arty_rel` on the board, 10 and 100 Mb/s | `boards/arty_a7_100/scripts/program.ps1 -Tag arty_rel`, then `test/run_all.ps1 -LinkMbps 100` and `10`, `test/link_test.ps1 -AutoMbps 100`, `test/flood_test.ps1` | `ETH_SUITE: PASS 8/8 scripts` at 100 and at 10 Mb/s (no script or firmware change); `LINK_TEST: PASS 18/18`; `FLOOD_TEST: PASS 95/95` (all kinds, 1000 per s) and `PASS 50/50` (four kinds, 100000 per s offered); TCP iperf 94.8 / 94.9 Mb/s (PC to board / board to PC) at 100 and 9.5 / 9.5 Mb/s at 10 (mean of 3 x 10 s); UDP iperf 93.9 / 94.4 Mb/s at 100, 9.4 / 9.4 at 10, no loss; TCP echo 64 B mean 0.231 ms (100) and 0.429 ms (10); UDP echo 64 B mean 0.174 ms and 0.361 ms |
 
 ## 6a. Small memory (256 KiB LMB) and the Arty A7-100 budget
 
@@ -336,7 +337,9 @@ FIFOs (0 tiles); the dual-port frame buffer costs the same tiles as a single-por
 Other results of the Arty build (post-route, 100 MHz single clock, Vivado 2026.1): WNS +0.290 ns, WHS +0.005 ns, WPWS +3.000 ns, LUT 24986 (39.4 %), FF 36050
 (28.4 %), DSP 6, no critical warning, `report_cdc` clean apart from the Gray-code waivers. The MII interface (DP83848 datasheet numbers at 100 Mb/s: receive delay 10 to 30 ns,
 transmit setup 10 ns, hold 0 ns): receive setup +6.30 ns, hold +10.43 ns; transmit setup +20.65 ns, hold +2.86 ns. The first MII MAC synthesis showed one
-core warning, recorded in the MAC document, section 13.4. Nothing of this has run on a board.
+core warning, recorded in the MAC document, section 13.4. The release build `arty_rel` has WNS +0.142 ns, WHS +0.051 ns, WPWS +3.000 ns, LUT 24981, FF 36059, 105.5 block RAM tiles.
+
+**Measured on the board (`arty_rel`, 11-14-2026).** The first image ran without a fix: the 25 MHz reference clock from the FPGA is accepted by the PHY, the scan finds the DP83848 at MDIO address 1, `speed auto` links at 100 Mb/s full duplex through a switch, DHCP, ping, UDP and TCP work. The tests ran at 10 and 100 Mb/s with the board-neutral scripts unchanged (`run_all.ps1 -Port <COM> -Nic <adapter> -LinkMbps 10|100`; the speed is set and restored by the script). In the small-memory profile lwIP keeps data segments by reference, so every TCP data frame is copied: `show offload` after the six 10 s TCP runs reads frames sent in place 244116, copied 243694 (chained pbufs 243694, outside the buffer RAM 0) at 100 Mb/s and 25065 / 24414 at 10 Mb/s (the in-place frames are ACKs and other single-buffer frames), with ACK coalescing on (121859 candidates, 80561 dropped, 41298 forwarded at 100 Mb/s) and receive batching off. TCP still reaches the line rate of both links (94.8 / 94.9 and 9.5 / 9.5 Mb/s). The lwIP heap of the profile peaked at 23224 of 24576 bytes with 18 allocation failures counted after the suites (every test passed); the frame buffer RAM can be raised to 128 KiB (`-BufKb 128`, 29.5 tiles are free) if a load needs it, no result required it. Not verified: boot from the Quad-SPI flash, a direct cable to a PC (the PHY's auto-MDIX is off), JP2 with a terminal (no restart was seen on repeated COM port opens).
 
 ## 6b. TCP throughput tuning (Nexys Video, 1000 Mb/s, PC to board / board to PC)
 
@@ -379,6 +382,7 @@ Builds of the tree (post-route, `build_ethernet.ps1`, 100 MHz single clock unles
 | `eth_cc100c` | single clock, 128 KiB dual-port frame buffer on the LMB, zero-copy transmit, the core changes above (final tree) | +0.037 ns | +0.013 ns | +0.264 ns | 22179 / 31720 / 228.5 / 6 |
 | `eth_rel` (release, git 2c2c686b, tree clean) | the release image of `demos/ethernet`: single clock, 512 KiB LMB, 128 KiB dual-port frame buffer, ACK coalescing on at boot, protection profile | +0.154 ns | +0.012 ns | +0.264 ns | 23891 / 33968 / 228.5 / 6 |
 | `arty_dev` (xc7a100t, Arty A7-100T, section 6a) | single 100 MHz clock, MII, 256 KiB LMB, 64 KiB frame buffer, classifier in distributed RAM | +0.290 ns | +0.005 ns | +3.000 ns | 24986 / 36050 / 105.5 / 6 |
+| `arty_rel` (release, git ab3e1d17, tree clean; programmed and measured on the Arty A7-100T) | the same configuration, current firmware, ACK coalescing on at boot | +0.142 ns | +0.051 ns | +3.000 ns | 24981 / 36059 / 105.5 / 6 |
 
 Intermediate builds with a subset of the core changes failed by -1.478, -0.154 and -0.107 ns (each time the paths named in the table). The margin of the final build is thin (below +0.15 ns); a build with another placer directive (`RTLNET_PLACE_DIRECTIVE`) was not run. CDC census of the build: FIFO 10, Gray 6, AXI4-Lite bridges 5, reset synchronizers 5, level synchronizers 28; `report_cdc`: only the Gray-code waivers.
 
@@ -460,6 +464,7 @@ scatter-gather DMA; the simple-mode DMA of the design sends one contiguous buffe
 
 ## 8. Revision history
 
+* 11-14-2026: Arty A7-100T measured on the board: release image `arty_rel`, DP83848 found at MDIO address 1, `ETH_SUITE` 8/8 at 10 and 100 Mb/s, flood tests, in-place and copied counters (section 6a, verification and build rows, PHY table).
 * 11-14-2026: release build `eth_rel` and the release campaign results (sections 6 and 6c); the demo documents are in `demos/ethernet/`.
 * 11-14-2026: ACK coalescing on at boot (500 us), receive batching off (CLI section, measured matrix in 6e); data segments of the iperf server copied into one pbuf in the frame buffer RAM and sent in place (6f); flood test criteria, default thread count and measured table (5a).
 * 11-14-2026: Arty A7-100T build-out: second board, `ARTY` board ID, DP83848 row of the PHY table, section 6a changed from an estimate to the measured `arty_dev` build (105.5 of 135 tiles), verification and build rows.

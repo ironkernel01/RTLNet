@@ -35,5 +35,9 @@ UDP echo and UDP iperf 2 in FPGA fabric, lwIP TCP and a protection profile on a 
 video demos), it has no time limit and no netlist. Its brief (`ethernet/nexys_video/ethernet_nexys_video_brief.pdf`) has the measured results at 10, 100
 and 1000 Mb/s and the flood test.
 
+The Ethernet demo also runs on the Digilent Arty A7-100T (10/100 Mb/s MII, 256 KiB firmware memory): image
+`ethernet/arty_a7_100/rtlnet_arty_a7_100_eth.bit` (release image `arty_rel`, built by `boards/arty_a7_100/scripts/build_ethernet.ps1 -Tag arty_rel`),
+steps in `ethernet/arty_a7_100/README.md`, brief `ethernet/arty_a7_100/ethernet_arty_a7_100_brief.pdf` with the measured results at 10 and 100 Mb/s.
+
 License: `LICENSE.md` in the repository root for RTLNet. A demo that is under other terms names its license file in its
 README and brief.

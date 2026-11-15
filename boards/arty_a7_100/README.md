@@ -7,7 +7,7 @@
 | Top | `hdl/rtlnet_arty_a7_100_eth_top.sv` (`rtlnet_arty_a7_100_eth_top`) |
 | Design | the Ethernet demo of `boards/nexys_video/` (RTLNet network cores, MicroBlaze V CPU with lwIP TCP, hierarchical CLI on the USB-UART), 10/100 Mb/s only, no DDR3, no camera, no video, no H.264 |
 | Firmware | the same source as the Nexys Video Ethernet demo (`cpu/microblaze_v_ethernet/firmware/`), built in its small-memory profile (`-LmbKb 256`) |
-| Status | simulation and a timing-clean Vivado build only; nothing has run on a board (section 8) |
+| Status | built (`arty_rel`), programmed and measured on a board at 10 and 100 Mb/s: `ETH_SUITE: PASS 8/8` at both speeds, `FLOOD_TEST: PASS 95/95` and `50/50`; what was not verified is listed under Verified on the board and not verified |
 
 The CPU (`cpu/microblaze_v_ethernet/`), the protocol cores and the system registers are the Nexys Video ones, unchanged. The firmware
 names no board: it reads `BOARD_ID` (`ARTY`), `CPU_CLK_HZ` and `LINK_CAPS` (10 and 100 Mb/s, full duplex) from the system
@@ -21,7 +21,7 @@ constraints, the build scripts and the board bench.
 |---|---|
 | `hdl/` | board top `rtlnet_arty_a7_100_eth_top.sv`, filelist `rtlnet_arty_a7_100_eth.f` |
 | `constraints/` | `rtlnet_arty_a7_100_eth.xdc` (pins, system clock, asynchronous pins, configuration), `rtlnet_arty_a7_100_mii.xdc` (MII clocks, interface timing, reference clock output; read after synthesis) |
-| `scripts/` | `build_ethernet.ps1` (whole image) and `build_ethernet.tcl` (Vivado, gated) |
+| `scripts/` | `build_ethernet.ps1` (whole image, `-Program` to load it), `build_ethernet.tcl` (Vivado, gated) and `program.ps1` (JTAG programming) |
 | `testbench/` | board bench `tb_rtlnet_arty_a7_100_eth.sv` with `regression.txt` (picked up by `scripts/rtlnet_regression.ps1`) |
 
 ## Board connections and jumpers
@@ -48,7 +48,8 @@ All paths are from the repository root. Prefix of every command: `powershell -No
 | Command | Result |
 |---|---|
 | `boards/arty_a7_100/scripts/build_ethernet.ps1` | untagged build in `boards/arty_a7_100/build/`: Vivado synthesis, implementation (gated), bitstream, hardware export, firmware build (small-memory profile, host tests with the scripted CLI session), firmware merged into the bitstream |
-| `build_ethernet.ps1 -Tag <tag>` | the same into `boards/arty_a7_100/build/<tag>/` (the verified build used `-Tag arty_dev`) |
+| `build_ethernet.ps1 -Tag <tag>` | the same into `boards/arty_a7_100/build/<tag>/` (the release image is `-Tag arty_rel`) |
+| `build_ethernet.ps1 -Tag <tag> -Program` | the same, then program the board over JTAG with the merged `.bit` (`scripts/program.ps1`) |
 | `build_ethernet.ps1 -SkipBitstream` or `-SkipFirmware` | reuse the bitstream, MMI and XSA of the build folder, or stop after the bitstream |
 | `build_ethernet.ps1 -FwOutDir <short folder>` | firmware build folder elsewhere: the BSP flow fails on object paths above about 250 characters, so a checkout deep in a long path (a git worktree) needs a short folder |
 
@@ -64,15 +65,24 @@ utilization, timing summary, `mii_interface_timing.rpt`, CDC, methodology, DRC, 
 
 ## Programming
 
-The script does not program the board. With the Vivado hardware manager (any 2026.1 install): open the hardware target, program the device with
-`rtlnet_arty_a7_100_eth.bit`. To boot the image from power-up, add the Quad-SPI flash (`s25fl128s-3.3v-qspi-x4-single`, the part Digilent uses
-on revision E boards; older boards carry a Micron N25Q128A13ESF40) and write the same `.bit` there with JP1 in the SPI position. Neither path has been
-exercised for this design.
+`scripts/program.ps1 [-Tag <tag>] [-Bit <file>]` programs the board over JTAG (volatile: the image is gone after a power cycle; the Quad-SPI flash is never
+written) with the firmware-merged `rtlnet_arty_a7_100_eth.bit` of a build folder (not the `_hw.bit`). It takes the machine-wide board lock, runs
+`boards/nexys_video/scripts/program.tcl` through the repository Vivado launcher with the device pattern `xc7a100t*` and searches every JTAG target
+of the hw_server for that device: another board on the same PC (a Nexys Video is an xc7a200t) is never programmed, and the script fails when no Arty is
+found. The same step is `build_ethernet.ps1 -Program`. Release the lock with `scripts/rtlnet_board.ps1 release` at the end of a board session.
 
-After programming, open the COM port of the board at 115200 8N1. The CLI is the one of the Nexys Video Ethernet demo (`show version`, `show phy` and
+```
+powershell -NoProfile -ExecutionPolicy Bypass -File boards/arty_a7_100/scripts/program.ps1 -Tag arty_rel
+```
+
+To boot the image from power-up, add the Quad-SPI flash (`s25fl128s-3.3v-qspi-x4-single`, the part Digilent uses on revision E boards; older boards carry a
+Micron N25Q128A13ESF40) and write the same `.bit` there with JP1 in the SPI position. That path has not been exercised for this design.
+
+After programming, open the COM port of the board at 115200 8N1 (find it by enumeration: the FT2232HQ of the board shows two USB serial converters and one COM port;
+verify with `show version`, board `ARTY`). The CLI is the one of the Nexys Video Ethernet demo (`show version`, `show phy` and
 `show system` report the board, the PHY found by the scan and the build). Link control is `speed 10`, `speed 100` and `speed auto` on `interface eth0`;
-there is no gigabit mode. The hardware test scripts of `cpu/microblaze_v_ethernet/test/` (`run_all.ps1 -LinkMbps 10` or `100`) are board independent.
-The IP address comes from DHCP (192.0.2.x in examples) or `ip address` / `ip netmask`.
+there is no gigabit mode. The hardware test scripts of `cpu/microblaze_v_ethernet/test/` (`run_all.ps1 -LinkMbps 10` or `100`) are board independent and ran
+unchanged. The IP address comes from DHCP (192.0.2.x in examples) or `ip address` / `ip netmask`.
 
 ## Design summary
 
@@ -85,13 +95,13 @@ The IP address comes from DHCP (192.0.2.x in examples) or `ip address` / `ip net
 | Address map | as `cpu/microblaze_v_ethernet/documentation/rtlnet_cpu_eth.md`: SYS 0x44A0_0000, MAC 0x44A0_1000, MDIO 0x44A0_2000, UDP echo 0x44A0_3000, protocol 0x44A1_0000; LMB 256 KiB at 0, frame buffer RAM 64 KiB (CPU 0x0010_0000, DMA 0xC000_0000) |
 | System registers | `BOARD_ID` `ARTY`, 4 LEDs, 4 switches, 4 buttons, `LINK_CAPS` 0x3 |
 
-### Result of the verified build (tag `arty_dev`, Vivado 2026.1, xc7a100tcsg324-1, tree da8c56dd plus this folder)
+### Result of the release build (tag `arty_rel`, Vivado 2026.1, xc7a100tcsg324-1, git ab3e1d17, tree clean)
 
 | Item | Result |
 |---|---|
-| Timing, post-route | WNS +0.290 ns, WHS +0.005 ns, WPWS +3.000 ns, 0 failing endpoints in setup, hold and pulse width |
-| Utilization | LUT 24986 (39.4 %), FF 36050 (28.4 %), block RAM 105.5 tiles of 135 (78.2 %), DSP 6 (2.5 %) |
-| MII interface, 100 Mb/s constraints | receive setup +6.30 ns, hold +10.43 ns; transmit setup +20.65 ns, hold +2.86 ns (`reports/mii_interface_timing.rpt`) |
+| Timing, post-route | WNS +0.142 ns, WHS +0.051 ns, WPWS +3.000 ns, 0 failing endpoints in setup, hold and pulse width |
+| Utilization | LUT 24981 (39.40 %), FF 36059 (28.44 %), block RAM 105.5 tiles of 135 (78.15 %), DSP 6 (2.50 %) |
+| MII interface, 100 Mb/s constraints (`arty_dev` numbers) | receive setup +6.30 ns, hold +10.43 ns; transmit setup +20.65 ns, hold +2.86 ns (`reports/mii_interface_timing.rpt`) |
 | Critical warnings | 0 in synthesis and implementation |
 | CDC | `report_cdc`: only the Gray-code waivers created by `scripts/rtlnet_constrain_cdc.tcl` (CDC-6 x42); census FIFO 10, Gray 6, AXI4-Lite bridges 5, reset synchronizers 4, level synchronizers 20 |
 | Firmware | `RTLNET_FW: PASS`; LMB 229 KiB of 256 KiB used (code, data, bss, stack), frame buffer RAM 60 KiB of 64 KiB (frame buffers and the lwIP heap) |
@@ -122,11 +132,15 @@ Block RAM tiles by consumer (RAMB36 count plus half the RAMB18 count; 135 availa
 | MII MAC and MDIO core benches | `cores/rtlnet_eth_mac/testbench`, `cores/rtlnet_mdio/testbench` | pass (unchanged) |
 | Nexys Video Ethernet bench | `boards/nexys_video/testbench` | pass (unchanged) |
 | Firmware host tests | `cpu/microblaze_v_ethernet/firmware/test/regression.txt` | pass |
-| Vivado build | `build_ethernet.ps1 -Tag arty_dev` | table above |
+| Vivado build | `build_ethernet.ps1 -Tag arty_rel` | table above (`arty_dev` before it: WNS +0.290 ns, same block RAM) |
+| Hardware, 100 and 10 Mb/s | `run_all.ps1 -Port <COM> -Nic <adapter> -LinkMbps 100` and `10` on the programmed board | `ETH_SUITE: PASS 8/8 scripts` at each speed (console 26, ping 18, ARP 5, DHCP 10, UDP echo 5, UDP iperf 8, TCP echo 2, TCP iperf 2) |
+| Link control | `link_test.ps1 -AutoMbps 100` | `LINK_TEST: PASS 18/18` (`speed 100`, `speed 10`, `speed auto`) |
+| Protection profile | `flood_test.ps1 -Rate 1000` and `-Rate 100000` (four kinds) | `FLOOD_TEST: PASS 95/95` and `PASS 50/50` |
+| Throughput, 3 x 10 s iperf 2 TCP | switch to a Gigabit PC adapter | 94.8 (PC to board) and 94.9 (board to PC) Mb/s at 100 Mb/s, 9.5 and 9.5 Mb/s at 10 Mb/s; UDP iperf 93.9 and 94.4 Mb/s at 100, 9.4 at 10, no loss |
 
 The bench runs the real board top with the CPU replaced by its simulation stub, the DP83848 MII data model (`rtlnet_dp83848_model`: both PHY
 clocks, nibble injection, wire capture with preamble, SFD, nibble order, FCS and gap checks) and a Clause 22 MDIO slave with DP83848 identity and PHYSTS
-that answers at address 5 (the manual says 1; the bench scans like the firmware). It checks the system registers (4 LEDs, 4 switches, 4 buttons, `ARTY`,
+that answers at address 5 (the manual says 1; the bench scans like the firmware). The real PHY answers at address 1 (see Documents that disagree). It checks the system registers (4 LEDs, 4 switches, 4 buttons, `ARTY`,
 10/100 `LINK_CAPS`), every core ID, the 25 MHz reference clock (period, and that it runs for the whole PHY reset hold), the MDIO scan and PHYSTS decode,
 the MAC speed and receive qualification at both speeds, ARP, ICMP, UDP echo, the classifier drop-all state, storm limiter and protection profile with TCP traffic
 interleaved, the CPU path in both directions, the checksum offload, receive batching and ACK coalescing, DHCP, and the MAC counters.
@@ -135,18 +149,24 @@ interleaved, the CPU path in both directions, the checksum offload, receive batc
 
 | Topic | Documents | What this design does |
 |---|---|---|
-| PHY MDIO address | reference manual section 6 and the schematic sheet note: `00001`; the strap resistors read from the schematic (R197 populated on RXD_1/PHYAD2) give `00101` | nothing is hard-coded: the firmware scans addresses 1..31 then 0 for the PHY ID; the bench answers at 5 and also passes the scan |
+| PHY MDIO address | reference manual section 6 and the schematic sheet note: `00001`; the strap resistors read from the schematic (R197 populated on RXD_1/PHYAD2) give `00101` | measured on the board: the PHY answers at address 1 (ID 0x20005C90, `show phy`), as the manual says; nothing is hard-coded, the firmware scans addresses 1..31 then 0 for the PHY ID (the bench answers at 5 and also passes the scan) |
 | Which PHY | the Digilent XDC labels the Ethernet block "SMSC Ethernet PHY" | the reference manual and the schematic name the TI DP83848J; the XDC pins are used as they are |
 | LED names | the XDC names the four user LEDs `led[0..3]` (silkscreen LD4..LD7); the reference manual calls the user LEDs LD0..LD7 | the top names them `led[0..3]` after the XDC; the README uses the silkscreen names |
 | Clock groups for the MII clocks | `cores/rtlnet_eth_mac/documentation/rtlnet_eth_mac.md` section 13.2 says the board constraints must declare the two PHY clocks and `axis_clk` asynchronous groups; the repository CDC policy (`scripts/rtlnet_constrain_cdc.tcl`) declares no blanket groups | no group is declared: every crossing of the MAC goes through the shared primitives that the script bounds by cell name; the clock interaction report shows the MII/system crossings timed with 8.6 ns or more of slack |
 | Flash part | reference manual: Micron N25Q128A13ESF40 only on revisions up to C, Spansion/Infineon S25FL128S on later ones; the Digilent board files list the Micron part | the README names both |
 
-## Not verified
+## Verified on the board and not verified
 
-* Nothing has run on a board: no programming, no console, no PHY link, no traffic, no hardware test script. The MII input and output timing is
-  checked only by the static analysis of the build against the datasheet numbers; the 25 MHz clock accuracy, the PHY strap and reset behaviour and the real
-  MDIO address are untested.
-* The 10 Mb/s MII timing is covered by the 100 Mb/s constraints (more margin) and the 10 Mb/s bench only.
+Verified (11-14-2026, `arty_rel`; no fault was found: the first image worked and no change to the RTL, constraints, cores or firmware was needed): JTAG programming, the banner and
+the console, `show version` (board `ARTY`, CPU clock 100 MHz, link modes 10 and 100), `show phy` (DP83848, ID 0x20005C90, MDIO address 1; the PHY runs from the FPGA's
+25 MHz reference clock and links up at 100 Mb/s full duplex with `speed auto` through a switch), DHCP, ping, ARP, UDP echo, UDP iperf, TCP echo and TCP iperf at 100 and 10 Mb/s,
+link control, the protection profile and the zero-loss sweep. The MII receive and transmit paths worked at both speeds with no receive error counted by the MAC and every echo byte-exact.
+
+Not verified:
+
 * Quad-SPI flash programming and boot from flash.
-* Throughput: at 100 Mb/s the earlier small-memory measurement on the Nexys Video (94.5 / 94.9 Mbit/s TCP) is not a measurement of this board.
-* `JP2` behaviour with a terminal program (restart on COM port open) is from the manual.
+* A direct cable to a PC (auto-MDIX is off on the board: the campaign used a switch); half duplex (never advertised).
+* `JP2` behavior with a terminal program: no restart was seen when the COM port was opened many times, but the jumper position of the tested board was not recorded.
+* Temperature and voltage corners, a second board, and the PHY LEDs (not routed to the FPGA).
+* Small-memory headroom: the lwIP heap (24 KiB) peaked at 23,224 bytes with 18 allocation failures after the tests; every test passed. The frame buffer RAM can be raised to
+  128 KiB (`-BufKb 128`, 29.5 tiles are free) if a load needs it; no hardware result required it.

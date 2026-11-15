@@ -40,6 +40,12 @@ are in `ethernet/nexys_video/README.md`: program the board as in section 4 with 
 `show ip` prints. It needs no player and no UDP port 5004 rule; its tests use iperf 2 and the PowerShell scripts of
 `cpu/microblaze_v_ethernet/test/`.
 
+The Ethernet demo also has an image for the Digilent Arty A7-100T: `ethernet/arty_a7_100/rtlnet_arty_a7_100_eth.bit` (release image
+`arty_rel`), 10/100 Mb/s MII with a 256 KiB MicroBlaze V memory and the same services, classifier and console. Its brief
+(`ethernet/arty_a7_100/ethernet_arty_a7_100_brief.pdf`) holds the measured results: at 100 Mb/s UDP iperf 93.9 and 94.4 Mb/s and TCP iperf 94.8 and
+94.9 Mb/s (PC to board, board to PC), at 10 Mb/s 9.4 and 9.5 Mb/s, and the flood test. Its steps are in `ethernet/arty_a7_100/README.md`; the board
+needs one micro-USB cable (J10) and a straight Ethernet cable to a switch (no auto-MDIX), and it is programmed with `boards/arty_a7_100/scripts/program.ps1`.
+
 ## 3. What you need
 
 ### Board and cables

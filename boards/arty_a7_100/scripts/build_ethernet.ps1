@@ -16,12 +16,12 @@ Overview:
     <build folder>/firmware (BSP, objects, ELF) unless -FwOutDir names a folder.
   * Exit code 0 only when every step passed; otherwise the failing step's code (the Vivado gate codes are listed in
     build_ethernet.tcl).
-  * The board is not programmed by this script: load rtlnet_arty_a7_100_eth.bit with the Vivado hardware manager or program the
-    Quad-SPI flash (README, section Programming).
+  * The board is programmed only with -Program (program.ps1); otherwise run program.ps1 or load the Quad-SPI flash (README,
+    section Programming).
 Usage:
   powershell -NoProfile -ExecutionPolicy Bypass -File boards/arty_a7_100/scripts/build_ethernet.ps1 `
     [-Tag <name>] [-CpuClkHz 100000000] [-LmbKb 256] [-BufKb 64] [-CpuOpt 0] [-CpuBtc 0] [-CpuMuldiv 1] [-LmbBuf 1]
-    [-SkipBitstream] [-SkipFirmware] [-FwOutDir <dir>]
+    [-SkipBitstream] [-SkipFirmware] [-FwOutDir <dir>] [-Program]
   * -SkipBitstream: reuse the bitstream, MMI and XSA already in the build folder (firmware and merge only).
   * -CpuClkHz: the one system clock (100 MHz default; the MMCM divider is 1000 MHz / CpuClkHz and the block design is built for it).
   * -LmbKb: size of the LMB block RAM in KiB (code, data, lwIP pools and stack), 256 default (the firmware selects its small-memory
@@ -31,7 +31,10 @@ Usage:
     configuration (IP property values of the 2026.1 IP).
   * -FwOutDir: folder of the firmware build (default <build folder>/firmware). The BSP flow fails on object paths above about 250
     characters: a checkout deep in a long path (a git worktree) needs a short folder here.
+  * -Program: after a passing build, program the Arty over JTAG with the merged .bit through scripts/program.ps1 (machine-wide
+    board lock, volatile, only a device xc7a100t is accepted; the QSPI flash is never written).
 Revision: 11-14-2026
+  * 11-14-2026: -Program switch.
   * 11-14-2026: initial version (derived from boards/nexys_video/scripts/build_ethernet.ps1: Arty A7-100T, small-memory
     defaults, no clock tree option, -FwOutDir, no -Program).
 -------------------------------------------------------------------------------
@@ -47,7 +50,8 @@ param(
     [ValidateSet(16, 32, 64, 128)][int]$BufKb = 64,
     [switch]$SkipBitstream,
     [switch]$SkipFirmware,
-    [string]$FwOutDir = ''
+    [string]$FwOutDir = '',
+    [switch]$Program
 )
 $ErrorActionPreference = 'Stop'
 $Board = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
@@ -98,4 +102,8 @@ Step 'merge' {
 Write-Output '--- build_info.txt'
 Get-Content -LiteralPath (Join-Path $Build 'build_info.txt') | ForEach-Object { Write-Output "  $_" }
 Write-Output "RTLNET_BUILD_ETH: PASS $bit"
+if ($Program) {
+    powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'program.ps1') -Bit $bit
+    exit $LASTEXITCODE
+}
 exit 0

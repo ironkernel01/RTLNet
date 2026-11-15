@@ -1,0 +1,18 @@
+design        rtlnet_arty_a7_100_eth_top
+part          xc7a100tcsg324-1
+git_hash      ab3e1d17
+git_dirty     0
+cpu_clk_hz    100000000
+lmb_kb        256
+cpu_options   opt 0 btc 0 muldiv 1
+frame_buffer  lmb_buf 1 buf_kb 64
+tool          2026.1
+built         2026-11-14 22:58:10 -0500
+wns_ns        0.142
+whs_ns        0.051
+wpws_ns       3.000
+utilization   lut=24981 (39.40%), ff=36059 (28.44%), bram=105.5 (78.15%), dsp=6 (2.50%)
+cdc_classes   fifo {10 80} sync {20 82} axil_cdc {5 344} gray {6 192} reset {4 16}
+bitstream_hw  rtlnet_arty_a7_100_eth_hw.bit
+mmi           rtlnet_arty_a7_100_eth.mmi
+xsa           rtlnet_arty_a7_100_eth.xsa
