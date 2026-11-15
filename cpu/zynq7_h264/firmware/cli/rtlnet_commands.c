@@ -68,6 +68,7 @@ static void status(void)
     printf("TS bytes=%lu datagrams=%lu drops=%lu backlog=%lu bit/s=%lu\r\n",
         (unsigned long)s.ts_bytes,(unsigned long)s.datagrams,(unsigned long)s.dropped_pictures,
         (unsigned long)s.backlog,(unsigned long)s.bit_rate_bps);
+    printf("last stream stop waited %lu us for a picture in flight\r\n",(unsigned long)s.stop_drain_us);
 }
 /** cli_version -- show the linked firmware identity. */
 int cli_version(const MenuCommandContext *c) { (void)c; printf("RTLNet Zybo Z7-20 " RTLNET_BUILD_ID "\r\n"); return 0; }

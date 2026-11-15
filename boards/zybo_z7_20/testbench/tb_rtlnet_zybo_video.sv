@@ -1,6 +1,6 @@
 // Purpose: PS-free end-to-end RGB camera capture, slot ownership and H.264 encode.
 // Overview: AXI-Lite GP master BFM and two AXI3 HP byte-memory slaves replace PS7.
-//   Five small camera frames prove alternate admission and a held slot's integrity.
+//   Five small camera frames in the 1080p mode prove alternate admission and a held slot's integrity; two more in the 720p mode prove that every frame is admitted.
 //   One real lossy/deblocked IDR encode dumps Annex B and rebuilt YUV for the
 //   repository decoder comparison flow. The sensor/D-PHY is outside this bench.
 // Revision: 11-14-2026. Initial board bench. No foreach loops.
@@ -125,7 +125,7 @@ module tb_rtlnet_zybo_video;
   logic  m_axi_enc_rvalid;
   logic  m_axi_enc_rready;
   logic [1:0] irq;
-  rtlnet_zybo_video_bd #(.WIDTH_720(32), .HEIGHT_720(16)) dut (
+  rtlnet_zybo_video_bd #(.WIDTH_720(32), .HEIGHT_720(16), .WIDTH_1080(32), .HEIGHT_1080(16)) dut (
     .s_axi_aclk(ctrl_clk),
     .s_axi_aresetn(ctrl_resetn),
     .capture_clk(enc_clk),
@@ -405,6 +405,8 @@ module tb_rtlnet_zybo_video;
     cpu.rd(ENC,v); tb_check(v==32'h48323634,"encoder ID");
     cpu.rd(ENC+8,v); tb_check(v[19:16]==1 && v[22],"one engine with deblocking");
     cpu.wr(DMA+32'h14,128);
+    cpu.wr(CAM+32'h10,1);   // 1080p mode (geometry shrunk to 32x16 here): the sensor runs 30 fps, every second frame is admitted
+    cpu.rd(CAM+32'h18,v); tb_check(v==6000,"1080p admission PTS step 6000 (15 fps stream)");
     cpu.wr(CAM+32'h0c,1);
     camera_frame(0, 1, 1);
     camera_frame(1, 1, 1);
@@ -425,8 +427,8 @@ module tb_rtlnet_zybo_video;
         tb_check(snapshot[(y*32+x)*2+1]==128,"capture neutral chroma");
       end
     end
-    camera_frame(3, 84, 90);   // worst case: 1080p15 lanes at 420 Mb/s (84 Mpixel/s) against one pixel per 90 MHz clock
-    camera_frame(4, 42, 90);   // 1080p15 link rate from the sensor PLL arithmetic: 42 Mpixel/s
+    camera_frame(3, 84, 90);   // 1080p30 sensor: lanes at 420 Mb/s (84 Mpixel/s burst) against one pixel per 90 MHz clock
+    camera_frame(4, 42, 90);   // slower link rate (the former 1080p15 table, 42 Mpixel/s)
     tb_check(backlog_peak < 64, "receiver backlog stays far below the line buffer at the sensor link rates");
     $display("BENCH: receiver backlog peak %0d pixels, source stall cycles %0d", backlog_peak, stall_cycles);
     wait_published(3);
@@ -514,6 +516,13 @@ module tb_rtlnet_zybo_video;
     $fdisplay(f,"ry_stride=32\nrc_stride=16\nry_size=512\nrc_size=128");
     $fclose(f);
     cpu.wr(FB+32'h0c,2);
+    // 720p mode: the sensor runs 30 fps and every frame is admitted (30 fps stream, PTS step 3000)
+    cpu.wr(CAM+32'h10,0);
+    cpu.rd(CAM+32'h18,v); tb_check(v==3000,"720p admission PTS step 3000 (30 fps stream)");
+    camera_frame(5, 1, 1);
+    camera_frame(6, 1, 1);
+    cpu.rd(CAM+32'h20,v); tb_check(v==7,"seven camera frames observed in total");
+    cpu.rd(CAM+32'h24,v); tb_check(v==5,"720p admits every frame (two more admitted)");
     tb_verdict("tb_rtlnet_zybo_video");
   end
   initial begin

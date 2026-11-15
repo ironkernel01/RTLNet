@@ -5,14 +5,21 @@
  */
 #include "rtlnet_platform.h"
 #include "rtlnet_board.h"
+#include "xparameters.h"
 #include "xil_cache.h"
 #include "xil_exception.h"
 #include "xil_printf.h"
 #include "xscugic.h"
 #include "xiltimer.h"
+#include "xil_io.h"
 #include "xuartps.h"
 #include "xuartps_hw.h"
 
+/* SCU global timer rate: half the CPU clock. The BSP macro COUNTS_PER_SECOND (xtimer_config.h) is "XPAR_CPU_CORE_CLOCK_FREQ_HZ/2" without
+ * parentheses, so "value / COUNTS_PER_SECOND" divides by the CPU clock and then by 2: plat_ticks ran 4 times too slow in its seconds part and
+ * jumped backwards every two seconds (the delays were about 4 times long and the picture time-out fired by chance, which abandoned a picture
+ * in flight and made the next start rewrite the core configuration under it). */
+#define RTLNET_GTIMER_HZ ((uint64_t)(XPAR_CPU_CORE_CLOCK_FREQ_HZ) / 2ull)
 static XScuGic g_gic;
 static XUartPs g_uart;
 
@@ -30,6 +37,9 @@ void plat_init(void)
     XUartPs_Config *uart = XUartPs_LookupConfig(0);
     XScuGic_Config *gic = XScuGic_LookupConfig(0);
     int rc;
+    /* The Cortex-A9 global timer is disabled out of reset and XTime_GetTime does not start it; every plat_delay_* and
+     * plat_ticks would wait forever. Registers of the SCU global timer (0xF8F00200): clear, then enable. */
+    Xil_Out32(0xF8F00208u, 0u); Xil_Out32(0xF8F00200u, 0u); Xil_Out32(0xF8F00204u, 0u); Xil_Out32(0xF8F00208u, 1u);
     Xil_ICacheEnable();
     Xil_DCacheEnable();
     if (uart == NULL || gic == NULL) rtlnet_fatal("LookupConfig", -1);
@@ -48,15 +58,15 @@ uint32_t plat_ticks(void)
 {
     XTime value;
     XTime_GetTime(&value);
-    return (uint32_t)((value / COUNTS_PER_SECOND) * 1000000ull +
-        ((value % COUNTS_PER_SECOND) * 1000000ull) / COUNTS_PER_SECOND);
+    return (uint32_t)((value / RTLNET_GTIMER_HZ) * 1000000ull +
+        ((value % RTLNET_GTIMER_HZ) * 1000000ull) / RTLNET_GTIMER_HZ);
 }
 uint32_t plat_uptime_ms(void)
 {
     XTime value;
     XTime_GetTime(&value);
-    return (uint32_t)((value / COUNTS_PER_SECOND) * 1000ull +
-        ((value % COUNTS_PER_SECOND) * 1000ull) / COUNTS_PER_SECOND);
+    return (uint32_t)((value / RTLNET_GTIMER_HZ) * 1000ull +
+        ((value % RTLNET_GTIMER_HZ) * 1000ull) / RTLNET_GTIMER_HZ);
 }
 void plat_delay_us(uint32_t us)
 {

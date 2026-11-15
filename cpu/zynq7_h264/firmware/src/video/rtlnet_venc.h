@@ -89,6 +89,7 @@ typedef struct {
     uint32_t datagrams;
     uint32_t sink_errors;       /* datagrams refused by UDP */
     uint32_t dropped_pictures;  /* published frames the encoder skipped (frame number jumps) */
+    uint32_t stop_drain_us;     /* microseconds the last stream stop waited for a picture in flight */
     uint32_t errors;            /* encoder errors, bad index entries, take failures */
     uint32_t last_picture_bytes;
     uint32_t bit_rate_bps;      /* ES + TS overhead over the last full second: TS bytes x 8 */

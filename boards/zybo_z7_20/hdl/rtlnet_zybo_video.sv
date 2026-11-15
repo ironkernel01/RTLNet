@@ -481,7 +481,8 @@ module rtlnet_zybo_video #(
     .reg_rd_addr(cam_reg_ra),
     .reg_rd_data(cam_reg_q)
   );
-  assign admit = s_axis_video_tuser ? (camera_enable && (camera_mode || !skip_phase)) : frame_admit;
+  // 720p (mode 0): the sensor runs 30 fps and every frame is admitted; 1080p (mode 1): the sensor runs 30 fps and every second frame is admitted (15 fps).
+  assign admit = s_axis_video_tuser ? (camera_enable && (!camera_mode || !skip_phase)) : frame_admit;
   assign s_axis_video_tready = !admit || adapter_ready;
   // Camera configuration and metadata live in the capture domain behind a whole-transaction CDC.
   always_ff @(posedge capture_clk) begin

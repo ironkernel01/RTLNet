@@ -48,12 +48,15 @@ static int table(const rtlnet_sensor_reg_t *p, unsigned count)
     return 0;
 }
 #define TABLE(t) table(t, sizeof(t)/sizeof((t)[0]))
+/* Sensor rates: mode 0 uses the Digilent "720p 60 fps" table, whose PCLK 56 MHz / (HTS 1896 x VTS 984) gives 30 fps (measured 30.0 on the board);
+ * mode 1 uses the 1080p30 table (PCLK 84 MHz / (2500 x 1120) = 30 fps). The stream rate is set by frame admission in the PL: 720p all frames
+ * (30 fps), 1080p every second frame (15 fps). */
 int rtlnet_sensor_mode(unsigned mode)
 {
     if (mode > 1u) return -1;
     rtlnet_camera_enable(RTLNET_PLAT_CSI2_BASE, 0);
     if (write_reg(0x3008, 0x42) != 0) return -1;
-    if ((mode == 0u ? TABLE(cfg_720p_60fps_) : TABLE(cfg_1080p_15fps_)) != 0) return -1;
+    if ((mode == 0u ? TABLE(cfg_720p_60fps_) : TABLE(cfg_1080p_30fps_)) != 0) return -1;
     if (TABLE(cfg_advanced_awb_) != 0 || write_reg(0x3008, 0x02) != 0) return -1;
     plat_delay_ms(100u);
     if (rtlnet_camera_mode(RTLNET_PLAT_CSI2_BASE, mode)) return -1;

@@ -1,6 +1,6 @@
 # Zybo Z7-20 camera integration
 
-Revision: 11-14-2026.
+Revision: 11-15-2026.
 
 The target is the Digilent Zybo Z7-20 (`xc7z020clg400-1`). The design keeps the Digilent Pcam 5C physical
 receiver, CSI-2 receiver, Bayer conversion and gamma IP and encodes the camera picture with one RTLNet H.264
@@ -20,8 +20,8 @@ ports. The Baseline stage rebuilds the whole design and uses its camera stage on
 | 50 MHz | clk_wiz_0, 600 MHz VCO / 12 | GP0, receiver and D-PHY AXI-Lite control, RTLNet register window |
 | 90 MHz | rtlnet_video_clock | CSI-2 receiver video side, Bayer, gamma, adapter, capture DMA, frame buffer, encoder, HP0 and HP2, stage 0 VDMA |
 | 200 MHz | clk_wiz_0, 600 MHz VCO / 3 | D-PHY delay reference |
-| 140 / 105 MHz | sensor forwarded clock, 720p / 1080p15 | DDR HS input sampling |
-| 35 / 26.25 MHz | D-PHY HS clock / 4 | recovered byte stream |
+| 140 / 210 MHz | sensor forwarded clock, 720p / 1080p30 | DDR HS input sampling |
+| 35 / 52.5 MHz | D-PHY HS clock / 4 | recovered byte stream |
 
 The 150 MHz output of the Digilent reference clocking wizard is not used: it stays unconnected and unbuffered
 in clk_wiz_0 so that the wizard's port numbering (clk_out3 = 200 MHz) is unchanged. The constraint model of the
@@ -47,20 +47,25 @@ is registered in the encoder clock before its synchronizer.
 
 ## Video stream throughput at 90 MHz
 
-The selectable sensor modes (`cpu/zynq7_h264/firmware/src/ov5640/rtlnet_ov5640_tables.h`) are 720p (RAW10,
-1280 x 720, HTS 1896, VTS 984, PCLK 56 MHz, MIPISCLK 280 MHz) and 1080p15 (RAW10, 1920 x 1080, HTS 2500,
-VTS 1120, PCLK 42 MHz, MIPISCLK 210 MHz). 1080p30 (148.5 Mpixel/s) is not offered by the firmware.
+The selectable sensor modes (`cpu/zynq7_h264/firmware/src/ov5640/rtlnet_ov5640_tables.h`) are 720p (RAW10, 1280 x 720,
+HTS 1896, VTS 984, PCLK 56 MHz, MIPISCLK 280 MHz) and 1080p (RAW10, 1920 x 1080 from the Digilent 1080p30 table, HTS 2500,
+VTS 1120, PCLK 84 MHz, MIPISCLK 420 MHz). The sensor runs 30 fps in both modes (measured, see "Hardware bring-up"); the
+stream is 720p30 (every frame admitted) and 1080p15 (every second frame admitted).
 
 - Stream-side capacity: the Bayer block receives four pixels per beat and emits one pixel per clock, so a 90 MHz
   clock carries 90 Mpixel/s. The receiver's RAW10 formatter handles 3.2 pixels per clock.
-- Pixel burst rate during an active line, bounded by the CSI-2 lanes (two lanes, RAW10, 10 bit per pixel):
-  720p, 2 x 280 Mb/s / 10 = 56 Mpixel/s (byte clock 35 MHz); 1080p15 from the sensor PLL arithmetic,
-  2 x 210 Mb/s / 10 = 42 Mpixel/s (byte clock 26.25 MHz). If the 1080p15 lanes ran at 420 Mb/s instead, the burst
-  would be 84 Mpixel/s. Margins against 90 Mpixel/s: 1.61 (56), 2.14 (42), 1.07 (84). The vendor receiver was
-  tested at an 84 MHz byte clock with a 150 MHz video clock; the vendor documents no minimum video clock.
-- Frame rate: the sensor timing registers give PCLK / (HTS x VTS) = 15.0 fps for the 1080p15 table and 30.0 fps
-  for the 720p table, which is named 60 fps. Frame admission halves the 720p rate for 720p30 on the assumption of a
-  60 fps sensor; the frame counters measure the real rate at bring-up. The capture and encoder paths need far
+- Pixel burst rate during an active line, bounded by the CSI-2 lanes (two lanes, RAW10, 10 bit per pixel): 720p,
+  2 x 280 Mb/s / 10 = 56 Mpixel/s (byte clock 35 MHz); 1080p30, 2 x 420 Mb/s / 10 = 84 Mpixel/s (byte clock 52.5 MHz, HS
+  clock 210 MHz DDR). Margins against 90 Mpixel/s: 1.61 (720p) and 1.07 (1080p30). The lane rate (derived from the PLL registers, not observable on the board: the D-PHY IP has no rate counter; a wrong rate would not
+  have produced the error-free decoded streams below) is five times the
+  sensor PCLK in both tables (the sensor sends the pixel clock continuously over two lanes); the 15 fps table of the
+  earlier plan (PCLK 42 MHz, 210 Mb/s per lane) is no longer used, and the 420 Mb/s of the D-PHY constraint model is the
+  1080p30 lane rate. The vendor receiver was tested at an 84 MHz byte clock with a 150 MHz video clock; the vendor
+  documents no minimum video clock.
+- Frame rate: PCLK / (HTS x VTS) is 30.0 fps for the 720p table (named 60 fps in the vendor table) and 30.0 fps for the
+  1080p30 table. Measured on the board with the frame counter of `show camera`: 720p 29.94 to 30.1 fps, 1080p 29.99 to
+  30.05 fps. Frame admission is in the PL (`rtlnet_zybo_video`): mode 0 (720p) admits every frame and reports a PTS step of
+  3000 (30 fps), mode 1 (1080p) admits every second frame and reports 6000 (15 fps). The capture and encoder paths need far
   less than the stream capacity: 720p30 encoder input is 27.6 Mpixel/s.
 - Receiver buffering: a 1024-word asynchronous FIFO (32 bit, byte clock to video clock) and a line buffer of
   2048 beats x 4 pixels = 8192 pixels, more than one 1920-pixel line. Arrival never exceeds drain at the
@@ -72,7 +77,7 @@ VTS 1120, PCLK 42 MHz, MIPISCLK 210 MHz). 1080p30 (148.5 Mpixel/s) is not offere
   vendor CSI-2 receiver or the D-PHY, and its frames (32 x 16) are short. The vendor receiver at a 90 MHz video
   clock is not simulated and not verified on hardware.
 
-Supported modes at 90 MHz: 720p (720p30 by frame admission) and 1080p15. Not supported: 1080p30.
+Supported modes at 90 MHz: 720p (sensor 30 fps, stream 30 fps) and 1080p (sensor 30 fps, stream 15 fps). The Bayer, gamma and adapter chain carried 1080p30 from the sensor on the board without an adapter error.
 
 The adapter has four register stages (input, product, matrix sum, pair sum) before its output register, and
 `u_pair_slice` adds one clock: about eight clocks (90 ns) from a gamma pixel to the capture DMA input. The
@@ -245,13 +250,68 @@ require Cortex-A9 cache maintenance. IRQ_F2P bits 0 and 1 map to GIC IDs 61 and 
 the encoder uses a synchronized level until serviced. The ARM platform owns the fabric handlers, while emacps
 owns the PS GEM interrupt. AXI-Lite transactions cross atomically into the capture and encoder logic; frame data
 crosses DDR with explicit slot ownership, completion responses and CPU cache maintenance. The capture timestamp
-divider counts 90 clocks per microsecond. The frame sequence increments only on admission; 720p admits alternate
-frames and 1080p15 admits every frame. Firmware PTS steps are 3000 or 6000 at 90 kHz.
+divider counts 90 clocks per microsecond. The frame sequence increments only on admission; 1080p admits alternate
+frames and 720p admits every frame. Firmware PTS steps are 3000 or 6000 at 90 kHz.
+
+## Hardware bring-up (11-15-2026)
+
+Board: Digilent Zybo Z7-20 with a Pcam 5C, USB powered (JTAG and UART through one micro-USB cable on a direct PC port),
+PS Ethernet to a switch. Build `enc14` (Baseline stage, gates PASS with the deviation below), firmware `fw10`. Load with
+`scripts/program.ps1` (volatile JTAG: PL, PS initialization from the XSA, ARM ELF on core 0; core 1 untouched). Host test:
+`scripts/stream_test.ps1`.
+
+| Stage | Result | Evidence |
+|---|---|---|
+| a Console | pass | banner and prompt on the UART (about 40 s after the load before the clock fix, about 10 s after it), `show version` prints the build ID |
+| b PS Ethernet | pass | RTL8211F (PHY ID 001cc916), link up, DHCP lease, ping from the PC |
+| c Clocks, resets | pass (indirect) | the 90 MHz clock, the 200 MHz reference and the resets are not readable by a register; capture, encoder and the HP ports run, so they are up |
+| d Camera control | pass | OV5640 ID 0x5640 over I2C, sensor tables load, the PL counts frames |
+| e D-PHY, CSI-2 | pass, deviation open | 30 fps frame counter in both modes, adapter error counter 0, no decode error in 292 s of 720p and 142 s of 1080p |
+| f Video path | pass | Bayer, gamma, adapter, capture, frame buffer: frames are decoded without error on the PC |
+| g Encoder | pass | 9,006 pictures in 292 s without an error, constant QP 28: 0.17 Mb/s for the dark scene, about 1 Mb/s for the lit desk |
+| h Network, decode | pass | MPEG-TS over UDP, no continuity error, ffprobe and ffmpeg without error |
+
+Measured rates (frame counter of `show camera`, two reads 10 s to 290 s apart): 720p sensor 29.94 to 30.12 fps, admitted
+the same; 1080p sensor 29.99 to 30.05 fps, admitted 14.96 to 15.03 fps. The sensor runs 30 fps in the 720p table that the vendor
+names 60 fps. The lane rates follow from the sensor PLL registers (five times PCLK: 280 Mb/s at 720p, 420 Mb/s at 1080p30);
+they are not observable on the board.
+
+Stream figures: 720p 1280x720 30.00 fps, 6.38 MB in 292 s (0.17 Mb/s, constant QP 28, dark scene); 1080p 1920x1080 15.00 fps,
+1.91 MB in 142 s (0.11 Mb/s). Both are h264 Constrained Baseline, every GOP of 30 pictures starts with an IDR.
+
+### Timing deviation `DPHY_HS_INPUT`, hardware status
+
+Not closed, not contradicted. The D-PHY registers (control at +0, version at +12) expose no lane, alignment or error status, and the
+vendor receiver has no data-tap training. The runs of 292 s (720p) and 142 s (1080p) show no corrupted frame, no adapter error
+and no decode error, on one board, one cable and room temperature. The two endpoints still fail static timing by
+the margins above, so this is a hardware observation of one unit and not a timing closure; the margin question needs the instrumented image
+described in the deviation section (per-lane HS sync/valid, IDELAY ready) and a temperature and cable review. No tap value or clock
+setting was changed.
+
+### Faults found on the board
+
+1. The firmware hung in its first delay: the Cortex-A9 global timer was never started (control register 0). Fixed in `plat_init`.
+2. `plat_ticks`/`plat_uptime_ms` used the BSP macro `COUNTS_PER_SECOND`, which expands to `XPAR_CPU_CORE_CLOCK_FREQ_HZ/2` without parentheses: the time was
+   four times slow in its seconds part and stepped backwards every two seconds. The encoder time-out (500 ms) fired by chance, the firmware
+   abandoned a running P picture, and the next picture start rewrote PIC_CFG under it. The picture then coded without waiting for motion
+   search and the core waited for the search in its end-of-picture state forever: STATUS.BUSY stuck, MB_COUNT 3,600, PIC_CFG 0x401 (the
+   value written by the driver's configure step) while the picture was a P picture. Read-out with a throwaway build (debug word: state E_FLUSH,
+   motion search active and not idle, every other unit idle; the debug build is not kept). Fixed in `cpu/zynq7_h264/firmware/src/rtlnet_platform.c`.
+3. A stream stop with a picture in flight left the core BUSY (before fix 2): `venc_stop` now drains the picture first.
+4. Power: through a weak USB port the whole board reset (SLCR REBOOT_STATUS 0x00400002, power-on reset bit only, PL configuration lost,
+   `fpga -state` "not configured") 60 to 80 ms after the ARM started with the PL configured and clocked; no firmware cause was found
+   (reset-cause registers, a `b .` loop and an unconfigured PL survive). A direct PC USB port removed it.
+5. Open observation: the first decoded picture is rotated by 180 degrees (see the picture note below).
+
+Picture quality: a decoded 720p frame of a lit desk with two monitors (`boards/zybo_z7_20/build/bringup/f20.png`) is a real camera picture,
+sharp text on the monitors, plausible colours (warm light, white screens white), no tearing or shift, but dark and rotated by 180 degrees.
+Later runs (dark room) give nearly black pictures; the host test reports its picture check as FAIL and is not changed.
 
 ## What is verified
 
-Simulation (Active-HDL, `scripts/rtlnet_regression.ps1 -Match 'zybo|zynq7'`): the RGB adapter against a
-reference model, the HP bridge against a byte-level oracle, the integrated camera-to-encoder board bench with a
-decoded picture, and the ARM host suites, each with a negative control. Build: both stages pass every gate with
-the deviation above. Not verified: anything on hardware (D-PHY sampling margin, the vendor receiver at a 90 MHz
-video clock, sensor frame and lane rates, the streaming application).
+Simulation (Active-HDL, `scripts/rtlnet_regression.ps1 -Match 'zybo|zynq7'`, 13 of 13 pass): the RGB adapter against a
+reference model, the HP bridge against a byte-level oracle, the integrated camera-to-encoder board bench (1080p mode admits
+alternate frames, 720p mode admits every frame, PTS steps 6000 and 3000) with a decoded picture, and the ARM host suites, each
+with a negative control. Build: both stages pass every gate with the deviation above. Hardware: see "Hardware bring-up".
+Not verified: the D-PHY sampling margin over temperature and cables, the lane rates (derived, not observable), 1080p30 as a stream
+(the stream is 1080p15), a bright scene with the test's picture check, the supply on a wall adapter, other boards.

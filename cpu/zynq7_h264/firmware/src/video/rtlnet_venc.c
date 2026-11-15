@@ -29,6 +29,7 @@
 #include "rtlnet_board.h"
 #include "rtlnet_camera.h"
 #include "rtlnet_framebuf.h"
+#include "rtlnet_h264_enc.h"
 #include "rtlnet_h264_enc_ctl.h"
 #include "rtlnet_mmio.h"
 #include "rtlnet_muxjob.h"
@@ -59,6 +60,7 @@ uint32_t rtlnet_host_mem_read32(uintptr_t addr);
 
 #define VENC_PTS_BASE     90000u     /* first PTS: one second */
 #define VENC_ENC_TIMEOUT_US  500000u
+#define VENC_STOP_DRAIN_US   400000u   /* bound on the wait for a picture in flight at stream stop */
 #define VENC_LOG2_FN      4u
 #define VENC_MUX_BUDGET   MUXJOB_BUDGET   /* elementary stream bytes the mux sends per venc_poll call (four datagrams) */
 #define VENC_PAD_SLOTS    8u         /* frame-buffer slots whose padding lines are tracked */
@@ -302,6 +304,16 @@ void venc_stop(void)
     s = plat_irq_save();
     plat_irq_enable(RTLNET_CPU_IRQ_H264, 0);
     rtlnet_h264_ctl_close();
+    if (g.state == ST_ENCODING) {
+        /* A picture in flight is let finish before its input slot goes back to the capture: stopping mid-picture left the core BUSY for good on
+         * the board (STATUS.BUSY stuck, the next start never ran). The completion is read here, not by the handler (its line is off). */
+        uint32_t t0 = plat_ticks();
+        while (((rtlnet_h264_enc_status(RTLNET_PLAT_H264_BASE) & RTLNET_H264_STATUS_BUSY) != 0u) &&
+               ((uint32_t)(plat_ticks() - t0) < VENC_STOP_DRAIN_US * RTLNET_PLAT_TICKS_PER_US)) {
+        }
+        g.st.stop_drain_us = (uint32_t)(plat_ticks() - t0);
+        rtlnet_h264_enc_clear_status(RTLNET_PLAT_H264_BASE);
+    }
     release_slot();
     g.state = ST_IDLE;
     picq_flush(&g.q);   /* the pictures queued are abandoned with the stream; the next start resets the rings */
