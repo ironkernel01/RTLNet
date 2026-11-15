@@ -1,6 +1,6 @@
 // Drawing set: demo-ethernet (2 sheets: the Ethernet demo set-up and data path) for
-//   demos/ethernet/ethernet_brief.md               (sheet 1: Nexys Video, 10/100/1000 Mb/s RGMII)
-//   demos/ethernet/ethernet_arty_a7_100_brief.md   (sheet 2: Arty A7-100T, 10/100 Mb/s MII)
+//   demos/ethernet/nexys_video/ethernet_nexys_video_brief.md   (sheet 1: Nexys Video, 10/100/1000 Mb/s RGMII)
+//   demos/ethernet/arty_a7_100/ethernet_arty_a7_100_brief.md   (sheet 2: Arty A7-100T, 10/100 Mb/s MII)
 // The sheets differ in the board, the PHY interface and the memory sizes.
 // Build: node diagrams/src/demo-ethernet.js  ->  diagrams/out/demo-ethernet.pptx
 // Render: powershell -File diagrams\tools\render.ps1 diagrams\out\demo-ethernet.pptx  ->  out/png/demo-ethernet-1.png, -2.png

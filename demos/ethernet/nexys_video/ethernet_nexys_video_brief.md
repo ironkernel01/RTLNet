@@ -22,7 +22,7 @@
 
 <table style="width:100%; border:none; margin:0; padding:0;">
 <tr>
-<td style="text-align:left; border:none; padding:0; width:50%;"><img src="../../documentation/pdf/ironkernel_logo.png" alt="IronKernel Embedded" style="width:231px; margin:0;"></td>
+<td style="text-align:left; border:none; padding:0; width:50%;"><img src="../../../documentation/pdf/ironkernel_logo.png" alt="IronKernel Embedded" style="width:231px; margin:0;"></td>
 <td style="text-align:right; border:none; padding:0; width:50%; vertical-align:bottom;"><strong>Demo Brief</strong><br>Revision 11-14-2026</td>
 </tr>
 </table>
@@ -93,7 +93,7 @@ A paid license carries no royalty and no per-unit fee. This demo contains no pai
 
 **Figure 1.** Demo set-up and data path (demo-ethernet, sheet 1)
 
-<img src="../../diagrams/out/png/demo-ethernet-1.png" alt="Nexys Video, PC and the Ethernet data path of the demo" style="width:88%;">
+<img src="../../../diagrams/out/png/demo-ethernet-1.png" alt="Nexys Video, PC and the Ethernet data path of the demo" style="width:88%;">
 
 1. The MAC receives frames from the PHY and the protocol wrapper answers ARP requests, ping, DHCP and the UDP echo and UDP iperf 2 ports in fabric. The CPU sees none of this traffic. The MAC, the protocol blocks and the CPU side run from one 100 MHz clock; only the RGMII receive clock, the RGMII transmit clocks and the 200 MHz delay-control clock are separate.
 2. Frames the wrapper does not handle (TCP, for example) pass the classifier and go to the CPU through an AXI DMA into a dual-port frame buffer RAM on the CPU's data-side LMB. A frame that leaves the CPU as one buffer in that RAM is sent from where it is, with no copy. In one TCP test sequence at 1000 Mb/s this image sent 1,180,715 frames in place and copied none (`show offload`).
@@ -111,7 +111,7 @@ A Nexys Video with its 12 V supply (JP4 on JTAG), two micro-USB cables (PROG, UA
 4. `show interfaces`, `show phy`, `show arp`, `show counters`, `show tcp`, `show iperf`, `show offload` and `show classifier` print the state of each part. `configure terminal`, `interface eth0`, `speed 10|100|auto` sets the link speed.
 5. The tests of `cpu/microblaze_v_ethernet/test/` (`run_all.ps1 -Port <COM> -Nic <adapter> -LinkMbps 10|100|1000` and `flood_test.ps1`) run every service and the protection profile against the board.
 
-<div style="page-break-inside:avoid;"><img src="images/ethernet_console.png" alt="Console: show version, show system, show interfaces, show ip" style="width:56%;"><br><strong>Figure 2.</strong> Console after start-up: <code>show version</code>, <code>show system</code>, <code>show interfaces</code>, <code>show ip</code> (addresses and MAC replaced by documentation values)</div>
+<div style="page-break-inside:avoid;"><img src="../images/ethernet_console.png" alt="Console: show version, show system, show interfaces, show ip" style="width:56%;"><br><strong>Figure 2.</strong> Console after start-up: <code>show version</code>, <code>show system</code>, <code>show interfaces</code>, <code>show ip</code> (addresses and MAC replaced by documentation values)</div>
 
 ## Device utilization and timing
 
@@ -148,7 +148,7 @@ Method: the release image was programmed over JTAG and every number below was me
 </tbody>
 </table>
 
-<div style="page-break-inside:avoid;"><img src="images/ethernet_perf_1000.png" alt="Performance at 1000 Mb/s: UDP echo, UDP iperf, TCP" style="width:62%;"><br><strong>Figure 3.</strong> Performance at 1000 Mb/s from the release campaign (the captures for 100 and 10 Mb/s are <code>images/ethernet_perf_100.png</code> and <code>ethernet_perf_10.png</code>)</div>
+<div style="page-break-inside:avoid;"><img src="../images/ethernet_perf_1000.png" alt="Performance at 1000 Mb/s: UDP echo, UDP iperf, TCP" style="width:62%;"><br><strong>Figure 3.</strong> Performance at 1000 Mb/s from the release campaign (the captures for 100 and 10 Mb/s are <code>ethernet_perf_100.png</code> and <code>ethernet_perf_10.png</code>)</div>
 
 **What limits each figure.** The UDP echo, UDP iperf, ping, ARP and DHCP paths are RTL and carry no CPU load; the UDP iperf figures are the line rate of the link (the data rate is below 1000 Mb/s because of the Ethernet, IP and UDP headers; the one lost-datagram count above, 71 of 401,242 at 900 Mb/s offered board to PC, does not recur in the sweep up to 980 Mb/s). TCP runs on the soft CPU: a 100 MHz MicroBlaze V with block RAM only, no caches and no DDR3, handles every TCP segment in lwIP. At 100 and 10 Mb/s the CPU is fast enough and TCP reaches the line rate of the link. At 1000 Mb/s the CPU is the limit: 283 to 350 Mb/s, 28 to 35 % of the link. The hardware offloads (checksums, in-place transmit, ACK coalescing) raise the figure but do not remove that limit.
 
@@ -188,7 +188,7 @@ The classifier is always on and the policers of the profile are installed at eve
 
 The generator is a PC with normal sockets and the network between it and the board limits it: broadcast and multicast frames arrive at about 500 per second whatever the offered rate (5,004 to 5,305 in 10 s), while a unicast flood arrives at the full rate (199,690 of 200,000). The board's counters show exactly what arrived. During the 20,000 per second broadcast and multicast floods, 1 to 2 of 12 pings were lost (8 to 17 %), and none during the unicast and ICMP floods. The `udp-echo` and `icmp-board` floods are answered by the hardware and add nothing to the CPU path counters; the `arp` flood (147 requests sent) is reported, not required: 391 ARP frames seen, 314 passed, 77 dropped.
 
-<div style="page-break-inside:avoid;"><img src="images/ethernet_classifier.png" alt="show classifier after the flood test" style="width:66%;"><br><strong>Figure 4.</strong> <code>show classifier</code> after the flood test: dropped frames per class, the profile limits and the pass-all mode</div>
+<div style="page-break-inside:avoid;"><img src="../images/ethernet_classifier.png" alt="show classifier after the flood test" style="width:66%;"><br><strong>Figure 4.</strong> <code>show classifier</code> after the flood test: dropped frames per class, the profile limits and the pass-all mode</div>
 
 ## Test results
 
@@ -203,11 +203,11 @@ The generator is a PC with normal sockets and the network between it and the boa
 
 </div>
 
-<div style="page-break-inside:avoid;"><img src="images/ethernet_verdicts.png" alt="ETH_SUITE verdicts at 1000, 100 and 10 Mb/s" style="width:50%;"><br><strong>Figure 5.</strong> The three <code>ETH_SUITE</code> verdicts and the verdict of each script</div>
+<div style="page-break-inside:avoid;"><img src="../images/ethernet_verdicts.png" alt="ETH_SUITE verdicts at 1000, 100 and 10 Mb/s" style="width:50%;"><br><strong>Figure 5.</strong> The three <code>ETH_SUITE</code> verdicts and the verdict of each script</div>
 
-<div style="page-break-inside:avoid;"><img src="images/ethernet_offload.png" alt="show offload after TCP load" style="width:100%;"><br><strong>Figure 6.</strong> <code>show offload</code> after the TCP runs at 1000 Mb/s (counters cleared before the runs): checksums done in hardware, frames sent in place and ACK coalescing counters</div>
+<div style="page-break-inside:avoid;"><img src="../images/ethernet_offload.png" alt="show offload after TCP load" style="width:100%;"><br><strong>Figure 6.</strong> <code>show offload</code> after the TCP runs at 1000 Mb/s (counters cleared before the runs): checksums done in hardware, frames sent in place and ACK coalescing counters</div>
 
-Further captures are in `images/`: `ethernet_runcfg.png` (`show running-config`), `ethernet_flood1000.png` and `ethernet_flood20000.png` (the flood tests), `ethernet_perf_100.png` and `ethernet_perf_10.png`.
+Further captures are in `demos/ethernet/images/`: `ethernet_runcfg.png` (`show running-config`), `ethernet_flood1000.png` and `ethernet_flood20000.png` (the flood tests), `ethernet_perf_100.png` and `ethernet_perf_10.png`.
 
 ## Console commands
 

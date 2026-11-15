@@ -34,7 +34,7 @@ The Ethernet demo (`ethernet/`) is the network stack alone: 10/100/1000 Mb/s RGM
 iperf 2 in FPGA fabric, lwIP TCP echo (port 7) and TCP iperf 2 server (port 5001) on a small 100 MHz MicroBlaze V in block RAM,
 a classifier with per-class policers that holds a flood away from the CPU, and a console on the UART. It has no DDR3, no camera,
 no video and no H.264; its image is `ethernet/nexys_video/rtlnet_nexys_video_eth.bit` (release image `eth_rel`) and it has no
-time limit. Its brief (`ethernet/ethernet_brief.pdf`) holds the measured results: at 1000 Mb/s UDP iperf 942 and 944 Mb/s and
+time limit. Its brief (`ethernet/nexys_video/ethernet_nexys_video_brief.pdf`) holds the measured results: at 1000 Mb/s UDP iperf 942 and 944 Mb/s and
 TCP iperf 350 and 283 Mb/s (PC to board, board to PC), at 100 Mb/s 94 to 95 Mb/s for both, and the flood test. Its steps
 are in `ethernet/nexys_video/README.md`: program the board as in section 4 with that file, then `ping` the address that
 `show ip` prints. It needs no player and no UDP port 5004 rule; its tests use iperf 2 and the PowerShell scripts of

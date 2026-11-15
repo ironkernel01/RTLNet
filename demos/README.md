@@ -32,7 +32,7 @@ which demos there are; the README and the brief of each demo say what the demo s
 The Ethernet demo (`ethernet/`) is the network stack alone, with no video: 10/100/1000 Mb/s Ethernet with ARP, ping, DHCP,
 UDP echo and UDP iperf 2 in FPGA fabric, lwIP TCP and a protection profile on a 100 MHz MicroBlaze V without DDR3. Its image is
 `rtlnet_nexys_video_eth.bit` (built by `boards/nexys_video/scripts/build_ethernet.ps1 -Tag eth_rel`; the name differs from the
-video demos), it has no time limit and no netlist. Its brief (`ethernet/ethernet_brief.pdf`) has the measured results at 10, 100
+video demos), it has no time limit and no netlist. Its brief (`ethernet/nexys_video/ethernet_nexys_video_brief.pdf`) has the measured results at 10, 100
 and 1000 Mb/s and the flood test.
 
 License: `LICENSE.md` in the repository root for RTLNet. A demo that is under other terms names its license file in its

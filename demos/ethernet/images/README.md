@@ -2,7 +2,7 @@
 
 Revision 11-14-2026
 
-Captures of the release campaign of the Ethernet demo (image `eth_rel`, git 2c2c686b, Nexys Video, 11-14-2026). Each picture is a rendering of the console or test text (`cpu/microblaze_v_ethernet/test/render_capture.py`); the IP and MAC addresses in them are replaced by documentation values (192.0.2.x, 00:00:5E:00:53:xx). The brief (`../ethernet_brief.md`) uses the first six.
+Captures of the release campaign of the Ethernet demo (image `eth_rel`, git 2c2c686b, Nexys Video, 11-14-2026). Each picture is a rendering of the console or test text (`cpu/microblaze_v_ethernet/test/render_capture.py`); the IP and MAC addresses in them are replaced by documentation values (192.0.2.x, 00:00:5E:00:53:xx). The brief (`../nexys_video/ethernet_nexys_video_brief.md`) uses the first six.
 
 | File | Shows |
 |---|---|

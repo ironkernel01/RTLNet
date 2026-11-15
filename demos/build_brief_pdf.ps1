@@ -1,17 +1,22 @@
 # build_brief_pdf.ps1 - Markdown to PDF for a demo brief (headless Chrome, pdf_generator.md).
 #   powershell -NoProfile -ExecutionPolicy Bypass -File demos\build_brief_pdf.ps1 h264_baseline
 # Reads demos\<Name>\<Name>_brief.md and writes demos\<Name>\<Name>_brief.pdf.
+# A demo with one brief per board keeps each brief in its board folder:
+#   powershell -NoProfile -ExecutionPolicy Bypass -File demos\build_brief_pdf.ps1 ethernet nexys_video
+# reads demos\<Name>\<Board>\<Name>_<Board>_brief.md and writes the PDF next to it.
 # The page is the Markdown between documentation\pdf\head.html and foot.html, the same shell and the same
 # Chrome printing as documentation\build_pdf.ps1. render.html is assembled next to the .md so the relative
 # drawing paths (..\..\diagrams\out\png) resolve, and is deleted after the print.
-param([Parameter(Mandatory = $true)][string]$Name)
+param([Parameter(Mandatory = $true)][string]$Name, [string]$Board = '')
 $ErrorActionPreference = 'Stop'
 
 $demos = $PSScriptRoot
 $pdfDir = Join-Path $demos '..\documentation\pdf'
 $dir = Join-Path $demos $Name
-$md = Join-Path $dir "${Name}_brief.md"
-$pdf = Join-Path $dir "${Name}_brief.pdf"
+$stem = "${Name}_brief"
+if ($Board) { $dir = Join-Path $dir $Board; $stem = "${Name}_${Board}_brief" }
+$md = Join-Path $dir "$stem.md"
+$pdf = Join-Path $dir "$stem.pdf"
 $render = Join-Path $dir 'render.html'
 $profileDir = Join-Path $env:TEMP 'rtlnet_pdf_chrome_profile'
 if (-not (Test-Path $md)) { throw "$md not found" }

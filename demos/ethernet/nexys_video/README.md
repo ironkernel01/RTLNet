@@ -80,7 +80,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File cpu/microblaze_v_ethernet/te
 
 ## Expected results
 
-Measured on this image (`eth_rel`, build info in `build_info.txt`) in the release campaign of 11-14-2026: the board on a switch to a PC with a Gigabit adapter, iperf 2, 10 s runs (TCP: mean of 3 runs), 64-byte echoes x 2000. The brief (`ethernet_brief.md`, `ethernet_brief.pdf`) holds the same table with the method.
+Measured on this image (`eth_rel`, build info in `build_info.txt`) in the release campaign of 11-14-2026: the board on a switch to a PC with a Gigabit adapter, iperf 2, 10 s runs (TCP: mean of 3 runs), 64-byte echoes x 2000. The brief (`ethernet_nexys_video_brief.md`, `ethernet_nexys_video_brief.pdf`) holds the same table with the method.
 
 | Test | 10 Mb/s | 100 Mb/s | 1000 Mb/s |
 |---|---|---|---|
