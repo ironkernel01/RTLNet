@@ -1,6 +1,6 @@
 # RTLNet Demos
 
-Revision 11-14-2026
+Revision 11-16-2026
 
 This folder holds the ready-to-run demonstration images of RTLNet. Each demo is a prebuilt FPGA bitstream with the
 firmware inside it: program the board, type a few commands on the serial console and the result is on the PC. Nothing
@@ -18,6 +18,7 @@ has to be built.
 | `<demo name>/<board>/` | the demo on one board |
 | `<demo name>/<board>/README.md` | the steps to run that demo |
 | `<demo name>/<board>/rtlnet_<board>.bit` | the bitstream, firmware included (the Ethernet demo: `rtlnet_nexys_video_eth.bit`) |
+| `<demo name>/<board>/rtlnet_zybo.elf`, `ps7_init.tcl` | the Zybo Z7-20 camera demo only: its firmware runs on a Zynq ARM core, so the bitstream comes with the firmware ELF and the PS initialization script |
 | `<demo name>/<board>/build_info.txt` | source revision, timing result and utilization of the image |
 | `<demo name>/<demo name>_brief.md` and `.pdf` | the demo brief: what the demo shows, data path, test pattern, measured results, build variants, utilization and limits |
 
@@ -40,6 +41,8 @@ are in `ethernet/nexys_video/README.md`: program the board as in section 4 with 
 `show ip` prints. It needs no player and no UDP port 5004 rule; its tests use iperf 2 and the PowerShell scripts of
 `cpu/microblaze_v_ethernet/test/`.
 
+The Zybo Z7-20 camera demo (`h264_baseline/zybo_z7_20/`) streams a real camera: a Digilent Pcam 5C (OV5640, two MIPI CSI-2 lanes) is received by the IronKernel receiver `rtlnet_csi2_rx` in FPGA fabric, written to the DDR3 of the Zynq, encoded by one RTLNet H.264 Constrained Baseline engine and sent as MPEG-TS over UDP by a bare-metal ARM firmware, 720p30 or 1080p15, to VLC or ffplay on a PC. It is three binary files (bitstream, firmware ELF, PS initialization script) that `boards/zybo_z7_20/scripts/program_demo.ps1` loads over JTAG (volatile; no SD or QSPI boot). It needs a Zybo Z7-20, a Pcam 5C, one micro-USB cable (PROG UART: JTAG and console), an Ethernet cable to a network with DHCP, and AMD Vitis or Vivado 2026.1 for `xsdb`. Steps: `h264_baseline/zybo_z7_20/README.md`; brief with the measured results, the resources and what is not verified: `h264_baseline/zybo_z7_20/h264_baseline_zybo_z7_20_brief.pdf`. Its pictures are in `h264_baseline/images/`; the frames of 11-16-2026 were taken in a dark room and are to be retaken in daylight (`h264_baseline/images/README.md`).
+
 The Ethernet demo also has an image for the Digilent Arty A7-100T: `ethernet/arty_a7_100/rtlnet_arty_a7_100_eth.bit` (release image
 `arty_rel`), 10/100 Mb/s MII with a 256 KiB MicroBlaze V memory and the same services, classifier and console. Its brief
 (`ethernet/arty_a7_100/ethernet_arty_a7_100_brief.pdf`) holds the measured results: at 100 Mb/s UDP iperf 93.9 and 94.4 Mb/s and TCP iperf 94.8 and
@@ -58,7 +61,7 @@ needs one micro-USB cable (J10) and a straight Ethernet cable to a switch (no au
 | Micro-USB cable to the UART port | serial console |
 | Ethernet cable | from the board to the same network as the PC; the demos run on 100 Mb/s and 1000 Mb/s links (the README of each demo has the console commands that select the speed) |
 
-No camera is needed: the demos use test patterns generated on the board.
+No camera is needed for the Nexys Video demos: they use test patterns generated on the board (the Zybo Z7-20 camera demo above needs its Pcam 5C).
 
 ### On the PC (Windows)
 
@@ -108,18 +111,20 @@ demos\demorelease.bat
 ```
 
 It finds every `demos/<demo name>/release.txt` and, for each `<board> <build tag> [<bitstream file>]` line in it, copies the bitstream (`rtlnet_<board>.bit` unless the line names another file) and
-`build_info.txt` from `boards/<board>/build/<tag>/` into `demos/<demo name>/<board>/`. It prints one line per file and
+`build_info.txt` (without the host-name line of a Vivado report) from `boards/<board>/build/<tag>/` into `demos/<demo name>/<board>/`. A line `file <board> <source file in the repository> <name>` copies one more file into the board folder (the Zybo Z7-20 demo lists its firmware ELF and `ps7_init.tcl` this way). `demos\demorelease.bat <demo name> [<board>]` copies only that demo or board. It prints one line per file and
 ends with `DEMORELEASE: PASS`, or with `DEMORELEASE: FAIL` when a source file is missing. It builds nothing and does not
 touch the board.
 
 The PDF of a demo brief is built from `demos/<demo name>/<demo name>_brief.md` with one line (needs Chrome or Edge and an internet connection for the page scripts):
 
 ```
-powershell -NoProfile -ExecutionPolicy Bypass -File demosuild_brief_pdf.ps1 h264_baseline
+powershell -NoProfile -ExecutionPolicy Bypass -File demos\build_brief_pdf.ps1 h264_baseline
 ```
 
+A demo with one brief per board (`ethernet`, and the Zybo Z7-20 camera demo) takes the board as a second argument: `demos\build_brief_pdf.ps1 h264_baseline zybo_z7_20` reads `h264_baseline/zybo_z7_20/h264_baseline_zybo_z7_20_brief.md`.
+
 The script uses the page head and foot of `documentation/pdf`, prints with headless Chrome next to the `.md` so the relative image paths resolve, and removes its temporary `render.html`.
-The drawings of the briefs are in `diagrams/src/demo-h264.js` (render with `diagrams/tools/render.ps1`).
+The drawings of the briefs are in `diagrams/src/demo-h264.js` and `diagrams/src/demo-h264-zybo.js` (render with `diagrams/tools/render.ps1`).
 
 To add a demo:
 
