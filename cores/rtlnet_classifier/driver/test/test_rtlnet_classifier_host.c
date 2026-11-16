@@ -73,6 +73,25 @@ static uint32_t g_cnt_clear_count;
 static uint32_t g_id = RTLNET_CLS_ID_VALUE;
 static uint32_t g_status_reads;
 static int      g_protocol_violations;
+static int      g_live_tuple_ok;         /* a live tuple add may write while the tuple table is enabled */
+
+/* Write log: every register write while enabled, in order. */
+#define TB_LOG_MAX       256u
+static int      g_log_on;
+static uint32_t g_log_n;
+static uint32_t g_log_off[TB_LOG_MAX];
+static uint32_t g_log_val[TB_LOG_MAX];
+
+static void log_start(void)
+{
+    g_log_n = 0u;
+    g_log_on = 1;
+}
+
+static void log_stop(void)
+{
+    g_log_on = 0;
+}
 
 /* Build parameters of the modelled core. */
 static uint32_t g_te = 16u;
@@ -125,6 +144,9 @@ static void model_reset(void)
     g_id = RTLNET_CLS_ID_VALUE;
     g_status_reads = 0u;
     g_protocol_violations = 0;
+    g_live_tuple_ok = 0;
+    g_log_on = 0;
+    g_log_n = 0u;
 }
 
 /* Offset class of the entry memory: 1 field table t, 2 tuple, 3 rule; 0 none. */
@@ -214,6 +236,11 @@ void rtlnet_host_reg_write32(uintptr_t addr, uint32_t value)
     uint32_t i;
     int cls;
 
+    if (g_log_on && g_log_n < TB_LOG_MAX) {
+        g_log_off[g_log_n] = off;
+        g_log_val[g_log_n] = value;
+        g_log_n++;
+    }
     if (off == RTLNET_CLS_REG_CTRL) {
         if ((value & RTLNET_CLS_CTRL_CLEAR_TABLES) != 0u) {
             model_clear();
@@ -256,7 +283,8 @@ void rtlnet_host_reg_write32(uintptr_t addr, uint32_t value)
     }
     cls = entry_class(off, &idx);
     if (cls == 1 || cls == 2) {
-        if ((g_reg[RTLNET_CLS_REG_TABLE_MODE(idx) / 4u] & RTLNET_CLS_TM_ENABLE) != 0u) {
+        if ((g_reg[RTLNET_CLS_REG_TABLE_MODE(idx) / 4u] & RTLNET_CLS_TM_ENABLE) != 0u &&
+            !(cls == 2 && g_live_tuple_ok)) {
             g_protocol_violations++;
         }
         g_reg[off / 4u] = value;
@@ -771,6 +799,211 @@ static void test_protect(void)
     }
 }
 
+/* Index of the first / last logged write to `off` (-1 when none). */
+static int log_find(uint32_t off, int last)
+{
+    int found = -1;
+    uint32_t i;
+
+    for (i = 0u; i < g_log_n; i++) {
+        if (g_log_off[i] == off) {
+            found = (int)i;
+            if (!last) {
+                break;
+            }
+        }
+    }
+    return found;
+}
+
+static rtlnet_cls_tuple_t fw_allow(uint32_t i)
+{
+    rtlnet_cls_tuple_t t;
+
+    memset(&t, 0, sizeof t);
+    t.valid = 1u;
+    t.proto_en = 1u;
+    t.proto = (i & 1u) ? 17u : 6u;
+    t.src_ip = 0xC0A90100u + i;
+    t.src_mask = 0xFFFFFF00u;
+    t.dst_ip = 0xC0A901DCu;
+    t.dst_mask = 0xFFFFFFFFu;
+    t.sport_lo = 0u;
+    t.sport_hi = 0xFFFFu;
+    t.dport_lo = (uint16_t)(1000u + i);
+    t.dport_hi = (uint16_t)(1000u + i);
+    return t;
+}
+
+static void test_firewall(void)
+{
+    rtlnet_cls_tuple_t allow[RTLNET_CLS_MAX_TUPLES];
+    rtlnet_cls_tuple_t got;
+    rtlnet_cls_firewall_t fw;
+    rtlnet_classifier_t un;
+    uint32_t mac0[4];
+    uint32_t rm0;
+    uint32_t counts[3];
+    uint32_t k;
+    uint32_t i;
+    uint32_t n;
+    uint32_t w;
+    uint32_t e0 = RTLNET_CLS_REG_ENTRY((uint32_t)RTLNET_CLS_TABLE_ETHERTYPE, 2u);
+    int first_ctrl;
+    int last_ctrl;
+
+    counts[0] = 0u;
+    counts[1] = 3u;
+    counts[2] = g_tu;
+    for (i = 0u; i < RTLNET_CLS_MAX_TUPLES; i++) {
+        allow[i] = fw_allow(i);
+    }
+    for (k = 0u; k < 3u; k++) {
+        n = counts[k];
+        init_ok();
+        check(rtlnet_classifier_config_protect(&g_ctx, NULL) == RTLNET_CLS_OK, "fw: profile first");
+        for (w = 0u; w < 4u; w++) {
+            mac0[w] = mreg(RTLNET_CLS_REG_ENTRY((uint32_t)RTLNET_CLS_TABLE_MAC, 0u) + 4u * w);
+        }
+        rm0 = mreg(RTLNET_CLS_REG_RULE_MODE(0u));
+        fw.allow = allow;
+        fw.count = n;
+        fw.etype_pair = 1u;
+        log_start();
+        check(rtlnet_classifier_firewall_apply(&g_ctx, &fw) == RTLNET_CLS_OK, "fw: apply");
+        log_stop();
+        checkf(g_mode == (uint32_t)RTLNET_CLS_MODE_DROP_ON_MATCH, "fw: MODE drop-on-match (count %u, tuples %u)", n, g_tu);
+        checkf(mreg(RTLNET_CLS_REG_TABLE_MODE(1u)) ==
+                   (RTLNET_CLS_TM_ENABLE | RTLNET_CLS_TM_EXCLUDE | (1u << RTLNET_CLS_TM_COMPARE_SHIFT)),
+               "fw: EtherType table enable|exclude|range classify 0 (count %u, tuples %u)", n, g_tu);
+        checkf(mreg(RTLNET_CLS_REG_TABLE_MODE(5u)) == (RTLNET_CLS_TM_ENABLE | RTLNET_CLS_TM_EXCLUDE),
+               "fw: tuple table enable|exclude classify 0 (count %u, tuples %u)", n, g_tu);
+        checkf(mreg(e0 + RTLNET_CLS_ENT_SRC_LO) == 0x0806u &&
+                   mreg(e0 + RTLNET_CLS_ENT_CTRL) == (RTLNET_CLS_ENT_VALID | RTLNET_CLS_ENT_SRC_EN),
+               "fw: ARP pair low word and control (%u, %u)", n, g_tu);
+        checkf(mreg(e0 + 0x10u + RTLNET_CLS_ENT_SRC_LO) == 0x0806u && mreg(e0 + 0x10u + RTLNET_CLS_ENT_CTRL) == 0u,
+               "fw: ARP pair high word (%u, %u)", n, g_tu);
+        for (i = 0u; i < g_tu; i++) {
+            memset(&got, 0, sizeof got);
+            check(rtlnet_classifier_tuple_get(&g_ctx, i, &got) == RTLNET_CLS_OK, "fw: tuple_get");
+            if (i < n) {
+                checkf(memcmp(&got, &allow[i], sizeof got) == 0, "fw: allow slot %u encoded (count %u)", i, n);
+            } else {
+                checkf(got.valid == 0u && mreg(RTLNET_CLS_REG_TUPLE(i) + RTLNET_CLS_TUP_CTRL) == 0u,
+                       "fw: slot %u invalid (count %u)", i, n);
+            }
+        }
+        for (w = 0u; w < 4u; w++) {
+            checkf(mreg(RTLNET_CLS_REG_ENTRY((uint32_t)RTLNET_CLS_TABLE_MAC, 0u) + 4u * w) == mac0[w],
+                   "fw: MAC table word %u unchanged (count %u)", w, n);
+        }
+        checkf(mreg(RTLNET_CLS_REG_RULE_MODE(0u)) == rm0, "fw: rule 0 mode unchanged (%u, %u)", n, g_tu);
+        /* Write order. */
+        first_ctrl = log_find(RTLNET_CLS_REG_CTRL, 0);
+        last_ctrl = log_find(RTLNET_CLS_REG_CTRL, 1);
+        check(g_log_n > 2u && first_ctrl == 0 && g_log_val[0] == (uint32_t)RTLNET_CLS_MODE_DROP_ALL,
+              "fw: MODE = DROP_ALL is the first write");
+        check(last_ctrl >= 0 && (uint32_t)last_ctrl == g_log_n - 1u &&
+                  g_log_val[last_ctrl] == (uint32_t)RTLNET_CLS_MODE_DROP_ON_MATCH,
+              "fw: MODE = DROP_ON_MATCH is the last write");
+        check(first_ctrl != last_ctrl, "fw: two distinct CTRL writes");
+    }
+    check(g_protocol_violations == 0, "fw: no protocol violation");
+
+    /* Rejections: right error and zero register writes. */
+    init_ok();
+    fw.allow = allow;
+    fw.count = 2u;
+    fw.etype_pair = 0u;
+    log_start();
+    fw.count = g_tu + 1u;
+    check(rtlnet_classifier_firewall_apply(&g_ctx, &fw) == RTLNET_CLS_ERR_RANGE && g_log_n == 0u, "fw: count > tuples");
+    fw.count = 2u;
+    fw.etype_pair = g_te / 2u;
+    check(rtlnet_classifier_firewall_apply(&g_ctx, &fw) == RTLNET_CLS_ERR_RANGE && g_log_n == 0u, "fw: etype_pair range");
+    fw.etype_pair = 0u;
+    allow[1].valid = 0u;
+    check(rtlnet_classifier_firewall_apply(&g_ctx, &fw) == RTLNET_CLS_ERR_ARG && g_log_n == 0u, "fw: allow entry valid 0");
+    allow[1].valid = 1u;
+    allow[1].police_en = 1u;
+    allow[1].policer = 7u;
+    check(rtlnet_classifier_firewall_apply(&g_ctx, &fw) == RTLNET_CLS_ERR_RANGE && g_log_n == 0u, "fw: allow policer range");
+    allow[1].police_en = 0u;
+    allow[1].policer = 0u;
+    fw.allow = NULL;
+    check(rtlnet_classifier_firewall_apply(&g_ctx, &fw) == RTLNET_CLS_ERR_ARG && g_log_n == 0u, "fw: allow NULL with count");
+    check(rtlnet_classifier_firewall_apply(&g_ctx, NULL) == RTLNET_CLS_ERR_ARG && g_log_n == 0u, "fw: NULL firewall");
+    check(rtlnet_classifier_firewall_apply(NULL, &fw) == RTLNET_CLS_ERR_ARG && g_log_n == 0u, "fw: NULL context");
+    memset(&un, 0, sizeof un);
+    check(rtlnet_classifier_firewall_apply(&un, &fw) == RTLNET_CLS_ERR_NOT_INIT && g_log_n == 0u, "fw: uninitialised context");
+    fw.count = 0u;
+    check(rtlnet_classifier_firewall_apply(&g_ctx, &fw) == RTLNET_CLS_OK && g_log_n > 0u, "fw: allow NULL with count 0 is fine");
+    log_stop();
+}
+
+static void test_tuple_live(void)
+{
+    rtlnet_cls_tuple_t t = fw_allow(2u);
+    rtlnet_cls_tuple_t got;
+    rtlnet_cls_firewall_t fw;
+    uint32_t base = RTLNET_CLS_REG_TUPLE(5u);
+    uint32_t i;
+    int tm_written = 0;
+
+    init_ok();
+    fw.allow = NULL;
+    fw.count = 0u;
+    fw.etype_pair = 0u;
+    check(rtlnet_classifier_firewall_apply(&g_ctx, &fw) == RTLNET_CLS_OK, "live: firewall first");
+    g_live_tuple_ok = 1;
+    log_start();
+    check(rtlnet_classifier_tuple_live_set(&g_ctx, 5u, &t) == RTLNET_CLS_OK, "live: set on a free slot");
+    log_stop();
+    check(g_log_n == 7u, "live: exactly 7 writes");
+    check(g_log_n == 7u && g_log_off[6] == base + RTLNET_CLS_TUP_CTRL && (g_log_val[6] & RTLNET_CLS_TUP_VALID) != 0u,
+          "live: control word with VALID is last");
+    for (i = 0u; i < g_log_n; i++) {
+        if (g_log_off[i] == RTLNET_CLS_REG_TABLE_MODE(RTLNET_CLS_TABLE_TUPLE)) {
+            tm_written = 1;
+        }
+    }
+    check(!tm_written, "live: TABLE_MODE[TUPLE] never written");
+    check(mreg(RTLNET_CLS_REG_TABLE_MODE(5u)) == (RTLNET_CLS_TM_ENABLE | RTLNET_CLS_TM_EXCLUDE),
+          "live: tuple table still enabled");
+    memset(&got, 0, sizeof got);
+    check(rtlnet_classifier_tuple_get(&g_ctx, 5u, &got) == RTLNET_CLS_OK && memcmp(&got, &t, sizeof got) == 0,
+          "live: entry encoded");
+
+    log_start();
+    check(rtlnet_classifier_tuple_live_set(&g_ctx, 5u, &t) == RTLNET_CLS_ERR_IN_USE && g_log_n == 0u,
+          "live: valid slot is IN_USE, no write");
+    check(rtlnet_classifier_tuple_live_set(&g_ctx, g_tu, &t) == RTLNET_CLS_ERR_RANGE && g_log_n == 0u,
+          "live: index range");
+    t.valid = 0u;
+    check(rtlnet_classifier_tuple_live_set(&g_ctx, 6u, &t) == RTLNET_CLS_ERR_ARG && g_log_n == 0u,
+          "live: valid 0 rejected");
+    t.valid = 1u;
+    check(rtlnet_classifier_tuple_live_set(&g_ctx, 6u, NULL) == RTLNET_CLS_ERR_ARG && g_log_n == 0u,
+          "live: NULL tuple");
+    g_clear_reads = 2u;
+    check(rtlnet_classifier_tuple_live_set(&g_ctx, 6u, &t) == RTLNET_CLS_ERR_IN_USE && g_log_n == 0u,
+          "live: CLEARING is IN_USE, no write");
+    g_clear_reads = 0u;
+    check(rtlnet_classifier_tuple_live_set(&g_ctx, 6u, &t) == RTLNET_CLS_OK && g_log_n == 7u,
+          "live: free slot after CLEARING ends");
+
+    log_start();
+    check(rtlnet_classifier_tuple_live_clear(&g_ctx, 5u) == RTLNET_CLS_OK, "live: clear");
+    check(g_log_n == 1u && g_log_off[0] == base + RTLNET_CLS_TUP_CTRL && g_log_val[0] == 0u,
+          "live: clear is one write of 0 to +0");
+    check(mreg(RTLNET_CLS_REG_TUPLE(5u) + RTLNET_CLS_TUP_CTRL) == 0u, "live: slot free again");
+    check(rtlnet_classifier_tuple_live_clear(&g_ctx, g_tu) == RTLNET_CLS_ERR_RANGE && g_log_n == 1u,
+          "live: clear index range, no write");
+    log_stop();
+    g_live_tuple_ok = 0;
+    check(rtlnet_classifier_tuple_live_set(NULL, 0u, &t) == RTLNET_CLS_ERR_ARG, "live: NULL context");
+}
+
 static void run_suite(void)
 {
     test_init();
@@ -786,6 +1019,8 @@ static void run_suite(void)
     test_bcast_storm();
     test_build_and_bounds();
     test_protect();
+    test_firewall();
+    test_tuple_live();
 }
 
 /* Builds the suite runs against: the defaults, the defaults with distributed RAM, the small-FPGA profile. */

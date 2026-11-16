@@ -14,6 +14,8 @@
 
 #include <stddef.h>   /* NULL */
 
+#define RTLNET_FW_ARP_ETYPE   0x0806u   /* firewall: the EtherType that always passes */
+
 /* -------------------------------------------------------------------------
  * Internal helpers
  * ------------------------------------------------------------------------- */
@@ -96,6 +98,38 @@ static void write_entry_words(const rtlnet_classifier_t *ctx, uint32_t t, uint32
     wr(ctx, base + RTLNET_CLS_ENT_DST_LO, (uint32_t)(e->dst_value & 0xFFFFFFFFull));
     wr(ctx, base + RTLNET_CLS_ENT_DST_HI, (uint32_t)((e->dst_value >> 32) & 0xFFFFull));
     wr(ctx, base + RTLNET_CLS_ENT_CTRL, entry_ctrl_word(e));
+}
+
+/*
+ * tuple_ctrl_word -- pack the control word of a tuple entry.
+ * Returns: the +0 word (VALID set when tuple->valid is non-zero).
+ */
+static uint32_t tuple_ctrl_word(const rtlnet_cls_tuple_t *tuple)
+{
+    uint32_t c = (uint32_t)tuple->proto & RTLNET_CLS_TUP_PROTO_MASK;
+
+    c |= ((uint32_t)tuple->policer << RTLNET_CLS_TUP_POLICER_SHIFT) & RTLNET_CLS_TUP_POLICER_MASK;
+    c |= (tuple->police_en != 0u) ? RTLNET_CLS_TUP_POLICE_EN : 0u;
+    c |= (tuple->proto_en != 0u) ? RTLNET_CLS_TUP_PROTO_EN : 0u;
+    c |= (tuple->valid != 0u) ? RTLNET_CLS_TUP_VALID : 0u;
+    return c;
+}
+
+/*
+ * write_tuple_words -- write the seven words of tuple entry `index`, the six value words first and the
+ * control word (with VALID) last.
+ */
+static void write_tuple_words(const rtlnet_classifier_t *ctx, uint32_t index, const rtlnet_cls_tuple_t *tuple)
+{
+    uint32_t base = RTLNET_CLS_REG_TUPLE(index);
+
+    wr(ctx, base + RTLNET_CLS_TUP_SRC_IP, tuple->src_ip);
+    wr(ctx, base + RTLNET_CLS_TUP_SRC_MASK, tuple->src_mask);
+    wr(ctx, base + RTLNET_CLS_TUP_DST_IP, tuple->dst_ip);
+    wr(ctx, base + RTLNET_CLS_TUP_DST_MASK, tuple->dst_mask);
+    wr(ctx, base + RTLNET_CLS_TUP_SPORT, ((uint32_t)tuple->sport_hi << 16) | (uint32_t)tuple->sport_lo);
+    wr(ctx, base + RTLNET_CLS_TUP_DPORT, ((uint32_t)tuple->dport_hi << 16) | (uint32_t)tuple->dport_lo);
+    wr(ctx, base + RTLNET_CLS_TUP_CTRL, tuple_ctrl_word(tuple));
 }
 
 /*
@@ -488,8 +522,6 @@ int rtlnet_classifier_table_entry_get(const rtlnet_classifier_t *ctx, rtlnet_cls
 int rtlnet_classifier_tuple_set(const rtlnet_classifier_t *ctx, uint32_t index,
                                 const rtlnet_cls_tuple_t *tuple)
 {
-    uint32_t base;
-    uint32_t c;
     uint32_t mode;
     int rc = ready(ctx);
 
@@ -505,20 +537,8 @@ int rtlnet_classifier_tuple_set(const rtlnet_classifier_t *ctx, uint32_t index,
     if (tuple->police_en != 0u && (uint32_t)tuple->policer >= ctx->num_policers) {
         return RTLNET_CLS_ERR_RANGE;
     }
-    base = RTLNET_CLS_REG_TUPLE(index);
-    c = (uint32_t)tuple->proto & RTLNET_CLS_TUP_PROTO_MASK;
-    c |= ((uint32_t)tuple->policer << RTLNET_CLS_TUP_POLICER_SHIFT) & RTLNET_CLS_TUP_POLICER_MASK;
-    c |= (tuple->police_en != 0u) ? RTLNET_CLS_TUP_POLICE_EN : 0u;
-    c |= (tuple->proto_en != 0u) ? RTLNET_CLS_TUP_PROTO_EN : 0u;
-    c |= (tuple->valid != 0u) ? RTLNET_CLS_TUP_VALID : 0u;
     mode = table_disable(ctx, (uint32_t)RTLNET_CLS_TABLE_TUPLE);
-    wr(ctx, base + RTLNET_CLS_TUP_SRC_IP, tuple->src_ip);
-    wr(ctx, base + RTLNET_CLS_TUP_SRC_MASK, tuple->src_mask);
-    wr(ctx, base + RTLNET_CLS_TUP_DST_IP, tuple->dst_ip);
-    wr(ctx, base + RTLNET_CLS_TUP_DST_MASK, tuple->dst_mask);
-    wr(ctx, base + RTLNET_CLS_TUP_SPORT, ((uint32_t)tuple->sport_hi << 16) | (uint32_t)tuple->sport_lo);
-    wr(ctx, base + RTLNET_CLS_TUP_DPORT, ((uint32_t)tuple->dport_hi << 16) | (uint32_t)tuple->dport_lo);
-    wr(ctx, base + RTLNET_CLS_TUP_CTRL, c);
+    write_tuple_words(ctx, index, tuple);
     if ((mode & RTLNET_CLS_TM_ENABLE) != 0u) {
         wr(ctx, RTLNET_CLS_REG_TABLE_MODE(RTLNET_CLS_TABLE_TUPLE), mode);
     }
@@ -565,6 +585,124 @@ int rtlnet_classifier_tuple_get(const rtlnet_classifier_t *ctx, uint32_t index, 
     tuple->dport_lo = (uint16_t)(dp & 0xFFFFu);
     tuple->dport_hi = (uint16_t)(dp >> 16);
     return RTLNET_CLS_OK;
+}
+
+/*
+ * rtlnet_classifier_tuple_live_set -- add one tuple entry while the tuple table stays enabled. The normal
+ * update protocol (rtlnet_classifier_tuple_set) disables the table, which for an EXCLUDE table would drop all
+ * IP traffic during the write; here the slot must be free, so no frame can see a half-written entry.
+ * Steps:
+ *   1. Check the arguments, then STATUS.CLEARING (entry writes are ignored while it is set).
+ *   2. Check the slot's control word in the readback mirror: VALID set means the slot is in use.
+ *   3. Write the six value words, then the control word with VALID last. TABLE_MODE is never written.
+ * Returns: RTLNET_CLS_OK, RTLNET_CLS_ERR_ARG (NULL or valid 0), RTLNET_CLS_ERR_RANGE,
+ * RTLNET_CLS_ERR_IN_USE (CLEARING or slot already valid, nothing written), RTLNET_CLS_ERR_NOT_INIT.
+ */
+int rtlnet_classifier_tuple_live_set(const rtlnet_classifier_t *ctx, uint32_t index,
+                                     const rtlnet_cls_tuple_t *tuple)
+{
+    int rc = ready(ctx);
+
+    if (rc != RTLNET_CLS_OK) {
+        return rc;
+    }
+    if (tuple == NULL || tuple->valid == 0u) {
+        return RTLNET_CLS_ERR_ARG;
+    }
+    if (index >= ctx->tuple_entries) {
+        return RTLNET_CLS_ERR_RANGE;
+    }
+    if (tuple->police_en != 0u && (uint32_t)tuple->policer >= ctx->num_policers) {
+        return RTLNET_CLS_ERR_RANGE;
+    }
+    if ((rd(ctx, RTLNET_CLS_REG_STATUS) & RTLNET_CLS_STATUS_CLEARING) != 0u) {
+        return RTLNET_CLS_ERR_IN_USE;
+    }
+    if ((rd(ctx, RTLNET_CLS_REG_TUPLE(index) + RTLNET_CLS_TUP_CTRL) & RTLNET_CLS_TUP_VALID) != 0u) {
+        return RTLNET_CLS_ERR_IN_USE;
+    }
+    write_tuple_words(ctx, index, tuple);
+    return RTLNET_CLS_OK;
+}
+
+/*
+ * rtlnet_classifier_tuple_live_clear -- remove one tuple entry while the tuple table stays enabled: one
+ * write of 0 to the control word (VALID off). No other word and no TABLE_MODE is written.
+ * Returns: RTLNET_CLS_OK, RTLNET_CLS_ERR_RANGE, RTLNET_CLS_ERR_NOT_INIT.
+ */
+int rtlnet_classifier_tuple_live_clear(const rtlnet_classifier_t *ctx, uint32_t index)
+{
+    int rc = ready(ctx);
+
+    if (rc != RTLNET_CLS_OK) {
+        return rc;
+    }
+    if (index >= ctx->tuple_entries) {
+        return RTLNET_CLS_ERR_RANGE;
+    }
+    wr(ctx, RTLNET_CLS_REG_TUPLE(index) + RTLNET_CLS_TUP_CTRL, 0u);
+    return RTLNET_CLS_OK;
+}
+
+/*
+ * rtlnet_classifier_firewall_apply -- CPU-path firewall on top of the installed configuration (the caller has
+ * run clear_all plus a profile; the MAC table and rule 0 stay). Drop = not ARP AND no allow entry hit.
+ * Steps:
+ *   1. Check everything before the first write: context, pointers, allow entries valid and in range of the
+ *      policers, count against the tuple slots, etype_pair against the table entries.
+ *   2. MODE = DROP_ALL.
+ *   3. EtherType pair etype_pair = 0x0806..0x0806, gating.
+ *   4. Tuple slots 0..count-1 = allow list; slots count..end written invalid (removes the profile's tuples).
+ *   5. EtherType table: enable, EXCLUDE, range compare, no classify, VLAN_AWARE as read back.
+ *   6. Tuple table: enable, EXCLUDE, single compare (as rtlnet_classifier_acl_add leaves it), no classify.
+ *   7. MODE = DROP_ON_MATCH last.
+ * Returns: RTLNET_CLS_OK, RTLNET_CLS_ERR_ARG, RTLNET_CLS_ERR_RANGE, RTLNET_CLS_ERR_NOT_INIT, or the first
+ * error of a step.
+ */
+int rtlnet_classifier_firewall_apply(const rtlnet_classifier_t *ctx, const rtlnet_cls_firewall_t *fw)
+{
+    static const rtlnet_cls_tuple_t no_tuple = {0};
+    uint32_t i;
+    uint32_t vlan;
+    int rc = ready(ctx);
+
+    if (rc != RTLNET_CLS_OK) {
+        return rc;
+    }
+    if (fw == NULL || (fw->count > 0u && fw->allow == NULL)) {
+        return RTLNET_CLS_ERR_ARG;
+    }
+    if (fw->count > ctx->tuple_entries || fw->etype_pair >= ctx->table_entries / 2u) {
+        return RTLNET_CLS_ERR_RANGE;
+    }
+    for (i = 0u; i < fw->count; i++) {
+        if (fw->allow[i].valid == 0u) {
+            return RTLNET_CLS_ERR_ARG;
+        }
+        if (fw->allow[i].police_en != 0u && (uint32_t)fw->allow[i].policer >= ctx->num_policers) {
+            return RTLNET_CLS_ERR_RANGE;
+        }
+    }
+    rc = rtlnet_classifier_set_mode(ctx, RTLNET_CLS_MODE_DROP_ALL);
+    if (rc == RTLNET_CLS_OK) {
+        rc = rtlnet_classifier_ethertype_filter(ctx, fw->etype_pair, RTLNET_FW_ARP_ETYPE, RTLNET_FW_ARP_ETYPE,
+                                                RTLNET_CLS_ACT_GATE);
+    }
+    for (i = 0u; rc == RTLNET_CLS_OK && i < ctx->tuple_entries; i++) {
+        rc = rtlnet_classifier_tuple_set(ctx, i, (i < fw->count) ? &fw->allow[i] : &no_tuple);
+    }
+    if (rc == RTLNET_CLS_OK) {
+        vlan = rd(ctx, RTLNET_CLS_REG_TABLE_MODE(RTLNET_CLS_TABLE_ETHERTYPE)) & RTLNET_CLS_TM_VLAN_AWARE;
+        rc = rtlnet_classifier_table_mode(ctx, RTLNET_CLS_TABLE_ETHERTYPE, 1, 1, RTLNET_CLS_CMP_RANGE, 0,
+                                          (vlan != 0u) ? 1 : 0);
+    }
+    if (rc == RTLNET_CLS_OK) {
+        rc = rtlnet_classifier_table_mode(ctx, RTLNET_CLS_TABLE_TUPLE, 1, 1, RTLNET_CLS_CMP_SINGLE, 0, 0);
+    }
+    if (rc == RTLNET_CLS_OK) {
+        rc = rtlnet_classifier_set_mode(ctx, RTLNET_CLS_MODE_DROP_ON_MATCH);
+    }
+    return rc;
 }
 
 /*

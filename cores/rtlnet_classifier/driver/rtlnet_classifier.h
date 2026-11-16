@@ -189,6 +189,7 @@
 #define RTLNET_CLS_ERR_TIMEOUT         (-3)    /* CLEARING did not end */
 #define RTLNET_CLS_ERR_RANGE           (-4)    /* index beyond what the build has */
 #define RTLNET_CLS_ERR_NOT_INIT        (-5)    /* context not initialised */
+#define RTLNET_CLS_ERR_IN_USE          (-6)    /* live add on a valid slot, or while CLEARING */
 
 /* -------------------------------------------------------------------------
  * Types
@@ -380,6 +381,19 @@ typedef struct {
     uint32_t window_ms[RTLNET_CLS_PROT_CLASSES];   /* 1 or more */
 } rtlnet_cls_protect_t;
 
+/* Firewall for the CPU path (rtlnet_classifier_firewall_apply), built from existing hardware, no RTL change:
+ *   MODE = DROP_ON_MATCH, EtherType table gating + EXCLUDE with one range pair 0x0806..0x0806 (ARP),
+ *   tuple table gating + EXCLUDE holding the allow list.
+ * A frame drops when it is not ARP AND hits no allow entry (match = AND over the enabled gating engines; an
+ * EXCLUDE table contributes "no entry hit"). ARP and allowed tuples pass, everything else drops; with zero
+ * allow entries only ARP passes. The allow entries sit in tuple slots 0..count-1; the other slots are written
+ * invalid. Layers on top of clear_all plus a profile: the MAC table and rule 0 stay as they are. */
+typedef struct {
+    const rtlnet_cls_tuple_t *allow;      /* allow entries, written to tuple slots 0..count-1 */
+    uint32_t                  count;      /* 0 = only ARP passes */
+    uint32_t                  etype_pair; /* EtherType range-pair index used for ARP (entries 2i, 2i+1) */
+} rtlnet_cls_firewall_t;
+
 /* -------------------------------------------------------------------------
  * API
  * ------------------------------------------------------------------------- */
@@ -438,6 +452,12 @@ int rtlnet_classifier_config_bcast_storm(const rtlnet_classifier_t *ctx, uint32_
                                          uint32_t window_ms);
 int rtlnet_classifier_bcast_storm_enable(const rtlnet_classifier_t *ctx, int on);
 
+int rtlnet_classifier_firewall_apply(const rtlnet_classifier_t *ctx, const rtlnet_cls_firewall_t *fw);
+/* Live update of one allow entry without disabling the tuple table (an EXCLUDE table that is disabled
+ * would drop all IP during the write): value words first, control word with VALID last. */
+int rtlnet_classifier_tuple_live_set(const rtlnet_classifier_t *ctx, uint32_t index,
+                                     const rtlnet_cls_tuple_t *tuple);
+int rtlnet_classifier_tuple_live_clear(const rtlnet_classifier_t *ctx, uint32_t index);
 
 void rtlnet_classifier_protect_defaults(rtlnet_cls_protect_t *profile);
 int rtlnet_classifier_config_protect(const rtlnet_classifier_t *ctx, const rtlnet_cls_protect_t *profile);
