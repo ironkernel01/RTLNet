@@ -23,6 +23,12 @@
 //   * CPU-path protection profile (the firmware's rtlnet_classifier_config_protect, stand-in cls_config_protect): broadcast, UDP,
 //     ARP and ICMP classes each sent above their limit while unicast TCP segments to the board keep passing; exactly the
 //     limit of each class and every TCP segment reach the CPU, byte-exact and in order; counters per policer and per table.
+//   * CPU-path firewall (the firmware's rtlnet_classifier_protect_load + rtlnet_classifier_firewall_apply, written in the
+//     bench in the driver's order; allow list = TCP to the board address /32 port 7): a TCP SYN to port 7 and an ARP request
+//     for another host reach the CPU byte-exact; a TCP SYN to port 23, UDP to port 9999, EtherType 0x86DD and an ICMP echo
+//     reply are dropped (MODE_DROPPED counts each); the ICMP echo reply and ARP reply of the hardware leaves still leave
+//     the board and never reach the classifier; a live add of TCP port 23 (value words, VALID last, TABLE_MODE untouched)
+//     lets it through, a live clear drops it again; then the profile and PASS_ALL are restored.
 //   * CPU network path (cpu_axis_ethernet_stream) through the simulation stand-in's DMA tasks: claimed frames never
 //     reach the CPU; an unclaimed UDP datagram arrives byte-exact; a frame the CPU sends leaves on the PHY unchanged
 //     (padded to 60); the wrapper's CPU counters agree.
@@ -34,7 +40,8 @@
 // needs RTLNET_SIM_RXC_INSERTION_NS (filelist define, MAC documentation section 7).
 // Ends with one anchored verdict line from rtlnet_tb_pkg::tb_verdict; +INJECT_FAILURE is the negative control.
 // Language: SystemVerilog-2012 (simulation only).
-// Revision: 11-14-2026
+// Revision: 11-16-2026
+//   * 11-16-2026: CPU-path firewall phase at every link speed.
 //   * 11-14-2026: the top's COMMON_CLK 2 (one 100 MHz system clock) is the default; the define RTLNET_TB_MULTI_CLK selects the
 //     multi-clock tree (tags mc).
 //   * 11-14-2026: initial version (from tb_rtlnet_nexys_video_net for the Ethernet demo top).
@@ -72,6 +79,7 @@ module tb_rtlnet_nexys_video_eth;
   localparam int          PROT_N_ARP     = 5;
   localparam int          PROT_N_ICMP    = 5;
   localparam int          PROT_N_TCP     = 8;                          // unicast TCP segments, never policed
+  localparam int          FW_ALLOW_DPORT = 7;                          // destination port of the firewall allow entry (TCP echo)
   localparam int          PROT_N_TOTAL   = PROT_N_BCAST + PROT_N_UDP + PROT_N_ARP + PROT_N_ICMP + PROT_N_TCP;
   localparam logic [47:0] BOARD_MAC  = 48'h02_49_4B_52_4E_01;   // rtlnet_pkg default
   localparam logic [31:0] BOARD_IP   = 32'hC0A9_01DC;          // 192.169.1.220
@@ -368,6 +376,186 @@ module tb_rtlnet_nexys_video_eth;
       i = i + 2 + f[i + 1];
     end
     return 0;
+  endfunction
+
+  // ---------------------------------------------------------------------------
+  // CPU-path firewall (firmware: rtlnet_classifier_protect_load + rtlnet_classifier_firewall_apply, live add and
+  // clear of one allow entry). The stand-in has no task for these, so the register writes are made here in the
+  // driver's order (cores/rtlnet_classifier/driver/rtlnet_classifier.c).
+  // ---------------------------------------------------------------------------
+  localparam logic [31:0] CLS_TM1         = CLS + 32'h024;             // TABLE_MODE[ETHERTYPE]
+  localparam logic [31:0] CLS_TM5         = CLS + 32'h034;             // TABLE_MODE[TUPLE]
+  localparam logic [31:0] FW_TUP_VALID    = 32'h8000_0000;
+  localparam logic [31:0] FW_TUP_PROTO_EN = 32'h4000_0000;
+  int fw_frames = 0;                                                   // frames the firewall phase injected
+
+  function automatic logic [31:0] cls_tup(input int e);
+    return CLS + 32'h900 + 32'h20 * 32'(e);
+  endfunction
+
+  // write_tuple_words: six value words, then the control word (VALID) last.
+  task automatic fw_tuple_words(input int e, input logic [31:0] dip, input logic [31:0] dmask,
+                                input logic [31:0] sport_w, input logic [31:0] dport_w, input logic [31:0] ctrl);
+    logic [31:0] b;
+    b = cls_tup(e);
+    wr(b + 32'h04, 32'h0);
+    wr(b + 32'h08, 32'h0);
+    wr(b + 32'h0C, dip);
+    wr(b + 32'h10, dmask);
+    wr(b + 32'h14, sport_w);
+    wr(b + 32'h18, dport_w);
+    wr(b + 32'h00, ctrl);
+  endtask
+
+  // rtlnet_classifier_tuple_set: the tuple table is disabled while the words change, the mode is restored.
+  task automatic fw_tuple_set(input int e, input logic [31:0] dip, input logic [31:0] dmask,
+                              input logic [31:0] sport_w, input logic [31:0] dport_w, input logic [31:0] ctrl);
+    logic [31:0] m;
+    rd(CLS_TM5, m);
+    if (m[0]) wr(CLS_TM5, m & ~32'h1);
+    fw_tuple_words(e, dip, dmask, sport_w, dport_w, ctrl);
+    if (m[0]) wr(CLS_TM5, m);
+  endtask
+
+  // rtlnet_classifier_acl_add of the protection profile (protocol, any addresses, any ports, classify, policer).
+  task automatic fw_acl_profile(input int e, input logic [31:0] proto, input logic [31:0] policer);
+    logic [31:0] old;
+    rd(CLS_TM5, old);
+    fw_tuple_set(e, 32'h0, 32'h0, 32'hFFFF_0000, 32'hFFFF_0000,
+                 FW_TUP_VALID | FW_TUP_PROTO_EN | 32'h2000_0000 | (policer << 8) | proto);
+    wr(CLS_TM5, 32'h0000_0011 | (old & 32'h0000_0082));            // enable, classify, single; keeps EXCLUDE, VLAN_AWARE
+  endtask
+
+  // rtlnet_classifier_protect_load: every write of config_protect except the final MODE write (MODE stays DROP_ALL).
+  task automatic fw_protect_load(input int lim_b, input int lim_u, input int lim_a, input int lim_i, input int win);
+    logic [31:0] st;
+    int          lim [4];
+    int          n;
+    lim[0] = lim_b; lim[1] = lim_u; lim[2] = lim_a; lim[3] = lim_i;
+    wr(CLS + 32'h00C, 32'h0000_0100);                              // clear_all
+    n = 0;
+    do begin rd(CLS + 32'h010, st); n++; end while (st[0] && n < 1000);
+    rd(CLS + 32'h040, st);                                         // rule 0 (ARP): bytes 12 and 13, settle, mode
+    wr(CLS + 32'hC00 + 32'd4 * 12, 32'hFF00_0800 | 32'h08);
+    wr(CLS + 32'hC00 + 32'd4 * 13, 32'hFF00_0800 | 32'h06);
+    for (int i = 0; i < 8; i++) rd(CLS + 32'h010, st);
+    wr(CLS + 32'h040, 32'h1 | 32'h4 | 32'h8 | (32'd2 << 4));
+    fw_acl_profile(0, 32'd1, 32'd3);                               // tuple 0: ICMP, policer 3
+    fw_acl_profile(1, 32'd17, 32'd1);                              // tuple 1: UDP, policer 1
+    rd(CLS + 32'h020, st);                                         // MAC entry 0: destination broadcast, policer 0
+    wr(CLS + 32'h400 + 32'h0, 32'hFFFF_FFFF);
+    wr(CLS + 32'h400 + 32'h8, 32'hFFFF_FFFF);
+    wr(CLS + 32'h400 + 32'hC, 32'h0000_FFFF);
+    wr(CLS + 32'h400 + 32'h4, 32'h8000_0000 | 32'h2000_0000 | 32'h0400_0000 | 32'h0000_FFFF);
+    wr(CLS + 32'h020, 32'h0000_0011);
+    for (int p = 0; p < 4; p++) begin
+      wr(CLS + 32'h100 + 32'h20 * 32'(p) + 32'h04, 32'(lim[p]));
+      wr(CLS + 32'h100 + 32'h20 * 32'(p) + 32'h08, 32'(win));
+      wr(CLS + 32'h100 + 32'h20 * 32'(p) + 32'h00, 32'h1);
+    end
+  endtask
+
+  // rtlnet_classifier_firewall_apply with one allow entry in slot 0: TCP to ip/32, destination port dport.
+  // tuples = the tuple slots of the build (the slots after the allow list are written invalid).
+  task automatic fw_firewall_apply(input int tuples, input logic [31:0] ip, input logic [15:0] dport);
+    logic [31:0] m;
+    wr(CLS + 32'h00C, 32'h0);                                      // MODE = DROP_ALL
+    rd(CLS_TM1, m);                                                // EtherType pair 0 = 0x0806..0x0806, gating
+    if (m[0]) wr(CLS_TM1, m & ~32'h1);
+    wr(CLS + 32'h510 + 32'h0, 32'h0000_0806);                      // odd entry (high value), valid off
+    wr(CLS + 32'h510 + 32'h8, 32'h0);
+    wr(CLS + 32'h510 + 32'hC, 32'h0);
+    wr(CLS + 32'h510 + 32'h4, 32'h0);
+    wr(CLS + 32'h500 + 32'h0, 32'h0000_0806);                      // even entry (low value), VALID | SRC_EN last
+    wr(CLS + 32'h500 + 32'h8, 32'h0);
+    wr(CLS + 32'h500 + 32'hC, 32'h0);
+    wr(CLS + 32'h500 + 32'h4, 32'hC000_0000);
+    wr(CLS_TM1, 32'h0000_0005);                                    // enable, range
+    for (int e = 0; e < tuples; e++) begin                         // allow list in slot 0, the other slots invalid
+      if (e == 0) fw_tuple_set(e, ip, 32'hFFFF_FFFF, 32'hFFFF_0000, {dport, dport}, FW_TUP_VALID | FW_TUP_PROTO_EN | 32'd6);
+      else        fw_tuple_set(e, 32'h0, 32'h0, 32'h0, 32'h0, 32'h0);
+    end
+    rd(CLS_TM1, m);
+    wr(CLS_TM1, 32'h0000_0007 | (m & 32'h0000_0080));              // enable, exclude, range, no classify
+    wr(CLS_TM5, 32'h0000_0003);                                    // enable, exclude, single, no classify
+    wr(CLS + 32'h00C, 32'h0000_0003);                              // MODE = DROP_ON_MATCH, last
+  endtask
+
+  // rtlnet_classifier_tuple_live_set: STATUS and the slot's control word read, six value words, VALID last.
+  task automatic fw_live_set(input int e, input logic [31:0] ip, input logic [15:0] dport);
+    logic [31:0] st;
+    logic [31:0] c;
+    rd(CLS + 32'h010, st);
+    tb_check(!st[0], "live set: classifier not clearing");
+    rd(cls_tup(e), c);
+    tb_check(!c[31], "live set: slot is free");
+    fw_tuple_words(e, ip, 32'hFFFF_FFFF, 32'hFFFF_0000, {dport, dport}, FW_TUP_VALID | FW_TUP_PROTO_EN | 32'd6);
+  endtask
+
+  // rtlnet_classifier_tuple_live_clear: one write of 0 to the control word.
+  task automatic fw_live_clear(input int e);
+    wr(cls_tup(e), 32'h0);
+  endtask
+
+  task automatic fw_inject(input bytes_t fr);
+    u_phy.inject(fr);
+    fw_frames++;
+  endtask
+
+  // Send one frame from the link partner, wait until the classifier judged it, then check the CPU path and the
+  // counters: want_pass = 1 the frame arrives byte-exact and PASSED advances by 1; = 0 nothing arrives and
+  // MODE_DROPPED advances by 1.
+  task automatic fw_send(input bytes_t fr, input bit want_pass, input string what);
+    logic [31:0] f0, p0, m0, f1, p1, m1;
+    bytes_t      cpu_f;
+    bit          cpu_ok;
+    string       why;
+    int          n;
+    rd(CLS + 32'h080, f0);
+    rd(CLS + 32'h084, p0);
+    rd(CLS + 32'h08C, m0);
+    fw_inject(fr);
+    n = 0;
+    do begin
+      #(20_000);
+      rd(CLS + 32'h080, f1);
+      n++;
+    end while (f1 == f0 && n < 400);
+    tb_check(f1 == f0 + 1, $sformatf("%s: classifier judged %0d frames, expected 1", what, f1 - f0));
+    if (want_pass) begin
+      dut.u_cpu.eth_get(cpu_f, 200_000, cpu_ok);
+      tb_check(cpu_ok, $sformatf("%s: reaches the CPU", what));
+      if (cpu_ok) tb_check(bytes_equal(cpu_f, fr, why), $sformatf("%s: byte-exact: %s", what, why));
+    end else begin
+      dut.u_cpu.eth_get(cpu_f, 40_000, cpu_ok);
+      tb_check(!cpu_ok, $sformatf("%s: does not reach the CPU", what));
+    end
+    rd(CLS + 32'h084, p1);
+    rd(CLS + 32'h08C, m1);
+    tb_check(p1 - p0 == (want_pass ? 1 : 0), $sformatf("%s: PASSED advanced %0d", what, p1 - p0));
+    tb_check(m1 - m0 == (want_pass ? 0 : 1), $sformatf("%s: MODE_DROPPED advanced %0d", what, m1 - m0));
+  endtask
+
+  // TCP segment without payload, flags as given (0x5002 = SYN), correct checksums, padded to 60 bytes.
+  function automatic bytes_t tcp_ctl_frame(input bit [47:0] dst_mac, input bit [47:0] src_mac, input bit [31:0] src_ip,
+                                           input bit [31:0] dst_ip, input bit [15:0] sport, input bit [15:0] dport,
+                                           input bit [15:0] flags);
+    bytes_t q;
+    bytes_t ip;
+    bytes_t seg;
+    bytes_t ps;
+    bit [15:0] c;
+    push16(seg, sport); push16(seg, dport); push32(seg, 32'h3000_0001); push32(seg, 32'h0);
+    push16(seg, flags); push16(seg, 16'h2000); push16(seg, 16'h0000); push16(seg, 16'h0000);
+    ip = ipv4_header(16'(20 + seg.size()), 16'h4323, 8'd6, src_ip, dst_ip);
+    push32(ps, src_ip); push32(ps, dst_ip); ps.push_back(8'h00); ps.push_back(8'd6); push16(ps, 16'(seg.size()));
+    for (int i = 0; i < $size(seg); i++) ps.push_back(seg[i]);
+    c = inet_checksum(ps, 0, ps.size());
+    seg[16] = c[15:8]; seg[17] = c[7:0];
+    q = eth_header(dst_mac, src_mac, 16'h0800);
+    for (int i = 0; i < $size(ip); i++) q.push_back(ip[i]);
+    for (int i = 0; i < $size(seg); i++) q.push_back(seg[i]);
+    return pad60(q);
   endfunction
 
   initial begin : watchdog
@@ -834,6 +1022,98 @@ module tb_rtlnet_nexys_video_eth;
       check_reg(CLS + 32'h0A8, PROT_N_UDP + PROT_N_ICMP, "tuple table hits: UDP and ICMP");
     end
 
+    // CPU-path firewall (rtlnet_classifier_protect_load + rtlnet_classifier_firewall_apply): only ARP and the allow
+    // list (one entry: TCP to the board address /32, port 7, the TCP echo service) reach the CPU path; the hardware
+    // leaves (ARP responder, ICMP echo) stay in front of the classifier and keep answering. Live add and clear of
+    // an allow entry (TCP port 23) in the live write order. Ends with the protection profile and MODE PASS_ALL
+    // again, as the phases after it expect.
+    begin
+      bytes_t     fr;
+      bytes_t     req_a;
+      logic [1:0] r;
+      logic [31:0] caps;
+      logic [31:0] f0, p0, m0, f1, p1, m1;
+      int         tuples;
+      bytes_t     cpu_f;
+      bit         cpu_ok;
+      rd(CLS + 32'h008, caps);
+      tuples = int'(caps[9:5]);
+      tb_check(tuples >= 3, $sformatf("firewall: classifier has %0d tuple slots, need at least 3", tuples));
+      fw_protect_load(PROT_LIM_BCAST, PROT_LIM_UDP, PROT_LIM_ARP, PROT_LIM_ICMP, PROT_WINDOW);
+      rd(CLS + 32'h010, d);
+      tb_check((d & 32'h0000_0301) == 32'h0000_0000, $sformatf("firewall: STATUS 0x%08x: MODE drop-all after protect_load", d));
+      fw_firewall_apply(tuples, BOARD_IP, 16'(FW_ALLOW_DPORT));
+      rd(CLS + 32'h010, d);
+      tb_check((d & 32'h0000_0301) == 32'h0000_0300, $sformatf("firewall: STATUS 0x%08x: MODE drop-on-match, not clearing", d));
+      check_reg(CLS_TM1, 32'h0000_0007, "firewall: EtherType table enable, exclude, range");
+      check_reg(CLS_TM5, 32'h0000_0003, "firewall: tuple table enable, exclude, single");
+      check_reg(cls_tup(0), 32'hC000_0006, "firewall: tuple slot 0 valid, TCP");
+      check_reg(cls_tup(1), 32'h0000_0000, "firewall: tuple slot 1 free");
+      check_reg(cls_tup(0) + 32'h0C, BOARD_IP, "firewall: tuple slot 0 destination = board address");
+      check_reg(cls_tup(0) + 32'h18, {16'(FW_ALLOW_DPORT), 16'(FW_ALLOW_DPORT)}, "firewall: tuple slot 0 destination port");
+
+      // Reaches the CPU: TCP SYN to the allowed port, an ARP request for another host (broadcast).
+      fw_send(tcp_ctl_frame(BOARD_MAC, HOST_MAC, HOST_IP, BOARD_IP, 16'd42001, 16'd7, 16'h5002), 1'b1,
+              "firewall: TCP SYN to port 7");
+      fw_send(pad60(arp_request(HOST_MAC, HOST_IP, SRV_IP + 32'd10)), 1'b1, "firewall: ARP request for another host");
+
+      // Does not reach the CPU: TCP SYN to port 23, UDP to a port no leaf claims, EtherType 0x86DD, ICMP type 0.
+      fw_send(tcp_ctl_frame(BOARD_MAC, HOST_MAC, HOST_IP, BOARD_IP, 16'd42002, 16'd23, 16'h5002), 1'b0,
+              "firewall: TCP SYN to port 23");
+      fw_send(udp_frame(BOARD_MAC, HOST_MAC, HOST_IP, BOARD_IP, 16'd42003, 16'd9999, rand_bytes(seed, 30)), 1'b0,
+              "firewall: UDP to port 9999");
+      fr = eth_header(BOARD_MAC, HOST_MAC, 16'h86DD);
+      for (int i = 0; i < 46; i++) fr.push_back(8'(8'h60 + i));
+      fw_send(fr, 1'b0, "firewall: EtherType 0x86DD");
+      fr = echo_request(BOARD_MAC, HOST_MAC, HOST_IP, BOARD_IP, 16'h2223, 16'd1, rand_bytes(seed, 20));
+      fr[34] = 8'd0;
+      fw_send(fr, 1'b0, "firewall: ICMP echo reply to the board");
+
+      // Hardware leaves still answer, and the classifier never sees those frames.
+      rd(CLS + 32'h080, f0);
+      rd(CLS + 32'h084, p0);
+      rd(CLS + 32'h08C, m0);
+      payload = rand_bytes(seed, 56);
+      req = echo_request(BOARD_MAC, HOST_MAC, HOST_IP, BOARD_IP, 16'h1235, 16'd2, payload);
+      fw_inject(req);
+      expect_frame(echo_reply(req, BOARD_MAC, BOARD_IP), "firewall: ICMP echo reply", got);
+      req_a = arp_request(HOST_MAC, HOST_IP, BOARD_IP);
+      fw_inject(pad60(req_a));
+      expect_frame(arp_reply(req_a, BOARD_MAC, BOARD_IP), "firewall: ARP reply", got);
+      dut.u_cpu.eth_get(cpu_f, 40_000, cpu_ok);
+      tb_check(!cpu_ok, "firewall: hardware-answered frames do not reach the CPU");
+      rd(CLS + 32'h080, f1);
+      rd(CLS + 32'h084, p1);
+      rd(CLS + 32'h08C, m1);
+      tb_check(f1 == f0 && p1 == p0 && m1 == m0, $sformatf("firewall: classifier counters moved on hardware-answered frames (%0d %0d %0d)",
+                                                           f1 - f0, p1 - p0, m1 - m0));
+
+      // Live add of TCP port 23, then live clear (TABLE_MODE untouched).
+      fw_live_set(1, BOARD_IP, 16'd23);
+      check_reg(CLS_TM5, 32'h0000_0003, "firewall: live add leaves the tuple table mode");
+      check_reg(cls_tup(1), 32'hC000_0006, "firewall: live add slot 1 valid");
+      fw_send(tcp_ctl_frame(BOARD_MAC, HOST_MAC, HOST_IP, BOARD_IP, 16'd42004, 16'd23, 16'h5002), 1'b1,
+              "firewall: TCP SYN to port 23 after the live add");
+      fw_send(tcp_ctl_frame(BOARD_MAC, HOST_MAC, HOST_IP, BOARD_IP, 16'd42005, 16'd7, 16'h5002), 1'b1,
+              "firewall: TCP SYN to port 7 after the live add");
+      fw_live_clear(1);
+      check_reg(CLS_TM5, 32'h0000_0003, "firewall: live clear leaves the tuple table mode");
+      check_reg(cls_tup(1), 32'h0000_0000, "firewall: live clear slot 1 free");
+      fw_send(tcp_ctl_frame(BOARD_MAC, HOST_MAC, HOST_IP, BOARD_IP, 16'd42006, 16'd23, 16'h5002), 1'b0,
+              "firewall: TCP SYN to port 23 after the live clear");
+      fw_send(tcp_ctl_frame(BOARD_MAC, HOST_MAC, HOST_IP, BOARD_IP, 16'd42007, 16'd7, 16'h5002), 1'b1,
+              "firewall: TCP SYN to port 7 after the live clear");
+
+      // Back to the protection profile with MODE PASS_ALL (what the stand-in's config_protect leaves), then a
+      // datagram the firewall dropped reaches the CPU again.
+      dut.u_cpu.cls_config_protect(CLS, PROT_LIM_BCAST, PROT_LIM_UDP, PROT_LIM_ARP, PROT_LIM_ICMP, PROT_WINDOW, r);
+      tb_check(r == 2'b00, $sformatf("firewall: profile restore resp %b", r));
+      rd(CLS + 32'h010, d);
+      tb_check((d & 32'h0000_0301) == 32'h0000_0100, $sformatf("firewall: STATUS 0x%08x: MODE pass-all after the restore", d));
+      fw_send(udp_frame(BOARD_MAC, HOST_MAC, HOST_IP, BOARD_IP, 16'd42008, 16'd9999, rand_bytes(seed, 30)), 1'b1,
+              "firewall off: UDP to port 9999 reaches the CPU again");
+    end
+
     // DHCP with the bench as server.
     wr(DHCP + 32'h00C, 32'h1);
     expect_frame(empty, "DHCP DISCOVER", got);
@@ -885,14 +1165,14 @@ module tb_rtlnet_nexys_video_eth;
 
     // Counters and PHY-side timing.
     rd(MAC + 32'h020, d);
-    tb_check(d - rx_good0 == 7 + 1 + STORM_BURST + 3 + 7 + PROT_N_TOTAL,
-             $sformatf("MAC RX_GOOD advanced %0d, expected %0d", d - rx_good0, 7 + 1 + STORM_BURST + 3 + 7 + PROT_N_TOTAL));
+    tb_check(d - rx_good0 == 7 + 1 + STORM_BURST + 3 + 7 + PROT_N_TOTAL + fw_frames,
+             $sformatf("MAC RX_GOOD advanced %0d, expected %0d", d - rx_good0, 7 + 1 + STORM_BURST + 3 + 7 + PROT_N_TOTAL + fw_frames));
     rd(MAC + 32'h024, d);
     tb_check(d == 0, $sformatf("MAC RX_BAD %0d", d));
     rd(MAC + 32'h02C, d);
-    tb_check(d - tx0 == 7 + 3, $sformatf("MAC TX_FRAMES advanced %0d, expected 10", d - tx0));
-    check_reg(ARP + 32'h024, 32'd2, "ARP REPLIES_SENT");
-    check_reg(ICMP + 32'h024, 32'd1, "ICMP ECHO_REPLIES");
+    tb_check(d - tx0 == 7 + 3 + 2, $sformatf("MAC TX_FRAMES advanced %0d, expected 12 (two more from the firewall phase)", d - tx0));
+    check_reg(ARP + 32'h024, 32'd3, "ARP REPLIES_SENT (one more from the firewall phase)");
+    check_reg(ICMP + 32'h024, 32'd2, "ICMP ECHO_REPLIES (one more from the firewall phase)");
     tb_check(phy_viol == 0, $sformatf("PHY model RGMII TX timing violations: %0d", phy_viol));
     tb_check(dut.u_cpu.axil_timeouts == 0, "no AXI4-Lite timeouts");
 
