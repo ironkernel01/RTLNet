@@ -61,6 +61,7 @@
 #define HOST_MAX_CORES     16u
 #define HOST_MAX_WORDS     64u
 #define HOST_CLS_WORDS     (RTLNET_CLS_WINDOW_BYTES / 4u)
+#define HOST_CLS_WLOG_MAX  1024u   /* classifier write log entries */
 /* Classifier model build parameters (CAPS): 16 + 16 entries, 2 rules, 4 policers, 2 lanes, 64 bytes. */
 #define HOST_CLS_CAPS      (16u | (16u << 5) | (2u << 10) | (4u << 13) | (2u << 16) | (8u << 21))
 #define HOST_CLS_LATENCY   (31u | (23u << 8))
@@ -82,6 +83,9 @@ static int       g_cls_on;                    /* the classifier model answers at
 static uint32_t  g_cls_mode;                  /* CTRL.MODE */
 static uint32_t  g_cls_caps;                  /* CAPS word, 0 = HOST_CLS_CAPS */
 static uint32_t  g_cls_mem[HOST_CLS_WORDS];   /* every other register word as written */
+static uint32_t  g_cls_wlog_off[HOST_CLS_WLOG_MAX];   /* write log: offsets */
+static uint32_t  g_cls_wlog_val[HOST_CLS_WLOG_MAX];   /* write log: values */
+static unsigned  g_cls_wlog_n;
 
 /* Protocol wrapper CAPS / CPU_CAPS model. */
 static int       g_wrap_on;
@@ -433,6 +437,11 @@ static uint32_t host_cls_read(uint32_t off)
  */
 static void host_cls_write(uint32_t off, uint32_t value)
 {
+    if (g_cls_wlog_n < HOST_CLS_WLOG_MAX) {
+        g_cls_wlog_off[g_cls_wlog_n] = off;
+        g_cls_wlog_val[g_cls_wlog_n] = value;
+        g_cls_wlog_n++;
+    }
     if (off == RTLNET_CLS_REG_CTRL) {
         if ((value & RTLNET_CLS_CTRL_CLEAR_TABLES) != 0u) {
             memset(g_cls_mem, 0, sizeof(g_cls_mem));
@@ -454,6 +463,44 @@ static void host_cls_write(uint32_t off, uint32_t value)
     } else if (off >= RTLNET_CLS_REG_TABLE_MODE(0u)) {
         g_cls_mem[(off / 4u) % HOST_CLS_WORDS] = value;
     }
+}
+
+/**
+ * @brief Forget the logged classifier writes.
+ * @return None.
+ */
+void host_model_cls_wlog_clear(void)
+{
+    g_cls_wlog_n = 0u;
+}
+
+/**
+ * @brief Number of classifier writes logged since the last clear.
+ * @return Count.
+ */
+unsigned host_model_cls_wlog_count(void)
+{
+    return g_cls_wlog_n;
+}
+
+/**
+ * @brief Offset of one logged classifier write.
+ * @param index Position in the log.
+ * @return Offset, 0xFFFFFFFF past the log.
+ */
+uint32_t host_model_cls_wlog_offset(unsigned index)
+{
+    return (index < g_cls_wlog_n) ? g_cls_wlog_off[index] : 0xFFFFFFFFu;
+}
+
+/**
+ * @brief Value of one logged classifier write.
+ * @param index Position in the log.
+ * @return Value, 0 past the log.
+ */
+uint32_t host_model_cls_wlog_value(unsigned index)
+{
+    return (index < g_cls_wlog_n) ? g_cls_wlog_val[index] : 0u;
 }
 
 /**

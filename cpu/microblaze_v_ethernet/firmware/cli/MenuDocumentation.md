@@ -24,9 +24,9 @@ SPDX-License-Identifier: LGPL-2.1-or-later
 
 | Item | Value |
 |---|---|
-| Revision | 11-14-2026 (newest row of the revision history in cli/cli_commands.txt) |
-| Generated | 2026-11-14 00:00:00 -04:00 by cli/gen_menu.py from cli/cli_commands.txt |
-| Commands | 62 table entries (5 mode-entry), 18 keyword groups, 3 built-ins (exit, end, help) |
+| Revision | 11-16-2026 (newest row of the revision history in cli/cli_commands.txt) |
+| Generated | 2026-11-16 00:00:00 -04:00 by cli/gen_menu.py from cli/cli_commands.txt |
+| Commands | 66 table entries (5 mode-entry), 21 keyword groups, 3 built-ins (exit, end, help) |
 
 ## 1. Title and overview
 
@@ -239,7 +239,7 @@ token counts; exec commands are also accepted in priv.
 | 16 | cli_show_tcp | exec | `SHOW TCP` | — | — | 2 | 2 | — | lwIP interface, TCP echo server, connections and counters |
 | 17 | cli_show_cpu_path | exec | `SHOW CPU-PATH` | — | — | 2 | 2 | — | CPU network path: DMA frames and errors, wrapper CPU-path counters |
 | 18 | cli_show_offload | exec | `SHOW OFFLOAD` | — | — | 2 | 2 | — | Checksum offload: discovery, CTRL, lwIP flags, counters, zero-copy options |
-| 19 | cli_show_classifier | exec | `SHOW CLASSIFIER` | — | — | 2 | 2 | — | CPU-path classifier: built sizes, mode, protection profile with per-class limits and counters |
+| 19 | cli_show_classifier | exec | `SHOW CLASSIFIER` | — | — | 2 | 2 | — | CPU-path classifier: built sizes, mode, protection profile with per-class limits and counters, firewall state and allow list |
 | 20 | cli_show_running | priv | `SHOW RUNNING-CONFIG` | — | — | 2 | 2 | — | Current configuration |
 | 21 | cli_disable | priv | `DISABLE` | — | — | 1 | 1 | — | Leave privileged exec mode |
 | 22 | cli_debug_read | priv | `DEBUG READ [ADDR]` | ADDR | — | 3 | 3 | — | Read a 32-bit word (hex 0x... or decimal address) |
@@ -266,23 +266,27 @@ token counts; exec commands are also accepted in priv.
 | 43 | cli_tcp_echo_port | config | `TCP ECHO PORT [PORT]` | PORT | — | 4 | 4 | — | TCP echo server port (default 7) |
 | 44 | cli_offload | config | `OFFLOAD [WHAT] [STATE] {TIMER} {LIMIT}` | WHAT, STATE | TIMER, LIMIT | 3 | 5 | — | Checksum offload (tx-ip, tx-l4, rx, all) and receive features (ack-coalesce, rx-batch) on or off, as far as the build has them; TIMER in microseconds, LIMIT ACKs or frames |
 | 45 | cli_classifier_policer | config | `CLASSIFIER POLICER [CLASS] [FRAMES] [WINDOW_MS]` | CLASS, FRAMES, WINDOW_MS | — | 5 | 5 | — | Frames per window the CPU path passes for a traffic class: broadcast, udp, arp or icmp |
-| 46 | cli_if_speed | config-if | `SPEED [MBPS]` | MBPS | — | 2 | 2 | — | Link speed, full duplex: 10, 100 or auto (auto = every mode of the board, best rate) |
-| 47 | cli_if_shutdown | config-if | `SHUTDOWN` | — | — | 1 | 1 | — | Disable the interface (MAC receive and transmit) |
-| 48 | cli_if_no_shutdown | config-if | `NO SHUTDOWN` | — | — | 2 | 2 | — | Enable the interface |
-| 49 | cli_if_ip_address | config-if | `IP ADDRESS [ADDR] [MASK]` | ADDR, MASK | — | 4 | 4 | — | Set the static IPv4 address and mask |
-| 50 | cli_if_no_ip_address | config-if | `NO IP ADDRESS` | — | — | 3 | 3 | — | Remove the static IPv4 address (0.0.0.0) |
-| 51 | cli_if_ip_netmask | config-if | `IP NETMASK [MASK]` | MASK | — | 3 | 3 | — | Set the static netmask |
-| 52 | cli_if_mac | config-if | `MAC-ADDRESS [MAC]` | MAC | — | 2 | 2 | — | Set the node MAC address (aa:bb:cc:dd:ee:ff) |
-| 53 | cli_dhcp_start | config-dhcp | `START` | — | — | 1 | 1 | — | Start DHCP discovery now |
-| 54 | cli_dhcp_stop | config-dhcp | `STOP` | — | — | 1 | 1 | — | Stop the DHCP client and release the lease |
-| 55 | cli_dhcp_renew | config-dhcp | `RENEW` | — | — | 1 | 1 | — | Renew the lease now |
-| 56 | cli_dhcp_auto | config-dhcp | `AUTO` | — | — | 1 | 1 | — | Start DHCP automatically on link up |
-| 57 | cli_dhcp_no_auto | config-dhcp | `NO AUTO` | — | — | 2 | 2 | — | Do not start DHCP on link up |
-| 58 | cli_sock_open | config-sock | `OPEN [PORT]` | PORT | — | 2 | 2 | — | Open the socket on a local UDP port |
-| 59 | cli_sock_close | config-sock | `CLOSE` | — | — | 1 | 1 | — | Close the socket |
-| 60 | cli_sock_remote | config-sock | `REMOTE [ADDR] [PORT] {MAC}` | ADDR, PORT | MAC | 3 | 4 | — | Remote IPv4 address, UDP port and next-hop MAC |
-| 61 | cli_sock_connect | config-sock | `CONNECT-ON-RECEIVE` | — | — | 1 | 1 | — | Follow the sender of the last datagram |
-| 62 | cli_sock_no_connect | config-sock | `NO CONNECT-ON-RECEIVE` | — | — | 2 | 2 | — | Keep the configured remote address |
+| 46 | cli_classifier_firewall_enable | config | `CLASSIFIER FIREWALL ENABLE` | — | — | 3 | 3 | — | Default deny: only ARP, the open services, the connections lwIP opened and the acl entries reach lwIP; refused when the allow list does not fit |
+| 47 | cli_classifier_firewall_disable | config | `CLASSIFIER FIREWALL DISABLE` | — | — | 3 | 3 | — | Firewall off: back to the protection profile (every frame reaches lwIP except what the policers limit) |
+| 48 | cli_cls_acl | config | `CLASSIFIER ACL [ENTRY] [PROTO] {W1} {W2} {W3} {W4} {W5} {W6} {W7} {W8} {W9} {W10}` | ENTRY, PROTO | W1, W2, W3, W4, W5, W6, W7, W8, W9, W10 | 4 | 14 | — | ACL entry (0..15): tcp\|udp\|any src <ip>/<len> dst <ip>/<len> [sport <lo>[-<hi>]] [dport <lo>[-<hi>]] gate\|classify\|police <p>; with the firewall on every entry allows its traffic (a source-restricted entry replaces the open service entry of its port) |
+| 49 | cli_no_cls_acl | config | `NO CLASSIFIER ACL [ENTRY]` | ENTRY | — | 4 | 4 | — | Clear an ACL entry |
+| 50 | cli_if_speed | config-if | `SPEED [MBPS]` | MBPS | — | 2 | 2 | — | Link speed, full duplex: 10, 100 or auto (auto = every mode of the board, best rate) |
+| 51 | cli_if_shutdown | config-if | `SHUTDOWN` | — | — | 1 | 1 | — | Disable the interface (MAC receive and transmit) |
+| 52 | cli_if_no_shutdown | config-if | `NO SHUTDOWN` | — | — | 2 | 2 | — | Enable the interface |
+| 53 | cli_if_ip_address | config-if | `IP ADDRESS [ADDR] [MASK]` | ADDR, MASK | — | 4 | 4 | — | Set the static IPv4 address and mask |
+| 54 | cli_if_no_ip_address | config-if | `NO IP ADDRESS` | — | — | 3 | 3 | — | Remove the static IPv4 address (0.0.0.0) |
+| 55 | cli_if_ip_netmask | config-if | `IP NETMASK [MASK]` | MASK | — | 3 | 3 | — | Set the static netmask |
+| 56 | cli_if_mac | config-if | `MAC-ADDRESS [MAC]` | MAC | — | 2 | 2 | — | Set the node MAC address (aa:bb:cc:dd:ee:ff) |
+| 57 | cli_dhcp_start | config-dhcp | `START` | — | — | 1 | 1 | — | Start DHCP discovery now |
+| 58 | cli_dhcp_stop | config-dhcp | `STOP` | — | — | 1 | 1 | — | Stop the DHCP client and release the lease |
+| 59 | cli_dhcp_renew | config-dhcp | `RENEW` | — | — | 1 | 1 | — | Renew the lease now |
+| 60 | cli_dhcp_auto | config-dhcp | `AUTO` | — | — | 1 | 1 | — | Start DHCP automatically on link up |
+| 61 | cli_dhcp_no_auto | config-dhcp | `NO AUTO` | — | — | 2 | 2 | — | Do not start DHCP on link up |
+| 62 | cli_sock_open | config-sock | `OPEN [PORT]` | PORT | — | 2 | 2 | — | Open the socket on a local UDP port |
+| 63 | cli_sock_close | config-sock | `CLOSE` | — | — | 1 | 1 | — | Close the socket |
+| 64 | cli_sock_remote | config-sock | `REMOTE [ADDR] [PORT] {MAC}` | ADDR, PORT | MAC | 3 | 4 | — | Remote IPv4 address, UDP port and next-hop MAC |
+| 65 | cli_sock_connect | config-sock | `CONNECT-ON-RECEIVE` | — | — | 1 | 1 | — | Follow the sender of the last datagram |
+| 66 | cli_sock_no_connect | config-sock | `NO CONNECT-ON-RECEIVE` | — | — | 2 | 2 | — | Keep the configured remote address |
 
 Built-ins (menu.c): `EXIT` (every mode), `END` (privileged and configuration modes), `HELP` and `?`
 (every mode, identical listing), `!!` (repeat the previous line), Ctrl-C (cancel the line),
@@ -305,6 +309,9 @@ Keyword groups (help text when `?` lists a keyword shared by several commands):
 | config | `IPERF TCP` | TCP iperf server (lwIP lwiperf, default port 5001) |
 | config | `TCP ECHO` | TCP echo server (lwIP, default port 7) |
 | config | `OFFLOAD` | Checksum offload on the CPU path (hardware IPv4/TCP/UDP checksums) |
+| config | `CLASSIFIER` | CPU-path classifier (protection profile policers, firewall, ACL entries) |
+| config | `CLASSIFIER FIREWALL` | Default-deny firewall: only ARP and the allow list reach lwIP |
+| config | `NO CLASSIFIER` | Clear a classifier ACL entry |
 | config-if | `IP` | Interface IP configuration |
 | config-if | `NO` | Negate a command or set its default |
 | config-if | `NO IP` | Interface IP configuration |

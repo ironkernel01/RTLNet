@@ -21,7 +21,7 @@
  */
 /*
  * File:      menu_commands.h
- * Generated: 2026-11-14 00:00:00 -04:00
+ * Generated: 2026-11-16 00:00:00 -04:00
  * Project:   RTLNet Ethernet demo firmware, hierarchical CLI
  * Purpose:   Prototypes of every command callback named in
  *            cli/cli_commands.txt; cli/cli_commands.c defines them.
@@ -74,6 +74,10 @@ int cli_tcp_echo_disable(const MenuCommandContext *ctx);
 int cli_tcp_echo_port(const MenuCommandContext *ctx);
 int cli_offload(const MenuCommandContext *ctx);
 int cli_classifier_policer(const MenuCommandContext *ctx);
+int cli_classifier_firewall_enable(const MenuCommandContext *ctx);
+int cli_classifier_firewall_disable(const MenuCommandContext *ctx);
+int cli_cls_acl(const MenuCommandContext *ctx);
+int cli_no_cls_acl(const MenuCommandContext *ctx);
 int cli_if_speed(const MenuCommandContext *ctx);
 int cli_if_shutdown(const MenuCommandContext *ctx);
 int cli_if_no_shutdown(const MenuCommandContext *ctx);

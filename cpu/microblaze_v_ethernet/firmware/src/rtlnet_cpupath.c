@@ -7,11 +7,13 @@
  * See rtlnet_cpupath.h for the contract. Context: main loop only.
  *
  * Every setter updates the configuration first and then re-applies the whole
- * classifier configuration (hw_sync): clear the tables, write every valid
- * entry, the policers and last the MODE, all through the classifier driver
- * (cores/rtlnet_classifier/driver). Writing MODE last means a half-written
- * configuration never passes frames it should not. clear_all leaves the
- * filter in drop-all for the duration of the rewrite (about 100 us).
+ * classifier configuration (hw_sync): clear the tables, write the base (the
+ * protection profile or the storm limiter), every valid entry, the policers
+ * and last the MODE (or the firewall, which ends with MODE), all through the
+ * classifier driver (cores/rtlnet_classifier/driver). Writing MODE last means
+ * a half-written configuration never passes frames it should not. clear_all
+ * leaves the filter in drop-all for the duration of the rewrite (about 100 us).
+ * This is the only driver context of the classifier in the firmware.
  */
 #include "rtlnet_cpupath.h"
 
@@ -20,12 +22,15 @@
 #include "rtlnet_board.h"
 #include "rtlnet_classifier.h"
 #include "rtlnet_eth_protocol.h"
+#include "rtlnet_firewall.h"
 #include "rtlnet_offload.h"
 #include "rtlnet_platform.h"
 
 static cpupath_cls_config_t g_cfg;
 static int                  g_present;
 static rtlnet_classifier_t  g_cls;
+static const rtlnet_cls_protect_t *g_profile;   /* base profile (rtlnet_protect.c), NULL = storm limiter */
+static rtlnet_cls_tuple_t   g_allow[CPUPATH_CLS_ENTRIES];   /* scratch: the composed allow list */
 
 /*
  * cpupath_config_defaults -- the broadcast storm configuration as the
@@ -114,15 +119,33 @@ static int settle_table(rtlnet_cls_table_t table, int any_valid, int classify_on
 }
 
 /*
+ * base_slots -- tuple slots the base uses (the protection profile: ICMP and UDP).
+ * Returns: 2 with the profile, 0 with the storm limiter.
+ */
+static unsigned base_slots(void)
+{
+    return (g_profile != NULL) ? (unsigned)RTLNET_CLS_PROT_MIN_TUPLES : 0u;
+}
+
+/*
  * hw_sync -- write the whole configuration into the classifier.
  * Steps:
  *   1. clear_all (tables, rules, policers disabled, MODE drop-all).
- *   2. Every valid MAC, EtherType (pair) and ACL entry through the driver's
- *      helpers; each used table then gets its final TABLE_MODE.
- *   3. The four policers.
- *   4. MODE last, so a half-written configuration never passes frames it
- *      should not.
- * Returns: CPUPATH_OK, CPUPATH_ABSENT or CPUPATH_HW_ERROR.
+ *   2. Base: the protection profile (rtlnet_classifier_protect_load with the current limits: everything
+ *      config_protect writes except MODE) when it is installed, else nothing (the storm limiter is MAC entry 0
+ *      and policer 0 below). MODE stays drop-all from clear_all and is written only at the very end, so no
+ *      pass-all write happens before the last write.
+ *   3. The MAC entries (entry 0 stays the storm / broadcast entry); the MAC table gets its final mode.
+ *   4. The policers from the configuration, except while the profile is installed: its limits (written in
+ *      step 2) own policers 0..3.
+ *   5. Firewall on: rtlnet_classifier_firewall_apply with the composed allow list (ARP pair 0; the EtherType
+ *      entries of the configuration are not applied); it ends with MODE drop-on-match.
+ *      Firewall off: the EtherType entries, the ACL entries (user entry i in tuple slot base_slots + i),
+ *      the final modes of both tables, and last the MODE of the configuration.
+ * cpupath_cls_set_acl refuses an entry with no slot behind the base's slots in both firewall states, so an
+ * entry past the table is only possible when the build shrank after it was accepted; the loop then skips it
+ * (the defensive bound), and hw_sync never fails for acl space.
+ * Returns: CPUPATH_OK, CPUPATH_ABSENT, CPUPATH_TOO_SMALL or CPUPATH_HW_ERROR.
  */
 static int hw_sync(void)
 {
@@ -132,12 +155,19 @@ static int hw_sync(void)
     int      any_mac = 0;
     int      any_etype = 0;
     int      any_acl = 0;
+    int      fw_on = fw_enabled();
     int      rc;
 
     if (!g_present) {
         return CPUPATH_ABSENT;
     }
     rc = rtlnet_classifier_clear_all(&g_cls);
+    if (rc == RTLNET_CLS_OK && g_profile != NULL) {
+        rc = rtlnet_classifier_protect_load(&g_cls, g_profile);
+        if (rc == RTLNET_CLS_ERR_RANGE) {
+            return CPUPATH_TOO_SMALL;
+        }
+    }
     for (unsigned i = 0; rc == RTLNET_CLS_OK && i < CPUPATH_CLS_ENTRIES; i++) {
         if (c->mac[i].valid) {
             any_mac = 1;
@@ -146,6 +176,26 @@ static int hw_sync(void)
                                               helper_action(c->mac[i].action, c->mac[i].policer));
         }
     }
+    for (unsigned i = 0; i < CPUPATH_CLS_ENTRIES; i++) {
+        act[i] = c->mac[i].action;
+        val[i] = c->mac[i].valid;
+    }
+    if (rc == RTLNET_CLS_OK) {
+        rc = settle_table(RTLNET_CLS_TABLE_MAC, any_mac, table_classify_only(act, val, CPUPATH_CLS_ENTRIES));
+    }
+    for (unsigned p = 0; g_profile == NULL && rc == RTLNET_CLS_OK && p < CPUPATH_CLS_POLICERS; p++) {
+        rc = rtlnet_classifier_policer_set(&g_cls, p, c->pol[p].enabled, c->pol[p].limit_pkts, c->pol[p].window_ms);
+    }
+    if (rc == RTLNET_CLS_OK && fw_on) {
+        rtlnet_cls_firewall_t fw;
+        unsigned needed;
+        fw.count = fw_compose(g_allow, g_cls.tuple_entries, &needed);
+        fw.allow = g_allow;
+        fw.etype_pair = 0u;
+        rc = rtlnet_classifier_firewall_apply(&g_cls, &fw);
+        return (rc == RTLNET_CLS_OK) ? CPUPATH_OK : CPUPATH_HW_ERROR;
+    }
+    fw_shadow_clear();
     for (unsigned i = 0; rc == RTLNET_CLS_OK && i < CPUPATH_CLS_PAIRS; i++) {
         if (c->etype[i].valid) {
             any_etype = 1;
@@ -155,19 +205,12 @@ static int hw_sync(void)
     }
     for (unsigned i = 0; rc == RTLNET_CLS_OK && i < CPUPATH_CLS_ENTRIES; i++) {
         const cpupath_acl_entry_t *a = &c->acl[i];
-        if (a->valid) {
+        if (a->valid && base_slots() + i < g_cls.tuple_entries) {
             any_acl = 1;
-            rc = rtlnet_classifier_acl_add(&g_cls, i, a->proto, a->src, a->src_mask, a->dst, a->dst_mask,
-                                           a->sport_lo, a->sport_hi, a->dport_lo, a->dport_hi,
+            rc = rtlnet_classifier_acl_add(&g_cls, base_slots() + i, a->proto, a->src, a->src_mask, a->dst,
+                                           a->dst_mask, a->sport_lo, a->sport_hi, a->dport_lo, a->dport_hi,
                                            helper_action(a->action, a->policer));
         }
-    }
-    for (unsigned i = 0; i < CPUPATH_CLS_ENTRIES; i++) {
-        act[i] = c->mac[i].action;
-        val[i] = c->mac[i].valid;
-    }
-    if (rc == RTLNET_CLS_OK) {
-        rc = settle_table(RTLNET_CLS_TABLE_MAC, any_mac, table_classify_only(act, val, CPUPATH_CLS_ENTRIES));
     }
     for (unsigned i = 0; i < CPUPATH_CLS_PAIRS; i++) {
         act[i] = c->etype[i].action;
@@ -182,9 +225,6 @@ static int hw_sync(void)
     }
     if (rc == RTLNET_CLS_OK) {
         rc = settle_table(RTLNET_CLS_TABLE_TUPLE, any_acl, table_classify_only(act, val, CPUPATH_CLS_ENTRIES));
-    }
-    for (unsigned p = 0; rc == RTLNET_CLS_OK && p < CPUPATH_CLS_POLICERS; p++) {
-        rc = rtlnet_classifier_policer_set(&g_cls, p, c->pol[p].enabled, c->pol[p].limit_pkts, c->pol[p].window_ms);
     }
     if (rc == RTLNET_CLS_OK) {
         rc = rtlnet_classifier_set_mode(&g_cls, (rtlnet_cls_mode_t)c->mode);
@@ -210,6 +250,7 @@ static int hw_sync(void)
 int cpupath_init(void)
 {
     int rc = CPUPATH_ABSENT;
+    g_profile = NULL;
     rtlnet_features_discover();
     g_present = rtlnet_features()->cls_present;
     if (g_present && rtlnet_classifier_init(&g_cls, RTLNET_PLAT_CLS_BASE) != RTLNET_CLS_OK) {
@@ -217,7 +258,7 @@ int cpupath_init(void)
     }
     if (g_present) {
         const cpupath_policer_t *sp = &g_cfg.pol[CPUPATH_STORM_POLICER];
-        if (g_cfg.mode == CPUPATH_MODE_PASS_ALL && sp->enabled &&
+        if (g_cfg.mode == CPUPATH_MODE_PASS_ALL && sp->enabled && !fw_enabled() &&
             rtlnet_classifier_config_bcast_storm(&g_cls, sp->limit_pkts, sp->window_ms) == RTLNET_CLS_OK) {
             rc = CPUPATH_OK;
         } else {
@@ -273,12 +314,13 @@ int cpupath_cls_set_mode(unsigned mode)
 }
 
 /*
- * cpupath_cls_set_policer -- one policer: enable, frames per window.
- * Returns: CPUPATH_BAD_ARG for an index out of range, else see hw_sync.
+ * cpupath_cls_set_policer -- one policer: enable, frames per window. While the protection profile is
+ * installed its limits own the four policers (change them with protect_set): this setter is refused then.
+ * Returns: CPUPATH_BAD_ARG for an index out of range or while the profile is installed, else see hw_sync.
  */
 int cpupath_cls_set_policer(unsigned index, int enable, uint32_t limit, uint32_t window_ms)
 {
-    if (index >= CPUPATH_CLS_POLICERS) {
+    if (index >= CPUPATH_CLS_POLICERS || g_profile != NULL) {
         return CPUPATH_BAD_ARG;
     }
     g_cfg.pol[index].enabled = enable ? 1 : 0;
@@ -317,8 +359,12 @@ int cpupath_cls_set_etype(unsigned entry, const cpupath_etype_entry_t *e)
 
 /*
  * cpupath_cls_set_acl -- set or clear one tuple (ACL) entry.
- * Returns: CPUPATH_BAD_ARG for an entry, port range or policer out of range,
- *          else see hw_sync.
+ * Entry i has the tuple slot base_slots + i (the protection profile holds slots 0 and 1) with the firewall off;
+ * the same limit is applied with it on, so the firewall can always be turned off: an entry past the table is
+ * refused in both states with nothing changed. With the firewall on, the entries are packed into the allow
+ * list and the change is applied live (see rtlnet_firewall.h); an entry that does not fit stays out.
+ * Returns: CPUPATH_BAD_ARG for an entry, port range or policer out of range, CPUPATH_NO_SPACE for an entry
+ *          without a slot, else see hw_sync.
  */
 int cpupath_cls_set_acl(unsigned entry, const cpupath_acl_entry_t *e)
 {
@@ -326,7 +372,13 @@ int cpupath_cls_set_acl(unsigned entry, const cpupath_acl_entry_t *e)
         (e->valid && (e->sport_hi < e->sport_lo || e->dport_hi < e->dport_lo))) {
         return CPUPATH_BAD_ARG;
     }
+    if (e->valid && g_present && base_slots() + entry >= g_cls.tuple_entries) {
+        return CPUPATH_NO_SPACE;
+    }
     g_cfg.acl[entry] = *e;
+    if (g_present && fw_enabled()) {
+        return (fw_live_refresh() == FW_OK) ? CPUPATH_OK : CPUPATH_HW_ERROR;
+    }
     return hw_sync();
 }
 
@@ -477,6 +529,112 @@ int cpupath_wrapper_counters(cpupath_wrapper_counters_t *out)
 }
 
 /*
+ * cpupath_base_profile -- install (or, with NULL, remove) the protection profile as the base of the whole
+ * state: re-read the build, then rewrite everything (hw_sync). The profile is held by pointer, so a limit
+ * changed in its owner (rtlnet_protect.c) is what the next rewrite writes.
+ * Returns: CPUPATH_OK, CPUPATH_ABSENT, CPUPATH_TOO_SMALL (the build cannot hold it: the storm limiter stays
+ *          the base), CPUPATH_NO_SPACE or CPUPATH_HW_ERROR.
+ */
+int cpupath_base_profile(const rtlnet_cls_protect_t *profile)
+{
+    int rc;
+    if (!g_present) {
+        return CPUPATH_ABSENT;
+    }
+    if (rtlnet_classifier_init(&g_cls, RTLNET_PLAT_CLS_BASE) != RTLNET_CLS_OK) {
+        return CPUPATH_HW_ERROR;
+    }
+    if (profile != NULL && (g_cls.table_entries < RTLNET_CLS_PROT_MIN_TABLE_ENTRIES ||
+                            g_cls.tuple_entries < RTLNET_CLS_PROT_MIN_TUPLES ||
+                            g_cls.num_rules < RTLNET_CLS_PROT_MIN_RULES ||
+                            g_cls.num_policers < RTLNET_CLS_PROT_MIN_POLICERS ||
+                            g_cls.match_depth_bytes < RTLNET_CLS_PROT_MIN_MATCH_BYTES)) {
+        g_profile = NULL;
+        (void)hw_sync();
+        return CPUPATH_TOO_SMALL;
+    }
+    g_profile = profile;
+    rc = hw_sync();
+    if (rc != CPUPATH_OK && profile != NULL) {
+        g_profile = NULL;
+    }
+    return rc;
+}
+
+/*
+ * cpupath_cls_ctx -- the classifier driver context (the only one), for the read side and the one-register
+ * policer write of rtlnet_protect.c.
+ * Returns: the context, NULL when the classifier is absent.
+ */
+const rtlnet_classifier_t *cpupath_cls_ctx(void)
+{
+    return g_present ? &g_cls : NULL;
+}
+
+/*
+ * cpupath_cls_reinit -- read the build parameters again (ID, CAPS, LATENCY).
+ * Returns: CPUPATH_OK, CPUPATH_ABSENT or CPUPATH_HW_ERROR.
+ */
+int cpupath_cls_reinit(void)
+{
+    if (!g_present) {
+        return CPUPATH_ABSENT;
+    }
+    return (rtlnet_classifier_init(&g_cls, RTLNET_PLAT_CLS_BASE) == RTLNET_CLS_OK) ? CPUPATH_OK : CPUPATH_HW_ERROR;
+}
+
+/*
+ * cpupath_sync -- rewrite the whole classifier state from the configuration (hw_sync) for the firewall.
+ * Returns: see hw_sync.
+ */
+int cpupath_sync(void)
+{
+    return hw_sync();
+}
+
+/*
+ * cpupath_fw_slots -- tuple slots of the built classifier.
+ * Returns: the count, 0 when the classifier is absent.
+ */
+unsigned cpupath_fw_slots(void)
+{
+    return g_present ? g_cls.tuple_entries : 0u;
+}
+
+/*
+ * cpupath_fw_arp_ok -- the build has an EtherType range pair for the firewall's ARP entry.
+ * Returns: 1 yes, 0 no.
+ */
+int cpupath_fw_arp_ok(void)
+{
+    return (g_present && g_cls.table_entries >= 2u) ? 1 : 0;
+}
+
+/*
+ * cpupath_fw_live_set -- one allow entry into a free tuple slot, the tuple table stays enabled.
+ * Returns: CPUPATH_OK, CPUPATH_ABSENT, CPUPATH_HW_ERROR.
+ */
+int cpupath_fw_live_set(unsigned slot, const rtlnet_cls_tuple_t *tuple)
+{
+    if (!g_present) {
+        return CPUPATH_ABSENT;
+    }
+    return (rtlnet_classifier_tuple_live_set(&g_cls, slot, tuple) == RTLNET_CLS_OK) ? CPUPATH_OK : CPUPATH_HW_ERROR;
+}
+
+/*
+ * cpupath_fw_live_clear -- remove one allow entry, the tuple table stays enabled.
+ * Returns: CPUPATH_OK, CPUPATH_ABSENT, CPUPATH_HW_ERROR.
+ */
+int cpupath_fw_live_clear(unsigned slot)
+{
+    if (!g_present) {
+        return CPUPATH_ABSENT;
+    }
+    return (rtlnet_classifier_tuple_live_clear(&g_cls, slot) == RTLNET_CLS_OK) ? CPUPATH_OK : CPUPATH_HW_ERROR;
+}
+
+/*
  * cpupath_mode_name -- CLI spelling of a MODE.
  * Returns: the name.
  */
@@ -497,6 +655,8 @@ const char *cpupath_result_text(int rc)
     case CPUPATH_ABSENT:    return "classifier not present in this build; setting kept in the running configuration";
     case CPUPATH_NO_DRIVER: return "protocol core built without the CPU network path";
     case CPUPATH_BAD_ARG:   return "invalid argument";
+    case CPUPATH_TOO_SMALL: return "this classifier build cannot hold the protection profile";
+    case CPUPATH_NO_SPACE:  return "no tuple slot for this entry (the protection profile uses the first two slots)";
     default:                return "classifier driver error";
     }
 }

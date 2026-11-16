@@ -212,7 +212,7 @@ MEMORY
     $objs = @()
     $fwSrcs = @(
         'src/main.c', 'src/rtlnet_platform.c', 'src/rtlnet_txring.c', 'src/rtlnet_board.c', 'src/rtlnet_fmt.c', 'src/rtlnet_phy.c',
-        'src/rtlnet_netmgr.c', 'src/rtlnet_cpupath.c', 'src/rtlnet_protect.c', 'src/rtlnet_offload.c', 'src/lwip/rtlnet_lwip.c', 'src/lwip/rtlnet_lwip_netif.c',
+        'src/rtlnet_netmgr.c', 'src/rtlnet_cpupath.c', 'src/rtlnet_protect.c', 'src/rtlnet_firewall.c', 'src/rtlnet_offload.c', 'src/lwip/rtlnet_lwip.c', 'src/lwip/rtlnet_lwip_netif.c',
         'src/lwip/rtlnet_tcp_echo.c', 'src/lwip/rtlnet_tcp_iperf.c', 'src/lwip/rtlnet_lwiperf.c',
         'cli/menu.c', 'cli/menu_table.c', 'cli/cli_commands.c'
     ) | ForEach-Object { "$Fw/$_" }
@@ -244,7 +244,7 @@ MEMORY
 # board layer against a register model; lwIP replaced by host/host_lwip_stub.c.
 if ($HostHarness -or $Demo) {
     $hsrcs = @('host/main.c', 'host/host_platform.c', 'host/host_lwip_stub.c', 'src/rtlnet_board.c', 'src/rtlnet_fmt.c', 'src/rtlnet_phy.c',
-               'src/rtlnet_netmgr.c', 'src/rtlnet_cpupath.c', 'src/rtlnet_protect.c', 'src/rtlnet_offload.c', 'cli/menu.c', 'cli/menu_table.c',
+               'src/rtlnet_netmgr.c', 'src/rtlnet_cpupath.c', 'src/rtlnet_protect.c', 'src/rtlnet_firewall.c', 'src/rtlnet_offload.c', 'cli/menu.c', 'cli/menu_table.c',
                'cli/cli_commands.c') |
              ForEach-Object { "$Fw/$_" }
     $exe = Join-Path $Out 'menu.exe'
@@ -284,7 +284,7 @@ if ($LwipTest) {
     }
     foreach ($s in @("$Fw/src/lwip/rtlnet_lwiperf.c", "$Fw/test/lwiperf_loopback/lwiperf_loopback_test.c")) {
         $o = Join-Path $lt (([System.IO.Path]::GetFileNameWithoutExtension($s)) + '.o')
-        Invoke-Step $HostCc (@('-std=gnu11', '-O1', '-g', '-Wall', '-Wextra', '-Werror') + $ltInc + @('-c', $s, '-o', $o))
+        Invoke-Step $HostCc (@('-std=gnu11', '-O1', '-g', '-Wall', '-Wextra', '-Werror', '-DRTLNET_LWIPERF_NO_FIREWALL') + $ltInc + @('-c', $s, '-o', $o))
         $ltObjs += $o
     }
     $ltExe = Join-Path $Out 'lwiperf_loopback.exe'

@@ -18,6 +18,7 @@
 REVISION:11-14-2026:Initial command set of the Ethernet demo
 REVISION:11-14-2026:OFFLOAD takes ack-coalesce and rx-batch with optional timer and limit
 REVISION:11-14-2026:SHOW CLASSIFIER and CLASSIFIER POLICER (classifier protection profile)
+REVISION:11-16-2026:CLASSIFIER FIREWALL ENABLE/DISABLE (default-deny CPU path), CLASSIFIER ACL and NO CLASSIFIER ACL, firewall block in SHOW CLASSIFIER
 
 # ---------------------------------------------------------------------------
 # Modes
@@ -45,6 +46,9 @@ KEYWORD:config:IPERF:iperf servers (UDP in RTL, TCP in firmware)
 KEYWORD:config:IPERF TCP:TCP iperf server (lwIP lwiperf, default port 5001)
 KEYWORD:config:TCP ECHO:TCP echo server (lwIP, default port 7)
 KEYWORD:config:OFFLOAD:Checksum offload on the CPU path (hardware IPv4/TCP/UDP checksums)
+KEYWORD:config:CLASSIFIER:CPU-path classifier (protection profile policers, firewall, ACL entries)
+KEYWORD:config:CLASSIFIER FIREWALL:Default-deny firewall: only ARP and the allow list reach lwIP
+KEYWORD:config:NO CLASSIFIER:Clear a classifier ACL entry
 KEYWORD:config-if:IP:Interface IP configuration
 KEYWORD:config-if:NO:Negate a command or set its default
 KEYWORD:config-if:NO IP:Interface IP configuration
@@ -67,7 +71,7 @@ cli_show_counters:exec:SHOW COUNTERS:Frame counters of every core
 cli_show_tcp:exec:SHOW TCP:lwIP interface, TCP echo server, connections and counters
 cli_show_cpu_path:exec:SHOW CPU-PATH:CPU network path: DMA frames and errors, wrapper CPU-path counters
 cli_show_offload:exec:SHOW OFFLOAD:Checksum offload: discovery, CTRL, lwIP flags, counters, zero-copy options
-cli_show_classifier:exec:SHOW CLASSIFIER:CPU-path classifier: built sizes, mode, protection profile with per-class limits and counters
+cli_show_classifier:exec:SHOW CLASSIFIER:CPU-path classifier: built sizes, mode, protection profile with per-class limits and counters, firewall state and allow list
 
 # ---------------------------------------------------------------------------
 # Privileged exec
@@ -102,6 +106,10 @@ cli_tcp_echo_disable:config:TCP ECHO DISABLE:Disable the TCP echo server (open c
 cli_tcp_echo_port:config:TCP ECHO PORT [PORT]:TCP echo server port (default 7)
 cli_offload:config:OFFLOAD [WHAT] [STATE] {TIMER} {LIMIT}:Checksum offload (tx-ip, tx-l4, rx, all) and receive features (ack-coalesce, rx-batch) on or off, as far as the build has them; TIMER in microseconds, LIMIT ACKs or frames
 cli_classifier_policer:config:CLASSIFIER POLICER [CLASS] [FRAMES] [WINDOW_MS]:Frames per window the CPU path passes for a traffic class: broadcast, udp, arp or icmp
+cli_classifier_firewall_enable:config:CLASSIFIER FIREWALL ENABLE:Default deny: only ARP, the open services, the connections lwIP opened and the acl entries reach lwIP; refused when the allow list does not fit
+cli_classifier_firewall_disable:config:CLASSIFIER FIREWALL DISABLE:Firewall off: back to the protection profile (every frame reaches lwIP except what the policers limit)
+cli_cls_acl:config:CLASSIFIER ACL [ENTRY] [PROTO] {W1} {W2} {W3} {W4} {W5} {W6} {W7} {W8} {W9} {W10}:ACL entry (0..15): tcp|udp|any src <ip>/<len> dst <ip>/<len> [sport <lo>[-<hi>]] [dport <lo>[-<hi>]] gate|classify|police <p>; with the firewall on every entry allows its traffic (a source-restricted entry replaces the open service entry of its port)
+cli_no_cls_acl:config:NO CLASSIFIER ACL [ENTRY]:Clear an ACL entry
 
 # ---------------------------------------------------------------------------
 # Interface configuration (eth0)

@@ -29,7 +29,8 @@
  *            point, checks the console text and the mode after every step
  *            (parser, abbreviation, ambiguity, context help, modes and
  *            prompts, history, line editing, core-presence probing against
- *            the register model) and prints one anchored verdict line:
+ *            the register model, the CPU-path firewall against the classifier
+ *            register model with its write log) and prints one anchored verdict line:
  *            "TEST PASS: menu_demo checks=<n>" or "TEST FAIL: menu_demo ...".
  */
 /*
@@ -52,6 +53,7 @@
 #include "rtlnet_cpupath.h"
 #include "rtlnet_protect.h"
 #include "rtlnet_eth_protocol.h"
+#include "rtlnet_firewall.h"
 #include "rtlnet_lwip_netif.h"
 #include "rtlnet_netmgr.h"
 #include "rtlnet_offload.h"
@@ -271,6 +273,348 @@ static void demo_protect(void)
     demo_cls(RTLNET_CLS_REG_POLICER(PROTECT_ICMP) + RTLNET_CLS_POL_LIMIT, 3u, "the kept setting is installed");
 }
 
+/* ---------------------------------------------------------------------------
+ * CPU-path firewall: the allow list in the classifier registers, live updates, the source-restricted ACL entry,
+ * the capacity refusal, the whole-state rewrite that keeps the protection profile, and back to the plain profile.
+ * ------------------------------------------------------------------------- */
+#define DEMO_IMG_WORDS   (RTLNET_CLS_WINDOW_BYTES / 4u)
+
+static uint32_t g_img[DEMO_IMG_WORDS];     /* classifier register image of the plain profile */
+
+/**
+ * @brief Number of valid tuple slots in the register model.
+ * @param entries Tuple slots to look at.
+ * @return Count.
+ */
+static unsigned demo_tuples_valid(unsigned entries)
+{
+    unsigned n = 0;
+    for (unsigned i = 0; i < entries; i++) {
+        if ((host_model_cls_peek(RTLNET_CLS_REG_TUPLE(i) + RTLNET_CLS_TUP_CTRL) & RTLNET_CLS_TUP_VALID) != 0u) {
+            n++;
+        }
+    }
+    return n;
+}
+
+/**
+ * @brief First valid tuple slot whose destination port range is exactly one port.
+ * @param entries Tuple slots to look at.
+ * @param port    Destination port.
+ * @return Slot, or -1.
+ */
+static int demo_tuple_dport(unsigned entries, unsigned port)
+{
+    for (unsigned i = 0; i < entries; i++) {
+        if ((host_model_cls_peek(RTLNET_CLS_REG_TUPLE(i) + RTLNET_CLS_TUP_CTRL) & RTLNET_CLS_TUP_VALID) != 0u &&
+            host_model_cls_peek(RTLNET_CLS_REG_TUPLE(i) + RTLNET_CLS_TUP_DPORT) == ((port << 16) | port)) {
+            return (int)i;
+        }
+    }
+    return -1;
+}
+
+/**
+ * @brief Every classifier write since the last log clear is a tuple word (no CTRL, no TABLE_MODE, nothing else).
+ * @return 1 when so and at least one write was logged, else 0.
+ */
+static int demo_wlog_tuples_only(void)
+{
+    if (host_model_cls_wlog_count() == 0u) {
+        return 0;
+    }
+    for (unsigned i = 0; i < host_model_cls_wlog_count(); i++) {
+        uint32_t o = host_model_cls_wlog_offset(i);
+        if (o < RTLNET_CLS_REG_TUPLE(0u) || o >= RTLNET_CLS_REG_TUPLE(RTLNET_CLS_MAX_TUPLES)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/**
+ * @brief No CTRL write of pass-all before the last classifier write of the log, and the last write is a CTRL write
+ *        of the given MODE.
+ * @param last_mode MODE the last write must set.
+ * @return 1 when so, else 0.
+ */
+static int demo_wlog_no_early_pass(uint32_t last_mode)
+{
+    unsigned n = host_model_cls_wlog_count();
+    if (n < 2u || host_model_cls_wlog_offset(n - 1u) != RTLNET_CLS_REG_CTRL ||
+        (host_model_cls_wlog_value(n - 1u) & RTLNET_CLS_CTRL_MODE_MASK) != last_mode) {
+        return 0;
+    }
+    for (unsigned i = 0; i + 1u < n; i++) {
+        if (host_model_cls_wlog_offset(i) == RTLNET_CLS_REG_CTRL &&
+            (host_model_cls_wlog_value(i) & RTLNET_CLS_CTRL_MODE_MASK) == RTLNET_CLS_MODE_PASS_ALL &&
+            (host_model_cls_wlog_value(i) & RTLNET_CLS_CTRL_CLEAR_TABLES) == 0u) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/**
+ * @brief The classifier registers equal an earlier image.
+ * @param img Image (g_img).
+ * @param msg Description.
+ * @return None.
+ */
+static void demo_cls_image_equal(const uint32_t *img, const char *msg)
+{
+    char buf[160];
+    unsigned bad = 0;
+    unsigned first = 0;
+    for (unsigned i = 0; i < DEMO_IMG_WORDS; i++) {
+        if (host_model_cls_peek(4u * i) != img[i]) {
+            if (bad == 0u) {
+                first = 4u * i;
+            }
+            bad++;
+        }
+    }
+    (void)snprintf(buf, sizeof(buf), "%s: %u words differ (first at 0x%03X)", msg, bad, first);
+    demo_check(bad == 0u, buf);
+}
+
+/**
+ * @brief The firewall scenarios. Runs in privileged exec with the classifier model present and the protection
+ *        profile installed (after demo_protect); ends in privileged exec with the firewall off.
+ * @return None.
+ */
+static void demo_firewall(void)
+{
+    const uint32_t caps_small = 8u | (8u << 5) | (1u << 10) | (4u << 13) | (2u << 16) | (8u << 21) | (1u << 27);
+    const uint32_t tm_etype = RTLNET_CLS_TM_ENABLE | RTLNET_CLS_TM_EXCLUDE |
+                              ((uint32_t)RTLNET_CLS_CMP_RANGE << RTLNET_CLS_TM_COMPARE_SHIFT);
+    const uint32_t tm_tuple = RTLNET_CLS_TM_ENABLE | RTLNET_CLS_TM_EXCLUDE;
+    const uint32_t entry0 = RTLNET_CLS_REG_ENTRY(RTLNET_CLS_TABLE_MAC, 0u);
+    int s;
+
+    /* The plain profile image, kept for the comparison after "classifier firewall disable". */
+    demo_type("configure terminal\r");
+    demo_type("classifier policer arp 50 250\r");
+    demo_type("end\r");
+    for (unsigned i = 0; i < DEMO_IMG_WORDS; i++) {
+        g_img[i] = host_model_cls_peek(4u * i);
+    }
+    demo_check(fw_enabled() == 0, "firewall: off at boot");
+    demo_cls(RTLNET_CLS_REG_CTRL, RTLNET_CLS_MODE_PASS_ALL, "firewall off: MODE pass-all");
+
+    /* ---- Enable: the service ports of the CLI session are the allow list. */
+    demo_type("configure terminal\r");
+    demo_type("tcp echo port 23\r");
+    demo_type("iperf tcp disable\r");
+    host_capture_clear();
+    demo_type("classifier firewall enable\r");
+    demo_check(strstr(host_capture_text(), "%") == NULL, "firewall enable: accepted");
+    demo_check(fw_enabled() == 1, "firewall enable: on");
+    demo_cls(RTLNET_CLS_REG_CTRL, RTLNET_CLS_MODE_DROP_ON_MATCH, "firewall: MODE drop-on-match");
+    demo_cls(RTLNET_CLS_REG_TABLE_MODE(RTLNET_CLS_TABLE_ETHERTYPE), tm_etype, "firewall: EtherType table enable, exclude, range");
+    demo_cls(RTLNET_CLS_REG_TABLE_MODE(RTLNET_CLS_TABLE_TUPLE), tm_tuple, "firewall: tuple table enable, exclude");
+    demo_cls(RTLNET_CLS_REG_ENTRY(RTLNET_CLS_TABLE_ETHERTYPE, 0u) + RTLNET_CLS_ENT_SRC_LO, 0x0806u, "firewall: ARP pair 0 low");
+    demo_cls(RTLNET_CLS_REG_ENTRY(RTLNET_CLS_TABLE_ETHERTYPE, 1u) + RTLNET_CLS_ENT_SRC_LO, 0x0806u, "firewall: ARP pair 0 high");
+    demo_check(demo_tuples_valid(RTLNET_CLS_MAX_TUPLES) == 1u, "firewall: exactly one valid tuple");
+    s = demo_tuple_dport(RTLNET_CLS_MAX_TUPLES, 23u);
+    demo_check(s == 0, "firewall: the TCP echo service (dport 23) is in slot 0");
+    demo_cls(RTLNET_CLS_REG_TUPLE(0u) + RTLNET_CLS_TUP_CTRL, RTLNET_CLS_TUP_VALID | RTLNET_CLS_TUP_PROTO_EN | 6u,
+             "firewall: slot 0 is TCP, no policer");
+    demo_cls(RTLNET_CLS_REG_TUPLE(0u) + RTLNET_CLS_TUP_SRC_MASK, 0u, "firewall: slot 0 any source");
+    demo_cls(RTLNET_CLS_REG_POLICER(PROTECT_ARP) + RTLNET_CLS_POL_LIMIT, 50u, "firewall: protection policers kept (arp limit)");
+    demo_cls(entry0 + RTLNET_CLS_ENT_CTRL, RTLNET_CLS_ENT_VALID | RTLNET_CLS_ENT_DST_EN | RTLNET_CLS_ENT_POLICE_EN | 0xFFFFu,
+             "firewall: MAC entry 0 (broadcast class) kept");
+    demo_type("end\r");
+    host_capture_clear();
+    demo_type("show classifier\r");
+    demo_check(strstr(host_capture_text(), "Firewall (CPU path)") != NULL &&
+               strstr(host_capture_text(), "State           : enabled (default deny)") != NULL, "show classifier: firewall enabled");
+    demo_check(strstr(host_capture_text(), "Allowed         : ARP (policer arp 50 per 250 ms)") != NULL, "show classifier: ARP allowed with its policer");
+    demo_check(strstr(host_capture_text(), "tcp-echo") != NULL && strstr(host_capture_text(), "dport 23-23") != NULL,
+               "show classifier: the dport 23 slot");
+    demo_check(strstr(host_capture_text(), "Free slots      : 15 of 16") != NULL, "show classifier: free slots");
+    demo_check(strstr(host_capture_text(), "Dropped         :") != NULL, "show classifier: dropped line");
+    host_capture_clear();
+    demo_type("show running-config\r");
+    demo_check(strstr(host_capture_text(), "tcp echo port 23\n") != NULL && strstr(host_capture_text(), "iperf tcp disable\n") != NULL &&
+               strstr(host_capture_text(), "classifier firewall enable\n") != NULL, "show run: the three firewall session lines");
+    demo_check(strstr(host_capture_text(), "classifier policer arp 50 250\n") != NULL, "show run: the policer lines");
+
+    /* ---- Live update: only tuple words are written. */
+    demo_type("configure terminal\r");
+    host_model_cls_wlog_clear();
+    demo_type("tcp echo port 24\r");
+    demo_check(demo_wlog_tuples_only(), "live: a port change writes tuple words only (no CTRL, no TABLE_MODE)");
+    demo_check(host_model_cls_wlog_count() == 1u + RTLNET_CLS_TUP_WORDS, "live: one clear (1 word) and one set (7 words)");
+    demo_check(demo_tuples_valid(RTLNET_CLS_MAX_TUPLES) == 1u && demo_tuple_dport(RTLNET_CLS_MAX_TUPLES, 24u) >= 0 &&
+               demo_tuple_dport(RTLNET_CLS_MAX_TUPLES, 23u) < 0, "live: one valid slot with dport 24");
+    demo_cls(RTLNET_CLS_REG_CTRL, RTLNET_CLS_MODE_DROP_ON_MATCH, "live: MODE untouched");
+    host_model_cls_wlog_clear();
+    demo_type("iperf tcp enable\r");
+    demo_check(demo_wlog_tuples_only() && demo_tuples_valid(RTLNET_CLS_MAX_TUPLES) == 2u &&
+               demo_tuple_dport(RTLNET_CLS_MAX_TUPLES, 5001u) >= 0, "live: the iperf server opens, its slot is added");
+    host_model_cls_wlog_clear();
+    demo_type("iperf tcp disable\r");
+    demo_check(demo_wlog_tuples_only() && host_model_cls_wlog_count() == 1u && demo_tuples_valid(RTLNET_CLS_MAX_TUPLES) == 1u,
+               "live: the iperf server closes, one word clears its slot");
+
+    /* ---- A client flow: remote address and port to the local port. */
+    host_model_cls_wlog_clear();
+    demo_check(fw_flow_add(FW_PROTO_TCP, 0xC0000207u, 5001u, 40001u) == FW_OK, "flow: add");
+    demo_check(demo_wlog_tuples_only() && demo_tuples_valid(RTLNET_CLS_MAX_TUPLES) == 2u &&
+               demo_tuple_dport(RTLNET_CLS_MAX_TUPLES, 40001u) >= 0, "flow: its slot is added live");
+    s = demo_tuple_dport(RTLNET_CLS_MAX_TUPLES, 40001u);
+    demo_check(s >= 0 && host_model_cls_peek(RTLNET_CLS_REG_TUPLE((unsigned)s) + RTLNET_CLS_TUP_SRC_IP) == 0xC0000207u &&
+               host_model_cls_peek(RTLNET_CLS_REG_TUPLE((unsigned)s) + RTLNET_CLS_TUP_SRC_MASK) == 0xFFFFFFFFu &&
+               host_model_cls_peek(RTLNET_CLS_REG_TUPLE((unsigned)s) + RTLNET_CLS_TUP_SPORT) == ((5001u << 16) | 5001u),
+               "flow: source 192.0.2.7/32, source port 5001");
+    demo_type("end\r");
+    host_capture_clear();
+    demo_type("show classifier\r");
+    demo_check(strstr(host_capture_text(), "flow 0") != NULL && strstr(host_capture_text(), "src 192.0.2.7/32") != NULL,
+               "show classifier: the flow slot");
+    demo_check(fw_flow_remove(FW_PROTO_TCP, 0xC0000207u, 5001u, 40001u) == FW_OK && demo_tuples_valid(RTLNET_CLS_MAX_TUPLES) == 1u,
+               "flow: removed, its slot clears");
+
+    /* ---- A source-restricted ACL entry replaces the open service entry of its port. */
+    demo_type("configure terminal\r");
+    host_model_cls_wlog_clear();
+    host_capture_clear();
+    demo_type("classifier acl 0 tcp src 192.0.2.0/24 dst 0.0.0.0/0 dport 24 gate\r");
+    demo_check(strstr(host_capture_text(), "%") == NULL, "acl: accepted");
+    demo_check(demo_wlog_tuples_only(), "acl live: tuple words only");
+    demo_check(demo_tuples_valid(RTLNET_CLS_MAX_TUPLES) == 1u && demo_tuple_dport(RTLNET_CLS_MAX_TUPLES, 24u) >= 0,
+               "acl: one slot with dport 24");
+    s = demo_tuple_dport(RTLNET_CLS_MAX_TUPLES, 24u);
+    demo_check(s >= 0 && host_model_cls_peek(RTLNET_CLS_REG_TUPLE((unsigned)s) + RTLNET_CLS_TUP_SRC_IP) == 0xC0000200u &&
+               host_model_cls_peek(RTLNET_CLS_REG_TUPLE((unsigned)s) + RTLNET_CLS_TUP_SRC_MASK) == 0xFFFFFF00u,
+               "acl: the slot is the source-restricted entry (192.0.2.0/24), the any-source service entry is gone");
+    demo_type("end\r");
+    host_capture_clear();
+    demo_type("show classifier\r");
+    demo_check(strstr(host_capture_text(), "acl 0") != NULL && strstr(host_capture_text(), "src 192.0.2.0/24") != NULL &&
+               strstr(host_capture_text(), "tcp-echo") == NULL, "show classifier: the acl slot replaces the service slot");
+    host_capture_clear();
+    demo_type("show running-config\r");
+    demo_check(strstr(host_capture_text(), "classifier acl 0 tcp src 192.0.2.0/24 dst 0.0.0.0/0 dport 24-24 gate\n") != NULL,
+               "show run: the acl line");
+    demo_type("configure terminal\r");
+    host_model_cls_wlog_clear();
+    demo_type("no classifier acl 0\r");
+    s = demo_tuple_dport(RTLNET_CLS_MAX_TUPLES, 24u);
+    demo_check(demo_wlog_tuples_only() && demo_tuples_valid(RTLNET_CLS_MAX_TUPLES) == 1u && s >= 0 &&
+               host_model_cls_peek(RTLNET_CLS_REG_TUPLE((unsigned)s) + RTLNET_CLS_TUP_SRC_MASK) == 0u,
+               "acl removed: the any-source service entry is back");
+
+    /* ---- Back to the plain profile with the firewall off. */
+    demo_type("classifier firewall disable\r");
+    demo_check(fw_enabled() == 0, "firewall disable: off");
+    demo_cls(RTLNET_CLS_REG_CTRL, RTLNET_CLS_MODE_PASS_ALL, "firewall disable: MODE pass-all");
+    demo_cls_image_equal(g_img, "firewall disable: the registers equal the plain profile image");
+
+    /* ---- Wipe regression: whole-state rewrites keep the protection profile. */
+    demo_type("classifier policer arp 50 250\r");
+    host_capture_clear();
+    demo_type("classifier acl 0 udp src 192.0.2.0/24 dst 0.0.0.0/0 dport 9000 classify\r");
+    demo_check(strstr(host_capture_text(), "%") == NULL, "wipe regression: acl accepted");
+    demo_cls(RTLNET_CLS_REG_POLICER(PROTECT_ARP) + RTLNET_CLS_POL_LIMIT, 50u, "after an acl edit: policer 2 limit stays 50");
+    demo_cls(RTLNET_CLS_REG_POLICER(PROTECT_ARP) + RTLNET_CLS_POL_WINDOW, 250u, "after an acl edit: policer 2 window stays 250");
+    demo_cls(entry0 + RTLNET_CLS_ENT_CTRL, RTLNET_CLS_ENT_VALID | RTLNET_CLS_ENT_DST_EN | RTLNET_CLS_ENT_POLICE_EN | 0xFFFFu,
+             "after an acl edit: MAC entry 0 still configured");
+    demo_cls(RTLNET_CLS_REG_RULE_MODE(0u), RTLNET_CLS_RM_ENABLE | RTLNET_CLS_RM_CLASSIFY | RTLNET_CLS_RM_POLICE_EN |
+             (PROTECT_ARP << RTLNET_CLS_RM_POLICER_SHIFT), "after an acl edit: rule 0 (ARP) still configured");
+    demo_cls(RTLNET_CLS_REG_TUPLE(0u) + RTLNET_CLS_TUP_CTRL, RTLNET_CLS_TUP_VALID | RTLNET_CLS_TUP_PROTO_EN |
+             RTLNET_CLS_TUP_POLICE_EN | (PROTECT_ICMP << RTLNET_CLS_TUP_POLICER_SHIFT) | 1u, "after an acl edit: profile tuple 0 (ICMP)");
+    demo_cls(RTLNET_CLS_REG_TUPLE(2u) + RTLNET_CLS_TUP_CTRL, RTLNET_CLS_TUP_VALID | RTLNET_CLS_TUP_PROTO_EN | 17u,
+             "after an acl edit: the user entry 0 is in tuple slot 2");
+    demo_cls(RTLNET_CLS_REG_TUPLE(2u) + RTLNET_CLS_TUP_DPORT, (9000u << 16) | 9000u, "after an acl edit: slot 2 dport 9000");
+    host_capture_clear();
+    demo_type("classifier acl 14 udp src 0.0.0.0/0 dst 0.0.0.0/0 gate\r");
+    demo_check(strstr(host_capture_text(), "no tuple slot for this entry") != NULL, "acl: entry 14 has no slot behind the profile's two");
+    demo_check(demo_tuples_valid(RTLNET_CLS_MAX_TUPLES) == 3u, "acl: the refused entry wrote nothing");
+    host_model_cls_wlog_clear();
+    demo_type("classifier firewall enable\r");
+    demo_check(demo_wlog_no_early_pass((uint32_t)RTLNET_CLS_MODE_DROP_ON_MATCH),
+               "firewall enable (full rewrite): no pass-all write, the last write is MODE drop-on-match");
+    demo_cls(RTLNET_CLS_REG_POLICER(PROTECT_ARP) + RTLNET_CLS_POL_LIMIT, 50u, "firewall on: policer 2 limit stays 50");
+    demo_cls(RTLNET_CLS_REG_POLICER(PROTECT_ARP) + RTLNET_CLS_POL_WINDOW, 250u, "firewall on: policer 2 window stays 250");
+    demo_cls(entry0 + RTLNET_CLS_ENT_CTRL, RTLNET_CLS_ENT_VALID | RTLNET_CLS_ENT_DST_EN | RTLNET_CLS_ENT_POLICE_EN | 0xFFFFu,
+             "firewall on: MAC entry 0 still configured");
+    demo_cls(RTLNET_CLS_REG_RULE_MODE(0u), RTLNET_CLS_RM_ENABLE | RTLNET_CLS_RM_CLASSIFY | RTLNET_CLS_RM_POLICE_EN |
+             (PROTECT_ARP << RTLNET_CLS_RM_POLICER_SHIFT), "firewall on: rule 0 (ARP) still configured");
+    demo_check(demo_tuples_valid(RTLNET_CLS_MAX_TUPLES) == 2u && demo_tuple_dport(RTLNET_CLS_MAX_TUPLES, 9000u) >= 0 &&
+               demo_tuple_dport(RTLNET_CLS_MAX_TUPLES, 24u) >= 0, "firewall on: the allow list is the echo service and the acl entry");
+    host_model_cls_wlog_clear();
+    demo_type("classifier firewall disable\r");
+    demo_check(demo_wlog_no_early_pass((uint32_t)RTLNET_CLS_MODE_PASS_ALL), "firewall disable: the only pass-all write is the last one");
+    host_model_cls_wlog_clear();
+    demo_type("classifier firewall enable\r");
+    demo_check(demo_wlog_no_early_pass((uint32_t)RTLNET_CLS_MODE_DROP_ON_MATCH), "firewall re-enable: no pass-all write");
+    demo_type("classifier firewall disable\r");
+    demo_cls(RTLNET_CLS_REG_POLICER(PROTECT_ARP) + RTLNET_CLS_POL_LIMIT, 50u, "disable and enable again: policer 2 limit stays 50");
+    demo_cls(RTLNET_CLS_REG_POLICER(PROTECT_ARP) + RTLNET_CLS_POL_WINDOW, 250u, "disable and enable again: policer 2 window stays 250");
+    demo_cls(RTLNET_CLS_REG_CTRL, RTLNET_CLS_MODE_PASS_ALL, "disable again: MODE pass-all");
+    demo_type("no classifier acl 0\r");
+    demo_cls_image_equal(g_img, "acl removed: the registers equal the plain profile image again");
+
+    /* ---- Capacity: the small build has 8 tuple slots. */
+    host_model_cls_set_caps(caps_small);
+    demo_check(protect_install() == PROTECT_OK, "firewall capacity: small build profile");
+    demo_type("iperf tcp enable\r");
+    for (unsigned i = 0; i < 6u; i++) {
+        char cmd[96];
+        (void)snprintf(cmd, sizeof(cmd), "classifier acl %u tcp src 192.0.2.0/24 dst 0.0.0.0/0 dport %u gate\r", i, 100u + i);
+        host_capture_clear();
+        demo_type(cmd);
+        demo_check(strstr(host_capture_text(), "%") == NULL, "capacity: acl entry fits behind the profile's two slots");
+    }
+    host_capture_clear();
+    demo_type("classifier acl 6 tcp src 192.0.2.0/24 dst 0.0.0.0/0 dport 106 gate\r");
+    demo_check(strstr(host_capture_text(), "no tuple slot for this entry") != NULL, "capacity: the seventh entry has no slot with the firewall off");
+    demo_check(fw_flow_add(FW_PROTO_TCP, 0xC0000207u, 5001u, 40002u) == FW_OK, "capacity: a client flow");
+    host_model_cls_wlog_clear();
+    host_capture_clear();
+    demo_type("classifier firewall enable\r");
+    demo_check(strstr(host_capture_text(), "% The allow list needs 9 tuple slots, the classifier has 8") != NULL,
+               "capacity: enable refused with the counts");
+    demo_check(host_model_cls_wlog_count() == 0u, "capacity: no register written");
+    demo_check(fw_enabled() == 0, "capacity: the firewall stays off");
+    demo_cls(RTLNET_CLS_REG_CTRL, RTLNET_CLS_MODE_PASS_ALL, "capacity: MODE still pass-all");
+    demo_check(fw_flow_remove(FW_PROTO_TCP, 0xC0000207u, 5001u, 40002u) == FW_OK, "capacity: the flow ends");
+    host_capture_clear();
+    demo_type("classifier firewall enable\r");
+    demo_check(strstr(host_capture_text(), "%") == NULL && fw_enabled() == 1 && demo_tuples_valid(8u) == 8u,
+               "capacity: 8 entries fill the 8 slots");
+    host_capture_clear();
+    demo_type("classifier acl 6 tcp src 192.0.2.0/24 dst 0.0.0.0/0 dport 106 gate\r");
+    demo_check(strstr(host_capture_text(), "no tuple slot for this entry") != NULL, "capacity: the seventh entry is refused with the firewall on too");
+    demo_check(fw_flow_add(FW_PROTO_TCP, 0xC0000207u, 5001u, 40003u) == FW_OK, "capacity: a flow with no free slot");
+    demo_check(demo_tuple_dport(8u, 40003u) < 0 && demo_tuples_valid(8u) == 8u, "capacity: the flow stays out of the full list");
+    demo_type("end\r");
+    host_capture_clear();
+    demo_type("show classifier\r");
+    demo_check(strstr(host_capture_text(), "% 1 allow entries did not fit the 8 tuple slots") != NULL &&
+               strstr(host_capture_text(), "Free slots      : 0 of 8") != NULL, "show classifier: the entry that did not fit");
+    demo_check(fw_flow_remove(FW_PROTO_TCP, 0xC0000207u, 5001u, 40003u) == FW_OK, "capacity: the flow ends");
+    demo_type("configure terminal\r");
+    host_capture_clear();
+    demo_type("classifier firewall disable\r");
+    demo_check(strstr(host_capture_text(), "%") == NULL && fw_enabled() == 0, "capacity: disable always succeeds");
+    for (unsigned i = 0; i < 6u; i++) {
+        char cmd[48];
+        (void)snprintf(cmd, sizeof(cmd), "no classifier acl %u\r", i);
+        demo_type(cmd);
+    }
+    demo_type("iperf tcp disable\r");
+
+    /* ---- Default build again; the session settings back to their defaults. */
+    host_model_cls_set_caps(0u);
+    demo_check(protect_install() == PROTECT_OK, "firewall: default build again");
+    demo_type("tcp echo port 2007\r");
+    demo_type("iperf tcp enable\r");
+    demo_type("end\r");
+}
+
 /**
  * @brief The CPU-path boot configuration against the classifier register model: cpupath_init writes the broadcast
  *        storm limiter through the driver, "show cpu-path" reads the state and counters back.
@@ -308,6 +652,7 @@ static void demo_cpupath(void)
     demo_check(strstr(host_capture_text(), "broadcasts seen 50, passed 12, dropped 38") != NULL, "show counters: storm limiter policer");
     demo_type("clear counters\r");
     demo_protect();
+    demo_firewall();
     demo_type("disable\r");
     host_model_set_core(RTLNET_PLAT_CLS_BASE, 0u);
 }

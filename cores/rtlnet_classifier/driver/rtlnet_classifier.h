@@ -460,6 +460,7 @@ int rtlnet_classifier_tuple_live_set(const rtlnet_classifier_t *ctx, uint32_t in
 int rtlnet_classifier_tuple_live_clear(const rtlnet_classifier_t *ctx, uint32_t index);
 
 void rtlnet_classifier_protect_defaults(rtlnet_cls_protect_t *profile);
+int rtlnet_classifier_protect_load(const rtlnet_classifier_t *ctx, const rtlnet_cls_protect_t *profile);   /* everything but the final MODE write */
 int rtlnet_classifier_config_protect(const rtlnet_classifier_t *ctx, const rtlnet_cls_protect_t *profile);
 int rtlnet_classifier_protect_limit(const rtlnet_classifier_t *ctx, rtlnet_cls_prot_class_t cls,
                                     uint32_t limit_pkts, uint32_t window_ms);

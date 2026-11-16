@@ -1236,8 +1236,10 @@ void rtlnet_classifier_protect_defaults(rtlnet_cls_protect_t *profile)
 }
 
 /*
- * rtlnet_classifier_config_protect -- install the protection profile: every
- * frame passes (MODE = PASS_ALL) except what the four class policers limit.
+ * rtlnet_classifier_protect_load -- install the protection profile with every write of
+ * rtlnet_classifier_config_protect except the final MODE write: MODE stays as clear_all left it
+ * (DROP_ALL). A caller that layers more on top (the firewall) sets the final MODE itself, so no frame
+ * passes by accident in between. Steps 1..7 of config_protect below.
  * Steps:
  *   1. Check the build holds the profile (1 MAC-table entry, 2 tuples, 1
  *      rule of 14 bytes, 4 policers) and every window is 1 ms or more;
@@ -1258,7 +1260,7 @@ void rtlnet_classifier_protect_defaults(rtlnet_cls_protect_t *profile)
  * Returns: RTLNET_CLS_OK, RTLNET_CLS_ERR_ARG, RTLNET_CLS_ERR_RANGE (the
  * build is too small), RTLNET_CLS_ERR_NOT_INIT, or a failing step's code.
  */
-int rtlnet_classifier_config_protect(const rtlnet_classifier_t *ctx, const rtlnet_cls_protect_t *profile)
+int rtlnet_classifier_protect_load(const rtlnet_classifier_t *ctx, const rtlnet_cls_protect_t *profile)
 {
     static const uint8_t bcast[RTLNET_CLS_MAC_BYTES] = {0xFFu, 0xFFu, 0xFFu, 0xFFu, 0xFFu, 0xFFu};
     static const uint8_t arp_type[2] = {0x08u, 0x06u};
@@ -1306,6 +1308,17 @@ int rtlnet_classifier_config_protect(const rtlnet_classifier_t *ctx, const rtlne
     for (c = 0u; rc == RTLNET_CLS_OK && c < (uint32_t)RTLNET_CLS_PROT_CLASSES; c++) {
         rc = rtlnet_classifier_policer_set(ctx, c, 1, profile->limit_pkts[c], profile->window_ms[c]);
     }
+    return rc;
+}
+
+/*
+ * rtlnet_classifier_config_protect -- install the protection profile (protect_load) and then set MODE =
+ * PASS_ALL as the last write. Returns: see protect_load.
+ */
+int rtlnet_classifier_config_protect(const rtlnet_classifier_t *ctx, const rtlnet_cls_protect_t *profile)
+{
+    int rc = rtlnet_classifier_protect_load(ctx, profile);
+
     if (rc == RTLNET_CLS_OK) {
         rc = rtlnet_classifier_set_mode(ctx, RTLNET_CLS_MODE_PASS_ALL);
     }

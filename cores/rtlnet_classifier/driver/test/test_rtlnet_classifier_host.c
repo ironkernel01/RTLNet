@@ -778,6 +778,34 @@ static void test_protect(void)
           "custom profile");
     check(rtlnet_classifier_config_protect(NULL, &pr) == RTLNET_CLS_ERR_ARG, "config_protect no context");
 
+    /* protect_load: the config_protect image except MODE, and no write of pass-all. */
+    {
+        static uint32_t img[RTLNET_CLS_WINDOW_BYTES / 4u];
+        uint32_t w;
+        uint32_t bad = 0u;
+        int pass_write = 0;
+
+        check(rtlnet_classifier_config_protect(&g_ctx, NULL) == RTLNET_CLS_OK, "protect_load: reference image");
+        for (w = 0x20u / 4u; w < RTLNET_CLS_WINDOW_BYTES / 4u; w++) {
+            img[w] = mreg(4u * w);
+        }
+        log_start();
+        check(rtlnet_classifier_protect_load(&g_ctx, NULL) == RTLNET_CLS_OK, "protect_load");
+        log_stop();
+        for (w = 0x20u / 4u; w < RTLNET_CLS_WINDOW_BYTES / 4u; w++) {
+            bad += (mreg(4u * w) != img[w]) ? 1u : 0u;
+        }
+        check(bad == 0u, "protect_load: registers equal the config_protect image (MODE aside)");
+        check(g_mode == (uint32_t)RTLNET_CLS_MODE_DROP_ALL, "protect_load: MODE stays drop-all");
+        for (w = 0u; w < g_log_n; w++) {
+            if (g_log_off[w] == RTLNET_CLS_REG_CTRL && (g_log_val[w] & RTLNET_CLS_CTRL_MODE_MASK) == (uint32_t)RTLNET_CLS_MODE_PASS_ALL) {
+                pass_write = 1;
+            }
+        }
+        check(!pass_write && g_log_n > 10u, "protect_load: no CTRL write of pass-all");
+        check(rtlnet_classifier_protect_load(NULL, NULL) == RTLNET_CLS_ERR_ARG, "protect_load: no context");
+    }
+
     /* A build too small for the profile is refused before anything is written. */
     {
         uint32_t tu = g_tu;

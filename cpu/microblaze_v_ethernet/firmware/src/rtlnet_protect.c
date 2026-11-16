@@ -6,8 +6,11 @@
  * See rtlnet_protect.h for the contract. Context: main loop only. The profile
  * lives in the classifier hardware (rule 0, tuples 0 and 1, MAC entry 0, the
  * four policers); this file keeps the limits and windows the CLI changes and
- * applies them through the classifier driver, using its own driver context
- * for the same registers as rtlnet_cpupath.c.
+ * the installed state. It owns no classifier context: rtlnet_cpupath.c is the
+ * one owner, installs the profile as the base of every whole-state rewrite
+ * (cpupath_base_profile, which reads these limits through a pointer) and
+ * lends its context for the read side and for the one-register policer write
+ * of a limit change.
  */
 #include "rtlnet_protect.h"
 
@@ -15,9 +18,7 @@
 
 #include "rtlnet_classifier.h"
 #include "rtlnet_cpupath.h"
-#include "rtlnet_platform.h"
 
-static rtlnet_classifier_t g_cls;
 static rtlnet_cls_protect_t g_profile;
 static int                  g_profile_ready;
 static int                  g_installed;
@@ -69,11 +70,9 @@ static int map_rc(int rc)
  * protect_install -- probe the classifier and install the profile.
  * Steps:
  *   1. The classifier must have been found by cpupath_init (feature discovery).
- *   2. rtlnet_classifier_init, then rtlnet_classifier_config_protect with the
- *      configured limits: clear, rule, tuples, MAC entry, policers, MODE
- *      pass-all last.
- * A classifier too small for the profile is left as it is (the broadcast
- * storm limiter of cpupath_init).
+ *   2. cpupath_base_profile: the classifier is re-read and the whole state is rewritten with this profile
+ *      as the base (config_protect with the configured limits: clear, rule, tuples, MAC entry, policers).
+ * A classifier too small for the profile keeps the broadcast storm limiter of cpupath_init as its base.
  * Returns: PROTECT_OK, PROTECT_ABSENT, PROTECT_TOO_SMALL or PROTECT_HW_ERROR.
  */
 int protect_install(void)
@@ -85,12 +84,33 @@ int protect_install(void)
     if (!cpupath_cls_present()) {
         return PROTECT_ABSENT;
     }
-    if (rtlnet_classifier_init(&g_cls, RTLNET_PLAT_CLS_BASE) != RTLNET_CLS_OK) {
-        return PROTECT_HW_ERROR;
+    switch (cpupath_base_profile(&g_profile)) {
+    case CPUPATH_OK:        rc = PROTECT_OK; break;
+    case CPUPATH_TOO_SMALL: rc = PROTECT_TOO_SMALL; break;
+    case CPUPATH_ABSENT:    rc = PROTECT_ABSENT; break;
+    default:                rc = PROTECT_HW_ERROR; break;
     }
-    rc = map_rc(rtlnet_classifier_config_protect(&g_cls, &g_profile));
     g_installed = (rc == PROTECT_OK) ? 1 : 0;
     return rc;
+}
+
+/*
+ * protect_profile -- the limits and windows the next whole-state rewrite writes.
+ * Returns: pointer to the profile.
+ */
+const rtlnet_cls_protect_t *protect_profile(void)
+{
+    ensure_profile();
+    return &g_profile;
+}
+
+/*
+ * protect_installed -- the profile is the base of the classifier state.
+ * Returns: 1 installed, 0 not.
+ */
+int protect_installed(void)
+{
+    return g_installed;
 }
 
 /*
@@ -115,7 +135,7 @@ int protect_set(unsigned cls, uint32_t limit_pkts, uint32_t window_ms)
     if (!g_installed) {
         return PROTECT_TOO_SMALL;
     }
-    return map_rc(rtlnet_classifier_protect_limit(&g_cls, (rtlnet_cls_prot_class_t)cls, limit_pkts, window_ms));
+    return map_rc(rtlnet_classifier_protect_limit(cpupath_cls_ctx(), (rtlnet_cls_prot_class_t)cls, limit_pkts, window_ms));
 }
 
 /*
@@ -137,7 +157,7 @@ int protect_class_get(unsigned cls, protect_class_t *out)
     if (!g_installed) {
         return PROTECT_OK;
     }
-    if (rtlnet_classifier_protect_get(&g_cls, (rtlnet_cls_prot_class_t)cls, &ps) != RTLNET_CLS_OK) {
+    if (rtlnet_classifier_protect_get(cpupath_cls_ctx(), (rtlnet_cls_prot_class_t)cls, &ps) != RTLNET_CLS_OK) {
         return PROTECT_HW_ERROR;
     }
     out->limit_pkts = ps.limit_pkts;
@@ -166,9 +186,9 @@ int protect_info(protect_info_t *out)
     if (!cpupath_cls_present()) {
         return PROTECT_ABSENT;
     }
-    if (rtlnet_classifier_init(&g_cls, RTLNET_PLAT_CLS_BASE) != RTLNET_CLS_OK ||
-        rtlnet_classifier_get_build(&g_cls, &b) != RTLNET_CLS_OK ||
-        rtlnet_classifier_get_mode(&g_cls, &m) != RTLNET_CLS_OK) {
+    if (cpupath_cls_reinit() != CPUPATH_OK ||
+        rtlnet_classifier_get_build(cpupath_cls_ctx(), &b) != RTLNET_CLS_OK ||
+        rtlnet_classifier_get_mode(cpupath_cls_ctx(), &m) != RTLNET_CLS_OK) {
         return PROTECT_HW_ERROR;
     }
     out->valid = 1;

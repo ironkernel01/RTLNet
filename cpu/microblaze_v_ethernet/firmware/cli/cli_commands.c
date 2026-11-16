@@ -59,6 +59,7 @@
 #include "rtlnet_dhcp.h"
 #include "rtlnet_eth_mac.h"
 #include "rtlnet_eth_protocol.h"
+#include "rtlnet_firewall.h"
 #include "rtlnet_fmt.h"
 #include "rtlnet_icmp.h"
 #include "rtlnet_iperf.h"
@@ -1006,17 +1007,221 @@ int cli_show_counters(const MenuCommandContext *ctx)
 }
 
 /**
- * @brief The classifier protection profile as configuration commands (the four class policers).
+ * @brief Print an entry action ("gate", "classify", "police <p>").
+ * @param action  CPUPATH_ACT_*.
+ * @param policer Policer index for police.
+ * @return None.
+ */
+static void cli_print_action(unsigned action, unsigned policer)
+{
+    if (action == CPUPATH_ACT_GATE) {
+        fmt_printf("gate");
+    } else if (action == CPUPATH_ACT_CLASSIFY) {
+        fmt_printf("classify");
+    } else {
+        fmt_printf("police %u", policer);
+    }
+}
+
+/**
+ * @brief Report a cpupath result: nothing for success, the reason otherwise.
+ * @param rc CPUPATH_* result.
+ * @return 0 for success and for a setting kept without hardware (absent core
+ *         or driver), -1 for a bad argument or a driver error.
+ */
+static int cli_cpupath_rc(int rc)
+{
+    if (rc == CPUPATH_OK) {
+        return 0;
+    }
+    fmt_printf("%% %s\n", cpupath_result_text(rc));
+    return (rc == CPUPATH_ABSENT || rc == CPUPATH_NO_DRIVER) ? 0 : -1;
+}
+
+/**
+ * @brief Report a firewall result: nothing for success, the reason otherwise (with the slot counts when the
+ *        allow list does not fit).
+ * @param rc FW_* result.
+ * @return 0 for success, -1 otherwise.
+ */
+static int cli_fw_rc(int rc)
+{
+    fw_status_t st;
+    if (rc == FW_OK) {
+        return 0;
+    }
+    if (rc == FW_NO_ROOM) {
+        fw_status(&st);
+        fmt_printf("%% The allow list needs %u tuple slots, the classifier has %u; the firewall stays off\n",
+                   st.needed, st.avail);
+        return -1;
+    }
+    fmt_printf("%% %s\n", fw_result_text(rc));
+    return -1;
+}
+
+/**
+ * @brief Parse "gate", "classify" or "police <p>" from argv[i...].
+ * @param ctx    Command context.
+ * @param i      Index of the action word.
+ * @param action Parsed CPUPATH_ACT_*.
+ * @param pol    Parsed policer (0 unless police).
+ * @return Index after the action, or -1 (message printed).
+ */
+static int cli_parse_action(const MenuCommandContext *ctx, int i, unsigned *action, unsigned *pol)
+{
+    uint32_t p;
+    *pol = 0u;
+    if (i >= ctx->argc) {
+        fmt_printf("%% Incomplete command: action gate, classify or police <p> expected\n");
+        return -1;
+    }
+    if (cli_word_is(ctx->argv[i], "gate")) {
+        *action = CPUPATH_ACT_GATE;
+        return i + 1;
+    }
+    if (cli_word_is(ctx->argv[i], "classify")) {
+        *action = CPUPATH_ACT_CLASSIFY;
+        return i + 1;
+    }
+    if (cli_word_is(ctx->argv[i], "police")) {
+        if (i + 1 >= ctx->argc || cli_parse_u32(ctx->argv[i + 1], &p) != 0 || p >= CPUPATH_CLS_POLICERS) {
+            cli_bad_value("policer (0..3)", (i + 1 < ctx->argc) ? ctx->argv[i + 1] : "");
+            return -1;
+        }
+        *action = CPUPATH_ACT_POLICE;
+        *pol = (unsigned)p;
+        return i + 2;
+    }
+    cli_bad_value("action (gate, classify, police <p>)", ctx->argv[i]);
+    return -1;
+}
+
+/**
+ * @brief Parse a table entry index 0..limit-1.
+ * @param s     Text.
+ * @param limit Number of entries (CPUPATH_CLS_ENTRIES).
+ * @param out   Index.
+ * @return 0, or -1 (message printed).
+ */
+static int cli_parse_entry(const char *s, unsigned limit, unsigned *out)
+{
+    uint32_t v;
+    if (cli_parse_u32(s, &v) != 0 || v >= limit) {
+        return cli_bad_value("entry (0..15)", s);
+    }
+    *out = (unsigned)v;
+    return 0;
+}
+
+/**
+ * @brief Parse "a.b.c.d/len" into address and mask.
+ * @param s    Text.
+ * @param addr Address.
+ * @param mask Mask from the prefix length (0..32).
+ * @return 0, or -1 for a malformed prefix.
+ */
+static int cli_parse_prefix(const char *s, uint32_t *addr, uint32_t *mask)
+{
+    char ip[16];
+    unsigned n = 0;
+    uint32_t len;
+    while (s[n] != '\0' && s[n] != '/' && n < sizeof(ip) - 1u) {
+        ip[n] = s[n];
+        n++;
+    }
+    ip[n] = '\0';
+    if (s[n] != '/' || cli_parse_ipv4(ip, addr) != 0 || cli_parse_u32(&s[n + 1u], &len) != 0 || len > 32u) {
+        return -1;
+    }
+    *mask = (len == 0u) ? 0u : (0xFFFFFFFFu << (32u - len));
+    return 0;
+}
+
+/**
+ * @brief Parse "lo" or "lo-hi" (0..65535).
+ * @param s  Text.
+ * @param lo Low end.
+ * @param hi High end (= lo for a single value).
+ * @return 0, or -1 for a malformed or inverted range.
+ */
+static int cli_parse_range(const char *s, uint16_t *lo, uint16_t *hi)
+{
+    char a[8];
+    unsigned n = 0;
+    uint32_t l;
+    uint32_t h;
+    while (s[n] != '\0' && s[n] != '-' && n < sizeof(a) - 1u) {
+        a[n] = s[n];
+        n++;
+    }
+    a[n] = '\0';
+    if (cli_parse_u32(a, &l) != 0 || l > CLI_UDP_PORT_MAX) {
+        return -1;
+    }
+    h = l;
+    if (s[n] == '-' && (cli_parse_u32(&s[n + 1u], &h) != 0 || h > CLI_UDP_PORT_MAX || h < l)) {
+        return -1;
+    }
+    if (s[n] != '\0' && s[n] != '-') {
+        return -1;
+    }
+    *lo = (uint16_t)l;
+    *hi = (uint16_t)h;
+    return 0;
+}
+
+/**
+ * @brief Prefix length of a contiguous mask.
+ * @param m Mask.
+ * @return Leading one bits.
+ */
+static unsigned cli_prefix_len(uint32_t m)
+{
+    unsigned n = 0;
+    while (n < 32u && (m & (0x80000000u >> n)) != 0u) {
+        n++;
+    }
+    return n;
+}
+
+/**
+ * @brief The classifier configuration as commands: the four class policers of the protection profile, the user
+ *        ACL entries and, when the firewall is on, "classifier firewall enable" (last, so a replay configures the
+ *        entries first). Services and client flows are dynamic and are not listed.
  * @return None.
  */
 static void cli_print_protect_config(void)
 {
     protect_class_t pc;
-    for (unsigned c = 0u; c < PROTECT_CLASSES; c++) {
-        if (protect_class_get(c, &pc) == PROTECT_OK) {
-            fmt_printf("classifier policer %s %u %u\n", protect_class_name(c), (unsigned)pc.limit_pkts,
+    const cpupath_cls_config_t *c = cpupath_cls_config();
+    char a[16];
+    char b[16];
+    for (unsigned k = 0u; k < PROTECT_CLASSES; k++) {
+        if (protect_class_get(k, &pc) == PROTECT_OK) {
+            fmt_printf("classifier policer %s %u %u\n", protect_class_name(k), (unsigned)pc.limit_pkts,
                        (unsigned)pc.window_ms);
         }
+    }
+    for (unsigned i = 0; i < CPUPATH_CLS_ENTRIES; i++) {
+        const cpupath_acl_entry_t *e = &c->acl[i];
+        if (!e->valid) {
+            continue;
+        }
+        fmt_printf("classifier acl %u %s src %s/%u dst %s/%u ", i,
+                   (e->proto == 6u) ? "tcp" : (e->proto == 17u) ? "udp" : "any", cli_ipv4_text(e->src, a),
+                   cli_prefix_len(e->src_mask), cli_ipv4_text(e->dst, b), cli_prefix_len(e->dst_mask));
+        if (e->sport_lo != 0u || e->sport_hi != CLI_UDP_PORT_MAX) {
+            fmt_printf("sport %u-%u ", (unsigned)e->sport_lo, (unsigned)e->sport_hi);
+        }
+        if (e->dport_lo != 0u || e->dport_hi != CLI_UDP_PORT_MAX) {
+            fmt_printf("dport %u-%u ", (unsigned)e->dport_lo, (unsigned)e->dport_hi);
+        }
+        cli_print_action(e->action, e->policer);
+        fmt_printf("\n");
+    }
+    if (fw_enabled()) {
+        fmt_printf("classifier firewall enable\n");
     }
 }
 
@@ -2288,6 +2493,63 @@ int cli_offload(const MenuCommandContext *ctx)
 /* ------------------------------------------------------------------------- */
 
 /**
+ * @brief The Firewall block of SHOW CLASSIFIER: state, what is allowed, one line per allow slot, the free
+ *        slots, the frames dropped and a line when an allow entry did not fit.
+ * @param ck Counters read from the classifier (NULL when they could not be read).
+ * @return None.
+ */
+static void cli_show_firewall(const cpupath_cls_counters_t *ck)
+{
+    fw_status_t st;
+    protect_class_t pc;
+    char a[16];
+    char b[16];
+    char who[24];
+    fw_status(&st);
+    fmt_printf("Firewall (CPU path)\n");
+    fmt_printf("  State           : %s\n", st.enabled ? "enabled (default deny)" : "disabled");
+    if (!st.enabled) {
+        return;
+    }
+    if (protect_installed() && protect_class_get(PROTECT_ARP, &pc) == PROTECT_OK) {
+        fmt_printf("  Allowed         : ARP (policer arp %u per %u ms), and the allow list below\n",
+                   (unsigned)pc.limit_pkts, (unsigned)pc.window_ms);
+    } else {
+        fmt_printf("  Allowed         : ARP (not policed), and the allow list below\n");
+    }
+    for (unsigned i = 0; i < st.slots && i < FW_MAX_SLOTS; i++) {
+        const fw_slot_t *s = fw_slot(i);
+        const rtlnet_cls_tuple_t *t;
+        if (s == NULL || s->kind == FW_SLOT_FREE) {
+            continue;
+        }
+        t = &s->tuple;
+        if (s->kind == FW_SLOT_SERVICE) {
+            (void)fmt_snprintf(who, sizeof(who), "%s", fw_service_name(s->index));
+        } else if (s->kind == FW_SLOT_FLOW) {
+            (void)fmt_snprintf(who, sizeof(who), "flow %u", (unsigned)s->index);
+        } else {
+            (void)fmt_snprintf(who, sizeof(who), "acl %u", (unsigned)s->index);
+        }
+        fmt_printf("  Slot %-2u %-10s : %s src %s/%u dst %s/%u sport %u-%u dport %u-%u%s\n", i, who,
+                   !t->proto_en ? "any" : (t->proto == FW_PROTO_TCP) ? "tcp" : (t->proto == FW_PROTO_UDP) ? "udp" : "ip",
+                   cli_ipv4_text(t->src_ip, a), cli_prefix_len(t->src_mask), cli_ipv4_text(t->dst_ip, b),
+                   cli_prefix_len(t->dst_mask), (unsigned)t->sport_lo, (unsigned)t->sport_hi, (unsigned)t->dport_lo,
+                   (unsigned)t->dport_hi, t->police_en ? " (policed)" : "");
+    }
+    fmt_printf("  Free slots      : %u of %u\n", st.slots - st.used, st.slots);
+    if (ck != NULL) {
+        fmt_printf("  Dropped         : %u frames (not ARP and not allowed)\n", (unsigned)ck->mode_dropped);
+    }
+    if (st.unfit != 0u) {
+        fmt_printf("  %% %u allow entries did not fit the %u tuple slots and stay blocked\n", st.unfit, st.slots);
+    }
+    if (st.flows_full != 0u) {
+        fmt_printf("  %% %u client connections found the flow table full and stay blocked\n", st.flows_full);
+    }
+}
+
+/**
  * @brief SHOW CLASSIFIER: the built classifier (sizes, RAM style, latency), its mode, the protection profile
  *        and, per traffic class, the policer limit, window and counters.
  * @param ctx Unused.
@@ -2319,19 +2581,19 @@ int cli_show_classifier(const MenuCommandContext *ctx)
                    (unsigned)ck.frames, (unsigned)ck.passed, (unsigned)ck.dropped, (unsigned)ck.police_dropped,
                    (unsigned)ck.mode_dropped, (unsigned)ck.overrun_dropped);
     }
-    if (!info.installed) {
-        return 0;
-    }
-    fmt_printf("  Class      Limit / window      Seen    Passed   Dropped  Polices\n");
-    for (unsigned c = 0u; c < PROTECT_CLASSES; c++) {
-        if (protect_class_get(c, &pc) != PROTECT_OK) {
-            fmt_printf("  %% class %s not readable\n", protect_class_name(c));
-            continue;
+    if (info.installed) {
+        fmt_printf("  Class      Limit / window      Seen    Passed   Dropped  Polices\n");
+        for (unsigned c = 0u; c < PROTECT_CLASSES; c++) {
+            if (protect_class_get(c, &pc) != PROTECT_OK) {
+                fmt_printf("  %% class %s not readable\n", protect_class_name(c));
+                continue;
+            }
+            fmt_printf("  %-9s %6u / %5u ms %9u %9u %9u  %s%s\n", protect_class_name(c), (unsigned)pc.limit_pkts,
+                       (unsigned)pc.window_ms, (unsigned)pc.seen, (unsigned)pc.passed, (unsigned)pc.dropped,
+                       protect_class_text(c), pc.enabled ? "" : " (policer off)");
         }
-        fmt_printf("  %-9s %6u / %5u ms %9u %9u %9u  %s%s\n", protect_class_name(c), (unsigned)pc.limit_pkts,
-                   (unsigned)pc.window_ms, (unsigned)pc.seen, (unsigned)pc.passed, (unsigned)pc.dropped,
-                   protect_class_text(c), pc.enabled ? "" : " (policer off)");
     }
+    cli_show_firewall((cpupath_cls_counters(&ck) == CPUPATH_OK) ? &ck : NULL);
     return 0;
 }
 
@@ -2362,4 +2624,101 @@ int cli_classifier_policer(const MenuCommandContext *ctx)
         return -1;
     }
     return 0;
+}
+
+/**
+ * @brief CLASSIFIER FIREWALL ENABLE (config): default-deny on the CPU path. Only ARP and the allow list (the
+ *        services lwIP listens on, the connections it opened, the classifier acl entries) reach lwIP; the rest is
+ *        dropped in hardware. Refused, nothing written, when the allow list does not fit the classifier.
+ * @param ctx Unused.
+ * @return 0, or -1 when refused or on a driver error.
+ */
+int cli_classifier_firewall_enable(const MenuCommandContext *ctx)
+{
+    (void)ctx;
+    return cli_fw_rc(fw_enable(1));
+}
+
+/**
+ * @brief CLASSIFIER FIREWALL DISABLE (config): back to the protection profile alone.
+ * @param ctx Unused.
+ * @return 0, or -1 on a driver error.
+ */
+int cli_classifier_firewall_disable(const MenuCommandContext *ctx)
+{
+    (void)ctx;
+    return cli_fw_rc(fw_enable(0));
+}
+
+/**
+ * @brief CLASSIFIER ACL [ENTRY] [PROTO] {W1}..{W10}: tcp|udp|any src <ip>/<len> dst <ip>/<len>
+ *        [sport <lo>[-<hi>]] [dport <lo>[-<hi>]] gate|classify|police <p>. With the firewall on every entry is an
+ *        allow entry (a police action keeps its policer); with it off the entry takes the classify or police
+ *        action. The firmware has no EtherType entries: they are not applied while the firewall is on.
+ * @param ctx Arguments as typed.
+ * @return 0, or -1 for a bad value or a driver error.
+ */
+int cli_cls_acl(const MenuCommandContext *ctx)
+{
+    cpupath_acl_entry_t e;
+    unsigned entry;
+    int i = 2;
+    if (cli_parse_entry(ctx->argv[0], CPUPATH_CLS_ENTRIES, &entry) != 0) {
+        return -1;
+    }
+    e.valid = 1;
+    if (cli_word_is(ctx->argv[1], "tcp")) {
+        e.proto = 6u;
+    } else if (cli_word_is(ctx->argv[1], "udp")) {
+        e.proto = 17u;
+    } else if (cli_word_is(ctx->argv[1], "any")) {
+        e.proto = 0u;
+    } else {
+        return cli_bad_value("protocol (tcp, udp, any)", ctx->argv[1]);
+    }
+    if (i + 3 >= ctx->argc || !cli_word_is(ctx->argv[i], "src") || cli_parse_prefix(ctx->argv[i + 1], &e.src, &e.src_mask) != 0 ||
+        !cli_word_is(ctx->argv[i + 2], "dst") || cli_parse_prefix(ctx->argv[i + 3], &e.dst, &e.dst_mask) != 0) {
+        fmt_printf("%% Expected: src <ip>/<len> dst <ip>/<len>\n");
+        return -1;
+    }
+    i += 4;
+    e.sport_lo = 0u;
+    e.sport_hi = (uint16_t)CLI_UDP_PORT_MAX;
+    e.dport_lo = 0u;
+    e.dport_hi = (uint16_t)CLI_UDP_PORT_MAX;
+    if (i + 1 < ctx->argc && cli_word_is(ctx->argv[i], "sport")) {
+        if (cli_parse_range(ctx->argv[i + 1], &e.sport_lo, &e.sport_hi) != 0) {
+            return cli_bad_value("source port range", ctx->argv[i + 1]);
+        }
+        i += 2;
+    }
+    if (i + 1 < ctx->argc && cli_word_is(ctx->argv[i], "dport")) {
+        if (cli_parse_range(ctx->argv[i + 1], &e.dport_lo, &e.dport_hi) != 0) {
+            return cli_bad_value("destination port range", ctx->argv[i + 1]);
+        }
+        i += 2;
+    }
+    i = cli_parse_action(ctx, i, &e.action, &e.policer);
+    if (i < 0) {
+        return -1;
+    }
+    if (i < ctx->argc) {
+        return cli_bad_value("extra word", ctx->argv[i]);
+    }
+    return cli_cpupath_rc(cpupath_cls_set_acl(entry, &e));
+}
+
+/**
+ * @brief NO CLASSIFIER ACL [ENTRY].
+ * @param ctx argv[0] = entry.
+ * @return 0, or -1 for a bad entry or a driver error.
+ */
+int cli_no_cls_acl(const MenuCommandContext *ctx)
+{
+    cpupath_acl_entry_t e = { 0 };
+    unsigned entry;
+    if (cli_parse_entry(ctx->argv[0], CPUPATH_CLS_ENTRIES, &entry) != 0) {
+        return -1;
+    }
+    return cli_cpupath_rc(cpupath_cls_set_acl(entry, &e));
 }

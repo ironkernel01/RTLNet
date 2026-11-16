@@ -87,6 +87,22 @@
 
 #include <string.h>
 
+/* RTLNET-MOD: the firewall of the CPU path (src/rtlnet_firewall.h) is told which port the server listens on and
+ * which client connections are open, so that it lets their traffic through. The desktop loopback test of this file
+ * builds with RTLNET_LWIPERF_NO_FIREWALL: no firewall, the hooks are empty. */
+#ifdef RTLNET_LWIPERF_NO_FIREWALL
+#define FW_SVC_IPERF_TCP 1u
+#define FW_SVC_IPERF_BACK 2u
+#define RTLNET_LWIPERF_FW_SERVER(id, port, on)      ((void)0)
+#define RTLNET_LWIPERF_FW_FLOW_ADD(rip, rport, lport)  ((void)0)
+#define RTLNET_LWIPERF_FW_FLOW_REMOVE(rip, rport, lport) ((void)0)
+#else
+#include "rtlnet_firewall.h"
+#define RTLNET_LWIPERF_FW_SERVER(id, port, on)      ((void)fw_service_set((id), FW_PROTO_TCP, (port), (on)))
+#define RTLNET_LWIPERF_FW_FLOW_ADD(rip, rport, lport)  ((void)fw_flow_add(FW_PROTO_TCP, (rip), (rport), (lport)))
+#define RTLNET_LWIPERF_FW_FLOW_REMOVE(rip, rport, lport) ((void)fw_flow_remove(FW_PROTO_TCP, (rip), (rport), (lport)))
+#endif
+
 /* Currently, only TCP is implemented */
 #if LWIP_TCP && LWIP_CALLBACK_API
 
@@ -193,6 +209,9 @@ typedef struct _rtlnet_lwiperf_state_tcp {
   ip_addr_t local_addr;
   ip_addr_t remote_addr;
   u8_t hdr[RTLNET_LWIPERF_HDR_KEEP];
+  u8_t fw_flow;        /* the firewall holds the client flow of this connection (fw_lport, remote_addr, remote_port) */
+  u8_t fw_server;      /* firewall service id + 1 when this listener is registered (main server or connect-back), else 0 */
+  u16_t fw_lport;      /* local port of the client connection / port of the listener */
 } rtlnet_lwiperf_state_tcp_t;
 
 /** List of active iperf sessions */
@@ -365,6 +384,15 @@ rtlnet_lwiperf_tcp_close(rtlnet_lwiperf_state_tcp_t *conn, enum rtlnet_lwiperf_r
   rtlnet_lwiperf_list_remove(&conn->base);
   rtlnet_lwiperf_slot_release(conn);
   rtlnet_lwip_tcp_conn_report(conn, report_type);
+  if (conn->fw_flow) {
+    RTLNET_LWIPERF_FW_FLOW_REMOVE(lwip_ntohl(ip4_addr_get_u32(ip_2_ip4(&conn->remote_addr))), conn->remote_port,
+                                  conn->fw_lport);
+    conn->fw_flow = 0;
+  }
+  if (conn->fw_server) {
+    RTLNET_LWIPERF_FW_SERVER((unsigned)conn->fw_server - 1u, conn->fw_lport, 0);
+    conn->fw_server = 0;
+  }
   if (conn->conn_pcb != NULL) {
     tcp_arg(conn->conn_pcb, NULL);
     tcp_poll(conn->conn_pcb, NULL, 0);
@@ -579,6 +607,11 @@ rtlnet_lwiperf_tx_start_impl(const ip_addr_t *remote_ip, u16_t remote_port, u32_
     (void)rtlnet_lwiperf_tcp_close(client_conn, RTLNET_LWIPERF_TCP_ABORTED_LOCAL);
     return err;
   }
+  /* RTLNET-MOD: the local port is known now and the SYN-ACK is processed from the main loop later: let the
+     firewall pass the reply traffic (removed again in rtlnet_lwiperf_tcp_close, on a close or an error) */
+  client_conn->fw_lport = newpcb->local_port;
+  client_conn->fw_flow = 1;
+  RTLNET_LWIPERF_FW_FLOW_ADD(lwip_ntohl(ip4_addr_get_u32(ip_2_ip4(&remote_addr))), remote_port, newpcb->local_port);
   rtlnet_lwiperf_list_add(&client_conn->base);
   *new_conn = client_conn;
   return ERR_OK;
@@ -929,6 +962,11 @@ static err_t rtlnet_lwiperf_start_tcp_server_impl(const ip_addr_t *local_addr, u
 
   tcp_arg(s->server_pcb, s);
   tcp_accept(s->server_pcb, rtlnet_lwiperf_tcp_accept);
+  /* RTLNET-MOD: the main server is the firewall's iperf service; the listener a dual or tradeoff client starts for
+     the connect-back is a temporary service of its own while it listens (removed when the listener closes) */
+  s->fw_server = (u8_t)(((related_master_state == NULL) ? FW_SVC_IPERF_TCP : FW_SVC_IPERF_BACK) + 1u);
+  s->fw_lport = local_port;
+  RTLNET_LWIPERF_FW_SERVER((unsigned)s->fw_server - 1u, local_port, 1);
 
   rtlnet_lwiperf_list_add(&s->base);
   *state = s;

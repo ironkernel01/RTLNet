@@ -11,6 +11,7 @@
 #include <stddef.h>   /* NULL */
 #include <string.h>   /* memset */
 
+#include "rtlnet_firewall.h"
 #include "rtlnet_platform.h"
 
 #include "lwip/pbuf.h"
@@ -249,7 +250,8 @@ static err_t on_accept(void *arg, struct tcp_pcb *pcb, err_t err)
 }
 
 /*
- * apply -- open, move or close the listen PCB to match the configuration.
+ * apply -- open, move or close the listen PCB to match the configuration, and tell the firewall which port
+ * is open (FW_SVC_TCP_ECHO: removed when the listen PCB closes, set once the new one listens).
  * Returns: nothing.
  */
 static void apply(void)
@@ -260,6 +262,7 @@ static void apply(void)
     if (g_listen != NULL && (!g_cfg_enable || g_listen_port != g_cfg_port)) {
         (void)tcp_close(g_listen);
         g_listen = NULL;
+        (void)fw_service_set(FW_SVC_TCP_ECHO, FW_PROTO_TCP, g_listen_port, 0);
     }
     if (g_cfg_enable && g_listen == NULL) {
         struct tcp_pcb *pcb = tcp_new_ip_type(IPADDR_TYPE_V4);
@@ -277,6 +280,7 @@ static void apply(void)
         }
         g_listen_port = g_cfg_port;
         tcp_accept(g_listen, on_accept);
+        (void)fw_service_set(FW_SVC_TCP_ECHO, FW_PROTO_TCP, g_listen_port, 1);
     }
 }
 

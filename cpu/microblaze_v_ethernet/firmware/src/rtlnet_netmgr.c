@@ -14,6 +14,7 @@
 #include "rtlnet_arp.h"
 #include "rtlnet_board.h"
 #include "rtlnet_cpupath.h"
+#include "rtlnet_firewall.h"
 #include "rtlnet_protect.h"
 #include "rtlnet_dhcp.h"
 #include "rtlnet_eth_mac.h"
@@ -95,6 +96,7 @@ void netmgr_config_defaults(void)
     g_cfg.tcp_iperf_enable = 1;
     g_cfg.tcp_iperf_port = RTLNET_TCP_IPERF_PORT_DEFAULT;
     cpupath_config_defaults();
+    fw_config_defaults();
     for (unsigned i = 0; i < NETMGR_NUM_SOCKETS; i++) {
         netmgr_socket_cfg_t *k = &g_cfg.sock[i];
         k->open          = 0;

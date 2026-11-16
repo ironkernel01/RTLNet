@@ -15,6 +15,7 @@
 #include <string.h>   /* memset, memcpy */
 
 #include "host_platform.h"
+#include "rtlnet_firewall.h"
 #include "rtlnet_lwip.h"
 #include "rtlnet_offload.h"
 #include "rtlnet_lwip_netif.h"
@@ -172,13 +173,15 @@ uint32_t rtlnet_netif_dma_sr(int rx)
 }
 
 /*
- * rtlnet_tcp_echo_config -- harness: store the setting.
+ * rtlnet_tcp_echo_config -- harness: store the setting; the server counts as listening on that port for the
+ * firewall (on the target the firewall service is set when the listen PCB opens or closes).
  * Returns: nothing.
  */
 void rtlnet_tcp_echo_config(int enable, uint16_t port)
 {
     g_echo_enable = enable ? 1 : 0;
     g_echo_port = port;
+    (void)fw_service_set(FW_SVC_TCP_ECHO, FW_PROTO_TCP, port, g_echo_enable);
 }
 
 /*
@@ -220,13 +223,15 @@ void rtlnet_tcp_echo_clear_counters(void)
 }
 
 /*
- * rtlnet_tcp_iperf_config -- harness: store the setting.
+ * rtlnet_tcp_iperf_config -- harness: store the setting; the server counts as listening on that port for the
+ * firewall (on the target the firewall service is set when the lwiperf server opens or closes).
  * Returns: nothing.
  */
 void rtlnet_tcp_iperf_config(int enable, uint16_t port)
 {
     g_iperf_enable = enable ? 1 : 0;
     g_iperf_port = port;
+    (void)fw_service_set(FW_SVC_IPERF_TCP, FW_PROTO_TCP, port, g_iperf_enable);
 }
 
 /*

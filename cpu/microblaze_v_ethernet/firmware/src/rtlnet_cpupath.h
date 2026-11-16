@@ -34,6 +34,15 @@
  * entries has the action gate, otherwise it is classify-only and its police
  * entries only count and police.
  *
+ * One owner, one context: this module holds the only classifier driver context and rewrites the whole state
+ * (hw_sync) in one fixed order: clear_all; the base (the protection profile of rtlnet_protect.c when it is
+ * installed, else the broadcast storm limiter); the MAC entries; the policers (the profile's limits own
+ * policers 0..3 while it is installed); then either the firewall (rtlnet_firewall.c: ARP pair and allow list,
+ * MODE drop-on-match last) or the EtherType and ACL entries and MODE. With the profile installed it uses
+ * tuple slots 0 and 1, so the user ACL entry i goes to hardware slot 2 + i (a refusal when that is past the
+ * table). rtlnet_protect.c and rtlnet_firewall.c never write the classifier except through the functions
+ * below (one policer register through cpupath_cls_ctx, the firewall's slots through cpupath_fw_live_*).
+ *
  * This header holds types, constants and signatures; rtlnet_cpupath.c holds
  * the per-function commentary.
  */
@@ -41,6 +50,8 @@
 #define RTLNET_CPUPATH_H
 
 #include <stdint.h>   /* uint8_t, uint16_t, uint32_t */
+
+#include "rtlnet_classifier.h"
 
 #define CPUPATH_CLS_ENTRIES        16u     /* MAC and ACL entries (classifier TABLE_ENTRIES / TUPLE_ENTRIES) */
 #define CPUPATH_CLS_PAIRS          8u      /* EtherType range pairs (TABLE_ENTRIES / 2) */
@@ -67,6 +78,8 @@
 #define CPUPATH_NO_DRIVER          (-2)    /* driver not in this firmware build */
 #define CPUPATH_BAD_ARG            (-3)
 #define CPUPATH_HW_ERROR           (-4)
+#define CPUPATH_TOO_SMALL          (-5)    /* the build cannot hold the protection profile */
+#define CPUPATH_NO_SPACE           (-6)    /* an ACL entry has no tuple slot (the profile uses the first two) */
 
 typedef struct {
     int      valid;
@@ -173,6 +186,18 @@ int                         cpupath_cls_info(cpupath_cls_info_t *out);
 int                         cpupath_storm_set(uint32_t limit, uint32_t window_ms);
 int                         cpupath_storm_enable(int on);
 int                         cpupath_wrapper_counters(cpupath_wrapper_counters_t *out);
+
+/* Base profile (rtlnet_protect.c) and the shared context. */
+int                         cpupath_base_profile(const rtlnet_cls_protect_t *profile);
+const rtlnet_classifier_t  *cpupath_cls_ctx(void);
+int                         cpupath_cls_reinit(void);
+
+/* Firewall support (rtlnet_firewall.c). */
+int                         cpupath_sync(void);
+unsigned                    cpupath_fw_slots(void);
+int                         cpupath_fw_arp_ok(void);
+int                         cpupath_fw_live_set(unsigned slot, const rtlnet_cls_tuple_t *tuple);
+int                         cpupath_fw_live_clear(unsigned slot);
 const char                 *cpupath_mode_name(unsigned mode);
 const char                 *cpupath_result_text(int rc);
 
