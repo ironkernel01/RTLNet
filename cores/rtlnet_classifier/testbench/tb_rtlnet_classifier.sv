@@ -38,10 +38,19 @@
 //   * Plusargs: +INJECT_FAILURE (negative control), +SEED=<n>, +PERTURB=<k>
 //     (proves checks can fail: 1 expected latency +1, 2 model range upper
 //     bound exclusive, 3 model storm limit +1, 4 model LT as LE, 5 model
-//     drops VLAN awareness, 6 model counter FRAMES +1), +TRACE (per-frame
-//     engine results and model verdicts in the log).
+//     drops VLAN awareness, 6 model counter FRAMES +1, 7 model treats the
+//     tuple table's EXCLUDE as include during the firewall phase), +TRACE
+//     (per-frame engine results and model verdicts in the log).
+//   * Firewall phase (phase_firewall, section 13 and the CPU-path firewall of
+//     the driver): the protection profile plus rtlnet_classifier_firewall_apply
+//     written in the driver's register order; allow list, ARP, drops, ARP
+//     policing, count 0; live add / clear of a tuple slot under full-rate
+//     traffic (timing windows from the register write start / response and a
+//     margin) and the normal update protocol as the contrast (drops allowed
+//     traffic).
 // Language: SystemVerilog-2012 (simulation only).
-// Revision: 10-22-2026
+// Revision: 11-16-2026
+//   * 11-16-2026: phase_firewall, +PERTURB=7.
 //   * 10-22-2026: initial version.
 // -----------------------------------------------------------------------------
 `timescale 1ns / 1ps
@@ -239,6 +248,10 @@ module tb_rtlnet_classifier;
   // ---------------------------------------------------------------------------
   int unsigned seed = 32'h1234_5678;
   int          perturb = 0;
+  bit          fw_phase = 1'b0;          // the firewall phase runs (PERTURB 7 applies only there)
+  bit          live_mode = 1'b0;         // live-update streams: no per-frame expectation queue, no latency check
+  longint      live_first_q [$];         // live_mode: clock of the first accepted beat of every frame
+  int          live_sent = 0;            // live_mode: frames the source has fully sent
   int          delay_beats = 0;
   int          verdict_latency = 0;
 
@@ -342,7 +355,10 @@ module tb_rtlnet_classifier;
     if (axis_resetn) begin
       if (s_tvalid && !s_tready) in_stall_cycles++;
       if (s_tvalid && s_tready) begin
-        if (!in_mid) begin
+        if (!in_mid && live_mode) begin
+          in_pv = 1'b0;
+          live_first_q.push_back(cyc);
+        end else if (!in_mid) begin
           if (vq.size() == 0) begin
             tb_error("input frame without an expectation");
             in_pv = 1'b0;
@@ -374,7 +390,7 @@ module tb_rtlnet_classifier;
 
   // Output monitor: latency of every output beat.
   always @(posedge axis_clk) begin
-    if (axis_resetn && m_tvalid && m_tready) begin
+    if (axis_resetn && m_tvalid && m_tready && !live_mode) begin
       longint t_in;
       int     lat;
       out_beats++;
@@ -864,7 +880,8 @@ module tb_rtlnet_classifier;
     // match.
     tand = 1;
     for (int t = 0; t < 6; t++) begin
-      if (tmode[t][0] && !tmode[t][4]) tand = tand && (tmode[t][1] ? !thit[t] : thit[t]);
+      if (tmode[t][0] && !tmode[t][4])
+        tand = tand && (((tmode[t][1] && !(perturb == 7 && fw_phase && t == T_TU)) ? !thit[t] : thit[t]));
     end
     anyg = 0; allex = 1; orv = 0; andv = 1;
     for (int i = 0; i < NR; i++) begin
@@ -1729,6 +1746,315 @@ module tb_rtlnet_classifier;
   endtask
 
   // ---------------------------------------------------------------------------
+  // Firewall phase: protection profile + rtlnet_classifier_firewall_apply.
+  // ---------------------------------------------------------------------------
+  localparam bit [31:0] FW_BOARD_IP  = 32'hC000_0232;   // 192.0.2.50
+  localparam bit [31:0] FW_CLIENT_IP = 32'hC000_020A;   // 192.0.2.10
+  localparam bit [31:0] FW_OTHER_IP  = 32'hC000_020B;   // 192.0.2.11
+  localparam bit [31:0] FW_PEER_IP   = 32'hC000_0263;   // 192.0.2.99
+  localparam bit [31:0] FW_ANY_IP    = 32'hC000_0299;   // 192.0.2.153
+  localparam int        LV_N         = 240;             // frames per live run (alternate dport 7 / 23)
+  localparam int        LV_ADD_AT    = 60;              // frames sent before the add starts
+  localparam int        LV_CLR_AT    = 150;             // frames sent before the clear starts
+  localparam int        LV_SLOT      = 3;               // free tuple slot of the live test (all builds have 4 or more)
+  // Margin (axis_clk) around a register write seen from the frame stream. A write takes effect between the
+  // start of the AXI write and its response (rtlnet_axil_cdc answers after the register file executed it),
+  // and a frame compares its fields from its judge beat until WIN + 8 clocks later (rotating scan, snapshot,
+  // table latency), so a frame whose judge beat is more than WIN + 16 clocks before the write start cannot
+  // see it and a frame whose judge beat is more than WIN + 16 clocks after the response must see it.
+  // Frames in between are not checked.
+  localparam int        LV_MARGIN    = WIN_B + 16;
+
+  tup_t fw_allow [0:2];
+  int   fw_pa;                                   // policer of the ARP class (2 as in section 13, 1 on a 2-policer build)
+
+  function automatic tup_t fw_tup(input bit [7:0] proto, input bit [31:0] sip, input bit [31:0] smask,
+                                  input bit [31:0] dip, input bit [31:0] dmask, input bit [15:0] slo,
+                                  input bit [15:0] shi, input bit [15:0] dlo, input bit [15:0] dhi);
+    tup_t x;
+    x = '{default: 0};
+    x.valid = 1'b1; x.proto_en = 1'b1; x.proto = proto;
+    x.sip = sip; x.smask = smask; x.dip = dip; x.dmask = dmask;
+    x.slo = slo; x.shi = shi; x.dlo = dlo; x.dhi = dhi;
+    return x;
+  endfunction
+
+  function automatic fdesc_t fw_d(input bit [7:0] proto, input bit [31:0] sip, input bit [31:0] dip,
+                                  input bit [15:0] sport, input bit [15:0] dport);
+    fdesc_t d;
+    d = fd_default();
+    d.proto = proto; d.sip = sip; d.dip = dip; d.sport = sport; d.dport = dport;
+    return d;
+  endfunction
+
+  // rtlnet_classifier_tuple_set: tuple table disabled while the words change, mode restored.
+  task automatic fw_tuple_update(input int e, input tup_t x);
+    bit [7:0] old;
+    old = tmode[T_TU];
+    if (old[0]) set_tmode(T_TU, old & 8'hFE);
+    set_tuple(e, x);
+    if (old[0]) set_tmode(T_TU, old);
+  endtask
+
+  // config_protect (section 13) followed by firewall_apply with `count` allow entries, in the driver's order.
+  task automatic fw_config(input int count);
+    ent_t x;
+    ent_t y;
+    tup_t z;
+    tup_t t;
+    bit [7:0] rm;
+    fw_pa = (NP >= 4) ? 2 : 1;
+    // config_protect: clear, rule 0 (ARP, classify-only, policer ARP).
+    clear_tables();
+    for (int b = 0; b < MDB; b++) begin
+      if (b == 12)      set_rbyte(0, b, 8'hFF, 4'b1000, 8'h08);
+      else if (b == 13) set_rbyte(0, b, 8'hFF, 4'b1000, 8'h06);
+      else              set_rbyte(0, b, 8'h00, 4'b0000, 8'h00);
+    end
+    repeat (40) @(posedge axis_clk);
+    rm = 8'h01 | 8'h04 | 8'h08 | 8'(fw_pa << 4);
+    set_rmode(0, rm);
+    // Tuple 0: ICMP, tuple 1: UDP, both classify-only (policed on a build with four policers).
+    t = '{default: 0};
+    t.valid = 1; t.proto_en = 1; t.proto = 8'd1; t.slo = 0; t.shi = 16'hFFFF; t.dlo = 0; t.dhi = 16'hFFFF;
+    t.police_en = (NP >= 4); t.policer = 2'd3;
+    fw_tuple_update(0, t);
+    set_tmode(T_TU, 8'h11);
+    t.proto = 8'd17; t.policer = 2'd1;
+    fw_tuple_update(1, t);
+    set_tmode(T_TU, 8'h11);
+    // MAC table entry 0: broadcast destination, classify-only, policer broadcast (0).
+    x = '{default: 0};
+    x.valid = 1; x.dst_en = 1; x.police_en = 1; x.policer = 0; x.dst = 48'hFFFF_FFFF_FFFF; x.src = 48'hFFFF_FFFF_FFFF;
+    set_entry(T_MAC, 0, x);
+    set_tmode(T_MAC, 8'h11);
+    for (int c = 0; c < NP; c++) set_pol(c, 1'b1, (c == fw_pa) ? 20 : 10, 100);
+    set_mode(2'b01);
+    // firewall_apply: DROP_ALL, EtherType pair 0 = 0x0806..0x0806 gating, tuple slots, table modes, DROP_ON_MATCH.
+    set_mode(2'b00);
+    x = '{default: 0}; y = '{default: 0};
+    x.valid = 1; x.src_en = 1; x.src = 48'h0806; y.src = 48'h0806;
+    set_entry(T_ET, 1, y);
+    set_entry(T_ET, 0, x);
+    set_tmode(T_ET, 8'h05);
+    z = '{default: 0};
+    for (int e = 0; e < TU; e++) fw_tuple_update(e, (e < count) ? fw_allow[e] : z);
+    set_tmode(T_ET, 8'h07);                     // enable, exclude, range
+    set_tmode(T_TU, 8'h03);                     // enable, exclude, single
+    set_mode(2'b11);
+    repeat (40) @(posedge axis_clk);
+  endtask
+
+  // One live run: LV_N back-to-back frames alternating TCP dport 7 (allowed) and TCP dport 23 to the board
+  // while a writer adds slot LV_SLOT (TCP dport 23) after LV_ADD_AT frames and clears it after LV_CLR_AT frames.
+  // contrast = 0: the live order (value words, then +0 with VALID, TABLE_MODE untouched); contrast = 1: the
+  // normal update protocol (tuple table disabled while the words change). Every verdict is read from the
+  // frames at the output (the sequence number is in the source MAC address), then checked against the
+  // timing windows of the writes.
+  task automatic live_run(input bit contrast);
+    bytes_t     lf [$];
+    int         dpt [0:LV_N-1];
+    bit         got [0:LV_N-1];
+    bytes_t     fr;
+    string      why;
+    longint     t_a0;       // add: start of the write that makes the entry effective
+    longint     t_a1;       // add: its response
+    longint     t_c0;       // clear: start / response
+    longint     t_c1;
+    longint     t_d0;       // contrast: start of the first write (table disabled)
+    longint     t_r1;       // contrast: response of the write that enables the table again
+    longint     jc;
+    int         jb;
+    int         seq;
+    int         npass;
+    int         n7_drop;
+    int         n_pre;
+    int         n_mid;
+    int         n_post;
+    int         n_skip;
+    tup_t       a;
+    logic [11:0] b;
+    quiesce();
+    tb_check(!tups[LV_SLOT].valid, "live run starts with a free slot");
+    a = fw_tup(8'd6, 32'h0, 32'h0, 32'h0, 32'h0, 16'h0000, 16'hFFFF, 16'd23, 16'd23);
+    b = A_TUPLE + 12'(32 * LV_SLOT);
+    u_sink.frames = {};
+    live_first_q  = {};
+    live_sent     = 0;
+    live_mode     = 1'b1;
+    t_a0 = 0; t_a1 = 0; t_c0 = 0; t_c1 = 0; t_d0 = 0; t_r1 = 0;
+    fork
+      begin : lv_stream
+        fdesc_t d;
+        bytes_t f;
+        for (int i = 0; i < LV_N; i++) begin
+          dpt[i] = (i % 2 == 0) ? 7 : 23;
+          d = fw_d(8'd6, FW_PEER_IP, FW_BOARD_IP, 16'(40000 + (i % 100)), 16'(dpt[i]));
+          d.src = 48'h0200_0000_0000 | 48'(i);
+          f = build(d);
+          lf.push_back(f);
+          u_src.send(f);
+          live_sent = i + 1;
+        end
+      end
+      begin : lv_writer
+        while (live_sent < LV_ADD_AT) @(posedge axis_clk);
+        t_d0 = cyc;
+        if (contrast) u_axil.wr(A_TMODE + 12'(4 * T_TU), 32'h0000_0002);     // disable, keep EXCLUDE
+        u_axil.wr(b + 12'h04, a.sip);
+        u_axil.wr(b + 12'h08, a.smask);
+        u_axil.wr(b + 12'h0C, a.dip);
+        u_axil.wr(b + 12'h10, a.dmask);
+        u_axil.wr(b + 12'h14, {a.shi, a.slo});
+        u_axil.wr(b + 12'h18, {a.dhi, a.dlo});
+        t_a0 = cyc;
+        u_axil.wr(b + 12'h00, tup_ctrl(a));                                  // VALID last
+        t_a1 = cyc;
+        if (contrast) u_axil.wr(A_TMODE + 12'(4 * T_TU), 32'h0000_0003);     // enable again
+        t_r1 = cyc;
+        while (live_sent < LV_CLR_AT) @(posedge axis_clk);
+        t_c0 = cyc;
+        u_axil.wr(b + 12'h00, 32'h0);                                        // removal: +0 = 0 only
+        t_c1 = cyc;
+      end
+    join
+    repeat (delay_beats + 4 * WIN_B + 100) @(posedge axis_clk);
+    live_mode = 1'b0;
+    tb_check(live_first_q.size() == LV_N, $sformatf("live: %0d frames accepted, sent %0d", live_first_q.size(), LV_N));
+    // Verdicts from the output.
+    for (int i = 0; i < LV_N; i++) got[i] = 1'b0;
+    for (int k = 0; k < u_sink.frames.size(); k++) begin
+      fr  = u_sink.frames[k];
+      seq = int'(get48(fr, 6) & 48'hFFFF);
+      if (seq >= LV_N) tb_error($sformatf("live: output frame with sequence %0d", seq));
+      else begin
+        tb_check(!got[seq], $sformatf("live: frame %0d left twice", seq));
+        got[seq] = 1'b1;
+        tb_check(bytes_equal(fr, lf[seq], why), $sformatf("live: frame %0d content: %s", seq, why));
+      end
+    end
+    u_sink.frames = {};
+    jb = ((M < 8) ? M : 8) - 1;                 // judge beat of a 60-byte (8-beat) frame
+    npass = 0; n7_drop = 0; n_pre = 0; n_mid = 0; n_post = 0; n_skip = 0;
+    for (int i = 0; i < LV_N; i++) begin
+      if (got[i]) npass++;
+      if (live_first_q.size() != LV_N) continue;
+      jc = live_first_q[i] + longint'(jb);
+      if (dpt[i] == 7) begin
+        if (!got[i]) n7_drop++;
+        if (!contrast) tb_check(got[i], $sformatf("live: allowed dport-7 frame %0d dropped (judge %0d, add %0d..%0d)", i,
+                                                  jc, t_a0, t_a1));
+        else if (jc + LV_MARGIN < t_d0 || jc - LV_MARGIN > t_r1)
+          tb_check(got[i], $sformatf("contrast: dport-7 frame %0d outside the disabled interval dropped", i));
+      end else begin
+        if (!contrast) begin
+          if (jc + LV_MARGIN < t_a0) begin
+            n_pre++;
+            tb_check(!got[i], $sformatf("live: dport-23 frame %0d passed before the add (judge %0d, add %0d)", i, jc, t_a0));
+          end else if (jc - LV_MARGIN > t_a1 && jc + LV_MARGIN < t_c0) begin
+            n_mid++;
+            tb_check(got[i], $sformatf("live: dport-23 frame %0d dropped after the add (judge %0d, add %0d..%0d)", i, jc,
+                                       t_a0, t_a1));
+          end else if (jc - LV_MARGIN > t_c1) begin
+            n_post++;
+            tb_check(!got[i], $sformatf("live: dport-23 frame %0d passed after the clear (judge %0d, clear %0d..%0d)", i,
+                                        jc, t_c0, t_c1));
+          end else n_skip++;
+        end
+      end
+    end
+    if (!contrast) begin
+      tb_check(n_pre > 0 && n_mid > 0 && n_post > 0, $sformatf("live: windows exercised pre %0d mid %0d post %0d", n_pre, n_mid, n_post));
+      $display("tb: live add/clear: add write %0d..%0d, clear write %0d..%0d, margin %0d, checked pre/mid/post %0d/%0d/%0d, unchecked %0d, dport-7 drops %0d",
+               t_a0, t_a1, t_c0, t_c1, LV_MARGIN, n_pre, n_mid, n_post, n_skip, n7_drop);
+    end else begin
+      tb_check(n7_drop >= 1, $sformatf("contrast: normal update protocol dropped %0d allowed dport-7 frames, expected at least 1", n7_drop));
+      $display("tb: contrast (table disabled during the write): %0d allowed dport-7 frames dropped", n7_drop);
+    end
+    // The model takes the observed verdicts for the counters (the slot is free again; TABLE_MODE restored).
+    tups[LV_SLOT] = '{default: 0};
+    mc[C_FRAMES]       += LV_N;
+    mc[C_PASSED]       += npass;
+    mc[C_DROPPED]      += LV_N - npass;
+    mc[C_MODE_DROPPED] += LV_N - npass;
+    mc[C_THIT + T_TU]  += npass;                // a frame passes only through an allow hit (EtherType never hits)
+  endtask
+
+  task automatic phase_firewall();
+    fdesc_t d;
+    int     arp_pass;
+    int     chk0;
+    int unsigned seed0;
+    chk0 = tb_checks;
+    seed0 = seed;                               // the random phase keeps the sequence it had without this phase
+    fw_phase = 1'b1;
+    fw_allow[0] = fw_tup(8'd6,  32'h0, 32'h0, FW_BOARD_IP, 32'hFFFF_FFFF, 16'h0000, 16'hFFFF, 16'd7, 16'd7);
+    fw_allow[1] = fw_tup(8'd17, 32'h0, 32'h0, 32'h0, 32'h0, 16'h0000, 16'hFFFF, 16'd5001, 16'd5001);
+    fw_allow[2] = fw_tup(8'd6,  FW_CLIENT_IP, 32'hFFFF_FFFF, 32'h0, 32'h0, 16'd5001, 16'd5001, 16'd49153, 16'd49153);
+    drain_and_check("before the firewall phase");
+    clear_counters();
+    // --- Three allow entries: verdicts. ---
+    fw_config(3);
+    d = fd_default(); d.dst = 48'hFFFF_FFFF_FFFF; d.etype = 16'h0806; d.ip = 0;
+    send_expect(build(d), 1, "firewall: ARP request (broadcast) passes");
+    d = fd_default(); d.etype = 16'h0806; d.ip = 0;
+    send_expect(build(d), 1, "firewall: ARP reply (unicast) passes");
+    send_expect(build(fw_d(8'd6, FW_PEER_IP, FW_BOARD_IP, 16'd40000, 16'd7)), 1, "firewall: TCP to the board port 7 passes");
+    send_expect(build(fw_d(8'd17, FW_PEER_IP, FW_ANY_IP, 16'd40000, 16'd5001)), 1, "firewall: UDP port 5001 (any address) passes");
+    send_expect(build(fw_d(8'd6, FW_CLIENT_IP, FW_ANY_IP, 16'd5001, 16'd49153)), 1, "firewall: client flow passes");
+    send_expect(build(fw_d(8'd6, FW_PEER_IP, FW_BOARD_IP, 16'd40000, 16'd8)), 0, "firewall: TCP port 8 drops");
+    send_expect(build(fw_d(8'd6, FW_PEER_IP, FW_ANY_IP, 16'd40000, 16'd7)), 0, "firewall: TCP port 7 to another address drops");
+    send_expect(build(fw_d(8'd17, FW_PEER_IP, FW_ANY_IP, 16'd40000, 16'd5002)), 0, "firewall: UDP port 5002 drops");
+    send_expect(build(fw_d(8'd6, FW_OTHER_IP, FW_ANY_IP, 16'd5001, 16'd49153)), 0, "firewall: client flow from the wrong source drops");
+    send_expect(build(fw_d(8'd1, FW_PEER_IP, FW_BOARD_IP, 16'd0, 16'd0)), 0, "firewall: ICMP echo request drops");
+    d = fd_default(); d.etype = 16'h86DD; d.ip = 0;
+    send_expect(build(d), 0, "firewall: EtherType 0x86DD drops");
+    d = fw_d(8'd6, FW_PEER_IP, FW_BOARD_IP, 16'd40000, 16'd7); d.tagged = 1;
+    send_expect(build(d), 0, "firewall: VLAN-tagged TCP port 7 drops (tables not VLAN-aware)");
+    d = fw_d(8'd6, FW_PEER_IP, FW_BOARD_IP, 16'd40000, 16'd7); d.frag = 16'h2000;
+    send_expect(build(d), 0, "firewall: fragment (MF = 1) TCP port 7 drops");
+    d = fw_d(8'd6, FW_PEER_IP, FW_BOARD_IP, 16'd40000, 16'd7); d.ihl = 6;
+    send_expect(build(d), 0, "firewall: IHL 6 TCP port 7 drops");
+    drain_and_check("firewall verdicts");
+    check_counters("firewall verdicts");
+    // --- ARP is still policed; allowed TCP is not. ---
+    set_pol(fw_pa, 1'b1, 20, 100);              // restart the window: the burst below is inside one window
+    repeat (300) @(posedge axis_clk);
+    arp_pass = 0;
+    for (int i = 0; i < 30; i++) begin
+      bit pv;
+      d = fd_default(); d.dst = 48'hFFFF_FFFF_FFFF; d.etype = 16'h0806; d.ip = 0;
+      send(build(d), pv);
+      if (pv) arp_pass++;
+    end
+    tb_check(arp_pass == 20, $sformatf("firewall: %0d of 30 ARP frames pass in one window, limit 20", arp_pass));
+    for (int i = 0; i < 40; i++)
+      send_expect(build(fw_d(8'd6, FW_PEER_IP, FW_BOARD_IP, 16'(41000 + i), 16'd7)), 1, "firewall: allowed TCP is not policed");
+    drain_and_check("firewall ARP policing");
+    check_counters("firewall ARP policing");
+    // --- No allow entry: only ARP passes. ---
+    fw_config(0);
+    d = fd_default(); d.dst = 48'hFFFF_FFFF_FFFF; d.etype = 16'h0806; d.ip = 0;
+    send_expect(build(d), 1, "firewall count 0: ARP request passes");
+    d = fd_default(); d.etype = 16'h0806; d.ip = 0;
+    send_expect(build(d), 1, "firewall count 0: ARP reply passes");
+    send_expect(build(fw_d(8'd6, FW_PEER_IP, FW_BOARD_IP, 16'd40000, 16'd7)), 0, "firewall count 0: TCP port 7 drops");
+    send_expect(build(fw_d(8'd17, FW_PEER_IP, FW_ANY_IP, 16'd40000, 16'd5001)), 0, "firewall count 0: UDP 5001 drops");
+    send_expect(build(fw_d(8'd6, FW_CLIENT_IP, FW_ANY_IP, 16'd5001, 16'd49153)), 0, "firewall count 0: client flow drops");
+    send_expect(build(fw_d(8'd1, FW_PEER_IP, FW_BOARD_IP, 16'd0, 16'd0)), 0, "firewall count 0: ICMP drops");
+    drain_and_check("firewall count 0");
+    check_counters("firewall count 0");
+    // --- Live add / clear under full-rate traffic, then the normal protocol as the contrast. ---
+    fw_config(3);
+    live_run(1'b0);
+    live_run(1'b1);
+    check_counters("firewall live");
+    fw_phase = 1'b0;
+    seed = seed0;
+    $display("tb: firewall phase %0d checks", tb_checks - chk0);
+  endtask
+
+  // ---------------------------------------------------------------------------
   // Main.
   // ---------------------------------------------------------------------------
   initial begin : main
@@ -1753,6 +2079,7 @@ module tb_rtlnet_classifier;
     phase_delay();
     phase_overrun();
     phase_clear();
+    phase_firewall();
     phase_random();
     $display("tb: latency min %0d max %0d (DELAY_BEATS + 2 = %0d), %0d output beats", lat_min, lat_max,
              delay_beats + 2, out_beats);
