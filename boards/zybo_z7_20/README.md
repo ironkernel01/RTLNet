@@ -13,12 +13,12 @@ Clock plan: the whole video path (receiver video side, capture DMA, frame buffer
 
 ## Status
 
-The design runs on a Zybo Z7-20 with a Pcam 5C: image `own7` with firmware `fw18` (gates PASS with the named deviation `DPHY_HS_INPUT` on the two `ISERDESE2` `DDLY` pins of the receiver; qualified
-WNS +0.252 ns and WHS +0.050 ns excluding them; 33,897 LUT, 27,770 registers, 27 block RAM tiles, 50 DSP). Measured on the board:
+The design runs on a Zybo Z7-20 with a Pcam 5C: image `own9` with firmware `fw19` (gates PASS with the named deviation `DPHY_HS_INPUT` on the two `ISERDESE2` `DDLY` pins of the receiver; qualified
+WNS +0.222 ns and WHS +0.051 ns excluding them; 33,151 LUT, 26,393 registers, 26 block RAM tiles, 50 DSP). The capture DMA and the encoder are 64-bit masters on the HP ports: no width bridge, no arbiter. Measured on the board with this image:
 
-- Receiver counters over 60 s: 720p 30.04 fps, 1080p 30.00 fps, `ECC_UNC`, `CRC`, `SOT`, `SIZE` and every other error counter 0 (`ECC_CORR` 0).
-- `stream_test.ps1 -Mode both -Port COM6` PASS 16/16 in three consecutive runs; 120 s soak at 720p PASS 8/8 (3,573 pictures, no continuity or decode error).
-- Pictures upright in both modes; white balance gains per mode make a neutral wall R:G:B within about 5 percent; the two greens of the sensor are equalised by the receiver (`PROC` bit 1); the highlight clamp (`PROC` bit 2)
+- Receiver counters over 60 s: 720p 30.00 fps, 1080p 30.01 fps, `ECC_UNC`, `CRC`, `SOT`, `SIZE` and every other error counter 0 (`ECC_CORR` 0).
+- `stream_test.ps1 -Mode both -Port COM6` PASS 16/16 in three consecutive runs; 120 s soak at 720p PASS 8/8 (3,573 pictures, no continuity or decode error); 120 s soak at 1080p PASS 8/8 (1,771 pictures, no continuity, PTS or decode error, no dropped picture).
+- Pictures upright in both modes (checked again on `own9` in a dark room; the white balance, green and highlight measurements below are those of `own7`); white balance gains per mode make a neutral wall R:G:B within about 5 percent; the two greens of the sensor are equalised by the receiver (`PROC` bit 1); the highlight clamp (`PROC` bit 2)
   keeps clipped bright areas neutral where the white balance gains had made them pink at 1080p (bright pixels 251 : 222 : 235 without, 253 : 251 : 239 with the clamp).
 - IDELAY sweep (both lanes, 3 s per tap, 78 ps per tap, measured on the previous image with the same receiver): error-free taps 0 to 29 at 720p (280 Mb/s) and 0 to 21 at 1080p (420 Mb/s); the default taps are 11 and 10.
   One unit, room temperature; the static timing of the two HS samplers fails hold (the named deviation).
@@ -44,12 +44,16 @@ The console is the board USB-UART at 115200 baud. About 40 s after the load the 
 rates, one PASS/FAIL line; the first GOP of a new UDP flow is reported but not judged, because the network can reorder the first burst of a new flow):
 `powershell -NoProfile -ExecutionPolicy Bypass -File boards/zybo_z7_20/scripts/stream_test.ps1 -Mode both -Port COM6`.
 
+## Demo
+
+The released image is a demo entry: `demos/h264_baseline/zybo_z7_20/` holds `rtlnet_zybo_z7_20.bit`, the firmware `rtlnet_zybo.elf` and `ps7_init.tcl` of image `own9` and firmware `fw19`, with its README (what to connect, how to load and view the stream), build info and a brief with the measured results (`h264_baseline_zybo_z7_20_brief.pdf`). `scripts/program_demo.ps1` loads those three files over JTAG (volatile) without a build folder; `demos/demorelease.bat h264_baseline zybo_z7_20` copies a new build into the demo folder and `scripts/demo_captures.ps1 -Port COM6` takes the pictures of the brief again from the running board (`demos/h264_baseline/images/README.md`).
+
 ## Build
 
 From the repository root (the tag is a free name):
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File boards/zybo_z7_20/scripts/build.ps1 -Tag own7
+powershell -NoProfile -ExecutionPolicy Bypass -File boards/zybo_z7_20/scripts/build.ps1 -Tag own9
 ```
 
 The tag owns `boards/zybo_z7_20/build/<tag>`: project, reports, `rtlnet_zybo_z7_20.bit`, `rtlnet_zybo_z7_20.xsa`, `export_manifest.txt` and `build_info.txt`. `-StopAfter bd` stops after block design creation and
@@ -57,7 +61,7 @@ validation (debug only, no verdict). `-HighProfile full|demo -HpNetlist <folder>
 `scripts/rtlnet_vivado.ps1`. The ARM application builds from the exported XSA:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File cpu/zynq7_h264/firmware/build.ps1 -Xsa boards/zybo_z7_20/build/own7/rtlnet_zybo_z7_20.xsa -Tag fw17
+powershell -NoProfile -ExecutionPolicy Bypass -File cpu/zynq7_h264/firmware/build.ps1 -Xsa boards/zybo_z7_20/build/own9/rtlnet_zybo_z7_20.xsa -Tag fw19
 ```
 
 ## Third-party material
@@ -73,8 +77,8 @@ Run the board's regression entries (Active-HDL, no Vivado, no board) from the re
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rtlnet_regression.ps1 -Match 'csi2|video_path|zybo|zynq7'
 ```
 
-The entries are: the HP bridge against a byte-level oracle, the integrated camera-to-encoder board bench (the D-PHY transmitter model of the receiver benches drives the wrapper's camera pins; admission, geometry,
-capture and encoder; negative controls `INJECT_FAILURE` and `MUTATE`), the decoder check (`scripts/check_board_encode.ps1` runs the bench itself and decodes its H.264 stream with three reference decoders), the
+The entries are: the integrated camera-to-encoder board bench (the D-PHY transmitter model of the receiver benches drives the wrapper's camera pins; admission, geometry, capture and encoder, the capture DMA and the encoder connected directly to two AXI3 HP slave models that reject illegal bursts;
+negative controls `INJECT_FAILURE` and `MUTATE`, mutation controls for WID, 4 KiB, burst length, single-beat bursts and beat size), the decoder check (`scripts/check_board_encode.ps1` runs the bench itself and decodes its H.264 stream with three reference decoders), the
 build-gate policy checks (`scripts/check_gates.ps1`) and the ARM host suites. The receiver core has its own benches (`-Match csi2`). The AMD primitive branch of the receiver's D-PHY front end cannot be simulated;
 the bench uses the behavioural front end, and the primitive branch is covered by synthesis, the gates and the board runs.
 
@@ -82,10 +86,10 @@ the bench uses the behavioural front end, and the primitive branch is covered by
 
 | Folder | Content |
 |---|---|
-| `hdl/` | `rtlnet_zybo_video` (receiver, admission, capture, frame buffer, encoder, arbiter, bridges), its generated module-reference boundary and filelist, `rtlnet_axi_hp_bridge` |
+| `hdl/` | `rtlnet_zybo_video` (receiver, admission, capture, frame buffer, encoder; the capture DMA and the encoder are 64-bit masters on the HP ports, no bridge, no arbiter), its generated module-reference boundary and filelist |
 | `bd/` | block design Tcl (`rtlnet_zybo.tcl`) |
 | `constraints/` | camera pins; HS clock, HS input delays and LP false paths |
-| `scripts/` | build flow and gates, CDC hook and reviewed waivers, `program.ps1`, `stream_test.ps1`, `rx_test.ps1` |
+| `scripts/` | build flow and gates, CDC hook and reviewed waivers, `program.ps1`, `program_demo.ps1`, `stream_test.ps1`, `rx_test.ps1`, `demo_captures.ps1` |
 | `testbench/` | benches and `regression.txt` |
 | `board_files/` | Digilent board files (see above) |
 | `documentation/` | architecture, clock tree, gates, results |

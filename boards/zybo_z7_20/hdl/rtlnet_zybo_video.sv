@@ -2,7 +2,10 @@
 // Overview: the receiver (rtlnet_csi2_rx, CAMERA_RX = 1) takes the camera D-PHY pins and delivers YUV422 pairs at capture_clk;
 //   the camera admission below selects the frames (720p every frame, 1080p every second frame), the capture DMA writes them to DDR
 //   frames and the encoder reads completed DDR frames at enc_clk. Software owns framebuf's firmware-reader handshake.
-//   GP0 AXI-Lite decodes six 4 KiB windows at 0x44A0_4000..0x44A0_9000 (receiver at 0x44A0_9000).
+//   The capture DMA and the encoder are 64-bit masters (AXI_DATA_W 64): each connects straight to its HP port, no bridge and no
+//   arbiter. The masters issue bursts of at most 16 beats (AWLEN and ARLEN are 4 bits on AXI3), WID is AWID, and the two
+//   IDs are zero-extended to the 6 bits of the port.
+//   GP0 AXI-Lite decodes five 4 KiB windows at 0x44A0_5000..0x44A0_9000 (receiver at 0x44A0_9000); 0x44A0_4000 is unmapped (DECERR).
 //   Camera register contract is cpu/zynq7_h264/firmware/src/rtlnet_camera.h.
 //   Capture IRQ is an edge pulse at s_axi_aclk, encoder IRQ a synchronized level.
 //   Frame events are separated by at least 16 ms (>4 control clocks), satisfying
@@ -216,112 +219,31 @@ module rtlnet_zybo_video #(
   (* X_INTERFACE_PARAMETER = "SENSITIVITY LEVEL_HIGH" *)
   output logic [1:0] irq
 );
-  logic [191:0] d_awaddr;
-  logic [5:0] d_awvalid;
-  logic [5:0] d_awready;
-  logic [191:0] d_wdata;
-  logic [23:0] d_wstrb;
-  logic [5:0] d_wvalid;
-  logic [5:0] d_wready;
-  logic [11:0] d_bresp;
-  logic [5:0] d_bvalid;
-  logic [5:0] d_bready;
-  logic [191:0] d_araddr;
-  logic [5:0] d_arvalid;
-  logic [5:0] d_arready;
-  logic [191:0] d_rdata;
-  logic [11:0] d_rresp;
-  logic [5:0] d_rvalid;
-  logic [5:0] d_rready;
-  logic [5:0] cap_awid;
-  logic [31:0] cap_awaddr;
-  logic [7:0] cap_awlen;
-  logic [2:0] cap_awsize;
-  logic [1:0] cap_awburst;
-  logic cap_awvalid;
-  logic cap_awready;
-  logic [127:0] cap_wdata;
-  logic [15:0] cap_wstrb;
-  logic cap_wlast;
-  logic cap_wvalid;
-  logic cap_wready;
-  logic [5:0] cap_bid;
-  logic [1:0] cap_bresp;
-  logic cap_bvalid;
-  logic cap_bready;
-  logic [5:0] cap_arid;
-  logic [31:0] cap_araddr;
-  logic [7:0] cap_arlen;
-  logic [2:0] cap_arsize;
-  logic [1:0] cap_arburst;
-  logic cap_arvalid;
-  logic cap_arready;
-  logic [5:0] cap_rid;
-  logic [127:0] cap_rdata;
-  logic [1:0] cap_rresp;
-  logic cap_rlast;
-  logic cap_rvalid;
-  logic cap_rready;
-  logic [3:0] enc_awid;
-  logic [31:0] enc_awaddr;
-  logic [7:0] enc_awlen;
-  logic [2:0] enc_awsize;
-  logic [1:0] enc_awburst;
-  logic enc_awvalid;
-  logic enc_awready;
-  logic [127:0] enc_wdata;
-  logic [15:0] enc_wstrb;
-  logic enc_wlast;
-  logic enc_wvalid;
-  logic enc_wready;
-  logic [3:0] enc_bid;
-  logic [1:0] enc_bresp;
-  logic enc_bvalid;
-  logic enc_bready;
-  logic [3:0] enc_arid;
-  logic [31:0] enc_araddr;
-  logic [7:0] enc_arlen;
-  logic [2:0] enc_arsize;
-  logic [1:0] enc_arburst;
-  logic enc_arvalid;
-  logic enc_arready;
-  logic [3:0] enc_rid;
-  logic [127:0] enc_rdata;
-  logic [1:0] enc_rresp;
-  logic enc_rlast;
-  logic enc_rvalid;
-  logic enc_rready;
-  logic [4:0] arb_awid;
-  logic [31:0] arb_awaddr;
-  logic [7:0] arb_awlen;
-  logic [2:0] arb_awsize;
-  logic [1:0] arb_awburst;
-  logic arb_awvalid;
-  logic arb_awready;
-  logic [127:0] arb_wdata;
-  logic [15:0] arb_wstrb;
-  logic arb_wlast;
-  logic arb_wvalid;
-  logic arb_wready;
-  logic [4:0] arb_bid;
-  logic [1:0] arb_bresp;
-  logic arb_bvalid;
-  logic arb_bready;
-  logic [4:0] arb_arid;
-  logic [31:0] arb_araddr;
-  logic [7:0] arb_arlen;
-  logic [2:0] arb_arsize;
-  logic [1:0] arb_arburst;
-  logic arb_arvalid;
-  logic arb_arready;
-  logic [4:0] arb_rid;
-  logic [127:0] arb_rdata;
-  logic [1:0] arb_rresp;
-  logic arb_rlast;
-  logic arb_rvalid;
-  logic arb_rready;
-  logic fb_req;
+  logic [159:0] d_awaddr;
+  logic [4:0] d_awvalid;
+  logic [4:0] d_awready;
+  logic [159:0] d_wdata;
+  logic [19:0] d_wstrb;
+  logic [4:0] d_wvalid;
+  logic [4:0] d_wready;
+  logic [9:0] d_bresp;
+  logic [4:0] d_bvalid;
+  logic [4:0] d_bready;
+  logic [159:0] d_araddr;
+  logic [4:0] d_arvalid;
+  logic [4:0] d_arready;
+  logic [159:0] d_rdata;
+  logic [9:0] d_rresp;
+  logic [4:0] d_rvalid;
+  logic [4:0] d_rready;
   logic [29:0] cap_addr;
+  logic [7:0] cap_awlen;
+  logic [3:0] enc_awid;
+  logic [7:0] enc_awlen;
+  logic [3:0] enc_bid;
+  logic [3:0] enc_arid;
+  logic [7:0] enc_arlen;
+  logic fb_req;
   logic fb_rsp_valid;
   logic fb_rsp_ok;
   logic [31:0] fb_rsp_base;
@@ -387,7 +309,7 @@ module rtlnet_zybo_video #(
   logic camreg_rvalid;
   logic camreg_rready;
   // u_decode implements rtlnet_axil_decoder in its explicitly connected clock domain.
-  rtlnet_axil_decoder #(.N(6), .SLAVE_BASE({32'h44a09000,32'h44a08000,32'h44a07000,32'h44a06000,32'h44a04000,32'h44a05000}), .SLAVE_SIZE({6{32'h1000}})) u_decode (
+  rtlnet_axil_decoder #(.N(5), .SLAVE_BASE({32'h44a09000,32'h44a08000,32'h44a07000,32'h44a06000,32'h44a05000}), .SLAVE_SIZE({5{32'h1000}})) u_decode (
     .aclk(s_axi_aclk),
     .aresetn(s_axi_aresetn),
     .s_axi_awaddr(s_axi_awaddr),
@@ -586,23 +508,23 @@ module rtlnet_zybo_video #(
     .m_width(),
     .m_height(),
     .m_src_pattern(),
-    .s_axi_awaddr(d_awaddr[160 +: 12]),
-    .s_axi_awvalid(d_awvalid[5 +: 1]),
-    .s_axi_awready(d_awready[5 +: 1]),
-    .s_axi_wdata(d_wdata[160 +: 32]),
-    .s_axi_wstrb(d_wstrb[20 +: 4]),
-    .s_axi_wvalid(d_wvalid[5 +: 1]),
-    .s_axi_wready(d_wready[5 +: 1]),
-    .s_axi_bresp(d_bresp[10 +: 2]),
-    .s_axi_bvalid(d_bvalid[5 +: 1]),
-    .s_axi_bready(d_bready[5 +: 1]),
-    .s_axi_araddr(d_araddr[160 +: 12]),
-    .s_axi_arvalid(d_arvalid[5 +: 1]),
-    .s_axi_arready(d_arready[5 +: 1]),
-    .s_axi_rdata(d_rdata[160 +: 32]),
-    .s_axi_rresp(d_rresp[10 +: 2]),
-    .s_axi_rvalid(d_rvalid[5 +: 1]),
-    .s_axi_rready(d_rready[5 +: 1])
+    .s_axi_awaddr(d_awaddr[128 +: 12]),
+    .s_axi_awvalid(d_awvalid[4 +: 1]),
+    .s_axi_awready(d_awready[4 +: 1]),
+    .s_axi_wdata(d_wdata[128 +: 32]),
+    .s_axi_wstrb(d_wstrb[16 +: 4]),
+    .s_axi_wvalid(d_wvalid[4 +: 1]),
+    .s_axi_wready(d_wready[4 +: 1]),
+    .s_axi_bresp(d_bresp[8 +: 2]),
+    .s_axi_bvalid(d_bvalid[4 +: 1]),
+    .s_axi_bready(d_bready[4 +: 1]),
+    .s_axi_araddr(d_araddr[128 +: 12]),
+    .s_axi_arvalid(d_arvalid[4 +: 1]),
+    .s_axi_arready(d_arready[4 +: 1]),
+    .s_axi_rdata(d_rdata[128 +: 32]),
+    .s_axi_rresp(d_rresp[8 +: 2]),
+    .s_axi_rvalid(d_rvalid[4 +: 1]),
+    .s_axi_rready(d_rready[4 +: 1])
   );
   // The capture FIFO state must not reach the receiver pipeline combinationally (the admission ready of the pairs would fan out
   // through the receiver's clock enables): u_pair_slice ends that path at a flop.
@@ -622,9 +544,10 @@ module rtlnet_zybo_video #(
     .m_tready(pair_ready)
   );
   // Capture uses 30 address bits to avoid the existing core's 32-bit shift overflow in cfg_ok.
-  assign cap_awaddr = {2'b0, cap_addr};
-  // u_capture implements rtlnet_vdma_s2mm in its explicitly connected clock domain.
-  rtlnet_vdma_s2mm #(.ADDR_W(30), .ID_W(6)) u_capture (
+  assign m_axi_cap_awaddr = {2'b0, cap_addr};
+  // u_capture implements rtlnet_vdma_s2mm in its explicitly connected clock domain, 64-bit beats of at most 16 per burst: it drives
+  // the HP2 port directly. The master has no read channel (the read channel of the port is idle); WID is AWID (constant 0).
+  rtlnet_vdma_s2mm #(.ADDR_W(30), .ID_W(6), .AXI_DATA_W(64), .MAX_BURST_BEATS(16)) u_capture (
     .clk(capture_clk),
     .resetn(capture_resetn),
     .s_axi_aclk(s_axi_aclk),
@@ -650,39 +573,39 @@ module rtlnet_zybo_video #(
     .fb_done_width(fb_done_width),
     .fb_done_height(fb_done_height),
     .fb_done_src_pattern(fb_done_src_pattern),
-    .m_axi_awid(cap_awid),
+    .m_axi_awid(m_axi_cap_awid),
     .m_axi_awaddr(cap_addr),
     .m_axi_awlen(cap_awlen),
-    .m_axi_awsize(cap_awsize),
-    .m_axi_awburst(cap_awburst),
-    .m_axi_awvalid(cap_awvalid),
-    .m_axi_awready(cap_awready),
-    .m_axi_wdata(cap_wdata),
-    .m_axi_wstrb(cap_wstrb),
-    .m_axi_wlast(cap_wlast),
-    .m_axi_wvalid(cap_wvalid),
-    .m_axi_wready(cap_wready),
-    .m_axi_bid(cap_bid),
-    .m_axi_bresp(cap_bresp),
-    .m_axi_bvalid(cap_bvalid),
-    .m_axi_bready(cap_bready),
-    .s_axi_awaddr(d_awaddr[64 +: 12]),
-    .s_axi_awvalid(d_awvalid[2 +: 1]),
-    .s_axi_awready(d_awready[2 +: 1]),
-    .s_axi_wdata(d_wdata[64 +: 32]),
-    .s_axi_wstrb(d_wstrb[8 +: 4]),
-    .s_axi_wvalid(d_wvalid[2 +: 1]),
-    .s_axi_wready(d_wready[2 +: 1]),
-    .s_axi_bresp(d_bresp[4 +: 2]),
-    .s_axi_bvalid(d_bvalid[2 +: 1]),
-    .s_axi_bready(d_bready[2 +: 1]),
-    .s_axi_araddr(d_araddr[64 +: 12]),
-    .s_axi_arvalid(d_arvalid[2 +: 1]),
-    .s_axi_arready(d_arready[2 +: 1]),
-    .s_axi_rdata(d_rdata[64 +: 32]),
-    .s_axi_rresp(d_rresp[4 +: 2]),
-    .s_axi_rvalid(d_rvalid[2 +: 1]),
-    .s_axi_rready(d_rready[2 +: 1])
+    .m_axi_awsize(m_axi_cap_awsize),
+    .m_axi_awburst(m_axi_cap_awburst),
+    .m_axi_awvalid(m_axi_cap_awvalid),
+    .m_axi_awready(m_axi_cap_awready),
+    .m_axi_wdata(m_axi_cap_wdata),
+    .m_axi_wstrb(m_axi_cap_wstrb),
+    .m_axi_wlast(m_axi_cap_wlast),
+    .m_axi_wvalid(m_axi_cap_wvalid),
+    .m_axi_wready(m_axi_cap_wready),
+    .m_axi_bid(m_axi_cap_bid),
+    .m_axi_bresp(m_axi_cap_bresp),
+    .m_axi_bvalid(m_axi_cap_bvalid),
+    .m_axi_bready(m_axi_cap_bready),
+    .s_axi_awaddr(d_awaddr[32 +: 12]),
+    .s_axi_awvalid(d_awvalid[1 +: 1]),
+    .s_axi_awready(d_awready[1 +: 1]),
+    .s_axi_wdata(d_wdata[32 +: 32]),
+    .s_axi_wstrb(d_wstrb[4 +: 4]),
+    .s_axi_wvalid(d_wvalid[1 +: 1]),
+    .s_axi_wready(d_wready[1 +: 1]),
+    .s_axi_bresp(d_bresp[2 +: 2]),
+    .s_axi_bvalid(d_bvalid[1 +: 1]),
+    .s_axi_bready(d_bready[1 +: 1]),
+    .s_axi_araddr(d_araddr[32 +: 12]),
+    .s_axi_arvalid(d_arvalid[1 +: 1]),
+    .s_axi_arready(d_arready[1 +: 1]),
+    .s_axi_rdata(d_rdata[32 +: 32]),
+    .s_axi_rresp(d_rresp[2 +: 2]),
+    .s_axi_rvalid(d_rvalid[1 +: 1]),
+    .s_axi_rready(d_rready[1 +: 1])
   );
   // u_framebuf implements rtlnet_framebuf in its explicitly connected clock domain.
   rtlnet_framebuf #(.ADDR_W(32), .N(3), .NUM_READERS(1)) u_framebuf (
@@ -713,6 +636,30 @@ module rtlnet_zybo_video #(
     .r_width(),
     .r_height(),
     .r_src_pattern(),
+    .s_axi_awaddr(d_awaddr[64 +: 12]),
+    .s_axi_awvalid(d_awvalid[2 +: 1]),
+    .s_axi_awready(d_awready[2 +: 1]),
+    .s_axi_wdata(d_wdata[64 +: 32]),
+    .s_axi_wstrb(d_wstrb[8 +: 4]),
+    .s_axi_wvalid(d_wvalid[2 +: 1]),
+    .s_axi_wready(d_wready[2 +: 1]),
+    .s_axi_bresp(d_bresp[4 +: 2]),
+    .s_axi_bvalid(d_bvalid[2 +: 1]),
+    .s_axi_bready(d_bready[2 +: 1]),
+    .s_axi_araddr(d_araddr[64 +: 12]),
+    .s_axi_arvalid(d_arvalid[2 +: 1]),
+    .s_axi_arready(d_arready[2 +: 1]),
+    .s_axi_rdata(d_rdata[64 +: 32]),
+    .s_axi_rresp(d_rresp[4 +: 2]),
+    .s_axi_rvalid(d_rvalid[2 +: 1]),
+    .s_axi_rready(d_rready[2 +: 1])
+  );
+  // u_encoder implements rtlnet_h264_top in its explicitly connected clock domain.
+  rtlnet_h264_top #(.NUM_ENGINES(1), .ID_W(4), .AXI_DATA_W(64), .HIGH_PROFILE(HIGH_PROFILE), .HP_T8(HP_T8), .HP_T8_AUTO(HP_T8_AUTO), .DEBLOCK(DEBLOCK)) u_encoder (
+    .enc_clk(enc_clk),
+    .enc_resetn(enc_resetn),
+    .s_axi_aclk(s_axi_aclk),
+    .s_axi_aresetn(s_axi_aresetn),
     .s_axi_awaddr(d_awaddr[96 +: 12]),
     .s_axi_awvalid(d_awvalid[3 +: 1]),
     .s_axi_awready(d_awready[3 +: 1]),
@@ -729,284 +676,65 @@ module rtlnet_zybo_video #(
     .s_axi_rdata(d_rdata[96 +: 32]),
     .s_axi_rresp(d_rresp[6 +: 2]),
     .s_axi_rvalid(d_rvalid[3 +: 1]),
-    .s_axi_rready(d_rready[3 +: 1])
-  );
-  // u_encoder implements rtlnet_h264_top in its explicitly connected clock domain.
-  rtlnet_h264_top #(.NUM_ENGINES(1), .ID_W(4), .HIGH_PROFILE(HIGH_PROFILE), .HP_T8(HP_T8), .HP_T8_AUTO(HP_T8_AUTO), .DEBLOCK(DEBLOCK)) u_encoder (
-    .enc_clk(enc_clk),
-    .enc_resetn(enc_resetn),
-    .s_axi_aclk(s_axi_aclk),
-    .s_axi_aresetn(s_axi_aresetn),
-    .s_axi_awaddr(d_awaddr[128 +: 12]),
-    .s_axi_awvalid(d_awvalid[4 +: 1]),
-    .s_axi_awready(d_awready[4 +: 1]),
-    .s_axi_wdata(d_wdata[128 +: 32]),
-    .s_axi_wstrb(d_wstrb[16 +: 4]),
-    .s_axi_wvalid(d_wvalid[4 +: 1]),
-    .s_axi_wready(d_wready[4 +: 1]),
-    .s_axi_bresp(d_bresp[8 +: 2]),
-    .s_axi_bvalid(d_bvalid[4 +: 1]),
-    .s_axi_bready(d_bready[4 +: 1]),
-    .s_axi_araddr(d_araddr[128 +: 12]),
-    .s_axi_arvalid(d_arvalid[4 +: 1]),
-    .s_axi_arready(d_arready[4 +: 1]),
-    .s_axi_rdata(d_rdata[128 +: 32]),
-    .s_axi_rresp(d_rresp[8 +: 2]),
-    .s_axi_rvalid(d_rvalid[4 +: 1]),
-    .s_axi_rready(d_rready[4 +: 1]),
+    .s_axi_rready(d_rready[3 +: 1]),
     .m_axi_awid(enc_awid),
-    .m_axi_awaddr(enc_awaddr),
-    .m_axi_awlen(enc_awlen),
-    .m_axi_awsize(enc_awsize),
-    .m_axi_awburst(enc_awburst),
-    .m_axi_awvalid(enc_awvalid),
-    .m_axi_awready(enc_awready),
-    .m_axi_wdata(enc_wdata),
-    .m_axi_wstrb(enc_wstrb),
-    .m_axi_wlast(enc_wlast),
-    .m_axi_wvalid(enc_wvalid),
-    .m_axi_wready(enc_wready),
-    .m_axi_bid(enc_bid),
-    .m_axi_bresp(enc_bresp),
-    .m_axi_bvalid(enc_bvalid),
-    .m_axi_bready(enc_bready),
-    .m_axi_arid(enc_arid),
-    .m_axi_araddr(enc_araddr),
-    .m_axi_arlen(enc_arlen),
-    .m_axi_arsize(enc_arsize),
-    .m_axi_arburst(enc_arburst),
-    .m_axi_arvalid(enc_arvalid),
-    .m_axi_arready(enc_arready),
-    .m_axi_rdata(enc_rdata),
-    .m_axi_rresp(enc_rresp),
-    .m_axi_rlast(enc_rlast),
-    .m_axi_rvalid(enc_rvalid),
-    .m_axi_rready(enc_rready),
-    .irq(encoder_irq)
-  );
-  // u_arbiter implements rtlnet_axi_arbiter in its explicitly connected clock domain.
-  rtlnet_axi_arbiter #(.NUM_MASTERS(1), .ID_W(4), .HIGH_PRIO_MASK(1'b1)) u_arbiter (
-    .clk(enc_clk),
-    .resetn(enc_resetn),
-    .s_axi_aclk(s_axi_aclk),
-    .s_axi_aresetn(s_axi_aresetn),
-    .s_awid(enc_awid),
-    .s_awaddr(enc_awaddr),
-    .s_awlen(enc_awlen),
-    .s_awsize(enc_awsize),
-    .s_awburst(enc_awburst),
-    .s_awvalid(enc_awvalid),
-    .s_awready(enc_awready),
-    .s_wdata(enc_wdata),
-    .s_wstrb(enc_wstrb),
-    .s_wlast(enc_wlast),
-    .s_wvalid(enc_wvalid),
-    .s_wready(enc_wready),
-    .s_bid(enc_bid),
-    .s_bresp(enc_bresp),
-    .s_bvalid(enc_bvalid),
-    .s_bready(enc_bready),
-    .s_arid(enc_arid),
-    .s_araddr(enc_araddr),
-    .s_arlen(enc_arlen),
-    .s_arsize(enc_arsize),
-    .s_arburst(enc_arburst),
-    .s_arvalid(enc_arvalid),
-    .s_arready(enc_arready),
-    .s_rid(enc_rid),
-    .s_rdata(enc_rdata),
-    .s_rresp(enc_rresp),
-    .s_rlast(enc_rlast),
-    .s_rvalid(enc_rvalid),
-    .s_rready(enc_rready),
-    .m_axi_awid(arb_awid),
-    .m_axi_awaddr(arb_awaddr),
-    .m_axi_awlen(arb_awlen),
-    .m_axi_awsize(arb_awsize),
-    .m_axi_awburst(arb_awburst),
-    .m_axi_awlock(),
-    .m_axi_awcache(),
-    .m_axi_awprot(),
-    .m_axi_awqos(),
-    .m_axi_awvalid(arb_awvalid),
-    .m_axi_awready(arb_awready),
-    .m_axi_wdata(arb_wdata),
-    .m_axi_wstrb(arb_wstrb),
-    .m_axi_wlast(arb_wlast),
-    .m_axi_wvalid(arb_wvalid),
-    .m_axi_wready(arb_wready),
-    .m_axi_bid(arb_bid),
-    .m_axi_bresp(arb_bresp),
-    .m_axi_bvalid(arb_bvalid),
-    .m_axi_bready(arb_bready),
-    .m_axi_arid(arb_arid),
-    .m_axi_araddr(arb_araddr),
-    .m_axi_arlen(arb_arlen),
-    .m_axi_arsize(arb_arsize),
-    .m_axi_arburst(arb_arburst),
-    .m_axi_arlock(),
-    .m_axi_arcache(),
-    .m_axi_arprot(),
-    .m_axi_arqos(),
-    .m_axi_arvalid(arb_arvalid),
-    .m_axi_arready(arb_arready),
-    .m_axi_rid(arb_rid),
-    .m_axi_rdata(arb_rdata),
-    .m_axi_rresp(arb_rresp),
-    .m_axi_rlast(arb_rlast),
-    .m_axi_rvalid(arb_rvalid),
-    .m_axi_rready(arb_rready),
-    .s_axi_awaddr(d_awaddr[32 +: 12]),
-    .s_axi_awvalid(d_awvalid[1 +: 1]),
-    .s_axi_awready(d_awready[1 +: 1]),
-    .s_axi_wdata(d_wdata[32 +: 32]),
-    .s_axi_wstrb(d_wstrb[4 +: 4]),
-    .s_axi_wvalid(d_wvalid[1 +: 1]),
-    .s_axi_wready(d_wready[1 +: 1]),
-    .s_axi_bresp(d_bresp[2 +: 2]),
-    .s_axi_bvalid(d_bvalid[1 +: 1]),
-    .s_axi_bready(d_bready[1 +: 1]),
-    .s_axi_araddr(d_araddr[32 +: 12]),
-    .s_axi_arvalid(d_arvalid[1 +: 1]),
-    .s_axi_arready(d_arready[1 +: 1]),
-    .s_axi_rdata(d_rdata[32 +: 32]),
-    .s_axi_rresp(d_rresp[2 +: 2]),
-    .s_axi_rvalid(d_rvalid[1 +: 1]),
-    .s_axi_rready(d_rready[1 +: 1]),
-    .err_irq()
-  );
-  // u_hp_cap implements rtlnet_axi_hp_bridge in its explicitly connected clock domain.
-  rtlnet_axi_hp_bridge #(.ID_W(6)) u_hp_cap (
-    .aclk(capture_clk),
-    .aresetn(capture_resetn),
-    .s_axi_awid(cap_awid),
-    .s_axi_awaddr(cap_awaddr),
-    .s_axi_awlen(cap_awlen),
-    .s_axi_awsize(cap_awsize),
-    .s_axi_awburst(cap_awburst),
-    .s_axi_awvalid(cap_awvalid),
-    .s_axi_awready(cap_awready),
-    .s_axi_wdata(cap_wdata),
-    .s_axi_wstrb(cap_wstrb),
-    .s_axi_wlast(cap_wlast),
-    .s_axi_wvalid(cap_wvalid),
-    .s_axi_wready(cap_wready),
-    .s_axi_bid(cap_bid),
-    .s_axi_bresp(cap_bresp),
-    .s_axi_bvalid(cap_bvalid),
-    .s_axi_bready(cap_bready),
-    .s_axi_arid('0),
-    .s_axi_araddr('0),
-    .s_axi_arlen('0),
-    .s_axi_arsize('0),
-    .s_axi_arburst('0),
-    .s_axi_arvalid('0),
-    .s_axi_arready(),
-    .s_axi_rid(),
-    .s_axi_rdata(),
-    .s_axi_rresp(),
-    .s_axi_rlast(),
-    .s_axi_rvalid(),
-    .s_axi_rready('0),
-    .m_axi_awid(m_axi_cap_awid),
-    .m_axi_awaddr(m_axi_cap_awaddr),
-    .m_axi_awlen(m_axi_cap_awlen),
-    .m_axi_awsize(m_axi_cap_awsize),
-    .m_axi_awburst(m_axi_cap_awburst),
-    .m_axi_awvalid(m_axi_cap_awvalid),
-    .m_axi_awready(m_axi_cap_awready),
-    .m_axi_wid(m_axi_cap_wid),
-    .m_axi_wdata(m_axi_cap_wdata),
-    .m_axi_wstrb(m_axi_cap_wstrb),
-    .m_axi_wlast(m_axi_cap_wlast),
-    .m_axi_wvalid(m_axi_cap_wvalid),
-    .m_axi_wready(m_axi_cap_wready),
-    .m_axi_bid(m_axi_cap_bid),
-    .m_axi_bresp(m_axi_cap_bresp),
-    .m_axi_bvalid(m_axi_cap_bvalid),
-    .m_axi_bready(m_axi_cap_bready),
-    .m_axi_arid(m_axi_cap_arid),
-    .m_axi_araddr(m_axi_cap_araddr),
-    .m_axi_arlen(m_axi_cap_arlen),
-    .m_axi_arsize(m_axi_cap_arsize),
-    .m_axi_arburst(m_axi_cap_arburst),
-    .m_axi_arvalid(m_axi_cap_arvalid),
-    .m_axi_arready(m_axi_cap_arready),
-    .m_axi_rid(m_axi_cap_rid),
-    .m_axi_rdata(m_axi_cap_rdata),
-    .m_axi_rresp(m_axi_cap_rresp),
-    .m_axi_rlast(m_axi_cap_rlast),
-    .m_axi_rvalid(m_axi_cap_rvalid),
-    .m_axi_rready(m_axi_cap_rready)
-  );
-  logic [5:0] hp_bid;
-  assign arb_bid = hp_bid[4:0];
-  logic [5:0] hp_rid;
-  assign arb_rid = hp_rid[4:0];
-  // u_hp_enc implements rtlnet_axi_hp_bridge in its explicitly connected clock domain.
-  rtlnet_axi_hp_bridge #(.ID_W(6)) u_hp_enc (
-    .aclk(enc_clk),
-    .aresetn(enc_resetn),
-    .s_axi_awid({1'b0,arb_awid}),
-    .s_axi_awaddr(arb_awaddr),
-    .s_axi_awlen(arb_awlen),
-    .s_axi_awsize(arb_awsize),
-    .s_axi_awburst(arb_awburst),
-    .s_axi_awvalid(arb_awvalid),
-    .s_axi_awready(arb_awready),
-    .s_axi_wdata(arb_wdata),
-    .s_axi_wstrb(arb_wstrb),
-    .s_axi_wlast(arb_wlast),
-    .s_axi_wvalid(arb_wvalid),
-    .s_axi_wready(arb_wready),
-    .s_axi_bid(hp_bid),
-    .s_axi_bresp(arb_bresp),
-    .s_axi_bvalid(arb_bvalid),
-    .s_axi_bready(arb_bready),
-    .s_axi_arid({1'b0,arb_arid}),
-    .s_axi_araddr(arb_araddr),
-    .s_axi_arlen(arb_arlen),
-    .s_axi_arsize(arb_arsize),
-    .s_axi_arburst(arb_arburst),
-    .s_axi_arvalid(arb_arvalid),
-    .s_axi_arready(arb_arready),
-    .s_axi_rid(hp_rid),
-    .s_axi_rdata(arb_rdata),
-    .s_axi_rresp(arb_rresp),
-    .s_axi_rlast(arb_rlast),
-    .s_axi_rvalid(arb_rvalid),
-    .s_axi_rready(arb_rready),
-    .m_axi_awid(m_axi_enc_awid),
     .m_axi_awaddr(m_axi_enc_awaddr),
-    .m_axi_awlen(m_axi_enc_awlen),
+    .m_axi_awlen(enc_awlen),
     .m_axi_awsize(m_axi_enc_awsize),
     .m_axi_awburst(m_axi_enc_awburst),
     .m_axi_awvalid(m_axi_enc_awvalid),
     .m_axi_awready(m_axi_enc_awready),
-    .m_axi_wid(m_axi_enc_wid),
     .m_axi_wdata(m_axi_enc_wdata),
     .m_axi_wstrb(m_axi_enc_wstrb),
     .m_axi_wlast(m_axi_enc_wlast),
     .m_axi_wvalid(m_axi_enc_wvalid),
     .m_axi_wready(m_axi_enc_wready),
-    .m_axi_bid(m_axi_enc_bid),
+    .m_axi_bid(enc_bid),
     .m_axi_bresp(m_axi_enc_bresp),
     .m_axi_bvalid(m_axi_enc_bvalid),
     .m_axi_bready(m_axi_enc_bready),
-    .m_axi_arid(m_axi_enc_arid),
+    .m_axi_arid(enc_arid),
     .m_axi_araddr(m_axi_enc_araddr),
-    .m_axi_arlen(m_axi_enc_arlen),
+    .m_axi_arlen(enc_arlen),
     .m_axi_arsize(m_axi_enc_arsize),
     .m_axi_arburst(m_axi_enc_arburst),
     .m_axi_arvalid(m_axi_enc_arvalid),
     .m_axi_arready(m_axi_enc_arready),
-    .m_axi_rid(m_axi_enc_rid),
     .m_axi_rdata(m_axi_enc_rdata),
     .m_axi_rresp(m_axi_enc_rresp),
     .m_axi_rlast(m_axi_enc_rlast),
     .m_axi_rvalid(m_axi_enc_rvalid),
-    .m_axi_rready(m_axi_enc_rready)
+    .m_axi_rready(m_axi_enc_rready),
+    .irq(encoder_irq)
   );
+  // HP port glue: the encoder IDs (4 bits) are zero-extended to the 6 bits of the port, WID equals AWID, the AXI3 length fields are the low four
+  // bits (the masters never issue more than 16 beats; the simulation check below reports a longer burst). The capture master drives a 6-bit AWID
+  // of constant 0 and has no read channel, whose port signals are idle.
+  assign enc_bid = m_axi_enc_bid[3:0];
+  assign m_axi_enc_awid = {2'b00, enc_awid};
+  assign m_axi_enc_wid = {2'b00, enc_awid};
+  assign m_axi_enc_awlen = enc_awlen[3:0];
+  assign m_axi_enc_arid = {2'b00, enc_arid};
+  assign m_axi_enc_arlen = enc_arlen[3:0];
+  assign m_axi_cap_wid = m_axi_cap_awid;
+  assign m_axi_cap_awlen = cap_awlen[3:0];
+  assign m_axi_cap_arid = '0;
+  assign m_axi_cap_araddr = '0;
+  assign m_axi_cap_arlen = '0;
+  assign m_axi_cap_arsize = 3'd3;
+  assign m_axi_cap_arburst = 2'b01;
+  assign m_axi_cap_arvalid = 1'b0;
+  assign m_axi_cap_rready = 1'b0;
+  // synthesis translate_off
+  always @(posedge enc_clk) begin
+    if (enc_resetn && ((m_axi_enc_awvalid && (enc_awlen > 8'd15)) || (m_axi_enc_arvalid && (enc_arlen > 8'd15))))
+      $error("rtlnet_zybo_video: encoder burst longer than 16 beats at the HP port");
+  end
+  always @(posedge capture_clk) begin
+    if (capture_resetn && m_axi_cap_awvalid && (cap_awlen > 8'd15))
+      $error("rtlnet_zybo_video: capture burst longer than 16 beats at the HP port");
+  end
+  // synthesis translate_on
   // u_capture_irq implements rtlnet_pulse_sync in its explicitly connected clock domain.
   rtlnet_pulse_sync #(.STAGES(3)) u_capture_irq (
     .src_clk(capture_clk),

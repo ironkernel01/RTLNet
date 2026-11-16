@@ -1,6 +1,6 @@
 # rtlnet_h264_enc: H.264 encoder core, phases 2b-2 to 2c-2 (Intra16x16, I_PCM fallback, P pictures with integer-pel motion search)
 
-Revision: 11-13-2026 (the filter's macroblock-count multiplier in a DSP block and the two-clock DDR3 arbiter, sections 19.7 and 19.8; interrupt, section 18; deblocking filter, section 19; High profile seam, CABAC slice syntax, section 17; phase 2c-2: integer-pel motion search, section 16; phase 2c-1: P pictures without motion search, section 15; phase 2b-4: burst-only DDR3 access, section 14)
+Revision: 11-15-2026 (64-bit memory port, parameter AXI_DATA_W, section 14.5; the filter's macroblock-count multiplier in a DSP block and the two-clock DDR3 arbiter, sections 19.7 and 19.8; interrupt, section 18; deblocking filter, section 19; High profile seam, CABAC slice syntax, section 17; phase 2c-2: integer-pel motion search, section 16; phase 2c-1: P pictures without motion search, section 15; phase 2b-4: burst-only DDR3 access, section 14)
 
 ## 1. Purpose and scope
 
@@ -194,7 +194,8 @@ on average. The driver therefore writes `max(QP, RTLNET_H264_QP_MIN_REALTIME)` i
 | NUM_ENGINES | 2 | how many engines code slice bands in parallel, 1..4 (one engine carries 720p30, two carry 1080p30 at 90 MHz) |
 | MAX_MB_W, MAX_MB_H | 120, 68 | widest and tallest picture in macroblocks (1920x1088); range-checks and CAPS |
 | ADDR_W | 32 | only 32 supported (elaboration `$fatal`) |
-| ID_W | 4 | AXI ID width of each engine port |
+| ID_W | 4 | AXI ID width of each engine port (at least 3 with AXI_DATA_W 64) |
+| AXI_DATA_W | 128 | data width of every engine's memory port in bits, 128 or 64 (`$fatal` otherwise). With 128 the port is the one described in sections 5 and 14. With 64 it suits an AXI3 slave (the Zynq HP ports) and the bytes in memory are the same (section 14.5). RD_STRIP_MB 8 is rejected with 64 |
 | RD_STRIP_MB | 4 | macroblocks per input-read burst strip, 2, 4 or 8: row bursts of 2 x RD_STRIP_MB beats (8 beats = 128 bytes at 4) |
 | REF_BUF_KB | 1 | prediction buffer per engine, KiB (two banks of 32 words of 16 bytes, 24 used per bank; at least 1; written by the search since 2c-2) |
 | MV_LINE_KB | 1 | motion vector line RAM per engine and per user (stage A's context and the search's), KiB (one 32-bit word per macroblock column and one more; at least MAX_MB_W + 1 words) |
@@ -221,7 +222,7 @@ parameters, so one build codes both video modes.
 |---|---|
 | Clocks and resets | `enc_clk`, `enc_resetn` (synchronous, active low); `s_axi_aclk`, `s_axi_aresetn` |
 | AXI4-Lite slave, `s_axi_aclk` | `s_axi_aw*`, `w*`, `b*`, `ar*`, `r*`, 12-bit address (4 KiB window), 32-bit data |
-| AXI4 masters, `enc_clk` | `m_axi_aw*`, `w*`, `b*`, `ar*`, `r*` as packed vectors, engine e at `[e*W +: W]`, arbiter style; 128-bit data, ADDR_W 32, ID_W 4 |
+| AXI4 masters, `enc_clk` | `m_axi_aw*`, `w*`, `b*`, `ar*`, `r*` as packed vectors, engine e at `[e*W +: W]`, arbiter style; `AXI_DATA_W`-bit data (128 default, 64), ADDR_W 32, ID_W 4 |
 | Interrupt | `irq`, level on `enc_clk`: `CTRL.IRQ_EN` and an enabled `IRQ_STATUS` bit (picture done, error, ring stall, profile change, license lost, picture start; section 18) |
 
 In P pictures the AR channel also carries the search window reads (AXI ID 1; the input strips use ID 0): per macroblock one column of reference tiles,
@@ -826,6 +827,35 @@ and `rtlnet_framebuf` have no memory port.
 423 and 425 clocks per macroblock); 1080p30 PASS (1802 pictures, 0 dropped, 0 continuity errors, 0 PTS gaps, PSNR minimum 51.09 dB, 2210 kb/s, TS-mux load 7.0 %,
 435 clocks per macroblock on both engines, last interval 379, busy cycles read 455 k, coder 1,550 k, write 699 k of 1,778 k per picture). The write path that was 3.4 million
 clocks per picture is 0.7 million. `show ddr`: errors 0 on all masters.
+
+### 14.5 64-bit memory port (`AXI_DATA_W` 64, 11-15-2026)
+
+`rtlnet_h264_top`, `rtlnet_h264_engine`, `rtlnet_h264_rd_dma`, `rtlnet_h264_search` (its window loader) and `rtlnet_h264_wr_master` take the parameter `AXI_DATA_W` (128 default, 64). With 128 the generated
+logic is that of the 128-bit encoder: every difference is a constant-folded branch of the parameter or a `generate` block that is not elaborated, and the port, the byte layout and the bursts are unchanged
+(the Nexys Video design passes no value). Evidence: an out-of-context synthesis of `rtlnet_h264_top` with its defaults (2 engines, xc7a200t) before and after the change gives byte-identical EDIF netlists (cells, nets, connections) apart from the time stamp and one added generic annotation line
+(`AXI_DATA_W`), and the same 58,463 LUT, 39,803 FF, 45 RAMB and 78 DSP48E1 primitives; the same holds for `rtlnet_vdma_s2mm`. The register and net names of the 128-bit path were kept for this (the 64-bit logic lives in separate registers and `generate` blocks). With 64 the memory port is a 64-bit AXI3-compatible master port and the bytes written to and read from memory equal those of the 128-bit port:
+
+* **Rules of the port.** INCR bursts of full width (size 3), at most 16 beats (`m_axi_awlen` and `m_axi_arlen` never exceed 15, so a slave with 4-bit length fields takes the low four bits), never across 4 KiB, 8-byte aligned addresses.
+  W follows its AW (the write master raises WVALID only after the AW handshake of the burst), and `m_axi_wid` of an AXI3 slave is `m_axi_awid`, which holds for the whole burst. The IDs of the port are `ID_W` bits: reads 0 (input strips) and 1 (reference), writes 0 ring, 1 index, 2 rebuilt picture;
+  AWID bit 2 marks the first of two bursts of one split write (below). No other AXI4-only feature is used.
+* **Input read (`rtlnet_h264_rd_dma`).** A pixel row of 32 bytes takes four beats; a strip row burst is `4 x n_mb` beats (16 at the default 4, 4 for a last strip of one macroblock); the first three beats of a row are held and the fourth beat
+  completes the 256-bit row of the converter. `RD_STRIP_MB` 8 would give 32 beats and stops the elaboration.
+* **Reference window (`rtlnet_h264_search`).** A luma tile (256 bytes) is read as two bursts of 16 beats (128 bytes each, the second at +128), a chroma tile (128 bytes) as one burst of 16 beats; two beats (low half first) make a window word
+  of 128 bits that is written to the window RAM with the second beat. A column load is up to 9 bursts instead of 6.
+* **Writes (`rtlnet_h264_wr_master`).** The ring writer, the index writer and the rebuilt-picture writer keep their 128-bit beat streams and burst descriptors; the master sends each 128-bit beat as two 64-bit beats (low half first)
+  and pops the beat of the requester with the upper half. A burst of more than 8 requester beats (more than 16 bus beats) leaves as two bursts of ceil(n/2) and floor(n/2) requester beats at consecutive addresses (a luma tile: 2 x 128 bytes; a 16-beat ring burst: 2 x 128 bytes),
+  so no bus burst has fewer than 8 beats unless the requester burst had fewer than 4 (an end-of-slice, ring-end or 4 KiB tail, as before). The B responses of the first burst are ignored by the requesters (AWID bit 2); every requester burst gives one event.
+  An index record (8 requester beats) is one burst of 16 beats. At most 8 requester bursts are granted while the bus carries up to 9 bursts without B.
+* **Bytes in memory.** A harness configuration at 64 bits runs the same input with 128-bit ports as well and requires the same `MEMHASH` (a hash of every word of the memory model after the run: input area, compressed ring, index ring and both rebuilt pictures), see section 14.6.
+* **Seam of the High profile netlist.** `rtlnet_h264_hp` has no memory port (ports in `hp/rtlnet_h264_hp_bb.sv`: events, the macroblock descriptor, the packer commands, the coefficient RAM read port, the 8x8 transform streams, status); every memory access of the engine is in the modules above,
+  so the High profile build at 64 bits needs nothing from the netlist.
+
+### 14.6 Verification at 64 bits
+
+* `tb_h264_axi_mem` (parameter `AXI_W`) stores 128-bit words and merges 64-bit beats by byte lane, checks size, INCR, at most 16 beats, 4 KiB, alignment of the bus width; `tb_h264_burst_mon` (parameter `AXI_W`) checks the shapes in bytes (index record 128 bytes, rebuilt tile bursts of 256 or 128 bytes, reference reads of 256 or 128 bytes, input rows a multiple of 32 bytes, no single-beat transaction, a count of 16-beat reference reads that is a multiple of three).
+* `h264_harness.ps1 -AxiW 64` runs each configuration with 64-bit ports (label `<config>_w64`) and with 128-bit ports (`<config>_w64_ref128`, bench only) and requires equal `MEMHASH` before the three decoders compare the stream with the rebuilt picture. `-InjectWidth` flips one memory bit before the hash (the comparison must report different memory).
+  `-AxiW 64 -InjectBurst` and `-InjectBurstRef` are the burst monitor's negative controls at 64 bits. Entries: `h264_harness_w64` (I pictures, structure and strip widths, 1 and 2 engines, small ring), `h264_harness_w64_p` (P pictures, motion search, 720p and 1080p, 1 and 2 engines), `_neg`, `_widthneg`, `_burstneg`, `_burstrefneg`.
+* `tb_rtlnet_h264_search` with `TB_AXI_W=64` checks the loader against a 64-bit read channel (entries `w64*`), with the bus mutations `+MUT_LEN` (a burst seen with 32 beats) and `+MUT_ADDR` (a burst address moved by 16 bytes) as negative controls.
 
 ## 15. P pictures, phase 2c-1 (11-10-2026)
 

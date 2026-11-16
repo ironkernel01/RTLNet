@@ -1,15 +1,22 @@
 // Purpose: PS-free end-to-end camera path of the Zybo wrapper: D-PHY pins, receiver, admission, capture, slot ownership and H.264 encode.
 // Overview: the D-PHY transmitter model of the camera receiver benches (cores/rtlnet_csi2_rx/testbench, behavioural front end) sends
 //   CSI-2 RAW10 frames of 32 x 16 pixels on two lanes to the wrapper's camera pins; AXI-Lite GP master BFM and two AXI3 HP byte-memory
-//   slaves replace PS7. The frames are diagonal ramps (raw value 4 * (base + x + y)) that the receiver's bilinear demosaic reproduces
+//   slaves replace PS7. The capture DMA and the encoder (64-bit masters) are connected to the slaves directly, no bridge.
+//   The HP slave model rejects what an AXI3 HP port rejects or what breaks the project's burst rules: a burst that is not INCR or not 8
+//   bytes per beat, a burst across 4 KiB, WID different from AWID, WLAST wrong (W data is accepted only after its AW), an AWID or ARID with bits above the
+//   encoder's 4-bit ID, a burst of fewer than 8 beats other than the encoder ring's end-of-slice tail, and (through taps on the
+//   masters' 8-bit length fields, which the 4-bit AXI3 port would truncate) a burst of more than 16 beats; a hash of the memory bytes
+//   written is printed. The frames are diagonal ramps (raw value 4 * (base + x + y)) that the receiver's bilinear demosaic reproduces
 //   exactly in the interior, so the stored luma of every interior pixel is known.
 //   Five frames in the 1080p mode prove alternate admission (3 of 5 admitted, held slot unchanged); the stored frame is checked for
 //   geometry (32 x 16, every interior pixel) and neutral chroma; two frames in the 720p mode prove that every frame is admitted.
 //   The receiver counters read back over AXI-Lite (frames received, every error counter zero). One real lossy/deblocked IDR encode dumps
 //   Annex B and rebuilt YUV for the repository decoder comparison flow (scripts/check_board_encode.ps1).
 // Plusargs: INJECT_FAILURE (the verdict fails), MUTATE (one raw pixel of the frame that is checked is changed on the wire; the
-//   luma check must fail).
-// Revision: 11-15-2026. Camera input through the receiver core. No foreach loops.
+//   luma check must fail). Mutations of what the HP slave model sees (each must fail the bench through its own check): MUT_WID (one
+//   WID changed), MUT_4K (one AW address moved to the last bytes of its page), MUT_LONG (one burst length seen as 17 beats at the
+//   length tap), MUT_SHORT (one burst seen as a single beat), MUT_BEAT (one ARSIZE seen as 16 bytes per beat).
+// Revision: 11-15-2026. Camera input through the receiver core, direct 64-bit HP connection. No foreach loops.
 `timescale 1ns/1ps
 package rtlnet_zybo_tb_memory;
   byte unsigned mem [0:1048575];
@@ -246,7 +253,9 @@ module tb_rtlnet_zybo_video;
     .rvalid(s_axi_rvalid),
     .rready(s_axi_rready)
   );
-  rtlnet_zybo_tb_hp mem_cap (.clk(enc_clk), .resetn(capture_resetn),
+  rtlnet_zybo_tb_hp #(.NAME("capture")) mem_cap (.clk(enc_clk), .resetn(capture_resetn),
+    .awlen_wide(dut.cap_awlen),
+    .arlen_wide(8'd0),
     .awid(m_axi_cap_awid),
     .awaddr(m_axi_cap_awaddr),
     .awlen(m_axi_cap_awlen),
@@ -278,7 +287,9 @@ module tb_rtlnet_zybo_video;
     .rvalid(m_axi_cap_rvalid),
     .rready(m_axi_cap_rready)
   );
-  rtlnet_zybo_tb_hp mem_enc (.clk(enc_clk), .resetn(enc_resetn),
+  rtlnet_zybo_tb_hp #(.NAME("encoder")) mem_enc (.clk(enc_clk), .resetn(enc_resetn),
+    .awlen_wide(dut.enc_awlen),
+    .arlen_wide(dut.enc_arlen),
     .awid(m_axi_enc_awid),
     .awaddr(m_axi_enc_awaddr),
     .awlen(m_axi_enc_awlen),
@@ -330,6 +341,14 @@ module tb_rtlnet_zybo_video;
   integer actual_y;
   string out_prefix = "board";
   integer timeout_count;
+  logic [1:0] rd_resp;
+  // Hash of the whole byte store (to compare runs).
+  function automatic longint unsigned mem_hash();
+    longint unsigned h;
+    h = 64'hCBF2_9CE4_8422_2325;
+    for (int i=0;i<1048576;i++) h = (h ^ longint'(mem[i])) * 64'h0000_0100_0000_01B3;
+    return h;
+  endfunction
 
   always @(posedge ctrl_clk) if (ctrl_resetn && irq[0]) capture_irqs++;
 
@@ -456,9 +475,6 @@ module tb_rtlnet_zybo_video;
     if (!v[1] || v[2]) begin
       $display("DBG encoder status %08x",v);
       cpu.rd(ENC+32'h14,v); $display("DBG encoder error %08x",v);
-      cpu.rd(32'h44a04010,v); $display("DBG arbiter status %08x",v);
-      cpu.rd(32'h44a04040,v); $display("DBG arbiter capture %08x",v);
-      cpu.rd(32'h44a04044,v); $display("DBG arbiter address %08x",v);
       tb_verdict("tb_rtlnet_zybo_video");
     end
     repeat (6) @(negedge ctrl_clk);
@@ -522,6 +538,14 @@ module tb_rtlnet_zybo_video;
         tb_check(v==0,$sformatf("receiver error counter %0d is zero",n));
       end
     end
+    // The unmapped window 0x44A0_4000 (the arbiter window of earlier boards) answers DECERR.
+    cpu.read32(32'h44a04000, v, rd_resp);
+    tb_check(rd_resp==2'b11,"unmapped window 0x44A04000 answers DECERR");
+    mem_cap.report();
+    mem_enc.report();
+    tb_check(mem_cap.aw_bursts>0 && mem_enc.aw_bursts>0 && mem_enc.ar_bursts>0,"both HP ports carried write bursts and the encoder read bursts");
+    tb_check(mem_cap.short_bursts==0 && mem_enc.short_bursts==0,"no burst of fewer than 8 beats except the ring tail");
+    $display("MEMBYTES %016x", mem_hash());
     tb_verdict("tb_rtlnet_zybo_video");
   end
   initial begin
@@ -531,10 +555,16 @@ module tb_rtlnet_zybo_video;
   end
 endmodule
 
-// PS HP slave model: per-port AXI3 ordering with a shared physical DDR byte store.
-module rtlnet_zybo_tb_hp (
+// PS HP slave model: per-port AXI3 ordering with a shared physical DDR byte store; checks the burst shape, the 4 KiB rule, WID, the beat count and the
+// length taps of the master; NAME tags the messages.
+module rtlnet_zybo_tb_hp #(
+  parameter string NAME = "hp"
+) (
   input logic clk,
   input logic resetn,
+  // Taps on the masters' own 8-bit length fields (before the 4-bit port truncates them).
+  input logic [7:0] awlen_wide,
+  input logic [7:0] arlen_wide,
   input logic [5:0] awid,
   input logic [31:0] awaddr,
   input logic [3:0] awlen,
@@ -578,6 +608,21 @@ module rtlnet_zybo_tb_hp (
   integer rn=0;
   logic we=0;
   logic re=0;
+  integer aw_bursts=0;
+  integer ar_bursts=0;
+  integer short_bursts=0;
+  integer aw_hist [0:16];
+  integer ar_hist [0:16];
+  bit mut_wid, mut_4k, mut_long, mut_short, mut_beat;
+  bit mut_wid_done=0, mut_4k_done=0, mut_long_done=0, mut_short_done=0, mut_beat_done=0;
+  initial begin
+    mut_wid = $test$plusargs("MUT_WID");
+    mut_4k = $test$plusargs("MUT_4K");
+    mut_long = $test$plusargs("MUT_LONG");
+    mut_short = $test$plusargs("MUT_SHORT");
+    mut_beat = $test$plusargs("MUT_BEAT");
+    for (int i=0;i<17;i++) begin aw_hist[i]=0; ar_hist[i]=0; end
+  end
   assign awready=resetn && !writing && !bvalid && we;
   assign wready=resetn && writing && we;
   assign arready=resetn && !reading && re;
@@ -592,6 +637,15 @@ module rtlnet_zybo_tb_hp (
     we=($urandom%4)!=0;
     if (!rvalid || rready) re=($urandom%4)!=0;
   end
+  task automatic report();
+    string line;
+    line = {NAME, " HP port write bursts by beats:"};
+    for (int i=1;i<=16;i++) if (aw_hist[i]!=0) line = {line, $sformatf(" %0d:%0d", i, aw_hist[i])};
+    $display("%s", line);
+    line = {NAME, " HP port read bursts by beats:"};
+    for (int i=1;i<=16;i++) if (ar_hist[i]!=0) line = {line, $sformatf(" %0d:%0d", i, ar_hist[i])};
+    $display("%s", line);
+  endtask
   always @(posedge clk) begin
     if (!resetn) begin
       writing=0;
@@ -602,20 +656,55 @@ module rtlnet_zybo_tb_hp (
     end else begin
       if (bvalid && bready) bvalid<=0;
       if (awvalid && awready) begin
-        tb_check(awsize==3 && awburst==1,"HP write shape");
-        tb_check(awaddr[11:0]+(awlen+1)*8<=4096,"HP write within page");
+        logic [31:0] a_seen;
+        integer beats_seen;
+        integer wide_seen;
+        a_seen = awaddr;
+        beats_seen = awlen+1;
+        wide_seen = awlen_wide+1;
+        if (mut_4k && !mut_4k_done) begin a_seen = {awaddr[31:12], 12'hFF8}; mut_4k_done=1; end
+        if (mut_long && !mut_long_done) begin wide_seen = 17; mut_long_done=1; end
+        if (mut_short && !mut_short_done) begin beats_seen = 1; mut_short_done=1; end
+        tb_check(awburst==1,$sformatf("HP %s write burst type %0d is not INCR",NAME,awburst));
+        tb_check(awsize==3,$sformatf("HP %s write beat size %0d is not 8 bytes",NAME,awsize));
+        tb_check(a_seen[2:0]==0,"HP write address is 8-byte aligned");
+        tb_check(a_seen[11:0]+beats_seen*8<=4096,$sformatf("HP %s write crosses a 4 KiB boundary",NAME));
+        tb_check(wide_seen<=16,$sformatf("HP %s write burst of %0d beats at the master (AXI3 limit 16)",NAME,wide_seen));
+        tb_check(awid[5:4]==0,"HP write ID uses the 4 encoder ID bits");
+        tb_check(beats_seen>1,$sformatf("HP %s single-beat write burst",NAME));
+        // Fewer than 8 beats only as the encoder's end-of-slice ring tail (AWID 0, an even number of beats: whole 16-byte words of the 128-bit requester).
+        if (beats_seen<8 && !(awid[3:0]==0 && (beats_seen%2)==0 && NAME=="encoder")) short_bursts++;
+        aw_bursts++;
+        aw_hist[beats_seen]++;
         wa=awaddr; wi=awid; wn=awlen+1; writing=1;
       end
       if (wvalid && wready) begin
-        tb_check(wid==wi,"HP WID");
+        logic [5:0] wid_seen;
+        wid_seen = wid;
+        if (mut_wid && !mut_wid_done) begin wid_seen = wid ^ 6'd1; mut_wid_done=1; end
+        tb_check(wid_seen==wi,$sformatf("HP %s WID",NAME));
         tb_check(wlast==(wn==1),"HP WLAST");
         for (int k=0;k<8;k++) if(wstrb[k]) mem[address(wa+k)]=wdata[k*8 +:8];
         wa+=8; wn--;
         if (wn==0) begin writing=0; bid<=wi; bresp<=0; bvalid<=1; end
       end
       if (arvalid && arready) begin
-        tb_check(arsize==3 && arburst==1,"HP read shape");
-        tb_check(araddr[11:0]+(arlen+1)*8<=4096,"HP read within page");
+        logic [2:0] size_seen;
+        integer wide_r;
+        integer beats_r;
+        size_seen = arsize;
+        wide_r = arlen_wide+1;
+        beats_r = arlen+1;
+        if (mut_beat && !mut_beat_done) begin size_seen = 3'd4; mut_beat_done=1; end
+        tb_check(arburst==1,$sformatf("HP %s read burst type %0d is not INCR",NAME,arburst));
+        tb_check(size_seen==3,$sformatf("HP %s read beat size %0d is not 8 bytes",NAME,size_seen));
+        tb_check(araddr[11:0]+beats_r*8<=4096,$sformatf("HP %s read crosses a 4 KiB boundary",NAME));
+        tb_check(wide_r<=16,$sformatf("HP %s read burst of %0d beats at the master (AXI3 limit 16)",NAME,wide_r));
+        tb_check(arid[5:4]==0,"HP read ID uses the 4 encoder ID bits");
+        tb_check(beats_r>1,$sformatf("HP %s single-beat read burst",NAME));
+        if (beats_r<8) short_bursts++;
+        ar_bursts++;
+        ar_hist[beats_r]++;
         ra=araddr; ri=arid; rn=arlen+1; reading=1;
       end else if (rvalid && rready) begin
         ra+=8; rn--;

@@ -3,15 +3,15 @@
 | Item | Value |
 |---|---|
 | Core | `rtlnet_vdma_s2mm` |
-| Document revision | 11-09-2026 |
+| Document revision | 11-15-2026 |
 | Language | SystemVerilog-2012 (RTL, benches), C11 (driver) |
 | Position | between `rtlnet_csi2_rx` and the DDR3 arbiter; slot owner `rtlnet_framebuf` |
 | Register map revision | `VERSION` = `0x11092026`, `ID` = `0x53324D4D` ("S2MM") |
-| Verification | Active-HDL 11.1: `tb_rtlnet_vdma_s2mm` (5 configurations + negative control), `tb_rtlnet_video_path`, host driver test |
+| Verification | Active-HDL 11.1: `tb_rtlnet_vdma_s2mm` (6 configurations at 128 bits and 6 at 64 bits, negative controls and bus mutations), `tb_rtlnet_video_path`, host driver test |
 | Synthesis | Vivado 2026.1 out of context, xc7a200tsbg484-1: PASS, 0 critical warnings; 595 LUT, 1038 FF, 2 RAMB36 (2 KiB beat FIFO) |
 
 The core writes a video stream (32-bit words of two YUV422 pixels) as a frame of lines into a frame-buffer slot of DDR3 with
-128-bit AXI4 INCR bursts of at most 16 beats. One design serves every write-side video client; the `rtlnet_vdma_mm2s` read
+AXI4 INCR bursts of at most 16 beats of `AXI_DATA_W` bits (128 by default, 64 for an AXI3 port such as a Zynq HP port; the bytes in memory are the same). One design serves every write-side video client; the `rtlnet_vdma_mm2s` read
 DMA is a separate core.
 
 Contents: 1 interface, 2 behaviour, 3 registers, 4 clocks and crossings, 5 resources, 6 verification, 7 integration,
@@ -29,7 +29,7 @@ Contents: 1 interface, 2 behaviour, 3 registers, 4 clocks and crossings, 5 resou
 | video stream | `s_axis_tdata[31:0]`, `s_axis_tvalid`, `s_axis_tlast`, `s_axis_tuser`; out `s_axis_tready` | `clk` | `tuser` = first word of a frame, `tlast` = last word of a line |
 | frame sideband | `s_width[15:0]`, `s_height[15:0]`, `s_frame_num[31:0]`, `s_timestamp[31:0]`, `s_src_pattern` | `clk` | pixels; stable from the first word of a frame until the next first word |
 | slot interface | out `fb_req`; in `fb_rsp_valid`, `fb_rsp_ok`, `fb_rsp_base[ADDR_W-1:0]`; out `fb_done`, `fb_done_good`, `fb_done_frame_num`, `fb_done_timestamp`, `fb_done_width`, `fb_done_height`, `fb_done_src_pattern` | `clk` | `fb_req` is held until the answer pulse; `fb_done` is a one-clock pulse; base is a DDR3 byte offset |
-| AXI4 write master | `m_axi_aw*`, `m_axi_w*`, `m_axi_b*` | `clk` | AWID 0, size 4 (16 bytes), burst INCR, strobes all ones, no read channel |
+| AXI4 write master | `m_axi_aw*`, `m_axi_w*` (`AXI_DATA_W` bits), `m_axi_b*` | `clk` | AWID 0, size log2(`AXI_DATA_W` / 8) (full width), burst INCR, strobes all ones, no read channel, AWLEN at most 15 (an AXI3 port takes `awlen[3:0]` and drives WID = AWID) |
 | registers | `s_axi_aw*`, `s_axi_w*`, `s_axi_b*`, `s_axi_ar*`, `s_axi_r*` (AXI4-Lite, 12-bit address) | `s_axi_aclk` | 4 KiB window, crossing in section 4 |
 
 ### 1.2 Parameters
@@ -38,7 +38,8 @@ Contents: 1 interface, 2 behaviour, 3 registers, 4 clocks and crossings, 5 resou
 |---|---|---|
 | `ADDR_W` | 29 | DDR3 byte address bits (512 MiB) |
 | `ID_W` | 1 | AXI ID width (the ID is constant 0) |
-| `MAX_BURST_BEATS` | 16 | longest burst, 1..16 (`$fatal` outside) |
+| `AXI_DATA_W` | 128 | memory data width in bits, 128 or 64 (`$fatal` otherwise); the stream words per beat (4 or 2), the beat FIFO width, the burst size and the 4 KiB arithmetic follow it |
+| `MAX_BURST_BEATS` | 16 | longest burst in beats of `AXI_DATA_W` bits, 1..16 (`$fatal` outside); 16 beats are 256 bytes at 128 bits and 128 bytes at 64 bits |
 | `FIFO_KB` | 2 | beat FIFO size in kilobytes: a power of two beats, at least two bursts (`$fatal` otherwise) |
 | `RAM_STYLE` | "block" | passed to `rtlnet_ram_core` ("block" or "distributed") |
 
@@ -115,7 +116,7 @@ Vivado 2026.1, out-of-context synthesis, xc7a200tsbg484-1 (`.sim/synth/rtlnet_vd
 |---|---|
 | Slice LUT | 595 (0.44 %) |
 | Slice register | 1038 (0.39 %) |
-| Block RAM tiles | 2 (the 128 x 128-bit beat FIFO) |
+| Block RAM tiles | 2 (the 128 x 128-bit beat FIFO; with `AXI_DATA_W` 64 the FIFO is 256 x 64 bits, the same 2 KiB) |
 
 ---
 
@@ -142,6 +143,16 @@ burst with the bench's own splitter.
 Configurations (`testbench/regression.txt`): `gap` (random gaps), `nogap`, `burst8` (`MAX_BURST_BEATS` 8), `burst4_fkb1` (4 beats, 1 KiB
 FIFO), `full` (adds real 1280x720 and 1920x1080 packed frames, 587,825 checks), `neg` (`+INJECT_FAILURE`, expected failure).
 
+With `AXI_DATA_W` 128 the synthesized netlist is that of the 128-bit core: out-of-context synthesis before and after the parameter gives the same EDIF (cells, nets and connections) apart from the time stamp and the added generic annotations (595 LUT, 1038 FF, 2 RAMB36).
+
+With the define `TB_AXI_W=64` the same scenario runs with 64-bit beats (entries `w64_gap`, `w64_nogap`, `w64_burst8`, `w64_burst4_fkb1`, `w64_full`, `w64_neg`). The
+expected memory image is built byte by byte from the stream words, independent of the width, and after every frame the CRC-32 of the memory model's bytes
+(`mem_crc32()`, ascending byte address, the same for any word size) must equal the CRC of that expected image: the bytes of a frame written at 64 bits are the bytes written at 128 bits.
+The bench's splitter and the AW monitor use the beat size (a 64-bit burst of the same beat count carries half the bytes), the memory model limits a burst to 16 beats (AXI3), and the
+monitor requires `AWLEN` at most 15 and size 3. Bus mutations between the core and the memory model, each of which must fail the bench: `+MUT_LEN` (a burst of more than 16 beats: "burst of 32 beats
+exceeds the limit 16"), `+MUT_SIZE` (beat size: "size 2 is not full width 3"), `+MUT_4K` ("crosses a 4 KiB boundary"), `+MUT_STRB` (one strobe bit cleared: wrong byte, CRC mismatch); entries `w64_mut_len`, `w64_mut_size`, `w64_mut_4k`,
+`w64_mut_strb`, `mut_len`, `mut_strb`.
+
 Mutation (RTL restored to the identical SHA-256 afterwards): the 4 KiB limit on the burst length removed fails the bench,
 "AW beats 16, expected 8 (addr 0x400f80)" (32 failed checks).
 
@@ -161,7 +172,7 @@ Host: `testbench/test_rtlnet_vdma_s2mm_driver.c` (`rtlnet_vdma_s2mm_driver_test.
 
 ## 8. Limitations
 
-- Write only; INCR bursts of full width; no narrow transfers; no read channel.
-- Width in multiples of 8 pixels (one beat), the line start addresses in multiples of 16 bytes.
+- Write only; INCR bursts of full width; no narrow transfers; no read channel; `AXI_DATA_W` is 128 or 64.
+- Width in multiples of 8 pixels (16 bytes, one beat at 128 bits, two at 64 bits), the line start addresses and the stride in multiples of 16 bytes at both widths.
 - A cut-off frame is completed with zero words before the next frame starts (up to one frame time of stall).
 - The beat count of the FIFO bounds the lookahead; `FIFO_KB` must hold two bursts.

@@ -19,9 +19,14 @@
 //   * Read bursts: every burst is 16 (luma tile) or 8 (chroma tile) beats, tile aligned; the totals equal the expected loads (every
 //     existing tile of the three rows of every column of the band is read once per column, i.e. three times per picture).
 //   * +INJECT_FAILURE is the negative control (forces one failed check).
-// Defines: TB_W, TB_H, TB_FIRST, TB_ROWS, TB_TX, TB_TY (whole samples, 99 for a random current picture), TB_QP, TB_SR, TB_LAT, TB_SEED.
+//   * TB_AXI_W 64 (default 128): the loader runs with a 64-bit read data channel. Every burst is then 16 beats of 8 bytes (a luma tile as
+//     two bursts of 128 bytes, the second at +128, a chroma tile as one), the memory model answers by byte lane, the window RAM contents
+//     and every other check are unchanged (the same bytes in the window). Mutations of the burst seen by the model (each must fail): +MUT_LEN
+//     (one burst seen with 32 beats), +MUT_ADDR (one burst address moved by 16 bytes: wrong window content).
+// Defines: TB_W, TB_H, TB_FIRST, TB_ROWS, TB_TX, TB_TY (whole samples, 99 for a random current picture), TB_QP, TB_SR, TB_LAT, TB_SEED, TB_AXI_W.
 // Language: SystemVerilog-2012 (simulation only).
-// Revision: 11-10-2026
+// Revision: 11-15-2026
+//   * 11-15-2026: TB_AXI_W 64 and 128, bus mutations.
 //   * 11-10-2026: initial version (phase 2c-2).
 // Clocks: clk, 100 MHz.
 // -----------------------------------------------------------------------------
@@ -57,11 +62,16 @@
 `ifndef TB_SEED
   `define TB_SEED 1
 `endif
+`ifndef TB_AXI_W
+  `define TB_AXI_W 128
+`endif
 
 module tb_rtlnet_h264_search;
 
   import rtlnet_tb_pkg::*;
 
+  localparam int AXW    = `TB_AXI_W;
+  localparam int NB     = AXW / 8;       // bytes per bus beat
   localparam int W      = `TB_W;
   localparam int H      = `TB_H;
   localparam int FIRST  = `TB_FIRST;
@@ -92,7 +102,7 @@ module tb_rtlnet_h264_search;
   logic [31:0]   win_araddr;
   logic [7:0]    win_arlen;
   logic          win_arvalid, win_arready;
-  logic [127:0]  win_rdata;
+  logic [AXW-1:0] win_rdata;
   logic [1:0]    win_rresp;
   logic          win_rvalid, win_rready;
   logic          err_resp;
@@ -115,7 +125,7 @@ module tb_rtlnet_h264_search;
 
   rtlnet_h264_search #(
     .ADDR_W(32), .MAX_MB_W(120), .SR(SR), .WIN_KB(4), .MV_LINE_KB(1), .SRC_AW(7), .REF_AW(6), .MAX_EVAL(MAXEV), .GOOD_COST(GOOD), .ZERO_BIAS(ZBIAS),
-    .RAM_STYLE("block"), .SRCBUF_STYLE("distributed")
+    .RAM_STYLE("block"), .SRCBUF_STYLE("distributed"), .AXI_DATA_W(AXW)
   ) dut (
     .clk(clk), .resetn(resetn),
     .pic_start(pic_start), .cfg_mb_w(8'(W)), .cfg_mb_h(8'(H)), .band_first_row(8'(FIRST)), .band_rows(8'(ROWS)),
@@ -207,6 +217,13 @@ module tb_rtlnet_h264_search;
   int      clk_n;
   int      cur_beat;
   int      n_ar, n_ar16, n_ar8;
+  bit      mut_len, mut_addr, mut_len_done, mut_addr_done;
+  initial begin
+    mut_len = $test$plusargs("MUT_LEN");
+    mut_addr = $test$plusargs("MUT_ADDR");
+    mut_len_done = 1'b0;
+    mut_addr_done = 1'b0;
+  end
   int      n_beats;
   logic    ar_ok;
 
@@ -215,16 +232,23 @@ module tb_rtlnet_h264_search;
     clk_n <= clk_n + 1;
     if (resetn && win_arvalid && win_arready) begin
       burst_t b;
+      int     seen_len;
       b.addr = win_araddr;
       b.len  = int'(win_arlen) + 1;
       b.due  = clk_n + LAT;
+      seen_len = b.len;
+      if (mut_len && !mut_len_done) begin seen_len = 32; mut_len_done = 1'b1; end
+      if (mut_addr && !mut_addr_done && n_ar == 3) begin b.addr = b.addr + 16; mut_addr_done = 1'b1; end
       bq.push_back(b);
       n_ar++;
       if (b.len == 16) n_ar16++;
       if (b.len == 8)  n_ar8++;
-      tb_check((b.len == 16) || (b.len == 8), $sformatf("window burst of %0d beats", b.len));
-      tb_check((b.len == 16) ? ((b.addr % 256) == 0) : ((b.addr % 128) == 0), $sformatf("window burst of %0d beats at unaligned address 0x%0h", b.len, b.addr));
-      tb_check(((b.addr & 32'hFFF) + b.len * 16) <= 4096, "window burst crosses 4 KiB");
+      // 128 bits: 16 beats (luma tile, 256 bytes) or 8 beats (chroma tile, 128 bytes). 64 bits: always 16 beats (128 bytes: a luma half or a chroma tile).
+      tb_check(seen_len <= 16, $sformatf("window burst of %0d beats, above the 16 beats of an AXI3 port", seen_len));
+      tb_check((b.len * NB == 256) || (b.len * NB == 128), $sformatf("window burst of %0d beats", b.len));
+      tb_check(AXW == 128 || b.len == 16, $sformatf("window burst of %0d beats on a 64-bit bus, expected 16", b.len));
+      tb_check((b.len * NB == 256) ? ((b.addr % 256) == 0) : ((b.addr % 128) == 0), $sformatf("window burst of %0d beats at unaligned address 0x%0h", b.len, b.addr));
+      tb_check(((b.addr & 32'hFFF) + b.len * NB) <= 4096, "window burst crosses 4 KiB");
     end
   end
 
@@ -234,7 +258,7 @@ module tb_rtlnet_h264_search;
     win_rdata  <= '0;
     if (resetn && (bq.size() > 0) && (clk_n >= bq[0].due) && win_rready && ($urandom_range(99, 0) < 85)) begin
       win_rvalid <= 1'b1;
-      win_rdata  <= mem[(bq[0].addr / 16) + cur_beat];
+      win_rdata  <= AXW'(mem[(bq[0].addr + cur_beat * NB) / 16] >> (8 * ((bq[0].addr + cur_beat * NB) % 16)));
       n_beats++;
       cur_beat++;
       if (cur_beat == bq[0].len) begin
@@ -610,8 +634,13 @@ module tb_rtlnet_h264_search;
     for (int r = FIRST; r < FIRST + ROWS; r++) begin
       for (int c = 0; c < W; c++) exp_bursts += 2 * (1 + ((r > 0) ? 1 : 0) + (((r + 1) < H) ? 1 : 0));
     end
-    tb_check(n_ar == exp_bursts, $sformatf("%0d window bursts, expected %0d", n_ar, exp_bursts));
-    tb_check(n_ar16 == n_ar8, $sformatf("%0d luma and %0d chroma window bursts", n_ar16, n_ar8));
+    if (AXW == 128) begin
+      tb_check(n_ar == exp_bursts, $sformatf("%0d window bursts, expected %0d", n_ar, exp_bursts));
+      tb_check(n_ar16 == n_ar8, $sformatf("%0d luma and %0d chroma window bursts", n_ar16, n_ar8));
+    end else begin
+      // 64 bits: a luma tile is two bursts, a chroma tile one: three per tile row where 128 bits have two.
+      tb_check(n_ar == exp_bursts / 2 * 3, $sformatf("%0d window bursts, expected %0d", n_ar, exp_bursts / 2 * 3));
+    end
     $display("STAT search: %0d macroblocks, %0d candidates evaluated (mean %0d.%0d, max %0d), %0d window bursts (%0d x 16 beats, %0d x 8 beats), %0d window words checked, %0d candidate results checked",
              mbs, n_evals_total, n_evals_total / mbs, (n_evals_total * 10 / mbs) % 10, max_evals, n_ar, n_ar16, n_ar8, win_checks, ev_checks);
     tb_verdict("tb_rtlnet_h264_search");

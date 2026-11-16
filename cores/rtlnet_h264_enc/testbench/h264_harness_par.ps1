@@ -10,8 +10,9 @@ Overview:
   * Prints `PAR <name>: PASS|FAIL (<seconds> s)` per configuration and `PAR RESULT: <passed> of <total> passed`; exits 0 only when
     every configuration passed. The full per-configuration logs stay in <LogDir>.
 Usage: powershell -NoProfile -ExecutionPolicy Bypass -File h264_harness_par.ps1 -Config p_* [-Jobs 4] [-Prefix p2c1] [-LogDir <dir>]
-         [-Measure] [-Gap pct] [-Lat clocks] [-Inject] [-InjectBurst] [-InjectBurstRef] [-Pcm] [-NoPng]
-Revision: 11-10-2026
+         [-Measure] [-Gap pct] [-Lat clocks] [-Inject] [-InjectBurst] [-InjectBurstRef] [-Pcm] [-NoPng] [-AxiW 64] [-InjectWidth]
+Revision: 11-15-2026
+  * 11-15-2026: -AxiW and -InjectWidth are passed to the harness.
   * 11-10-2026: initial version (phase 2c-1).
 -------------------------------------------------------------------------------
 #>
@@ -27,7 +28,9 @@ param(
     [switch]$Pcm,
     [switch]$NoPng,
     [int]$Gap = 20,
-    [int]$Lat = 20
+    [int]$Lat = 20,
+    [ValidateSet(128, 64)][int]$AxiW = 128,
+    [switch]$InjectWidth
 )
 $ErrorActionPreference = 'Stop'
 $Repo = (Resolve-Path (Join-Path $PSScriptRoot '../../..')).Path
@@ -49,6 +52,8 @@ if ($InjectBurst) { $passthru += '-InjectBurst' }
 if ($InjectBurstRef) { $passthru += '-InjectBurstRef' }
 if ($Pcm) { $passthru += '-Pcm' }
 if ($NoPng) { $passthru += '-NoPng' }
+if ($AxiW -eq 64) { $passthru += @('-AxiW', '64') }
+if ($InjectWidth) { $passthru += '-InjectWidth' }
 $running = @()
 $results = @{}
 $queue = New-Object System.Collections.Queue

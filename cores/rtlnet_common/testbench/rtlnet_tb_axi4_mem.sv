@@ -31,12 +31,17 @@
 //     word first); a WRAP with another length or a misaligned start is an error, and the
 //     4 KiB check does not apply to a legal WRAP. With ALLOW_WRAP = 0 a WRAP is an error
 //     (burst not INCR) as before.
+//   * MAX_BURST_BEATS (default 256, the AXI4 limit; 16 for an AXI3 port such as the Zynq HP ports): a burst with more beats
+//     is an error. aw_hist and ar_hist count the accepted bursts per beat count. mem_crc32() is the CRC-32 of the stored
+//     bytes in ascending byte-address order (words never written count as absent), so the value is the same for any
+//     DATA_W that stores the same bytes; peek_byte() reads one byte.
 //   * Counters aw_count, ar_count, w_beats, r_beats count accepted bursts and
 //     beats. clear_memory() empties the storage; poke() and peek() access one
 //     word. resetn (synchronous, active low) clears every queue and flag, not
 //     the storage.
 // Language: SystemVerilog-2012 (simulation only).
-// Revision: 11-09-2026
+// Revision: 11-15-2026
+//   * 11-15-2026: MAX_BURST_BEATS, aw_hist, ar_hist, mem_crc32, peek_byte.
 //   * 11-09-2026: initial version.
 //   * 11-09-2026: size-aware beat addresses and 4 KiB check for CHECK_FULL_WIDTH = 0.
 //   * 11-09-2026: ALLOW_WRAP, WRAP burst addressing.
@@ -58,7 +63,8 @@ module rtlnet_tb_axi4_mem #(
   parameter int QUEUE_DEPTH      = 16,
   parameter int SEED             = 1,
   parameter bit CHECK_FULL_WIDTH = 1'b1,
-  parameter bit ALLOW_WRAP       = 1'b0   // accept legal WRAP bursts (2, 4, 8, 16 beats, aligned) and model the wrap
+  parameter bit ALLOW_WRAP       = 1'b0,  // accept legal WRAP bursts (2, 4, 8, 16 beats, aligned) and model the wrap
+  parameter int MAX_BURST_BEATS  = 256    // longest legal burst in beats (16: AXI3)
 )(
   input  logic                clk,
   input  logic                resetn,
@@ -157,6 +163,8 @@ module rtlnet_tb_axi4_mem #(
   bit [2:0]        ar_hold_size;
   bit [1:0]        ar_hold_burst;
 
+  int aw_hist [int];
+  int ar_hist [int];
   int aw_count = 0;
   int ar_count = 0;
   int w_beats  = 0;
@@ -177,6 +185,30 @@ module rtlnet_tb_axi4_mem #(
     bit [ADDR_W-1:0] k;
     k = {{SHIFT{1'b0}}, word_key(a)};
     return mem.exists(k) ? mem[k] : '0;
+  endfunction
+
+  function automatic bit [7:0] peek_byte(input bit [ADDR_W-1:0] a);
+    bit [DATA_W-1:0] w;
+    w = peek(a);
+    return w[8*int'(a[SHIFT-1:0]) +: 8];
+  endfunction
+
+  // CRC-32 (reflected, polynomial 0xEDB88320) over the bytes of every stored word, ascending byte address.
+  function automatic bit [31:0] mem_crc32();
+    bit [31:0] r;
+    bit [ADDR_W-1:0] k;
+    bit [DATA_W-1:0] w;
+    r = 32'hFFFF_FFFF;
+    if (mem.first(k)) begin
+      do begin
+        w = mem[k];
+        for (int i = 0; i < STRB_W; i++) begin
+          r = r ^ 32'(w[8*i +: 8]);
+          for (int b = 0; b < 8; b++) r = r[0] ? ((r >> 1) ^ 32'hEDB8_8320) : (r >> 1);
+        end
+      end while (mem.next(k));
+    end
+    return ~r;
   endfunction
 
   task automatic poke(input bit [ADDR_W-1:0] a, input bit [DATA_W-1:0] d);
@@ -223,6 +255,7 @@ module rtlnet_tb_axi4_mem #(
     if (burst != BURST_WRAP) begin
       tb_check(span <= PAGE, $sformatf("axi4_mem %s id %0d addr 0x%0h len %0d crosses a 4 KiB boundary", chan, id, a, len));
     end
+    tb_check((int'(len) + 1) <= MAX_BURST_BEATS, $sformatf("axi4_mem %s id %0d addr 0x%0h burst of %0d beats exceeds the limit %0d", chan, id, a, int'(len) + 1, MAX_BURST_BEATS));
     tb_check(burst == BURST_INCR || wrap_ok, $sformatf("axi4_mem %s addr 0x%0h len %0d burst %0d is not INCR or a legal WRAP", chan, a, len, burst));
     if (CHECK_FULL_WIDTH) begin
       tb_check(int'(size) == SHIFT, $sformatf("axi4_mem %s addr 0x%0h size %0d is not full width %0d", chan, a, size, SHIFT));
@@ -285,6 +318,7 @@ module rtlnet_tb_axi4_mem #(
       if (awvalid === 1'b1 && awready === 1'b1) begin
         burst_t b;
         check_burst("AW", awid, awaddr, awlen, awsize, awburst);
+        aw_hist[int'(awlen) + 1] = aw_hist.exists(int'(awlen) + 1) ? aw_hist[int'(awlen) + 1] + 1 : 1;
         b.id = awid; b.addr = awaddr; b.len = int'(awlen); b.size = awsize; b.burst = awburst; b.ready_at = 0;
         aw_q.push_back(b);
         aw_count++;
@@ -298,6 +332,7 @@ module rtlnet_tb_axi4_mem #(
       if (arvalid === 1'b1 && arready === 1'b1) begin
         burst_t b;
         check_burst("AR", arid, araddr, arlen, arsize, arburst);
+        ar_hist[int'(arlen) + 1] = ar_hist.exists(int'(arlen) + 1) ? ar_hist[int'(arlen) + 1] + 1 : 1;
         b.id = arid; b.addr = araddr; b.len = int'(arlen); b.size = arsize; b.burst = arburst; b.ready_at = cycle + READ_LATENCY;
         ar_q.push_back(b);
         ar_count++;

@@ -6,7 +6,8 @@ The target is the Digilent Zybo Z7-20 (`xc7z020clg400-1`). The camera (Digilent 
 IronKernel receiver `rtlnet_csi2_rx` (`cores/rtlnet_csi2_rx`, parameter `CAMERA_RX` = 1): D-PHY front end on the camera pins, CSI-2 packet
 layer, Bayer conversion with white balance and YUV422 output. The picture is encoded with one RTLNet H.264 Baseline engine (deblocking filter on)
 and the ARM application streams the result over the PS Gigabit Ethernet. The design is one flow: the capture DMA with its frame buffer, one
-deblocking encoder, the arbiter and two 128-to-64-bit AXI3 bridges for the HP ports surround the receiver in the module `rtlnet_zybo_video`.
+deblocking encoder surround the receiver in the module `rtlnet_zybo_video`. The capture DMA and the encoder are 64-bit masters (parameter `AXI_DATA_W` 64) and connect straight to the two
+HP ports; the design has no width bridge and no arbiter.
 
 ## Video wrapper
 
@@ -21,8 +22,27 @@ deblocking encoder, the arbiter and two 128-to-64-bit AXI3 bridges for the HP po
   The admission takes the YUV422 words of the receiver directly: `m_axis_tready` is high while a frame is not admitted, otherwise the capture slice is ready, so a skipped frame never
   stalls the receiver. The receiver cannot be stalled: its byte-clock FIFO drops entries when the capture path is not ready and counts them in `OVF`.
 - `u_pair_slice`, a register slice that ends the capture FIFO ready path at a flop (one extra clock), the capture DMA (`rtlnet_vdma_s2mm`), the three-slot frame buffer
-  (`rtlnet_framebuf`), the arbiter, the encoder, the HP bridges and the GP0 decoder with six 4 KiB windows (0x44A0_4000 to 0x44A0_9000, the receiver at 0x44A0_9000).
+  (`rtlnet_framebuf`), the encoder and the GP0 decoder with five 4 KiB windows (0x44A0_5000 to 0x44A0_9000, the receiver at 0x44A0_9000; 0x44A0_4000 is unmapped and answers DECERR).
 - `DPHY_TARGET` is a string parameter of the wrapper for the bench: any value other than "AMD" selects the behavioural D-PHY front end. The boundary does not expose it.
+
+### Memory ports
+
+The capture DMA (`rtlnet_vdma_s2mm`, `AXI_DATA_W` 64, `MAX_BURST_BEATS` 16: bursts of 16 beats of 8 bytes) drives HP2 and the encoder (`rtlnet_h264_top`, `NUM_ENGINES` 1, `AXI_DATA_W` 64) drives HP0, each master straight onto
+its port (AXI3: 4-bit AWLEN and ARLEN, 6-bit IDs, WID). What the earlier `rtlnet_axi_hp_bridge` and the one-master `rtlnet_axi_arbiter` did, and where it is now:
+
+| Function | Now |
+|---|---|
+| 128-bit to 64-bit data width | the masters make 64-bit beats themselves (`rtlnet_vdma_s2mm` packs two stream words per beat; the encoder's read DMA, search window loader and write master work at 64 bits, `rtlnet_h264_enc.md` section 14.5); the bytes in memory are the same |
+| burst splitting at 16 HP beats | the masters never issue more than 16 beats (capture: `MAX_BURST_BEATS` 16; encoder: row bursts of 4 x 4 beats, window and tile bursts of 128 bytes, a longer write leaves as two bursts); the wrapper takes `awlen[3:0]` and `arlen[3:0]` and a simulation check reports a longer one |
+| 4 KiB rule | by construction in the masters (assertions in simulation); the HP slave model of the bench checks every burst |
+| WID (AXI3) | `m_axi_*_wid` = `m_axi_*_awid`: constant 0 for the capture DMA; for the encoder the write master changes AWID only between bursts, so WID equals AWID for the whole burst |
+| IDs | zero-extended from 4 bits (encoder) or driven 6 bits wide (capture); BID and RID are cut to the master's width |
+| lock, cache, protection, QoS | not driven (as before: the bridge drove none) |
+| response merging | a burst is one transaction at the port; a split write of the encoder has two B responses, the first marked by AWID bit 2 and ignored by the requester event logic, any non-OKAY response sets the engine's AXI error as before |
+| read and write isolation, one transaction at a time | not needed: the HP ports take independent read and write channels and several outstanding bursts (`rtlnet_h264_wr_master` bounds the writes to eight requester bursts) |
+| arbiter register window 0x44A0_4000 (error counters, statistics, error interrupt not connected) | removed: no firmware read it (only a base address definition, now removed); its burst legality checks live in the masters' simulation assertions, in the HP slave model of the bench and in the synthesis-time `$fatal` of the width and burst parameters; an illegal burst on hardware would be answered by the PS (SLVERR) and counted by the encoder's `err_axi` or the capture's `AXI_ERR` as before |
+| address range check | none was configured in the arbiter; the PS DDR controller answers an address outside DDR |
+| register slice (timing) on AW and AR | not needed: closes at 90 MHz (results below) |
 
 ### Camera wrapper registers (0x44A0_5000)
 
@@ -121,18 +141,19 @@ from the 1080p30 table, HTS 2500, VTS 1120, PCLK 84 MHz, MIPISCLK 420 MHz). The 
 
 The receiver pipeline has about 20 clocks of latency (Bayer window, YUV conversion) and `u_pair_slice` adds one clock between the receiver and the capture DMA input.
 
-## Results (`xc7z020clg400-1`, image `own7`, 11-15-2026)
+## Results (`xc7z020clg400-1`, image `own9`, 11-15-2026)
 
 | Resource | Used | Device | Percent |
 |---|---|---|---|
-| Slice LUTs | 33,897 | 53,200 | 63.72 |
-| Slice registers | 27,770 | 106,400 | 26.10 |
-| Block RAM tiles | 27 | 140 | 19.29 |
+| Slice LUTs | 33,151 | 53,200 | 62.31 |
+| Slice registers | 26,393 | 106,400 | 24.81 |
+| Block RAM tiles | 26 | 140 | 18.57 |
 | DSPs | 50 | 220 | 22.73 |
 
-The gates print `rtlnet_build: PASS with deviation DPHY_HS_INPUT (2 endpoints; run-time tap sweep is the evidence)`. Full timing: WNS +0.252 ns, WHS -1.429 ns (the two deviation endpoints), worst pulse-width slack +0.264 ns;
-timing without the two endpoints: WNS +0.252 ns, WHS +0.050 ns. Critical warnings: 0 in synthesis; 2 in implementation and 4 in the parent log, all the two timing statements of the deviation (waived under its predicate).
-16 reviewed CDC and methodology waivers; 12 asynchronous-reset cells (the receiver's `rtlnet_reset_sync`). The previous image (`own6`, before the highlight clamp) used 33,820 LUT and 27,678 registers with WNS +0.404 ns.
+The gates print `rtlnet_build: PASS with deviation DPHY_HS_INPUT (2 endpoints; run-time tap sweep is the evidence)`. Full timing: WNS +0.222 ns, WHS -1.429 ns (the two deviation endpoints), worst pulse-width slack +0.264 ns;
+timing without the two endpoints: WNS +0.222 ns, WHS +0.051 ns. Critical warnings: 0 in synthesis; 2 in implementation and 4 in the parent log, all the two timing statements of the deviation (waived under its predicate).
+16 reviewed CDC and methodology waivers (12 `report_cdc` waivers); 12 asynchronous-reset cells (the receiver's `rtlnet_reset_sync`). The previous image `own7` (two bridges and the arbiter) used 33,897 LUT, 27,770 registers, 27 block RAM tiles and 50 DSP
+with WNS +0.252 ns: removing them saves 746 LUT, 1,377 registers and one block RAM tile.
 
 
 ## Timing deviation `DPHY_HS_INPUT`
@@ -169,7 +190,7 @@ assertion, synchronous release) inside `u_video`.
 
 | GP0 address | Owner |
 |---|---|
-| 0x44a04000 | RTLNet one-master arbiter |
+| 0x44a04000 | not mapped (DECERR) |
 | 0x44a05000 | Camera admission and capture metadata |
 | 0x44a06000 | RTLNet capture DMA |
 | 0x44a07000 | Three-slot frame buffer |
@@ -199,18 +220,26 @@ one step of the expected value, neutral chroma) with a held slot never overwritt
 and encoder IRQs; one real lossy/deblocked IDR encode whose Annex B stream and reconstruction `scripts/check_board_encode.ps1` decodes with the repository's three reference decoders (a mutated reconstruction and a damaged
 stream are negative controls). Negative controls of the bench: `INJECT_FAILURE` (the verdict fails) and `MUTATE` (one raw pixel of the checked frame is changed on the wire, the luma check fails).
 
-## Hardware bring-up (image `own7`, firmware `fw18`, 11-15-2026)
+The capture DMA and the encoder are connected to two AXI3 HP slave models directly (64-bit). Each model accepts W data only after its AW and rejects: a burst that is not INCR or not 8 bytes per beat, an address that is not 8-byte aligned, a burst across 4 KiB, WID different from AWID, a wrong WLAST,
+an ID with bits above the 4-bit encoder ID, a single-beat burst, a burst of fewer than 8 beats other than the encoder ring's end-of-slice tail, and (through taps on the masters' 8-bit length fields before the port takes four bits) a burst of more than 16 beats. It prints the beat-count histograms of both ports
+and the bench checks that the unmapped window 0x44A0_4000 answers DECERR. Mutations of what the model sees, each of which must fail the bench through its own check: `MUT_WID`, `MUT_4K`, `MUT_LONG` (a burst seen as 17 beats), `MUT_SHORT` (a single beat), `MUT_BEAT` (a 16-byte beat size).
+
+## Hardware bring-up (image `own9`, firmware `fw19`, 11-15-2026)
 
 Board: Digilent Zybo Z7-20 with a Pcam 5C, USB powered (JTAG and UART through one micro-USB cable on a direct PC port), PS Ethernet to a switch, console COM6. Load with
-`scripts/program.ps1 -Tag own7 -FwTag fw18` (volatile JTAG: PL, PS initialization from the XSA, ARM ELF on core 0; core 1 untouched). Host tests with the explicit port: `scripts/stream_test.ps1 -Port COM6`
+`scripts/program.ps1 -Tag own9 -FwTag fw19` (volatile JTAG: PL, PS initialization from the XSA, ARM ELF on core 0; core 1 untouched). Host tests with the explicit port: `scripts/stream_test.ps1 -Port COM6`
 and `scripts/rx_test.ps1 -Port COM6`.
 
 | Stage | Result | Evidence |
 |---|---|---|
 | a Console, b PS Ethernet, c Clocks, d Camera control | pass | prompt on the UART, RTL8211F with DHCP lease, OV5640 ID 0x5640 over I2C, receiver ID and VERSION found; `show rx` after boot: `status=0x07f` (clock running, both lanes in a burst and locked, IDELAYCTRL ready, in frame) |
-| e Receiver counters, 60 s | pass | `ZYBO_RX_COUNTERS: PASS 22/22`: 720p `FRAMES` 3 to 1,812 in 60.2 s (30.04 fps), 1080p 2 to 1,809 (30.00 fps); `ECC_CORR`, `ECC_UNC`, `CRC`, `SOT`, `DT`, `TRUNC`, `OVF`, `SIZE`, `ORPHAN`, `LEN`, `CLKLOSS` all 0 at both; admitted 30.00 fps at 720p and 14.99 fps at 1080p |
+| e Receiver counters, 60 s | pass | `ZYBO_RX_COUNTERS: PASS 22/22`: 720p `FRAMES` 3 to 1,810 in 60.2 s (30.00 fps), 1080p 3 to 1,810 (30.01 fps); `ECC_CORR`, `ECC_UNC`, `CRC`, `SOT`, `DT`, `TRUNC`, `OVF`, `SIZE`, `ORPHAN`, `LEN`, `CLKLOSS` all 0 at both; admitted 30.00 fps at 720p and 15.01 fps at 1080p |
 | f `stream_test.ps1 -Mode both -Port COM6` | pass | `ZYBO_STREAM_TEST: PASS 16/16` in three consecutive runs (sensor 30 fps, no encoder error, no dropped picture, continuity counters and decode clean from the second IDR picture, picture check) |
-| g Soak | pass | `stream_test.ps1 -Mode 720p -Seconds 120`: `ZYBO_STREAM_TEST: PASS 8/8`, `access_units=3573 cc_errors=0 pts_gaps=0`, rate 30.000, 0 decode errors |
+| g Soak, 720p | pass | `stream_test.ps1 -Mode 720p -Seconds 120 -Port COM6`: `ZYBO_STREAM_TEST: PASS 8/8`, `access_units=3573 cc_errors=0 pts_gaps=0`, rate 30.000, `errors=0 dropped pictures=0`, 0 decode errors |
+| h Soak, 1080p | pass | `-Mode 1080p -Seconds 120`: `ZYBO_STREAM_TEST: PASS 8/8`, `access_units=1771 cc_errors=0 pts_gaps=0`, rate 15.000, `errors=0 dropped pictures=0`, probe 1920x1080 h264 Constrained Baseline, 0 decode errors |
+
+Decoded frames (`build/zybo_stream_720p_frame.png`, `build/zybo_stream_1080p_frame.png`, taken four seconds into the capture): a dark room with only the two monitors lit; upright, readable text on the monitor, no block errors, tearing or colour banding visible at 720p and 1080p, a strong warm cast
+in the dark parts (low light; the white balance gains are tuned on lit scenes). The colour of a lit scene and a sunlit clipped window were not checked on this image (the room was dark).
 
 Measured rates: sensor 30 fps in both modes; stream 720p 1280x720 30 fps and 1080p 1920x1080 15 fps (h264 Constrained Baseline, every GOP of 30 pictures starts with an IDR). At constant QP 28 the 720p stream runs at 0.74 Mb/s in a dim scene.
 
@@ -238,7 +267,7 @@ Not shown on the board: a saturated coloured object (a bright saturated red or o
 
 Margin (`rx_test.ps1 -Action sweep`, 3 s per tap, section 12.1 of `cores/rtlnet_csi2_rx/documentation/rtlnet_csi2_rx.md`; measured on image `own6`, same receiver sources and constraints): both lanes at one tap, 720p error-free taps 0 to 29 (30 taps, 2,340 ps), 1080p
 error-free taps 0 to 21 (22 taps, 1,716 ps; errors at 22 to 26, clean again from 27, the next bit period). Default taps 11 (lane 0) and 10 (lane 1). The lower edge of the window lies below tap 0 and is not measured. Not
-measured: temperature, supply, other cables and boards. The sweep was not repeated on `own7`.
+measured: temperature, supply, other cables and boards. The sweep was not repeated on `own9`.
 
 ### Faults found on the board
 
@@ -255,9 +284,10 @@ measured: temperature, supply, other cables and boards. The sweep was not repeat
 
 ## What is verified
 
-Simulation (Active-HDL, `scripts/rtlnet_regression.ps1 -Match 'csi2|video_path|zybo|zynq7'`): the receiver benches including the highlight clamp and raw maxima, the HP bridge against a byte-level oracle, the integrated
-camera-to-encoder board bench through the receiver (admission, geometry, receiver counters, decoded picture), the build-gate policy checks and the ARM host suites, each with a negative control. Build: every gate passes with the
+Simulation (Active-HDL, `scripts/rtlnet_regression.ps1 -Match 'csi2|video_path|zybo|zynq7'`): the receiver benches including the highlight clamp and raw maxima, the integrated
+camera-to-encoder board bench through the receiver on the direct 64-bit HP connection (admission, geometry, receiver counters, decoded picture, the HP slave model's burst checks and their mutations), the build-gate policy checks and the ARM host suites, each with a negative control.
+The 64-bit masters have their own benches (`rtlnet_vdma_s2mm` at 64 bits, `rtlnet_h264_enc` at 64 bits with the memory contents compared with the 128-bit run). Build: every gate passes with the
 deviation above. Hardware: see "Hardware bring-up".
 Not verified: the D-PHY sampling margin over temperature and cables, the lane rates (derived, not observable), 1080p30 as a stream (the stream is 1080p15), the colour of lit scenes and a true clipped sunlit window with the final image
-(the room was dark), the sweep on `own7`, the supply on a wall adapter, other boards, the AMD primitive branch of the D-PHY front end in simulation.
+(the room was dark), the sweep on `own9`, the supply on a wall adapter, other boards, the AMD primitive branch of the D-PHY front end in simulation.
 

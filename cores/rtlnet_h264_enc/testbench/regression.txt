@@ -79,3 +79,21 @@ h264_dbk_mutation       script:cores/rtlnet_h264_enc/testbench/h264_dbk_mutation
 h264_harness_dbkoff     script:cores/rtlnet_h264_enc/testbench/h264_harness.ps1 -DbkCtl 0 -Tag off -Config qcif_s3,qcif_e2_s4,p_qcif_pan_s3_q28,p_qcif_pan_e2_s2_q28
 h264_harness_dbkmid     script:cores/rtlnet_h264_enc/testbench/h264_harness.ps1 -DbkCtl 1101001011 -Tag mid -Config p_qcif_pan_q28,p_qcif_cut_q28,p_qcif_pan_e2_s2_q28
 h264_harness_dbkoffs    script:cores/rtlnet_h264_enc/testbench/h264_harness.ps1 -DbkCtl dcbaf9 -Tag offs -Config p_qcif_pan_q28,qcif_photo_q38,qcif_noise_q18
+# AXI_DATA_W 64 (11-15-2026): the window loader and the whole core with 64-bit memory ports. tb_rtlnet_h264_search with TB_AXI_W=64 runs the loader against a 64-bit read channel (16-beat bursts of
+# 128 bytes, a luma tile as two bursts) and checks the same window contents; its mut entries change a burst length and a burst address as the model sees them and must fail. The w64 harness entries run
+# the encoder with 64-bit memory ports in the Verilator bench (TB_AXI_W=64, the memory model and the burst monitor of the width, bursts of at most 16 beats) and the same configuration with 128-bit
+# ports, require the same MEMHASH (a hash of every word of the memory model after the run: input area, compressed ring, index ring, both rebuilt pictures) and the decoder checks of the usual flow.
+# _widthneg is the negative control of the memory comparison (one memory bit flipped before the hash). h264_harness_w64_burstneg / _burstrefneg are the burst monitor controls at 64 bits.
+tb_rtlnet_h264_search   cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_search.f   w64  defines=TB_AXI_W=64  sim=verilator
+tb_rtlnet_h264_search   cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_search.f   w64_neg  defines=TB_AXI_W=64  plusargs=INJECT_FAILURE  expectfail  sim=verilator
+tb_rtlnet_h264_search   cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_search.f   w64_band  defines=TB_AXI_W=64,TB_W=7,TB_H=6,TB_FIRST=2,TB_ROWS=3,TB_TX=-9,TB_TY=7,TB_SEED=2  sim=verilator
+tb_rtlnet_h264_search   cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_search.f   w64_narrow  defines=TB_AXI_W=64,TB_W=2,TB_H=4,TB_FIRST=0,TB_ROWS=4,TB_TX=3,TB_TY=3,TB_SEED=3  sim=verilator
+tb_rtlnet_h264_search   cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_search.f   w64_mut_len  defines=TB_AXI_W=64  plusargs=MUT_LEN  expectfail  sim=verilator
+tb_rtlnet_h264_search   cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_search.f   w64_mut_addr  defines=TB_AXI_W=64  plusargs=MUT_ADDR  expectfail  sim=verilator
+tb_rtlnet_h264_search   cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_search.f   mut_len  plusargs=MUT_LEN  expectfail  sim=verilator
+h264_harness_w64        script:cores/rtlnet_h264_enc/testbench/h264_harness.ps1 -AxiW 64 -NoPng -Config qcif_s1,qcif_s3,qcif_ring,qcif_e2_s4,qcif_e2_2pic,strip_w13_s1,strip_w5_e2_s2,strip_w18_s3,qcif_photo_q18,qcif_noise_q0
+h264_harness_w64_p      script:cores/rtlnet_h264_enc/testbench/h264_harness_par.ps1 -AxiW 64 -NoPng -Jobs 4 -Prefix w64p -Config p_qcif_pan_q28,p_qcif_cut_e2_s4_q38,p_strip_w13_s1_q28,p_strip_w5_e2_s2_q28,p_qcif_ring_q28,p_qcif_pan_gop20_q28,m_qcif_panh8_q28,m_qcif_pand6_e2_s2_q28,m_qcif_bounce_s9_q28,m_strip_w18_panv7_q28,p_720p_e1_s1_q12,p_720p_e2_s2_q38,p_1080p_e2_s2_q38,p_1080p_e1_s1_q12
+h264_harness_w64_neg    script:cores/rtlnet_h264_enc/testbench/h264_harness.ps1 -AxiW 64 -Inject -NoPng -Config qcif_s1,qcif_e2_s4
+h264_harness_w64_widthneg script:cores/rtlnet_h264_enc/testbench/h264_harness.ps1 -AxiW 64 -InjectWidth -NoPng -Config qcif_s1,qcif_e2_s4
+h264_harness_w64_burstneg script:cores/rtlnet_h264_enc/testbench/h264_harness.ps1 -AxiW 64 -InjectBurst -NoPng -Config qcif_s1,qcif_e2_s4
+h264_harness_w64_burstrefneg script:cores/rtlnet_h264_enc/testbench/h264_harness.ps1 -AxiW 64 -InjectBurstRef -NoPng -Config p_qcif_pan_q28,p_qcif_pan_e2_s2_q28

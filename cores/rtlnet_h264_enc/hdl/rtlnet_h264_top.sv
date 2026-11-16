@@ -13,8 +13,11 @@
 //   * Registers on s_axi_aclk behind rtlnet_axil_cdc and rtlnet_axil_slave (4 KiB window, offsets in
 //     driver/rtlnet_h264_enc.h); the register file lives in enc_clk. s_axi_aresetn and enc_resetn come from
 //     one assertion.
-//   * One AXI4 master per engine on enc_clk (vector ports, arbiter style), 128-bit data, for every memory access: INCR full-width bursts of at most 16
-//     beats that never cross 4 KiB. The board runs enc_clk from the MIG ui_clk, so these ports reach the DDR3 arbiter directly.
+//   * One AXI4 master per engine on enc_clk (vector ports, arbiter style), AXI_DATA_W-bit data (128 default, 64), for every memory access: INCR
+//     full-width bursts of at most 16 beats that never cross 4 KiB. The board runs enc_clk from the MIG ui_clk, so these ports reach the DDR3
+//     arbiter directly. With AXI_DATA_W 64 the port suits an AXI3 slave (the Zynq HP ports): the same bytes in memory as with 128 bits, bursts
+//     of 16 beats of 8 bytes (a 16-beat burst of the 128-bit port is two 16-beat bursts), AWID bit 2 set on the first of two split write
+//     bursts, WID of the slave equals AWID, only AWLEN[3:0] and ARLEN[3:0] are non-zero. RD_STRIP_MB must be 2 or 4 with 64 bits.
 //   * SPS and PPS are written by firmware (driver rtlnet_h264_enc_write_sps_pps()); the core writes the access
 //     unit delimiter, the slice NAL units and their index entries.
 //   * irq is a level on enc_clk: high while CTRL.IRQ_EN is set and an IRQ_STATUS event bit has its IRQ_ENABLE bit set (sources: picture done,
@@ -42,7 +45,8 @@
 //     intersection of the netlist's tools and these parameters; a mismatch therefore shows as the smaller set and never as an error.
 //   * DEBLOCK (default 1): the in-loop deblocking filter rtlnet_h264_deblock in every engine (documentation section 19), DBK_LINE_KB its line store; registers DBK_CTRL, DBK_STATUS, CAPS bit 22.
 // Language: SystemVerilog-2012.
-// Revision: 11-12-2026
+// Revision: 11-15-2026
+//   * 11-15-2026: AXI_DATA_W parameter (128 default, 64) for the memory ports.
 //   * 11-12-2026: DEBLOCK and DBK_LINE_KB parameters, the filter state of the register block to the engines.
 //   * 11-12-2026: irq from the IRQ_STATUS / IRQ_ENABLE registers.
 //   * 11-11-2026: HIGH_PROFILE parameter and the hp seam to the registers.
@@ -74,7 +78,8 @@ module rtlnet_h264_top #(
   parameter bit    HP_T8       = 1'b1,    // only with HIGH_PROFILE = 1: 1 = include the 8x8 transform for inter macroblocks; 0 = leave it out (4x4 only)
   parameter bit    HP_T8_AUTO  = 1'b1,    // only with HP_T8 = 1: 1 = include the per-macroblock choice of 4x4 or 8x8 transform; 0 = leave it out (set per picture)
   parameter int    DBK_LINE_KB = 16,     // KiB per engine; memory for the deblocking filter (the rows above the current macroblock row); only with DEBLOCK = 1
-  parameter bit    DEBLOCK     = 1'b1    // 1 = include the in-loop deblocking filter; 0 = leave it out
+  parameter bit    DEBLOCK     = 1'b1,   // 1 = include the in-loop deblocking filter; 0 = leave it out
+  parameter int    AXI_DATA_W  = 128     // memory port data width in bits: 128 or 64
 )(
   // Engine clock (MIG ui_clk, 90 MHz on the board) and its reset (synchronous, active low); the register clock and its
   // reset (synchronous, active low, released with enc_resetn from the same assertion).
@@ -112,8 +117,8 @@ module rtlnet_h264_top #(
   output logic [NUM_ENGINES*2-1:0]      m_axi_awburst,
   output logic [NUM_ENGINES-1:0]        m_axi_awvalid,
   input  logic [NUM_ENGINES-1:0]        m_axi_awready,
-  output logic [NUM_ENGINES*128-1:0]    m_axi_wdata,
-  output logic [NUM_ENGINES*16-1:0]     m_axi_wstrb,
+  output logic [NUM_ENGINES*AXI_DATA_W-1:0]   m_axi_wdata,
+  output logic [NUM_ENGINES*AXI_DATA_W/8-1:0] m_axi_wstrb,
   output logic [NUM_ENGINES-1:0]        m_axi_wlast,
   output logic [NUM_ENGINES-1:0]        m_axi_wvalid,
   input  logic [NUM_ENGINES-1:0]        m_axi_wready,
@@ -128,7 +133,7 @@ module rtlnet_h264_top #(
   output logic [NUM_ENGINES*2-1:0]      m_axi_arburst,
   output logic [NUM_ENGINES-1:0]        m_axi_arvalid,
   input  logic [NUM_ENGINES-1:0]        m_axi_arready,
-  input  logic [NUM_ENGINES*128-1:0]    m_axi_rdata,
+  input  logic [NUM_ENGINES*AXI_DATA_W-1:0]   m_axi_rdata,
   input  logic [NUM_ENGINES*2-1:0]      m_axi_rresp,
   input  logic [NUM_ENGINES-1:0]        m_axi_rlast,
   input  logic [NUM_ENGINES-1:0]        m_axi_rvalid,
@@ -143,6 +148,12 @@ module rtlnet_h264_top #(
   generate
     if (NUM_ENGINES < 1 || NUM_ENGINES > 4) begin : g_bad_engines
       $fatal(1, "rtlnet_h264_top: NUM_ENGINES=%0d, must be 1..4", NUM_ENGINES);
+    end
+    if (AXI_DATA_W != 128 && AXI_DATA_W != 64) begin : g_bad_width
+      $fatal(1, "rtlnet_h264_top: AXI_DATA_W=%0d, must be 128 or 64", AXI_DATA_W);
+    end
+    if (AXI_DATA_W == 64 && RD_STRIP_MB == 8) begin : g_bad_strip64
+      $fatal(1, "rtlnet_h264_top: RD_STRIP_MB=8 gives 32-beat read bursts with AXI_DATA_W 64 (AXI3 limit 16); use 2 or 4");
     end
     if (ADDR_W != 32) begin : g_bad_addr
       $fatal(1, "rtlnet_h264_top: ADDR_W=%0d, only 32 is supported", ADDR_W);
@@ -387,7 +398,8 @@ module rtlnet_h264_top #(
         .ADDR_W(ADDR_W), .ID_W(ID_W), .MAX_MB_W(MAX_MB_W), .MAX_MB_H(MAX_MB_H), .MB_BUF_KB(MB_BUF_KB), .RD_STRIP_MB(RD_STRIP_MB),
         .REC_BUF_KB(REC_BUF_KB), .COEF_BUF_KB(COEF_BUF_KB), .LINE_KB(LINE_KB), .FIFO_KB(FIFO_KB), .REF_BUF_KB(REF_BUF_KB),
         .MV_LINE_KB(MV_LINE_KB), .WIN_KB(WIN_KB), .SR(SR), .EMIT_AUD(e == 0), .RAM_STYLE(RAM_STYLE),
-        .HIGH_PROFILE(HIGH_PROFILE), .HP_T8(HP_T8), .HP_T8_AUTO(HP_T8_AUTO), .DBK_LINE_KB(DBK_LINE_KB), .DEBLOCK(DEBLOCK)
+        .HIGH_PROFILE(HIGH_PROFILE), .HP_T8(HP_T8), .HP_T8_AUTO(HP_T8_AUTO), .DBK_LINE_KB(DBK_LINE_KB), .DEBLOCK(DEBLOCK),
+        .AXI_DATA_W(AXI_DATA_W)
       ) u_engine (
         .cfg_dbk_en(dbk_en), .cfg_dbk_a(dbk_a), .cfg_dbk_b(dbk_b),
         .clk(enc_clk), .resetn(enc_resetn),
@@ -416,12 +428,12 @@ module rtlnet_h264_top #(
         .m_arid(m_axi_arid[e*ID_W +: ID_W]), .m_araddr(m_axi_araddr[e*ADDR_W +: ADDR_W]),
         .m_arlen(m_axi_arlen[e*8 +: 8]), .m_arsize(m_axi_arsize[e*3 +: 3]), .m_arburst(m_axi_arburst[e*2 +: 2]),
         .m_arvalid(m_axi_arvalid[e]), .m_arready(m_axi_arready[e]),
-        .m_rdata(m_axi_rdata[e*128 +: 128]), .m_rresp(m_axi_rresp[e*2 +: 2]), .m_rlast(m_axi_rlast[e]),
+        .m_rdata(m_axi_rdata[e*AXI_DATA_W +: AXI_DATA_W]), .m_rresp(m_axi_rresp[e*2 +: 2]), .m_rlast(m_axi_rlast[e]),
         .m_rvalid(m_axi_rvalid[e]), .m_rready(m_axi_rready[e]),
         .m_awid(m_axi_awid[e*ID_W +: ID_W]), .m_awaddr(m_axi_awaddr[e*ADDR_W +: ADDR_W]),
         .m_awlen(m_axi_awlen[e*8 +: 8]), .m_awsize(m_axi_awsize[e*3 +: 3]), .m_awburst(m_axi_awburst[e*2 +: 2]),
         .m_awvalid(m_axi_awvalid[e]), .m_awready(m_axi_awready[e]),
-        .m_wdata(m_axi_wdata[e*128 +: 128]), .m_wstrb(m_axi_wstrb[e*16 +: 16]), .m_wlast(m_axi_wlast[e]),
+        .m_wdata(m_axi_wdata[e*AXI_DATA_W +: AXI_DATA_W]), .m_wstrb(m_axi_wstrb[e*(AXI_DATA_W/8) +: AXI_DATA_W/8]), .m_wlast(m_axi_wlast[e]),
         .m_wvalid(m_axi_wvalid[e]), .m_wready(m_axi_wready[e]),
         .m_bid(m_axi_bid[e*ID_W +: ID_W]), .m_bresp(m_axi_bresp[e*2 +: 2]), .m_bvalid(m_axi_bvalid[e]),
         .m_bready(m_axi_bready[e])

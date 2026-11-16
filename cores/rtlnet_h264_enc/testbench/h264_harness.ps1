@@ -47,7 +47,13 @@ Usage: powershell -NoProfile -ExecutionPolicy Bypass -File h264_harness.ps1 [-Co
     `MVSTAT pic<n> interior=<I> true=<T>` per P picture (macroblocks whose block at the expected vector lies inside the picture, and those among
     them coded as inter with exactly that vector), and the harness requires T >= 90 % of I for every P picture. Sr = n sets the core's search
     range (TB_SR; Sr 0 is the phase 2c-1 behaviour, the baseline of the bits gate, see h264_check.py bitsratio).
-Revision: 11-13-2026
+  * -AxiW 64 (11-15-2026): the core and the memory model run with 64-bit memory ports (bench define TB_AXI_W=64, label suffix _w64). Each configuration is
+    run a second time with 128-bit ports (the bench only, label <label>_ref128) and must leave the same memory: the bench prints MEMHASH, a hash of
+    every word of the memory model after the run, and the two values must be equal (the same bytes for the input frame area, the compressed ring, the
+    index ring and both rebuilt pictures), before the decoders compare the stream. -InjectWidth is the negative control of that comparison (the
+    bench flips one bit of one memory word before the hash; the run must report the mismatch).
+Revision: 11-15-2026
+  * 11-15-2026: -AxiW, -InjectWidth.
   * 11-13-2026: the SPS/PPS tool start is tried again (the tool folder is shared by every checkout on the machine).
   * 11-12-2026: -Irq: the bench takes the picture end from the irq output (IRQ_ENABLE, CTRL.IRQ_EN) instead of polling STATUS; the streams must be byte-identical to the polled run.
   * 11-09-2026: initial version; QP/pattern configuration table, PSNR floors, bits per picture, -Pcm and -Measure.
@@ -71,7 +77,9 @@ param(
     [int]$Threads = 1,
     [switch]$NoPng,
     [int]$Gap = 20,
-    [int]$Lat = 20
+    [int]$Lat = 20,
+    [ValidateSet(128, 64)][int]$AxiW = 128,
+    [switch]$InjectWidth
 )
 $ErrorActionPreference = 'Stop'
 $Repo = (Resolve-Path (Join-Path $PSScriptRoot '../../..')).Path
@@ -288,7 +296,7 @@ $VlExtra = '--unroll-count 8 --unroll-stmts 500 --output-split 5000'
 $allOk = $true
 foreach ($c in $Configs) {
     $name = $c.Name
-    $label = if ($Tag -ne '') { "${name}_$Tag" } elseif ($InjectBurst) { "${name}_burstneg" } elseif ($InjectBurstRef) { "${name}_burstrefneg" } elseif ($Inject) { "${name}_neg" } elseif ($Irq) { "${name}_irq" } else { $name }
+    $label = if ($Tag -ne '') { "${name}_$Tag" } elseif ($InjectWidth) { "${name}_widthneg" } elseif ($AxiW -eq 64) { "${name}_w64" } elseif ($InjectBurst) { "${name}_burstneg" } elseif ($InjectBurstRef) { "${name}_burstrefneg" } elseif ($Inject) { "${name}_neg" } elseif ($Irq) { "${name}_irq" } else { $name }
     $dir = "$Sim/$label"
     if (Test-Path -LiteralPath $dir) { Remove-Item -LiteralPath $dir -Recurse -Force }
     New-Item -ItemType Directory -Force -Path $dir, "$dir/png" | Out-Null
@@ -330,6 +338,7 @@ foreach ($c in $Configs) {
               "TB_CONSUMER_DELAY=$($c.Delay)", "TB_MEM_LOG2=$($c.Mem)", "TB_GAP=$Gap", "TB_LAT=$Lat", "TB_QP=$($c.Qp)")
     if ($Pcm -and $HasMbMode) { $defs += 'TB_PCM=1' }
     if ($NoDbk) { $defs += 'TB_DEBLOCK=0' }
+    if ($AxiW -eq 64) { $defs += 'TB_AXI_W=64' }
     if ($c.ContainsKey('Stall')) { $defs += 'TB_EXPECT_STALL=1' }
     if ($c.ContainsKey('Sr')) { $defs += "TB_SR=$($c.Sr)" }
     $fdir = $dir.Replace([string][char]92, '/')
@@ -338,6 +347,7 @@ foreach ($c in $Configs) {
     if ($Irq) { $pa += 'IRQ' }
     if ($DbkCtl -ne '') { $pa += "DBKCTL=$DbkCtl" }
     if ($InjectBurst) { $pa += 'INJECT_BURST' }
+    if ($InjectWidth) { $pa += 'INJECT_MEM' }
     if ($InjectBurstRef) { $pa += 'INJECT_BURST_REF' }
     if ($c.ContainsKey('ExpMv')) { $pa += "EXPMV_X=$($c.ExpMv[0])"; $pa += "EXPMV_Y=$($c.ExpMv[1])" }
     $simOut = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$Repo/scripts/rtlnet_run_verilator.ps1" -Bench tb_rtlnet_h264_top `
@@ -346,6 +356,28 @@ foreach ($c in $Configs) {
     $simSecs = $sw.Elapsed.TotalSeconds
     Write-Output "[$label] bench: $simLine"
     $runLog = Read-Text "$Repo/.sim/verilator/tb_rtlnet_h264_top_$label/run.log"
+    if ($AxiW -eq 64) {
+        # The same configuration with 128-bit ports (bench only): the memory after the run must be the same.
+        $benchRc = $LASTEXITCODE
+        $defs128 = @($defs | Where-Object { $_ -ne 'TB_AXI_W=64' })
+        $pa128 = @($pa | Where-Object { $_ -ne 'INJECT_MEM' } | ForEach-Object { if ($_ -like 'OUT=*') { "OUT=$fdir/ref128_o" } else { $_ } })
+        $refOut = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$Repo/scripts/rtlnet_run_verilator.ps1" -Bench tb_rtlnet_h264_top `
+            -Filelist cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_top.f -Tag "${label}_ref128" -Defines ($defs128 -join ',') -PlusArgs ($pa128 -join ',') -Threads $Threads -Extra $VlExtra
+        $refLine = ($refOut | Select-Object -Last 1)
+        $LASTEXITCODE = $benchRc
+        Write-Output "[$label] bench (128-bit reference): $refLine"
+        $refLog = Read-Text "$Repo/.sim/verilator/tb_rtlnet_h264_top_${label}_ref128/run.log"
+        $h64 = [regex]::Match($runLog, '(?m)^MEMHASH ([0-9a-f]+)').Groups[1].Value
+        $h128 = [regex]::Match($refLog, '(?m)^MEMHASH ([0-9a-f]+)').Groups[1].Value
+        $widthOk = ($h64 -ne '') -and ($h64 -eq $h128)
+        Write-Output "[$label] MEMHASH 64-bit $h64, 128-bit $h128 -> $(if ($widthOk) { 'identical memory' } else { 'DIFFERENT memory' })"
+        if ($InjectWidth) {
+            if (-not $widthOk) { Write-Output "TEST PASS: rtlnet_h264_top_$label (negative control: the width comparison reported different memory)" }
+            else { Write-Output "TEST FAIL: rtlnet_h264_top_$label (negative control: the width comparison missed the flipped memory bit)"; $allOk = $false }
+            continue
+        }
+        if (-not $widthOk) { $fails += 'memory differs between 64-bit and 128-bit ports' }
+    }
     if ($InjectBurst) {
         if (($LASTEXITCODE -ne 0) -and ($runLog -match 'burst monitor: engine 0 single-beat rebuilt-picture AW')) {
             Write-Output "TEST PASS: rtlnet_h264_top_$label (negative control: the burst monitor fired on the injected single-beat AW)"

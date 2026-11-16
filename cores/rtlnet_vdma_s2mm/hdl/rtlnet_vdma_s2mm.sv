@@ -1,11 +1,12 @@
 // -----------------------------------------------------------------------------
 // File: rtlnet_vdma_s2mm.sv
 // Purpose: 2D write DMA of the video path: writes a YUV422 word stream as a
-//   frame of lines into a frame-buffer slot of DDR3 through 128-bit AXI4 INCR bursts of at most MAX_BURST_BEATS beats.
+//   frame of lines into a frame-buffer slot of DDR3 through AXI4 INCR bursts of at most MAX_BURST_BEATS beats of AXI_DATA_W bits.
 // Overview:
 //   * Stream in: 32-bit words of two pixels, tuser = first word of a frame, tlast = last word of a line, with the frame
 //     sideband (width and height in pixels, frame number, timestamp, source flag) stable from the first word of a frame
-//     until the next one. Four words pack into one 128-bit beat, word 0 in the low bytes (memory order Y0 Cb Y1 Cr).
+//     until the next one. AXI_DATA_W / 32 words pack into one beat (four for 128 bits, two for 64 bits), word 0 in the low
+//     bytes (memory order Y0 Cb Y1 Cr). The bytes in memory are the same for both widths; only the beat size changes.
 //   * Frame control (one registered FSM, fs): at a first word the core captures the sideband and checks the geometry
 //     (width a nonzero multiple of 8 pixels = one beat, height nonzero, stride a multiple of 16 and at least the line
 //     bytes; STRIDE 0 means packed). A frame is not written (its words are consumed and discarded up to the next first
@@ -18,17 +19,21 @@
 //     and the DDR3 write stream stays consistent; the frame is reported not good.
 //   * Write side: line n starts at base + n * stride. Bursts follow the line from its start; the length is the least
 //     of MAX_BURST_BEATS, the beats left in the line and the beats to the next 4 KiB boundary, so a burst never crosses
-//     4 KiB. A burst's AW is issued only when all its beats are already in the beat FIFO (a W channel that never starves
+//     4 KiB. A beat is AXI_DATA_W / 8 bytes: with 64 bits a burst of the same beat count carries half the bytes, and
+//     MAX_BURST_BEATS 16 is the AXI3 limit of the Zynq HP ports (AWLEN is 4 bits there). A burst's AW is issued only when all its beats are already in the beat FIFO (a W channel that never starves
 //     keeps the shared arbiter's W path free for the other masters). W beats follow AW in order. Outstanding bursts are
 //     bounded (W queue of 4, 7 awaiting B). The beat FIFO is one rtlnet_ram_core (FIFO_KB kilobytes, common clock).
 //   * Done: when the last burst's response has arrived, fb_done pulses for one clock with fb_done_good = frame complete,
 //     every line end where expected and every write response OKAY, and the sideband of the frame. The frame buffer
 //     publishes only a good frame.
-//   * AXI4 master: AW and W only (no read channel); ID constant 0; size 4 (16 bytes), burst INCR, strobes all ones.
+//   * AXI4 master: AW and W only (no read channel); ID constant 0; size log2(AXI_DATA_W / 8) (full width), burst INCR, strobes
+//     all ones. awlen never exceeds 15 (MAX_BURST_BEATS is at most 16), so the master meets AXI3 as well; the user of an AXI3
+//     port takes awlen[3:0] and drives WID equal to the (constant) AWID.
 //   * Registers on s_axi_aclk behind rtlnet_axil_cdc and rtlnet_axil_slave (4 KiB window); rtlnet_vdma_s2mm_regs holds the
 //     register file, offsets in driver/rtlnet_vdma_s2mm.h.
 // Language: SystemVerilog-2012.
-// Revision: 11-09-2026
+// Revision: 11-15-2026
+//   * 11-15-2026: AXI_DATA_W parameter (128 default, 64): beat size, packer, beat FIFO and burst size follow it.
 //   * 11-09-2026: initial version.
 // Clocks: clk (datapath, FIFO, registers; the memory-controller user clock); s_axi_aclk (AXI4-Lite slave side of the
 //   register crossing only).
@@ -37,7 +42,8 @@ module rtlnet_vdma_s2mm #(
   parameter bit    AXIL_SYNC = 1'b0,   // 1: s_axi_aclk is clk (register window without a clock crossing)
   parameter int    ADDR_W          = 29,        // DDR3 byte address bits
   parameter int    ID_W            = 1,
-  parameter int    MAX_BURST_BEATS = 16,        // 1..16
+  parameter int    AXI_DATA_W      = 128,       // memory data width in bits: 128 or 64
+  parameter int    MAX_BURST_BEATS = 16,        // 1..16 beats of AXI_DATA_W bits
   parameter int    FIFO_KB         = 2,         // beat FIFO, kilobytes (power of two beats, at least 2 bursts)
   parameter string RAM_STYLE       = "block"
 )(
@@ -82,8 +88,8 @@ module rtlnet_vdma_s2mm #(
   output logic [1:0]          m_axi_awburst,
   output logic                m_axi_awvalid,
   input  logic                m_axi_awready,
-  output logic [127:0]        m_axi_wdata,
-  output logic [15:0]         m_axi_wstrb,
+  output logic [AXI_DATA_W-1:0]   m_axi_wdata,
+  output logic [AXI_DATA_W/8-1:0] m_axi_wstrb,
   output logic                m_axi_wlast,
   output logic                m_axi_wvalid,
   input  logic                m_axi_wready,
@@ -112,8 +118,13 @@ module rtlnet_vdma_s2mm #(
   input  logic                s_axi_rready
 );
 
-  localparam int          BEAT_BYTES   = 16;
-  localparam int          BEAT_SHIFT   = 4;
+  localparam int          BEAT_BYTES   = AXI_DATA_W / 8;
+  localparam int          BEAT_SHIFT   = $clog2(BEAT_BYTES);
+  localparam int          WPB          = AXI_DATA_W / 32;                  // stream words per beat
+  localparam logic [1:0]  PK_LAST      = 2'(WPB - 1);
+  localparam int          BPL_SH       = $clog2(AXI_DATA_W / 16);          // pixels per beat = 2**BPL_SH
+  localparam int          BPL_W        = 16 - BPL_SH;                      // bits of the beats per line (13 for 128 bits)
+  localparam int          TP_W         = $clog2(4096 / BEAT_BYTES) + 1;    // bits of the beats to the next 4 KiB boundary (9 for 128 bits)
   localparam int          FIFO_BEATS   = FIFO_KB * 1024 / BEAT_BYTES;
   localparam int          PTR_W        = $clog2(FIFO_BEATS);
   localparam int          WQ_DEPTH     = 4;
@@ -121,10 +132,13 @@ module rtlnet_vdma_s2mm #(
   localparam int          MAX_B_OUT    = 7;
   localparam int          PAGE_BEATS   = 4096 / BEAT_BYTES;          // beats per 4 KiB page
   localparam logic [1:0]  RESP_OKAY    = 2'b00;
-  localparam logic [2:0]  AXI_SIZE_16  = 3'd4;
+  localparam logic [2:0]  AXI_SIZE     = 3'(BEAT_SHIFT);
   localparam logic [1:0]  AXI_INCR     = 2'b01;
 
   generate
+    if (AXI_DATA_W != 128 && AXI_DATA_W != 64) begin : g_bad_width
+      $fatal(1, "rtlnet_vdma_s2mm: AXI_DATA_W=%0d, must be 128 or 64", AXI_DATA_W);
+    end
     if (MAX_BURST_BEATS < 1 || MAX_BURST_BEATS > 16) begin : g_bad_burst
       $fatal(1, "rtlnet_vdma_s2mm: MAX_BURST_BEATS=%0d, must be 1..16", MAX_BURST_BEATS);
     end
@@ -254,7 +268,7 @@ module rtlnet_vdma_s2mm #(
   logic [31:0]         sb_ts;
   logic                sb_src;
   logic [14:0]         wpl;            // words per line
-  logic [12:0]         bpl;            // beats per line
+  logic [BPL_W-1:0]    bpl;            // beats per line
   logic [ADDR_W-1:0]   stride_q;       // line stride, bytes
   logic                cfg_ok;
   logic [16:0]         width_bytes;
@@ -276,13 +290,13 @@ module rtlnet_vdma_s2mm #(
 
   // Packer and beat FIFO.
   logic [1:0]          pk_cnt;
-  logic [127:0]        pk;
+  logic [AXI_DATA_W-1:0] pk;
   logic [PTR_W:0]      wptr;
   logic [PTR_W:0]      rptr;
   logic [PTR_W:0]      occ;
   logic                fifo_wr;
-  logic [127:0]        fifo_wdata;
-  logic [127:0]        fifo_rdata;
+  logic [AXI_DATA_W-1:0] fifo_wdata;
+  logic [AXI_DATA_W-1:0] fifo_rdata;
   logic                fifo_rd;
   logic                rd_valid;
 
@@ -290,12 +304,12 @@ module rtlnet_vdma_s2mm #(
   logic                ws_active;
   logic                all_issued;
   logic [ADDR_W-1:0]   line_addr;
-  logic [12:0]         beat_in_line;
+  logic [BPL_W-1:0]    beat_in_line;
   logic [15:0]         lines_left;
   logic [PTR_W:0]      uncommitted;
   logic [ADDR_W-1:0]   cur_addr;       // registered: address of the next burst
-  logic [12:0]         rem_beats;      // registered: beats left in the line
-  logic [8:0]          to_page;        // registered: beats to the next 4 KiB boundary
+  logic [BPL_W-1:0]    rem_beats;      // registered: beats left in the line
+  logic [TP_W-1:0]     to_page;        // registered: beats to the next 4 KiB boundary
   logic [4:0]          burst_len;      // registered: length of the next burst in beats
   logic                last_in_line;   // registered: the next burst ends the line
   logic [4:0]          len_n;
@@ -329,7 +343,7 @@ module rtlnet_vdma_s2mm #(
   assign width_bytes = {s_width, 1'b0};
   assign stride_eff  = (stride_reg == 32'd0) ? 32'(width_bytes) : stride_reg;
   assign cfg_ok      = (s_width != 16'd0) && (s_width[2:0] == 3'd0) && (s_height != 16'd0) &&
-                       (stride_eff >= 32'(width_bytes)) && (stride_eff[BEAT_SHIFT-1:0] == '0) &&
+                       (stride_eff >= 32'(width_bytes)) && (stride_eff[3:0] == 4'd0) &&
                        (stride_eff < (32'd1 << ADDR_W));
 
   // ---------------------------------------------------------------------------
@@ -347,7 +361,7 @@ module rtlnet_vdma_s2mm #(
   assign early_sof     = s_axis_tvalid && s_axis_tuser && !first_word;
   assign exp_last      = (w_in_line == (wpl - 15'd1));
   assign last_of_frame = exp_last && (l_done == (sb_height - 16'd1));
-  assign pack_room     = (pk_cnt != 2'd3) || (occ != (PTR_W+1)'(FIFO_BEATS));
+  assign pack_room     = (pk_cnt != PK_LAST) || (occ != (PTR_W+1)'(FIFO_BEATS));
 
   // A word is accepted from the stream while active, or generated as zero while padding.
   assign wacc = ((fs == F_ACTIVE) && s_axis_tvalid && !early_sof && pack_room) ||
@@ -400,7 +414,7 @@ module rtlnet_vdma_s2mm #(
             sb_ts      <= s_timestamp;
             sb_src     <= s_src_pattern;
             wpl        <= s_width[15:1];
-            bpl        <= s_width[15:3];
+            bpl        <= s_width[15:BPL_SH];
             stride_q   <= stride_eff[ADDR_W-1:0];
             f_bad      <= 1'b0;
             f_axi_bad  <= 1'b0;
@@ -471,8 +485,8 @@ module rtlnet_vdma_s2mm #(
   // Packer and beat FIFO
   // ---------------------------------------------------------------------------
   assign occ        = wptr - rptr;
-  assign fifo_wr    = wacc && (pk_cnt == 2'd3);
-  assign fifo_wdata = {wdat, pk[127:32]};
+  assign fifo_wr    = wacc && (pk_cnt == PK_LAST);
+  assign fifo_wdata = {wdat, pk[AXI_DATA_W-1:32]};
 
   always_ff @(posedge clk) begin
     if (!resetn) begin
@@ -480,16 +494,16 @@ module rtlnet_vdma_s2mm #(
       pk     <= '0;
       wptr   <= '0;
     end else if (wacc) begin
-      pk     <= {wdat, pk[127:32]};
-      pk_cnt <= pk_cnt + 2'd1;
-      if (pk_cnt == 2'd3) wptr <= wptr + (PTR_W+1)'(1);
+      pk     <= {wdat, pk[AXI_DATA_W-1:32]};
+      pk_cnt <= (WPB == 4) ? (pk_cnt + 2'd1) : {1'b0, !pk_cnt[0]};
+      if (pk_cnt == PK_LAST) wptr <= wptr + (PTR_W+1)'(1);
     end
   end
 
   rtlnet_ram_core #(
     .RAM_STYLE    (RAM_STYLE),
     .CLOCKING     ("COMMON"),
-    .DATA_W       (128),
+    .DATA_W       (AXI_DATA_W),
     .ADDR_W       (PTR_W),
     .READ_LATENCY (1)
   ) u_beat_ram (
@@ -525,17 +539,17 @@ module rtlnet_vdma_s2mm #(
   // burst is issued (calc_cnt), so no step is a long combinational path. A burst needs a few clocks of this; at one stream
   // word per clock a 16-beat burst takes 64 clocks to fill, so the issue rate is not limited by it.
   always_ff @(posedge clk) begin
-    cur_addr  <= line_addr + ADDR_W'({beat_in_line, 4'b0000});
+    cur_addr  <= line_addr + (ADDR_W'(beat_in_line) << BEAT_SHIFT);
     rem_beats <= bpl - beat_in_line;
-    to_page   <= 9'(PAGE_BEATS) - {1'b0, cur_addr[11:BEAT_SHIFT]};
+    to_page   <= TP_W'(PAGE_BEATS) - {1'b0, cur_addr[11:BEAT_SHIFT]};
     burst_len <= len_n;
-    last_in_line <= (13'(len_n) == rem_beats);
+    last_in_line <= (BPL_W'(len_n) == rem_beats);
   end
 
   always_comb begin
     len_n = 5'(MAX_BURST_BEATS);
-    if (rem_beats < 13'(len_n))  len_n = rem_beats[4:0];
-    if (to_page   < 9'(len_n))   len_n = to_page[4:0];
+    if (rem_beats < BPL_W'(len_n))  len_n = rem_beats[4:0];
+    if (to_page   < TP_W'(len_n))   len_n = to_page[4:0];
   end
 
   assign aw_load = ws_active && !all_issued && (!m_axi_awvalid || m_axi_awready) && (wq_cnt < 3'(WQ_DEPTH)) &&
@@ -543,7 +557,7 @@ module rtlnet_vdma_s2mm #(
   assign wq_push = aw_load;
 
   assign m_axi_awid    = '0;
-  assign m_axi_awsize  = AXI_SIZE_16;
+  assign m_axi_awsize  = AXI_SIZE;
   assign m_axi_awburst = AXI_INCR;
   assign m_axi_bready  = 1'b1;
 
@@ -596,7 +610,7 @@ module rtlnet_vdma_s2mm #(
           lines_left   <= lines_left - 16'd1;
           if (lines_left == 16'd1) all_issued <= 1'b1;
         end else begin
-          beat_in_line <= beat_in_line + 13'(burst_len);
+          beat_in_line <= beat_in_line + BPL_W'(burst_len);
         end
       end
       if (fs == F_DONE) ws_active <= 1'b0;
@@ -607,7 +621,7 @@ module rtlnet_vdma_s2mm #(
   // W channel
   // ---------------------------------------------------------------------------
   assign m_axi_wdata  = fifo_rdata;
-  assign m_axi_wstrb  = 16'hFFFF;
+  assign m_axi_wstrb  = '1;
   assign m_axi_wvalid = rd_valid && w_active;
   assign m_axi_wlast  = (w_left == 5'd1);
   assign wfire        = m_axi_wvalid && m_axi_wready;
@@ -656,7 +670,7 @@ module rtlnet_vdma_s2mm #(
         $error("rtlnet_vdma_s2mm: W queue overflow");
       if (m_axi_bvalid && (b_out == 4'd0) && !aw_load)
         $error("rtlnet_vdma_s2mm: write response with no burst outstanding");
-      if (aw_load && ((13'(cur_addr[11:0]) + 13'({burst_len, 4'b0000})) > 13'd4096))
+      if (aw_load && ((13'(cur_addr[11:0]) + 13'(burst_len << BEAT_SHIFT)) > 13'd4096))
         $error("rtlnet_vdma_s2mm: burst crosses a 4 KiB boundary addr 0x%0h len %0d", cur_addr, burst_len);
     end
   end

@@ -31,8 +31,12 @@
 //     (luma word y, Cb words 16 + k, Cr words 20 + k with rows 2k and 2k + 1).
 //   * Source. The luma rows 0, 2, ..., 14 of the macroblock are copied from the strip buffer (through the engine's arbitrated read
 //     port: a read only in a clock the coder does not use the port) into a small buffer (SRCBUF_STYLE).
+//   * AXI_DATA_W (default 128): the width of the loader's read data channel. With 64 every tile burst is 16 bus beats of 8 bytes: a luma
+//     tile (256 bytes) is read as two bursts of 128 bytes at consecutive addresses (the second at +128), a chroma tile (128 bytes) as one
+//     burst, and two bus beats (low half first) make one window word. With 128 the loader is the original one.
 // Language: SystemVerilog-2012.
-// Revision: 11-10-2026
+// Revision: 11-15-2026
+//   * 11-15-2026: AXI_DATA_W parameter (128 default, 64).
 //   * 11-10-2026: initial version (phase 2c-2).
 // Clocks: clk.
 // -----------------------------------------------------------------------------
@@ -48,7 +52,8 @@ module rtlnet_h264_search #(
   parameter int    GOOD_COST    = 768,      // best cost at or below which the large steps are skipped
   parameter int    ZERO_BIAS    = 128,      // cost added to every vector but (0,0): a static scene must keep the zero vector (P_Skip)
   parameter string RAM_STYLE    = "block",
-  parameter string SRCBUF_STYLE = "distributed"
+  parameter string SRCBUF_STYLE = "distributed",
+  parameter int    AXI_DATA_W   = 128       // width of the window loader's read data channel in bits: 128 or 64
 )(
   input  logic                 clk,
   input  logic                 resetn,
@@ -72,7 +77,7 @@ module rtlnet_h264_search #(
   output logic [7:0]           win_arlen,
   output logic                 win_arvalid,
   input  logic                 win_arready,
-  input  logic [127:0]         win_rdata,
+  input  logic [AXI_DATA_W-1:0] win_rdata,
   input  logic [1:0]           win_rresp,
   input  logic                 win_rvalid,
   output logic                 win_rready,
@@ -112,8 +117,12 @@ module rtlnet_h264_search #(
   import rtlnet_h264_pkg::*;
 
   localparam int WIN_AW = $clog2(WIN_KB * 1024 / 16);
+  localparam bit NARROW = (AXI_DATA_W == 64);
 
   generate
+    if (AXI_DATA_W != 128 && AXI_DATA_W != 64) begin : g_bad_width
+      $fatal(1, "rtlnet_h264_search: AXI_DATA_W=%0d, must be 128 or 64", AXI_DATA_W);
+    end
     if (WIN_AW < 8) begin : g_win_small
       $fatal(1, "rtlnet_h264_search: WIN_KB=%0d too small (the window needs 144 words of 16 bytes per RAM: 4 KiB)", WIN_KB);
     end
@@ -181,13 +190,17 @@ module rtlnet_h264_search #(
   logic              rd_en_w;
   logic [7:0]        rd_addr0, rd_addr1;
   logic [127:0]      rd_data0, rd_data1;
+  logic [127:0]      win_wdata;     // the window word written by the loader
+  logic              win_wr;        // a window word completes with this R beat
+  logic [3:0]        wbeat;         // window word index inside the burst
+  logic              ar_h;          // 64-bit bus: the second burst of a luma tile
 
   rtlnet_ram_core #(.RAM_STYLE(RAM_STYLE), .CLOCKING("COMMON"), .DATA_W(128), .ADDR_W(WIN_AW), .READ_LATENCY(1)) u_win0 (
-    .wr_clk(clk), .wr_en(wr_en0), .wr_addr(wr_addr[WIN_AW-1:0]), .wr_data(win_rdata),
+    .wr_clk(clk), .wr_en(wr_en0), .wr_addr(wr_addr[WIN_AW-1:0]), .wr_data(win_wdata),
     .rd_clk(clk), .rd_resetn(resetn), .rd_en(rd_en_w), .rd_addr(rd_addr0[WIN_AW-1:0]), .rd_data(rd_data0)
   );
   rtlnet_ram_core #(.RAM_STYLE(RAM_STYLE), .CLOCKING("COMMON"), .DATA_W(128), .ADDR_W(WIN_AW), .READ_LATENCY(1)) u_win1 (
-    .wr_clk(clk), .wr_en(wr_en1), .wr_addr(wr_addr[WIN_AW-1:0]), .wr_data(win_rdata),
+    .wr_clk(clk), .wr_en(wr_en1), .wr_addr(wr_addr[WIN_AW-1:0]), .wr_data(win_wdata),
     .rd_clk(clk), .rd_resetn(resetn), .rd_en(rd_en_w), .rd_addr(rd_addr1[WIN_AW-1:0]), .rd_data(rd_data1)
   );
 
@@ -213,17 +226,32 @@ module rtlnet_h264_search #(
 
   assign win_req = active && !init_run && !win_busy && (ld_g < tot_cols) && (ld_g < (keep_g + 16'd4));
 
-  assign win_araddr  = lst_addr[ar_i];
-  assign win_arlen   = lst_ch[ar_i] ? 8'd7 : 8'd15;
+  assign win_araddr  = (NARROW && ar_h) ? (lst_addr[ar_i] + ADDR_W'(128)) : lst_addr[ar_i];
+  assign win_arlen   = (NARROW || !lst_ch[ar_i]) ? 8'd15 : 8'd7;
   assign win_arvalid = ar_run;
   assign win_rready  = win_busy;
   assign err_resp    = win_busy && win_rvalid && (win_rresp != 2'b00);
 
+  // r_b counts the bus beats of a tile (16 or 8 for 128 bits; 32 or 16 for 64 bits, the two halves of a luma tile in sequence).
   logic [4:0] r_len_m1;
-  assign r_len_m1 = lst_ch[r_i] ? 5'd7 : 5'd15;
-  assign wr_addr  = lst_ch[r_i] ? {1'b1, slot_q[1], 1'b0, lst_wr[r_i], r_b[2:0]} : {1'b0, slot_q[1], lst_wr[r_i], r_b[3:0]};
-  assign wr_en0   = win_busy && win_rvalid && !slot_q[0];
-  assign wr_en1   = win_busy && win_rvalid && slot_q[0];
+  assign r_len_m1 = NARROW ? (lst_ch[r_i] ? 5'd15 : 5'd31) : (lst_ch[r_i] ? 5'd7 : 5'd15);
+  assign wbeat    = NARROW ? r_b[4:1] : r_b[3:0];
+  assign wr_addr  = lst_ch[r_i] ? {1'b1, slot_q[1], 1'b0, lst_wr[r_i], wbeat[2:0]} : {1'b0, slot_q[1], lst_wr[r_i], wbeat};
+  assign wr_en0   = win_wr && !slot_q[0];
+  assign wr_en1   = win_wr && slot_q[0];
+  generate
+    if (!NARROW) begin : g_win128
+      assign win_wdata = win_rdata;
+      assign win_wr    = win_busy && win_rvalid;
+    end else begin : g_win64
+      logic [63:0] lo;   // low half of the window word
+      assign win_wdata = {win_rdata, lo};
+      assign win_wr    = win_busy && win_rvalid && r_b[0];
+      always_ff @(posedge clk) begin
+        if (win_busy && win_rvalid && !r_b[0]) lo <= win_rdata;
+      end
+    end
+  endgenerate
 
   always_ff @(posedge clk) begin
     if (!resetn) begin
@@ -241,6 +269,7 @@ module rtlnet_h264_search #(
       init_cnt  <= '0;
       win_busy  <= 1'b0;
       ar_run    <= 1'b0;
+      ar_h      <= 1'b0;
       ar_i      <= '0;
       r_i       <= '0;
       lst_end   <= '0;
@@ -293,8 +322,13 @@ module rtlnet_h264_search #(
         ar_run  <= 1'b1;
       end
       if (ar_run && win_arready) begin
-        ar_i <= ar_i + 3'd1;
-        if ((ar_i + 3'd1) == lst_end) ar_run <= 1'b0;
+        if (NARROW && !lst_ch[ar_i] && !ar_h) begin
+          ar_h <= 1'b1;               // 64-bit bus: the second half of the luma tile
+        end else begin
+          ar_h <= 1'b0;
+          ar_i <= ar_i + 3'd1;
+          if ((ar_i + 3'd1) == lst_end) ar_run <= 1'b0;
+        end
       end
       if (win_busy && win_rvalid) begin
         if (r_b == r_len_m1) begin

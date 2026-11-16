@@ -204,7 +204,7 @@ def main():
     for label, test_sources, test_headers in (
         ('header', sources, []),
         ('package', [s for s in sources if not s.endswith('/rtlnet_h264_pkg.sv')], headers),
-        ('module', [s for s in sources if not s.endswith('/rtlnet_axi_hp_bridge.sv')], headers),
+        ('module', [s for s in sources if not s.endswith('/rtlnet_vdma_s2mm.sv')], headers),
         ('package order', list(reversed(sources)), headers)):
         try:
             audit(repo, test_sources, test_headers, incdirs)

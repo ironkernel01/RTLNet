@@ -14,10 +14,15 @@
 //     per macroblock. Bank j of the strip starts at word dst_base + 32 * j and holds, as before: words 0..15 the luma
 //     rows (pixel i in byte i); words 16..23 the chroma rows of the row pairs, U(0..7) in bytes 0..7 and V(0..7) in
 //     bytes 8..15. The row number of each converted row travels with it through the converter latency.
+//   * AXI_DATA_W (default 128): the width of the read data channel. With 64 a pixel row of 32 bytes takes four beats instead of two
+//     (a burst is 4 * n_mb beats, at most 16, so NMB must be 2 or 4), the first three beats of a row are held and the fourth completes
+//     the 256-bit row that goes to the converter; every other part and the bytes read from memory are unchanged. With 128 the
+//     code is the original two-beat joiner (the registers of the 64-bit joiner are separate and do not exist then).
 //   * done pulses in the clock after the last chroma word of the last macroblock is written; busy covers start to done.
 //   * An R response other than OKAY pulses err_resp (the data is still consumed so the bus drains).
 // Language: SystemVerilog-2012.
-// Revision: 11-10-2026
+// Revision: 11-15-2026
+//   * 11-15-2026: AXI_DATA_W parameter (128 default, 64).
 //   * 11-09-2026: initial version (one macroblock per start, 2-beat bursts).
 //   * 11-10-2026: strips of NMB macroblocks per row burst (burst-only DDR3 access).
 // Clocks: clk.
@@ -25,7 +30,8 @@
 module rtlnet_h264_rd_dma #(
   parameter int ADDR_W = 32,
   parameter int RAM_AW = 8,
-  parameter int NMB    = 4    // macroblocks per strip, 2, 4 or 8 (burst of 2 * NMB beats)
+  parameter int NMB    = 4,   // macroblocks per strip, 2, 4 or 8 (burst of 2 * NMB beats; 4 * NMB beats with AXI_DATA_W 64, so 2 or 4)
+  parameter int AXI_DATA_W = 128 // width of the read data channel in bits: 128 or 64
 )(
   // Clock and synchronous active-low reset.
   input  logic              clk,
@@ -42,7 +48,7 @@ module rtlnet_h264_rd_dma #(
   output logic              busy,
   output logic              done,
 
-  // AXI4 read address channel, clk domain: INCR, 2 * n_mb beats, 16 bytes per beat.
+  // AXI4 read address channel, clk domain: INCR, 2 * n_mb beats of 16 bytes (4 * n_mb beats of 8 bytes with AXI_DATA_W 64).
   output logic [ADDR_W-1:0] araddr,
   output logic [7:0]        arlen,
   output logic [2:0]        arsize,
@@ -51,7 +57,7 @@ module rtlnet_h264_rd_dma #(
   input  logic              arready,
 
   // AXI4 read data channel, clk domain.
-  input  logic [127:0]      rdata,
+  input  logic [AXI_DATA_W-1:0] rdata,
   input  logic [1:0]        rresp,
   // rlast is not used: the beats of a row are counted by bb.
   /* verilator lint_off UNUSEDSIGNAL */
@@ -73,10 +79,17 @@ module rtlnet_h264_rd_dma #(
   localparam int CHROMA_BASE  = 16;
   localparam int BANK_WORDS   = 32;
   localparam int MI           = $clog2(NMB);
+  localparam bit NARROW       = (AXI_DATA_W == 64);
 
   generate
     if (NMB != 2 && NMB != 4 && NMB != 8) begin : g_bad_nmb
       $fatal(1, "rtlnet_h264_rd_dma: NMB=%0d, must be 2, 4 or 8", NMB);
+    end
+    if (AXI_DATA_W != 128 && AXI_DATA_W != 64) begin : g_bad_width
+      $fatal(1, "rtlnet_h264_rd_dma: AXI_DATA_W=%0d, must be 128 or 64", AXI_DATA_W);
+    end
+    if (AXI_DATA_W == 64 && NMB == 8) begin : g_bad_nmb64
+      $fatal(1, "rtlnet_h264_rd_dma: NMB=8 gives 32-beat bursts with AXI_DATA_W 64 (AXI3 limit 16); use NMB 2 or 4");
     end
   endgenerate
 
@@ -106,15 +119,31 @@ module rtlnet_h264_rd_dma #(
   logic              fin;
   logic [RAM_AW-1:0] y_waddr;
   logic [RAM_AW-1:0] c_waddr;
+  // 64-bit bus: the row registers of the joiner of four beats (constant 0 with 128 bits, where cv_* above are the joiner of two beats).
+  logic              cv64_valid;
+  logic              cv64_odd;
+  logic [MI-1:0]     cv64_mb;
+  logic [255:0]      cv64_data;
+  logic [3:0]        cv64_row;
+  logic              cv_valid_c;
+  logic              cv_odd_c;
+  logic [MI-1:0]     cv_mb_c;
+  logic [255:0]      cv_data_c;
+  logic [3:0]        cv_row_c;
+  assign cv_valid_c = NARROW ? cv64_valid : cv_valid;
+  assign cv_odd_c   = NARROW ? cv64_odd   : cv_odd;
+  assign cv_mb_c    = NARROW ? cv64_mb    : cv_mb;
+  assign cv_data_c  = NARROW ? cv64_data  : cv_data;
+  assign cv_row_c   = NARROW ? cv64_row   : cv_row;
 
   assign arlen   = len_q;
-  assign arsize  = 3'd4;
+  assign arsize  = 3'(NARROW ? 3 : 4);
   assign arburst = 2'b01;
   assign rready  = busy;
 
   rtlnet_h264_c422to420 #(.NMB(NMB)) u_conv (
     .clk(clk), .resetn(resetn),
-    .in_valid(cv_valid), .in_odd(cv_odd), .in_mb(cv_mb), .in_data(cv_data),
+    .in_valid(cv_valid_c), .in_odd(cv_odd_c), .in_mb(cv_mb_c), .in_data(cv_data_c),
     .y_valid(y_valid), .y_mb(y_mb), .y_data(y_data), .c_valid(c_valid), .c_mb(c_mb), .c_data(c_data)
   );
 
@@ -125,6 +154,42 @@ module rtlnet_h264_rd_dma #(
   assign ram_wr_data = c_valid ? c_data : y_data;
   assign err_resp    = busy && rvalid && (rresp != 2'b00);
   assign c_total     = {n_q[3:0], 3'b000};
+
+  // 64-bit bus: four beats make one 32-byte pixel row for the converter (the first three are held in acc). With 128 bits no logic exists here and
+  // the joiner of two beats is in the main block below, as before.
+  generate
+    if (NARROW) begin : g_join64
+      logic [191:0] acc;
+      always_ff @(posedge clk) begin
+        if (!resetn) begin
+          acc        <= '0;
+          cv64_valid <= 1'b0;
+          cv64_odd   <= 1'b0;
+          cv64_mb    <= '0;
+          cv64_row   <= '0;
+          cv64_data  <= '0;
+        end else begin
+          cv64_valid <= 1'b0;
+          if (busy && rvalid) begin
+            acc <= {rdata, acc[191:64]};
+            if (bb[1:0] == 2'd3) begin
+              cv64_valid <= 1'b1;
+              cv64_odd   <= r_row[0];
+              cv64_mb    <= MI'(bb[4:2]);
+              cv64_row   <= r_row;
+              cv64_data  <= {rdata, acc};
+            end
+          end
+        end
+      end
+    end else begin : g_no_join64
+      assign cv64_valid = 1'b0;
+      assign cv64_odd   = 1'b0;
+      assign cv64_mb    = '0;
+      assign cv64_row   = '0;
+      assign cv64_data  = '0;
+    end
+  endgenerate
 
   always_ff @(posedge clk) begin
     if (!resetn) begin
@@ -152,7 +217,7 @@ module rtlnet_h264_rd_dma #(
     end else begin
       done     <= 1'b0;
       cv_valid <= 1'b0;
-      row_d1   <= cv_row;
+      row_d1   <= cv_row_c;
       row_d2   <= row_d1[3:1];
       if (start && !busy) begin
         busy     <= 1'b1;
@@ -162,7 +227,7 @@ module rtlnet_h264_rd_dma #(
         stride_q <= stride;
         base_q   <= dst_base;
         n_q      <= n_mb;
-        len_q    <= {3'd0, n_mb, 1'b0} - 8'd1;
+        len_q    <= NARROW ? ({2'd0, n_mb, 2'b00} - 8'd1) : ({3'd0, n_mb, 1'b0} - 8'd1);
         ar_cnt   <= '0;
         bb       <= '0;
         r_row    <= '0;
@@ -177,16 +242,18 @@ module rtlnet_h264_rd_dma #(
         end
       end
       if (busy && rvalid) begin
-        if (!bb[0]) begin
-          beat0 <= rdata;
-        end else begin
-          cv_valid <= 1'b1;
-          cv_odd   <= r_row[0];
-          cv_mb    <= MI'(bb[4:1]);
-          cv_row   <= r_row;
-          cv_data  <= {rdata, beat0};
+        if (!NARROW) begin
+          if (!bb[0]) begin
+            beat0 <= 128'(rdata);
+          end else begin
+            cv_valid <= 1'b1;
+            cv_odd   <= r_row[0];
+            cv_mb    <= MI'(bb[4:1]);
+            cv_row   <= r_row;
+            cv_data  <= {128'(rdata), beat0};
+          end
         end
-        if (bb == ({n_q, 1'b0} - 5'd1)) begin
+        if (bb == (NARROW ? 5'({n_q, 2'b00} - 6'd1) : 5'({n_q, 1'b0} - 5'd1))) begin
           bb    <= '0;
           r_row <= r_row + 4'd1;
         end else begin

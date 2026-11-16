@@ -8,7 +8,10 @@
 //   * Configuration by defines: TB_MBW, TB_MBH (picture size in macroblocks), TB_SLICES, TB_PICS (pictures per run),
 //     TB_QP, TB_RING_KB (compressed ring size), TB_CONSUMER_DELAY (clocks between firmware polls),
 //     TB_LAT (memory read latency), TB_GAP (percent of clocks without ready/valid on the memory port),
-//     TB_MEM_LOG2 (memory model size in 16-byte words, power of two).
+//     TB_MEM_LOG2 (memory model size in 16-byte words, power of two), TB_AXI_W (memory data width of the core, the arbiter, the
+//     memory model and the burst monitor: 128 default, 64; the same stream and picture bytes must result: the bench prints MEMHASH, a
+//     hash of every word of the memory model after the run, and the harness (-AxiW 64) compares it with the 128-bit run; +INJECT_MEM
+//     flips one memory bit before the hash, the negative control of that comparison).
 //   * Plusargs: +INPFX=<path prefix>: the input of picture n is the hex file <prefix><n>.hex, loaded into the one input buffer
 //     just before the picture starts; +GOP=<string of I and P, one letter per picture> (default all I): an I picture is an IDR
 //     picture (frame_num 0, idr_pic_id counting the IDR pictures), a P picture is a non-IDR picture with frame_num counting the
@@ -46,11 +49,12 @@
 //     search range of the core (0: only the vector (0, 0), the phase 2c-1 behaviour: the baseline of the bits gate).
 //   * Race-free: every bench output changes at the falling clock edge and every input is sampled there.
 // Language: SystemVerilog-2012 (simulation only; Verilator 5 --timing and Active-HDL).
-// Revision: 11-10-2026
+// Revision: 11-15-2026
 //   * 11-09-2026: initial version.
 //   * 11-10-2026: tiled rebuilt picture, 128-byte index records, padded input stride, burst monitor.
 //   * 11-10-2026: phase 2c-1: GOPs of I and P pictures, two rebuilt buffers, one input buffer reloaded per picture.
 //   * 11-10-2026: phase 2c-2: motion statistics (MVSTAT), TB_SR.
+//   * 11-15-2026: TB_AXI_W, MEMHASH, +INJECT_MEM.
 // Clocks: enc_clk 150 MHz, s_axi_aclk 100 MHz.
 // -----------------------------------------------------------------------------
 `timescale 1ns / 1ps
@@ -103,6 +107,9 @@
 `ifndef TB_SR
   `define TB_SR 16
 `endif
+`ifndef TB_AXI_W
+  `define TB_AXI_W 128         // memory data width of the core and the memory model: 128 or 64 (the same stream and picture bytes in memory)
+`endif
 
 module tb_rtlnet_h264_top;
 
@@ -124,6 +131,8 @@ module tb_rtlnet_h264_top;
   `define TB_MAX_CLK 150_000_000
 `endif
   localparam int MAX_CLK  = `TB_MAX_CLK;
+  localparam int AXW      = `TB_AXI_W;
+  localparam int WORDS_PROBE = 3;     // a memory word inside the input frame area (the injection flips one bit there)
 
   // Register offsets (mirror driver/rtlnet_h264_enc.h).
   localparam logic [11:0] R_ID = 12'h000, R_VERSION = 12'h004, R_CAPS = 12'h008, R_CTRL = 12'h00C,
@@ -171,8 +180,8 @@ module tb_rtlnet_h264_top;
   logic [NE*2-1:0]   e_awburst, e_arburst, e_bresp, e_rresp;
   logic [NE-1:0]     e_awvalid, e_awready, e_wlast, e_wvalid, e_wready, e_bvalid, e_bready;
   logic [NE-1:0]     e_arvalid, e_arready, e_rlast, e_rvalid, e_rready;
-  logic [NE*128-1:0] e_wdata, e_rdata;
-  logic [NE*16-1:0]  e_wstrb;
+  logic [NE*AXW-1:0] e_wdata, e_rdata;
+  logic [NE*AXW/8-1:0] e_wstrb;
   logic [NE*4-1:0]   e_rid;
   logic [MID_W-1:0]  awid, bid, arid, rid;
   logic [31:0]       awaddr_m, araddr_m;
@@ -181,11 +190,11 @@ module tb_rtlnet_h264_top;
   logic [1:0]        awburst, arburst, bresp_m, rresp_m;
   logic              awvalid_m, awready_m, wlast, wvalid_m, wready_m, bvalid_m, bready_m;
   logic              arvalid_m, arready_m, rlast, rvalid_m, rready_m;
-  logic [127:0]      wdata_m, rdata_m;
-  logic [15:0]       wstrb_m;
+  logic [AXW-1:0]    wdata_m, rdata_m;
+  logic [AXW/8-1:0]  wstrb_m;
   logic              irq;
 
-  rtlnet_h264_top #(.NUM_ENGINES(NE), .SR(`TB_SR), .HIGH_PROFILE(`TB_HIGH_PROFILE), .HP_T8(`TB_HP_TOOL_T8), .HP_T8_AUTO(`TB_HP_TOOL_AUTO), .DEBLOCK(`TB_DEBLOCK)) dut (
+  rtlnet_h264_top #(.NUM_ENGINES(NE), .SR(`TB_SR), .HIGH_PROFILE(`TB_HIGH_PROFILE), .HP_T8(`TB_HP_TOOL_T8), .HP_T8_AUTO(`TB_HP_TOOL_AUTO), .DEBLOCK(`TB_DEBLOCK), .AXI_DATA_W(AXW)) dut (
     .enc_clk(enc_clk), .enc_resetn(resetn), .s_axi_aclk(s_clk), .s_axi_aresetn(resetn),
     .s_axi_awaddr(awaddr), .s_axi_awvalid(awvalid_l), .s_axi_awready(awready_l),
     .s_axi_wdata(wdata_l), .s_axi_wstrb(4'hF), .s_axi_wvalid(wvalid_l), .s_axi_wready(wready_l),
@@ -213,7 +222,7 @@ module tb_rtlnet_h264_top;
   logic [31:0] arb_s_rdata;
 
   rtlnet_axi_arbiter #(
-    .NUM_MASTERS(NE), .ADDR_W(32), .DATA_W(128), .ID_W(4), .HIGH_PRIO_MASK('0), .MAX_OUTSTANDING(8)
+    .NUM_MASTERS(NE), .ADDR_W(32), .DATA_W(AXW), .ID_W(4), .HIGH_PRIO_MASK('0), .MAX_OUTSTANDING(8)
   ) u_arb (
     .clk(enc_clk), .resetn(resetn), .s_axi_aclk(s_clk), .s_axi_aresetn(resetn),
     .s_awid(e_awid), .s_awaddr(e_awaddr), .s_awlen(e_awlen), .s_awsize(e_awsize), .s_awburst(e_awburst),
@@ -241,7 +250,7 @@ module tb_rtlnet_h264_top;
     .s_axi_rdata(arb_s_rdata), .s_axi_rresp(arb_s_rresp), .s_axi_rvalid(arb_s_rvalid), .s_axi_rready(1'b1)
   );
 
-  tb_h264_axi_mem #(.WORDS_LOG2(`TB_MEM_LOG2), .ID_W(MID_W), .READ_LAT(`TB_LAT), .GAP_PCT(`TB_GAP)) u_mem (
+  tb_h264_axi_mem #(.WORDS_LOG2(`TB_MEM_LOG2), .ID_W(MID_W), .READ_LAT(`TB_LAT), .GAP_PCT(`TB_GAP), .AXI_W(AXW)) u_mem (
     .clk(enc_clk), .resetn(resetn),
     .awid(awid), .awaddr(awaddr_m), .awlen(awlen), .awsize(awsize), .awburst(awburst), .awvalid(awvalid_m),
     .awready(awready_m), .wdata(wdata_m), .wstrb(wstrb_m), .wlast(wlast), .wvalid(wvalid_m), .wready(wready_m),
@@ -808,6 +817,8 @@ module tb_rtlnet_h264_top;
     // Burst shapes: one single-beat ring tail is possible per slice end, ring wrap or 4 KiB end.
     u_bmon.report(2 * SE * PICS + (stream.size() / (RING_SIZE / NE)) + 4);
     tb_check(u_bmon.viol_count == 0, "burst monitor reported a violation");
+    if ($test$plusargs("INJECT_MEM")) u_mem.mem[WORDS_PROBE] = u_mem.mem[WORDS_PROBE] ^ 128'd1;   // negative control of the width comparison of the harness (-InjectWidth)
+    $display("MEMHASH %016x", u_mem.mem_hash());
 `ifdef TB_EXPECT_STALL
     tb_check(stall_cycles > 0, "the ring-full guard never stalled the writer");
 `endif
@@ -853,7 +864,7 @@ module tb_rtlnet_h264_top;
       mon_awid[3:0]      = 4'd2;
     end
   end
-  tb_h264_burst_mon #(.NE(NE), .ID_W(4)) u_bmon (
+  tb_h264_burst_mon #(.NE(NE), .ID_W(4), .AXI_W(AXW)) u_bmon (
     .clk(enc_clk), .resetn(resetn), .awid(mon_awid), .awlen(mon_awlen), .awvalid(mon_awvalid), .awready(mon_awready),
     .arid(mon_arid), .arlen(mon_arlen), .arvalid(mon_arvalid), .arready(mon_arready)
   );

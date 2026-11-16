@@ -59,7 +59,9 @@
 //     fallen (its end_of_slice_flag and flush); the packer's ALIGN_ONES parameter (= HIGH_PROFILE) adds the PK_ALIGN1 command. With HIGH_PROFILE = 0 the module is not
 //     instantiated, e_idr / e_p / e_frame_num / e_idr_pic_id are the register values, and the generated logic is that of the
 //     Constrained Baseline encoder.
-// Revision: 11-11-2026
+// Revision: 11-15-2026
+//   * 11-15-2026: AXI_DATA_W parameter (128 default, 64): the memory port is 64 bits wide with the burst rules of an AXI3 port; the
+//     read and write masters inside (rd_dma, the search window loader, wr_master) make the bus beats, nothing else changes.
 //   * 11-11-2026: High profile seam (parameter HIGH_PROFILE, ports hp_*), forced IDR picture on a license or profile change.
 //   * 11-11-2026: High profile CABAC: cabac_init_idc in the slice header of a P slice, the slice-end command waits for the module's flush.
 //   * 11-09-2026: initial version (I_PCM); phase 2b-2: stage A / stage B macroblock coder, rebuilt and coefficient RAMs,
@@ -90,7 +92,8 @@ module rtlnet_h264_engine #(
   parameter bit    HP_T8       = 1'b1,   // only with HIGH_PROFILE = 1: 1 = include the 8x8 transform for inter macroblocks; 0 = leave it out (4x4 only)
   parameter bit    HP_T8_AUTO  = 1'b1,   // only with HP_T8 = 1: 1 = include the per-macroblock choice of 4x4 or 8x8 transform; 0 = leave it out
   parameter int    DBK_LINE_KB = 16,     // deblocking filter line store, KiB
-  parameter bit    DEBLOCK     = 1'b1    // 1: in-loop deblocking filter (slice header idc 2 while cfg_dbk_en)
+  parameter bit    DEBLOCK     = 1'b1,   // 1: in-loop deblocking filter (slice header idc 2 while cfg_dbk_en)
+  parameter int    AXI_DATA_W  = 128     // memory port data width in bits: 128, or 64 (bursts of at most 16 beats; RD_STRIP_MB 2 or 4)
 )(
   // Clock and synchronous active-low reset.
   input  logic              clk,
@@ -186,7 +189,7 @@ module rtlnet_h264_engine #(
   output logic [1:0]        m_arburst,
   output logic              m_arvalid,
   input  logic              m_arready,
-  input  logic [127:0]      m_rdata,
+  input  logic [AXI_DATA_W-1:0] m_rdata,
   input  logic [1:0]        m_rresp,
   input  logic              m_rlast,
   input  logic              m_rvalid,
@@ -198,8 +201,8 @@ module rtlnet_h264_engine #(
   output logic [1:0]        m_awburst,
   output logic              m_awvalid,
   input  logic              m_awready,
-  output logic [127:0]      m_wdata,
-  output logic [15:0]       m_wstrb,
+  output logic [AXI_DATA_W-1:0]   m_wdata,
+  output logic [AXI_DATA_W/8-1:0] m_wstrb,
   output logic              m_wlast,
   output logic              m_wvalid,
   input  logic              m_wready,
@@ -556,7 +559,7 @@ module rtlnet_h264_engine #(
   assign m_arvalid   = ref_busy ? ref_arvalid : rd_arvalid;
   assign m_araddr    = ref_busy ? ref_araddr  : rd_araddr;
   assign m_arlen     = ref_busy ? ref_arlen   : rd_arlen;
-  assign m_arsize    = 3'd4;
+  assign m_arsize    = 3'(AXI_DATA_W == 128 ? 4 : 3);
   assign m_arburst   = 2'b01;
   assign rd_arready  = m_arready && !ref_busy;
   assign ref_arready = m_arready && ref_busy;
@@ -1243,7 +1246,7 @@ module rtlnet_h264_engine #(
   // ---------------------------------------------------------------------------
   // Datapath instances
   // ---------------------------------------------------------------------------
-  rtlnet_h264_rd_dma #(.ADDR_W(ADDR_W), .RAM_AW(RAM_AW), .NMB(RD_STRIP_MB)) u_rd_dma (
+  rtlnet_h264_rd_dma #(.ADDR_W(ADDR_W), .RAM_AW(RAM_AW), .NMB(RD_STRIP_MB), .AXI_DATA_W(AXI_DATA_W)) u_rd_dma (
     .clk(clk), .resetn(resetn),
     .start(rd_start), .mb_addr(f_ptr + ADDR_W'({f_x, 5'd0})), .stride(cfg_in_stride), .n_mb(n_f), .dst_base(bank_base_f),
     .busy(rd_busy), .done(rd_done),
@@ -1261,7 +1264,7 @@ module rtlnet_h264_engine #(
 
   rtlnet_h264_search #(
     .ADDR_W(ADDR_W), .MAX_MB_W(MAX_MB_W), .SR(SR), .WIN_KB(WIN_KB), .MV_LINE_KB(MV_LINE_KB), .SRC_AW(RAM_AW), .REF_AW(REF_AW),
-    .RAM_STYLE(RAM_STYLE)
+    .RAM_STYLE(RAM_STYLE), .AXI_DATA_W(AXI_DATA_W)
   ) u_search (
     .clk(clk), .resetn(resetn),
     .pic_start(fetch_go && e_p), .cfg_mb_w(cfg_mb_w), .cfg_mb_h(cfg_mb_h), .band_first_row(band_first_row), .band_rows(band_rows),
@@ -1408,7 +1411,7 @@ module rtlnet_h264_engine #(
     .nal_done(nal_done), .ring_stall(ring_stall), .idle(ring_idle), .err_rptr(err_rptr)
   );
 
-  rtlnet_h264_wr_master #(.ADDR_W(ADDR_W), .ID_W(ID_W)) u_wr (
+  rtlnet_h264_wr_master #(.ADDR_W(ADDR_W), .ID_W(ID_W), .AXI_DATA_W(AXI_DATA_W)) u_wr (
     .clk(clk), .resetn(resetn),
     .rg_valid(rg_valid), .rg_addr(rg_addr), .rg_len(rg_len), .rg_pop(rg_pop),
     .rg_w_valid(rg_w_valid), .rg_w_data(rg_w_data), .rg_w_strb(rg_w_strb), .rg_w_pop(rg_w_pop),
@@ -1426,8 +1429,8 @@ module rtlnet_h264_engine #(
   // synthesis translate_off
   always_ff @(posedge clk) begin
     if (resetn && m_arvalid && m_arready) begin
-      if ((m_arburst != 2'b01) || (m_arsize != 3'd4) || (m_arlen > 8'd15) ||
-          (((m_araddr & 32'hFFF) + (({24'd0, m_arlen} + 32'd1) << 4)) > 32'h1000)) begin
+      if ((m_arburst != 2'b01) || (m_arsize != 3'(AXI_DATA_W == 128 ? 4 : 3)) || (m_arlen > 8'd15) ||
+          (((m_araddr & 32'hFFF) + (({24'd0, m_arlen} + 32'd1) << (AXI_DATA_W == 128 ? 4 : 3))) > 32'h1000)) begin
         $error("rtlnet_h264_engine: illegal AR burst addr 0x%0h len %0d size %0d burst %0d", m_araddr, m_arlen,
                m_arsize, m_arburst);
       end

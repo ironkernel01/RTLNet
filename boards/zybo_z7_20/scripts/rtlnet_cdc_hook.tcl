@@ -1,10 +1,10 @@
 # Purpose: apply the repository's bounded CDC constraints before implementation.
-# Overview: six AXI-Lite transaction crossings (camera block, arbiter, capture DMA, frame buffer, encoder, receiver), the receiver's byte-clock
+# Overview: five AXI-Lite transaction crossings (camera block, capture DMA, frame buffer, encoder, receiver), the receiver's byte-clock
 #   crossings (Gray FIFO pointers, pulse and level synchronizers, resets) and the IRQ synchronizers.
 # Revision: 11-15-2026.
 set rtlnet_hook_repo [file normalize [file join [file dirname [info script]] .. .. ..]]
 set ::rtlnet_cdc_required {sync reset gray axil_cdc}
-set ::rtlnet_cdc_expect {axil_cdc 6 sync 33 reset 3 gray 2}
+set ::rtlnet_cdc_expect {axil_cdc 5 sync 31 reset 3 gray 2}
 # The run directory property is relative in this project layout; the hook runs inside the run directory.
 set ::rtlnet_cdc_report [file join [pwd] rtlnet_cdc.rpt]
 source [file join $rtlnet_hook_repo scripts rtlnet_constrain_cdc.tcl]

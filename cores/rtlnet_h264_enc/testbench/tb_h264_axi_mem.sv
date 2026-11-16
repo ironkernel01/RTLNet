@@ -13,8 +13,14 @@
 //     beats, 4 KiB crossing, WLAST not on the last beat, valid or payload changing before ready, an address
 //     beyond the array.
 //   * Counters: aw_count, ar_count, w_beats, r_beats.
+//   * AXI_W (default 128): the width of the data channels, 128 or 64. The storage stays 128-bit words whatever the bus width (a 64-bit beat
+//     lands in its half of the word, by the byte strobes), so the benches that load and dump mem[] work for both. The checks use the bus
+//     width: the size field is log2(AXI_W / 8), the 4 KiB rule and the alignment use the beat size, and a burst has at most 16 beats
+//     (the AXI3 limit; the same number of beats as for 128 bits, half the bytes). mem_hash() is a hash of every storage word (the
+//     same for both widths when the same bytes are stored).
 // Language: SystemVerilog-2012 (simulation only).
-// Revision: 11-09-2026
+// Revision: 11-15-2026
+//   * 11-15-2026: AXI_W parameter, mem_hash().
 //   * 11-09-2026: initial version.
 // Clocks: clk.
 // -----------------------------------------------------------------------------
@@ -25,7 +31,8 @@ module tb_h264_axi_mem #(
   parameter int ID_W       = 4,
   parameter int READ_LAT   = 0,
   parameter int GAP_PCT    = 0,
-  parameter int SEED       = 1
+  parameter int SEED       = 1,
+  parameter int AXI_W      = 128
 )(
   // Clock and synchronous active-low reset.
   input  logic              clk,
@@ -39,8 +46,8 @@ module tb_h264_axi_mem #(
   input  logic [1:0]        awburst,
   input  logic              awvalid,
   output logic              awready,
-  input  logic [127:0]      wdata,
-  input  logic [15:0]       wstrb,
+  input  logic [AXI_W-1:0]  wdata,
+  input  logic [AXI_W/8-1:0] wstrb,
   input  logic              wlast,
   input  logic              wvalid,
   output logic              wready,
@@ -56,7 +63,7 @@ module tb_h264_axi_mem #(
   input  logic              arvalid,
   output logic              arready,
   output logic [ID_W-1:0]   rid,
-  output logic [127:0]      rdata,
+  output logic [AXI_W-1:0]  rdata,
   output logic [1:0]        rresp,
   output logic              rlast,
   output logic              rvalid,
@@ -65,6 +72,8 @@ module tb_h264_axi_mem #(
 
   localparam int WORDS = 1 << WORDS_LOG2;
   localparam int QD    = 32;
+  localparam int NB    = AXI_W / 8;     // bytes per beat
+  localparam int NSH   = $clog2(NB);    // log2 of the beat size
 
   logic [127:0] mem [0:WORDS-1];
 
@@ -101,7 +110,7 @@ module tb_h264_axi_mem #(
   bit              ar_held = 0;
   bit              w_held = 0;
   logic [31:0]     aw_hold_addr, ar_hold_addr;
-  logic [127:0]    w_hold_data;
+  logic [AXI_W-1:0] w_hold_data;
 
   int unsigned     rng;
 
@@ -110,13 +119,24 @@ module tb_h264_axi_mem #(
     return (($urandom % 100) >= GAP_PCT);
   endfunction
 
+  // Hash of every storage word (to compare the memory contents of two runs; the word index is mixed in).
+  function automatic longint unsigned mem_hash();
+    longint unsigned h;
+    h = 64'hCBF2_9CE4_8422_2325;
+    for (int i = 0; i < WORDS; i++) begin
+      h = (h ^ longint'(mem[i][63:0])) * 64'h0000_0100_0000_01B3;
+      h = (h ^ longint'(mem[i][127:64]) ^ longint'(i)) * 64'h0000_0100_0000_01B3;
+    end
+    return h;
+  endfunction
+
   function automatic void check_burst(input string what, input logic [31:0] addr, input logic [7:0] len,
                                       input logic [2:0] size, input logic [1:0] burst);
     if (burst != 2'b01) $error("tb_h264_axi_mem: %s burst type %0d, must be INCR", what, burst);
-    if (size != 3'd4)   $error("tb_h264_axi_mem: %s size %0d, must be the full 16-byte width", what, size);
+    if (size != 3'(NSH)) $error("tb_h264_axi_mem: %s size %0d, must be the full %0d-byte width", what, size, NB);
     if (len > 8'd15)    $error("tb_h264_axi_mem: %s length %0d beats, at most 16", what, len + 1);
-    if (((addr & 32'hFFF) + ((len + 1) * 16)) > 32'h1000) $error("tb_h264_axi_mem: %s 0x%08x len %0d crosses 4 KiB", what, addr, len);
-    if ((addr[3:0] != 4'd0)) $error("tb_h264_axi_mem: %s 0x%08x not 16-byte aligned", what, addr);
+    if (((addr & 32'hFFF) + ((len + 1) * NB)) > 32'h1000) $error("tb_h264_axi_mem: %s 0x%08x len %0d crosses 4 KiB", what, addr, len);
+    if ((addr & 32'(NB - 1)) != 32'd0) $error("tb_h264_axi_mem: %s 0x%08x not %0d-byte aligned", what, addr, NB);
     if ((addr >> 4) >= WORDS) $error("tb_h264_axi_mem: %s 0x%08x beyond the memory array", what, addr);
   endfunction
 
@@ -152,9 +172,9 @@ module tb_h264_axi_mem #(
         else begin
           logic [31:0] a;
           logic [127:0] w;
-          a = awq_addr[awq_rd] + (w_beat * 16);
+          a = awq_addr[awq_rd] + (w_beat * NB);
           w = mem[a >> 4];
-          for (int b = 0; b < 16; b++) if (wstrb[b]) w[8*b +: 8] = wdata[8*b +: 8];
+          for (int b = 0; b < NB; b++) if (wstrb[b]) w[8*(int'(a[3:0]) + b) +: 8] = wdata[8*b +: 8];
           mem[a >> 4] = w;
           w_beats++;
           if (wlast != (w_beat == awq_len[awq_rd])) $error("tb_h264_axi_mem: WLAST wrong at beat %0d of %0d", w_beat, awq_len[awq_rd] + 1);
@@ -192,8 +212,8 @@ module tb_h264_axi_mem #(
       end else if (r_active && (!rvalid || rready) && !(rvalid && !rready)) begin
         if (r_wait > 0) r_wait--;
         else if (pass_gap()) begin
-          rvalid <= 1'b1; rdata <= mem[r_addr >> 4]; rid <= r_id; rresp <= 2'b00; rlast <= (r_left == 1);
-          r_addr = r_addr + 16; r_left--;
+          rvalid <= 1'b1; rdata <= AXI_W'(mem[r_addr >> 4] >> (8 * int'(r_addr[3:0]))); rid <= r_id; rresp <= 2'b00; rlast <= (r_left == 1);
+          r_addr = r_addr + NB; r_left--;
           if (r_left == 0) r_active = 0;
         end
       end

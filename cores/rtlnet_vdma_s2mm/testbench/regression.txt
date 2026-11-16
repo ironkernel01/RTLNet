@@ -9,3 +9,18 @@ tb_rtlnet_vdma_s2mm   cores/rtlnet_vdma_s2mm/testbench/tb_rtlnet_vdma_s2mm.f  bu
 tb_rtlnet_vdma_s2mm   cores/rtlnet_vdma_s2mm/testbench/tb_rtlnet_vdma_s2mm.f  burst4_fkb1  defines=TB_GAP=1,TB_BURST=4,TB_FKB=1
 tb_rtlnet_vdma_s2mm   cores/rtlnet_vdma_s2mm/testbench/tb_rtlnet_vdma_s2mm.f  full         defines=TB_GAP=0,TB_FULL=1
 tb_rtlnet_vdma_s2mm   cores/rtlnet_vdma_s2mm/testbench/tb_rtlnet_vdma_s2mm.f  neg          defines=TB_GAP=1  plusargs=INJECT_FAILURE  expectfail
+# AXI_DATA_W 64 (11-15-2026): the same scenario with 64-bit beats (TB_AXI_W=64): same expected bytes and CRC-32 of the memory, bursts of at most 16 beats (AXI3
+# limit in the memory model). The mut_* entries drive a mutated bus between the DUT and the memory model (+MUT_LEN burst length, +MUT_SIZE beat size, +MUT_4K
+# 4 KiB rule, +MUT_STRB byte strobes) and must fail the bench.
+tb_rtlnet_vdma_s2mm   cores/rtlnet_vdma_s2mm/testbench/tb_rtlnet_vdma_s2mm.f  w64_gap       defines=TB_GAP=1,TB_AXI_W=64
+tb_rtlnet_vdma_s2mm   cores/rtlnet_vdma_s2mm/testbench/tb_rtlnet_vdma_s2mm.f  w64_nogap     defines=TB_GAP=0,TB_AXI_W=64
+tb_rtlnet_vdma_s2mm   cores/rtlnet_vdma_s2mm/testbench/tb_rtlnet_vdma_s2mm.f  w64_burst8    defines=TB_GAP=1,TB_BURST=8,TB_AXI_W=64
+tb_rtlnet_vdma_s2mm   cores/rtlnet_vdma_s2mm/testbench/tb_rtlnet_vdma_s2mm.f  w64_burst4_fkb1 defines=TB_GAP=1,TB_BURST=4,TB_FKB=1,TB_AXI_W=64
+tb_rtlnet_vdma_s2mm   cores/rtlnet_vdma_s2mm/testbench/tb_rtlnet_vdma_s2mm.f  w64_full      defines=TB_GAP=0,TB_FULL=1,TB_AXI_W=64
+tb_rtlnet_vdma_s2mm   cores/rtlnet_vdma_s2mm/testbench/tb_rtlnet_vdma_s2mm.f  w64_neg       defines=TB_GAP=1,TB_AXI_W=64  plusargs=INJECT_FAILURE  expectfail
+tb_rtlnet_vdma_s2mm   cores/rtlnet_vdma_s2mm/testbench/tb_rtlnet_vdma_s2mm.f  w64_mut_len   defines=TB_GAP=1,TB_AXI_W=64  plusargs=MUT_LEN   expectfail
+tb_rtlnet_vdma_s2mm   cores/rtlnet_vdma_s2mm/testbench/tb_rtlnet_vdma_s2mm.f  w64_mut_size  defines=TB_GAP=1,TB_AXI_W=64  plusargs=MUT_SIZE  expectfail
+tb_rtlnet_vdma_s2mm   cores/rtlnet_vdma_s2mm/testbench/tb_rtlnet_vdma_s2mm.f  w64_mut_4k    defines=TB_GAP=1,TB_AXI_W=64  plusargs=MUT_4K    expectfail
+tb_rtlnet_vdma_s2mm   cores/rtlnet_vdma_s2mm/testbench/tb_rtlnet_vdma_s2mm.f  w64_mut_strb  defines=TB_GAP=1,TB_AXI_W=64  plusargs=MUT_STRB  expectfail
+tb_rtlnet_vdma_s2mm   cores/rtlnet_vdma_s2mm/testbench/tb_rtlnet_vdma_s2mm.f  mut_len       defines=TB_GAP=1  plusargs=MUT_LEN   expectfail
+tb_rtlnet_vdma_s2mm   cores/rtlnet_vdma_s2mm/testbench/tb_rtlnet_vdma_s2mm.f  mut_strb      defines=TB_GAP=1  plusargs=MUT_STRB  expectfail

@@ -1,8 +1,12 @@
-# Purpose: HP protocol, camera-to-encoder and build-gate regressions of the Zybo Z7-20 board. Revision: 11-15-2026.
-tb_rtlnet_axi_hp_bridge boards/zybo_z7_20/testbench/tb_rtlnet_axi_hp_bridge.f hp
-tb_rtlnet_axi_hp_bridge boards/zybo_z7_20/testbench/tb_rtlnet_axi_hp_bridge.f neg plusargs=INJECT_FAILURE expectfail
+# Purpose: direct 64-bit HP connection, camera-to-encoder and build-gate regressions of the Zybo Z7-20 board. Revision: 11-15-2026.
+# The mut_* entries change what the AXI3 HP slave model sees (WID, 4 KiB, burst length at the master's 8-bit tap, a single-beat burst, the beat size) and must fail the bench.
 tb_rtlnet_zybo_video boards/zybo_z7_20/testbench/tb_rtlnet_zybo_video.f board
 tb_rtlnet_zybo_video boards/zybo_z7_20/testbench/tb_rtlnet_zybo_video.f neg plusargs=INJECT_FAILURE expectfail
 tb_rtlnet_zybo_video boards/zybo_z7_20/testbench/tb_rtlnet_zybo_video.f mut plusargs=MUTATE expectfail
+tb_rtlnet_zybo_video boards/zybo_z7_20/testbench/tb_rtlnet_zybo_video.f mut_wid plusargs=MUT_WID expectfail
+tb_rtlnet_zybo_video boards/zybo_z7_20/testbench/tb_rtlnet_zybo_video.f mut_4k plusargs=MUT_4K expectfail
+tb_rtlnet_zybo_video boards/zybo_z7_20/testbench/tb_rtlnet_zybo_video.f mut_long plusargs=MUT_LONG expectfail
+tb_rtlnet_zybo_video boards/zybo_z7_20/testbench/tb_rtlnet_zybo_video.f mut_short plusargs=MUT_SHORT expectfail
+tb_rtlnet_zybo_video boards/zybo_z7_20/testbench/tb_rtlnet_zybo_video.f mut_beat plusargs=MUT_BEAT expectfail
 zybo_decoder script:boards/zybo_z7_20/scripts/check_board_encode.ps1 -Tag decoder
 zybo_gates script:boards/zybo_z7_20/scripts/check_gates.ps1

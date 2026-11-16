@@ -30,6 +30,8 @@ and drives EMIO GPIO pin 54 for reset. Tables and notices are under
 are bounded; driver errors stop startup with the failed API named. Mode changes require
 the stream stopped and configure admission as well as the sensor.
 
+The GP0 windows of the design are the camera admission block (0x44A0_5000, `RTLNET_PLAT_CSI2_BASE`), the capture DMA (0x44A0_6000), the frame buffer (0x44A0_7000), the encoder (0x44A0_8000) and the receiver; the capture DMA and the encoder reach DDR directly as 64-bit masters on HP2 and HP0
+(no arbiter and no arbiter window: 0x44A0_4000 is not mapped, and the firmware does not define it).
 The camera receiver `rtlnet_csi2_rx` sits at 0x44A0_9000. `rtlnet_rx_probe` (`src/rtlnet_rx.c`) reads its ID and VERSION first (0x43534932 and 0x11152026, the core with the camera front end); any other value
 stops startup with a message that names what was read. `rtlnet_rx_init` (through the core driver `cores/rtlnet_csi2_rx/driver`) brings the receiver up after the sensor init table and before the sensor streams: soft
 reset held while the configuration is written, two lanes, bit order 0, settle 28 clocks, virtual channel 0 and data type RAW10, delay taps, black level, white balance gains, Bayer phase, gamma, green equalisation,
@@ -120,7 +122,7 @@ Measured on a Zybo Z7-20 with a Pcam 5C (JTAG load with `boards/zybo_z7_20/scrip
   1080p30 table (PCLK 84 MHz, HTS 2500, VTS 1120) is mode 1 and runs 30.0 fps (measured). The PL admits every frame in
   mode 0 (PTS step 3000) and every second frame in mode 1 (PTS step 6000, 15 fps).
 
-### Receiver bring-up measurements (11-15-2026, image `own7`, firmware `fw18`)
+### Receiver bring-up measurements (11-15-2026, image `own7`, firmware `fw18`; re-run on image `own9` with firmware `fw19`, see `boards/zybo_z7_20/documentation/rtlnet_zybo_z7_20.md`)
 
 The receiver measurements themselves are in `cores/rtlnet_csi2_rx/documentation/rtlnet_csi2_rx.md` section 12.
 
@@ -139,7 +141,7 @@ The ELF is built against the XSA of the design (the video path runs on a 90 MHz 
 timestamp counts microseconds from it):
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File cpu/zynq7_h264/firmware/build.ps1 -Xsa boards/zybo_z7_20/build/own7/rtlnet_zybo_z7_20.xsa -Tag fw17
+powershell -NoProfile -ExecutionPolicy Bypass -File cpu/zynq7_h264/firmware/build.ps1 -Xsa boards/zybo_z7_20/build/own9/rtlnet_zybo_z7_20.xsa -Tag fw19
 ```
 
 The build includes the receiver core driver (`cores/rtlnet_csi2_rx/driver`).

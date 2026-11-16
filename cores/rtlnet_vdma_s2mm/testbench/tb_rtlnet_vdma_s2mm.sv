@@ -22,9 +22,15 @@
 //      model's, LAST_BASE, STATUS write-1-to-clear, CNT_CLEAR.
 //  11. fb_done carries the sideband of its frame; fb_done_good only for a good frame.
 // Defines: TB_GAP 1 = random gaps (stream valid, AW/W/B ready), TB_FULL 1 = also 1280x720 and 1920x1080 frames, TB_BURST
-//   MAX_BURST_BEATS, TB_FKB FIFO kilobytes.
+//   MAX_BURST_BEATS, TB_FKB FIFO kilobytes, TB_AXI_W memory data width in bits (128 default, 64): the same scenario, the same
+//   expected bytes in memory (the expected image is built per byte, independent of the width), the memory model limits
+//   a burst to 16 beats (AXI3), and the CRC-32 of the memory bytes is compared with the CRC of the expected byte image after every frame.
+// Plusargs (mutations of the bus between the DUT and the memory model, each must fail the bench): +MUT_LEN adds 16 beats to
+//   one AWLEN (the burst length limit), +MUT_SIZE lowers AWSIZE (the full-width rule), +MUT_4K moves one AW address to the last
+//   16 bytes of its page (the 4 KiB rule), +MUT_STRB clears one strobe bit of one beat (the byte image and the CRC).
 // Language: SystemVerilog-2012 (simulation only).
-// Revision: 11-09-2026
+// Revision: 11-15-2026
+//   * 11-15-2026: TB_AXI_W 64 and 128, bus mutations, memory CRC.
 //   * 11-09-2026: initial version.
 // -----------------------------------------------------------------------------
 `timescale 1ns / 1ps
@@ -38,6 +44,9 @@
 `ifndef TB_BURST
   `define TB_BURST 16
 `endif
+`ifndef TB_AXI_W
+  `define TB_AXI_W 128
+`endif
 `ifndef TB_FKB
   `define TB_FKB 2
 `endif
@@ -49,6 +58,11 @@ module tb_rtlnet_vdma_s2mm;
   localparam int ADDR_W  = 29;
   localparam int GAP     = `TB_GAP;
   localparam int MAXB    = `TB_BURST;
+  localparam int AXW     = `TB_AXI_W;
+  localparam int BEAT    = AXW / 8;      // bytes per beat
+  localparam int WPB     = AXW / 32;     // stream words per beat
+  localparam int PXB     = AXW / 16;     // pixels per beat (two bytes per pixel)
+  localparam int BEAT_SHIFT = $clog2(BEAT);
 
   logic clk     = 1'b0;
   logic cfg_clk = 1'b0;
@@ -94,9 +108,28 @@ module tb_rtlnet_vdma_s2mm;
   logic [2:0]        awsize;
   logic [1:0]        awburst;
   logic              awvalid, awready;
-  logic [127:0]      wdata;
-  logic [15:0]       wstrb;
+  logic [AXW-1:0]    wdata;
+  logic [AXW/8-1:0]  wstrb;
   logic              wlast, wvalid, wready;
+  // Bus between the DUT and the memory model, with the bench mutations.
+  logic [ADDR_W-1:0] awaddr_m;
+  logic [7:0]        awlen_m;
+  logic [2:0]        awsize_m;
+  logic [AXW/8-1:0]  wstrb_m;
+  bit                mut_len, mut_size, mut_4k, mut_strb;
+  initial begin
+    mut_len = $test$plusargs("MUT_LEN"); mut_size = $test$plusargs("MUT_SIZE");
+    mut_4k = $test$plusargs("MUT_4K"); mut_strb = $test$plusargs("MUT_STRB");
+  end
+  // One burst (the second AW of the run) and one beat (the fourth W beat) are mutated.
+  int aw_idx = 0;
+  always @(posedge clk) if (resetn === 1'b1 && awvalid && awready) aw_idx <= aw_idx + 1;
+  assign awlen_m   = (mut_len  && aw_idx == 2) ? (awlen | 8'h10) : awlen;
+  assign awsize_m  = (mut_size && aw_idx == 2) ? (awsize - 3'd1) : awsize;
+  assign awaddr_m  = (mut_4k   && aw_idx == 2) ? (awaddr | ADDR_W'(32'hFF0)) : awaddr;
+  int w_idx_m = 0;
+  always @(posedge clk) if (resetn === 1'b1 && wvalid && wready) w_idx_m <= w_idx_m + 1;
+  assign wstrb_m   = (mut_strb && w_idx_m == 3) ? (wstrb & ~(1 << 2)) : wstrb;
   logic [1:0]        bresp_mem, bresp_dut;
   logic              bvalid, bready;
   logic              inject_axi_err = 1'b0;
@@ -115,7 +148,7 @@ module tb_rtlnet_vdma_s2mm;
     .arvalid(arvalid_l), .arready(arready_l), .rdata(rdata_l), .rresp(rresp_l), .rvalid(rvalid_l), .rready(rready_l));
 
   rtlnet_vdma_s2mm #(
-    .ADDR_W(ADDR_W), .ID_W(1), .MAX_BURST_BEATS(MAXB), .FIFO_KB(`TB_FKB)
+    .ADDR_W(ADDR_W), .ID_W(1), .AXI_DATA_W(AXW), .MAX_BURST_BEATS(MAXB), .FIFO_KB(`TB_FKB)
   ) dut (
     .clk(clk), .resetn(resetn), .s_axi_aclk(cfg_clk), .s_axi_aresetn(cfg_resetn),
     .s_axis_tdata(s_tdata), .s_axis_tvalid(s_tvalid), .s_axis_tready(s_tready), .s_axis_tlast(s_tlast),
@@ -135,15 +168,15 @@ module tb_rtlnet_vdma_s2mm;
     .s_axi_rready(rready_l));
 
   rtlnet_tb_axi4_mem #(
-    .ADDR_W(ADDR_W), .DATA_W(128), .ID_W(1), .READ_LATENCY(0),
+    .ADDR_W(ADDR_W), .DATA_W(AXW), .ID_W(1), .READ_LATENCY(0), .MAX_BURST_BEATS(16),
     .AW_READY_PCT(GAP ? 55 : 100), .W_READY_PCT(GAP ? 60 : 100), .AR_READY_PCT(100),
     .B_VALID_PCT(GAP ? 50 : 100), .R_VALID_PCT(100), .SEED(7)
   ) u_mem (
     .clk(clk), .resetn(resetn),
-    .awid(awid), .awaddr(awaddr), .awlen(awlen), .awsize(awsize), .awburst(awburst), .awvalid(awvalid),
-    .awready(awready), .wdata(wdata), .wstrb(wstrb), .wlast(wlast), .wvalid(wvalid), .wready(wready),
+    .awid(awid), .awaddr(awaddr_m), .awlen(awlen_m), .awsize(awsize_m), .awburst(awburst), .awvalid(awvalid),
+    .awready(awready), .wdata(wdata), .wstrb(wstrb_m), .wlast(wlast), .wvalid(wvalid), .wready(wready),
     .bid(bid), .bresp(bresp_mem), .bvalid(bvalid), .bready(bready),
-    .arid(1'b0), .araddr('0), .arlen(8'd0), .arsize(3'd4), .arburst(2'b01), .arvalid(1'b0), .arready(),
+    .arid(1'b0), .araddr('0), .arlen(8'd0), .arsize(3'(BEAT_SHIFT)), .arburst(2'b01), .arvalid(1'b0), .arready(),
     .rid(), .rdata(), .rresp(), .rlast(), .rvalid(), .rready(1'b1));
 
   // ---------------------------------------------------------------------------
@@ -193,13 +226,13 @@ module tb_rtlnet_vdma_s2mm;
       while (left > 0) begin
         int to_page;
         int len;
-        to_page = (4096 - (a % 4096)) / 16;
+        to_page = (4096 - (a % 4096)) / BEAT;
         len = MAXB;
         if (left < len) len = left;
         if (to_page < len) len = to_page;
         exp_aw_addr.push_back(a);
         exp_aw_len.push_back(len);
-        a += len * 16;
+        a += len * BEAT;
         left -= len;
       end
     end
@@ -236,8 +269,9 @@ module tb_rtlnet_vdma_s2mm;
         tb_check(int'(awlen) + 1 == el, $sformatf("AW beats %0d, expected %0d (addr 0x%0h)", int'(awlen) + 1, el, awaddr));
       end
       tb_check(int'(awlen) + 1 <= 16 && int'(awlen) + 1 <= MAXB, "burst longer than the maximum");
-      tb_check(awsize == 3'd4 && awburst == 2'b01 && awid == 1'b0, "AW size, burst type or ID");
-      tb_check(((int'(awaddr) % 4096) + (int'(awlen) + 1) * 16) <= 4096, "burst crosses 4 KiB");
+      tb_check(awsize == 3'(BEAT_SHIFT) && awburst == 2'b01 && awid == 1'b0, "AW size, burst type or ID");
+      tb_check(((int'(awaddr) % 4096) + (int'(awlen) + 1) * BEAT) <= 4096, "burst crosses 4 KiB");
+      tb_check(int'(awlen) <= 15, "AXI3: AWLEN above 15");
     end
   end
 
@@ -350,7 +384,7 @@ module tb_rtlnet_vdma_s2mm;
     int id;
     frame_ctr++;
     id = frame_ctr;
-    bpl = w_px / 8;
+    bpl = w_px / PXB;
     stride_eff = (stride_reg == 0) ? w_px * 2 : stride_reg;
     done_before = done_count;
     u_mem.clear_memory();
@@ -391,13 +425,13 @@ module tb_rtlnet_vdma_s2mm;
       bad_cnt = 0;
       for (int line = 0; line < h; line++) begin
         for (int beat = 0; beat < bpl; beat++) begin
-          logic [127:0] e;
-          logic [127:0] g;
+          logic [AXW-1:0] e;
+          logic [AXW-1:0] g;
           e = '0;
           if (line < valid_lines) begin
-            for (int k = 0; k < 4; k++) e[k*32 +: 32] = pix(id, line, beat * 4 + k);
+            for (int k = 0; k < WPB; k++) e[k*32 +: 32] = pix(id, line, beat * WPB + k);
           end
-          g = u_mem.peek(ADDR_W'(base + line * stride_eff + beat * 16));
+          g = u_mem.peek(ADDR_W'(base + line * stride_eff + beat * BEAT));
           if (g !== e) begin
             bad_cnt++;
             if (bad_cnt < 4) tb_check(1'b0, $sformatf("frame %0d line %0d beat %0d: memory 0x%0h, expected 0x%0h", id, line, beat, g, e));
@@ -407,6 +441,23 @@ module tb_rtlnet_vdma_s2mm;
       tb_check(bad_cnt == 0, $sformatf("frame %0d: %0d wrong beats", id, bad_cnt));
       tb_check(u_mem.mem.num() == h * bpl, $sformatf("frame %0d wrote %0d words, expected %0d", id, u_mem.mem.num(), h * bpl));
       tb_check(exp_aw_addr.size() == 0, $sformatf("frame %0d: %0d bursts never issued", id, exp_aw_addr.size()));
+      // The bytes in memory are the same for every width: the CRC-32 of the memory bytes equals the CRC of the expected
+      // byte image (valid lines from the stream, the rest zero) built here byte by byte.
+      begin
+        bit [31:0] r;
+        bit [7:0]  by;
+        bit [31:0] wd;
+        r = 32'hFFFF_FFFF;
+        for (int line = 0; line < h; line++) begin
+          for (int off = 0; off < bpl * BEAT; off++) begin
+            wd = (line < valid_lines) ? pix(id, line, off / 4) : 32'd0;
+            by = wd[8*(off % 4) +: 8];
+            r = r ^ 32'(by);
+            for (int b = 0; b < 8; b++) r = r[0] ? ((r >> 1) ^ 32'hEDB8_8320) : (r >> 1);
+          end
+        end
+        tb_check(u_mem.mem_crc32() == ~r, $sformatf("frame %0d: memory CRC-32 0x%08x, expected byte image 0x%08x", id, u_mem.mem_crc32(), ~r));
+      end
     end
     aw_prev = aw_seen;
   endtask
@@ -420,7 +471,7 @@ module tb_rtlnet_vdma_s2mm;
     repeat (10) @(posedge clk);
     // Header.
     reg_read(R_ID, v);   tb_check(v == 32'h5332_4D4D, "ID is S2MM");
-    reg_read(R_CAPS, v); tb_check(v == {8'd0, 8'(ADDR_W), 8'd16, 8'(MAXB)}, $sformatf("CAPS 0x%0h", v));
+    reg_read(R_CAPS, v); tb_check(v == {8'd0, 8'(ADDR_W), 8'(BEAT), 8'(MAXB)}, $sformatf("CAPS 0x%0h", v));
     reg_read(R_CTRL, v); tb_check(v == 32'd1, "ENABLE resets to 1");
 
     // 1. Packed.
@@ -472,7 +523,7 @@ module tb_rtlnet_vdma_s2mm;
       reg_write(R_STRIDE, 32'd0);
       s_width <= 16'd64; s_height <= 16'd8; s_frame <= 32'(id_cut); s_ts <= 32'd5; s_src <= 1'b1;
       stub_base <= 29'h0100_0000; stub_ok <= 1'b1; stub_arm <= 1'b1;
-      gen_bursts(32'h0100_0000, 128, 8, 8);
+      gen_bursts(32'h0100_0000, 128, 128 / BEAT, 8);
       @(posedge clk);
       send_words(id_cut, 64, 8, 3, 0);
       repeat (50) @(posedge clk);
@@ -481,7 +532,7 @@ module tb_rtlnet_vdma_s2mm;
       frame_ctr++;
       stub_base <= 29'h0110_0000; stub_ok <= 1'b1; stub_arm <= 1'b1;
       s_frame <= 32'(frame_ctr); s_ts <= 32'd6;
-      gen_bursts(32'h0110_0000, 128, 8, 8);
+      gen_bursts(32'h0110_0000, 128, 128 / BEAT, 8);
       // Check the cut-off frame's memory when its done arrives, the new frame's words follow.
       fork
         begin
@@ -498,14 +549,14 @@ module tb_rtlnet_vdma_s2mm;
           tb_check(!last_done_good, "a cut-off frame was reported good");
           tb_check(last_done_frame == id_cut, "cut-off frame sideband");
           for (int line = 0; line < 8; line++) begin
-            for (int beat = 0; beat < 8; beat++) begin
-              logic [127:0] e;
-              logic [127:0] g;
+            for (int beat = 0; beat < 128 / BEAT; beat++) begin
+              logic [AXW-1:0] e;
+              logic [AXW-1:0] g;
               e = '0;
               if (line < 3) begin
-                for (int k = 0; k < 4; k++) e[k*32 +: 32] = pix(id_cut, line, beat * 4 + k);
+                for (int k = 0; k < WPB; k++) e[k*32 +: 32] = pix(id_cut, line, beat * WPB + k);
               end
-              g = u_mem.peek(29'(32'h0100_0000 + line * 128 + beat * 16));
+              g = u_mem.peek(29'(32'h0100_0000 + line * 128 + beat * BEAT));
               tb_check(g === e, $sformatf("cut-off frame line %0d beat %0d: 0x%0h, expected 0x%0h", line, beat, g, e));
             end
           end

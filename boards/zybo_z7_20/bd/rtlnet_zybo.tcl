@@ -2,7 +2,7 @@
 # Overview: the Zynq PS7 (DDR3, GP0 AXI-Lite master, HP0 encoder and HP2 capture ports, GPIO and I2C for the Pcam 5C, 16 fabric
 #   interrupt inputs), the clock wizards (50 MHz control, 200 MHz D-PHY delay reference, one 90 MHz video clock for the whole video
 #   path: receiver video side, capture DMA, HP ports and encoder) and the module reference u_video (rtlnet_zybo_video: IronKernel CSI-2
-#   camera receiver, capture, frame buffer, arbiter, H.264 Baseline encoder). The camera pins go straight to u_video.
+#   camera receiver, capture, frame buffer, H.264 Baseline encoder). The camera pins go straight to u_video.
 # Revision: 11-15-2026.
 create_bd_design rtlnet_camera
 create_bd_intf_port -mode Master -vlnv {xilinx.com:interface:ddrx_rtl:1.0} DDR
