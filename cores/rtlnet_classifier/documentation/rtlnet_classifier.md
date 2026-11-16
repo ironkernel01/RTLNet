@@ -659,6 +659,8 @@ classes in this design:
 | broadcast | every broadcast frame that is not claimed (DHCP replies are claimed by the DHCP leaf) | |
 | multicast | never: the ingress filter (`FILTER_ENABLE` 1, the default) discards every multicast frame and counts it as filtered | |
 
+With the CPU-path firewall on, the table above changes: only ARP and the allow list reach the CPU path (section 14).
+
 A multicast class would police nothing in this design, so its policer is used by the UDP class. SYN-flood policing needs a
 second rule (bytes 12..13 = 0x08 0x00, byte 23 = 6, byte 47 masked 0x12 = 0x02) and is not installed, because the small
 build has one rule; a build with two rules can add it with `rtlnet_classifier_rule_pattern` and `rtlnet_classifier_rule_byte`.
@@ -696,7 +698,83 @@ per class (limit, window, seen, passed, dropped); `classifier policer <broadcast
 class (frames 0..100000, window 1..60000 ms); `clear counters` clears every policer counter; `show running-config` lists the
 four limits.
 
-## 14. Revision history
+## 14. CPU-path firewall (11-16-2026)
+
+### 14.1 Purpose
+
+The firewall makes the CPU path default-deny: only ARP and an allow list of IPv4 tuples reach lwIP, and the classifier drops
+every other frame in hardware before it reaches lwIP. It needs no RTL change: it is a
+register configuration of the existing engines. The hardware leaves in front of the CPU path (ARP responder, ICMP echo
+responder, UDP echo, DHCP, iperf and socket leaves) claim their frames before the classifier sees them and are unaffected.
+The firewall is off at boot; the Ethernet demo firmware turns it on with `classifier firewall enable` (CPU document,
+section 5b).
+
+### 14.2 Register mapping
+
+| Register | Setting | Role |
+|---|---|---|
+| `CTRL.MODE` | `DROP_ON_MATCH` (3) | a frame drops when `match` is 1 |
+| EtherType table, pair `etype_pair` (entries 2i, 2i+1) | 0x0806 .. 0x0806, range compare, gating, `EXCLUDE` | contributes 1 to `match` unless the frame is ARP |
+| Tuple table | gating, `EXCLUDE`, single compare; allow entries in slots 0..count-1, the other slots written invalid | contributes 1 to `match` unless an allow entry hits |
+| PORT table | not used | |
+| MAC table entry 0, rule 0 | unchanged from the protection profile (broadcast, ARP policing, classify-only) | policing of broadcast and ARP continues |
+| Policers 0..3 | unchanged limits | the `arp` and `broadcast` classes keep their limits; the `icmp` and `udp` classes were tuple entries and are replaced by the allow list |
+
+With `match` the AND over the enabled gating engines (section 6.1), `match = (not ARP) AND (no allow entry hits)`, so
+
+    drop = not ARP AND no allow hit
+
+With no allow entry only ARP passes. An allow entry with a police action keeps its policer; the entries the firmware builds
+for services and client flows are not policed.
+
+| Frame class | Verdict | Reason |
+|---|---|---|
+| ARP request or reply (EtherType 0x0806) | pass | EtherType pair; the `arp` policer still applies: exactly its limit passes per window |
+| TCP or UDP to an allowed destination (and, for a flow, from the allowed source and port) | pass | allow entry hit; not policed |
+| TCP or UDP to a closed port | drop | no allow hit; lwIP sends no RST and no ICMP port unreachable |
+| ICMP reaching the CPU path (echo request while the leaf is busy, other types) | drop | no allow hit; echo requests the hardware answers never reach the classifier |
+| IPv6 (EtherType 0x86DD) | drop | not ARP, no tuple |
+| VLAN-tagged frame | drop | EtherType 0x8100 is not ARP, the tuple extractor reads no tuple from it |
+| IPv4 fragment | drop | the tuple extractor reports no ports, so an allow entry with a port range misses (an allow entry with both port ranges "any" does match a fragment; the service and flow entries the firmware builds always name a port; a user `classifier acl` entry without ports does not) |
+| IPv4 with options (IHL other than 5) | drop | no tuple |
+
+### 14.3 Driver
+
+| Function | What it does |
+|---|---|
+| `rtlnet_classifier_firewall_apply(ctx, fw)` | On top of `clear_all` and a profile. Checks every argument and capacity before the first write (context, pointers, allow entries valid and within the policers, `count` against the tuple slots, `etype_pair` against the table). Then: MODE drop-all; EtherType pair = ARP, gating; tuple slots 0..count-1 = allow list and the rest invalid (this removes the profile's two tuples); EtherType table enable, `EXCLUDE`, range; tuple table enable, `EXCLUDE`, single; MODE drop-on-match as the last write. No pass-all write happens at any point. |
+| `rtlnet_classifier_protect_load(ctx, profile)` | `config_protect` without its final MODE write: the whole-state rewrite of the firmware installs the profile with it and writes MODE once, at the end. `config_protect` keeps its register image. |
+| `rtlnet_classifier_tuple_live_set(ctx, index, tuple)` | Adds one allow entry with the tuple table enabled: value words first, control word with `VALID` last. Refused with `RTLNET_CLS_ERR_IN_USE` on a valid slot or while `CLEARING`. |
+| `rtlnet_classifier_tuple_live_clear(ctx, index)` | Removes one allow entry: one write of 0 to the control word. |
+
+The normal update protocol (section 10.6: the table is disabled while its words change, then restored) cannot be used on an `EXCLUDE` table: a disabled
+table contributes nothing to `match`, so with the tuple table disabled the EtherType table alone decides and every IP frame drops until the table
+is enabled again. The live functions write only the entry that changes, in an order in which a slot is never half valid, and
+never write `TABLE_MODE` or `MODE`. `tuple_set` keeps its register image (it shares the encoder).
+
+### 14.4 Capacity
+
+The allow list needs one tuple slot per entry. The default build and the Nexys Video build have 16 tuple slots, the small
+profile (Arty A7-100) 8; the driver reads the count from `CAPS`. `firewall_apply` returns `RTLNET_CLS_ERR_RANGE` for a list
+longer than the build, before any write. The Ethernet firmware refuses to enable the firewall when its list does not fit
+and reports the needed and available counts (CPU document, section 5b).
+
+### 14.5 Verification record (11-16-2026, built and simulated; no hardware run yet)
+
+| Run | Configuration | Result |
+|---|---|---|
+| driver host test | `driver/test/build_test.ps1`: write log in the register model; firewall image after `config_protect` with 0, 3 and all slots, write order, rejected calls write nothing, live set and clear write counts and order, in the default, distributed and small builds | PASS, 2136 checks; negative control TEST FAIL; `mb-gcc ... -Werror` clean |
+| `tb_rtlnet_classifier` firewall phase | in every build: `config_protect`, then the firewall in the driver's write order; allow list TCP to 192.0.2.50/32 port 7, UDP port 5001, client flow TCP from 192.0.2.10/32 source port 5001 to port 49153; every verdict against the model and a hand expectation | base 19773, generic 19773, m128 20232, m40 15824, dist 19773, small 16845, small_generic 16845 checks PASS |
+| same phase, frames | ARP request and reply, allowed TCP and UDP and the flow pass; closed TCP and UDP ports, wrong flow source, wrong destination address, ICMP, EtherType 0x86DD, VLAN-tagged, fragment and IHL 6 drop; the ARP policer passes exactly its limit, allowed TCP is not policed; with no allow entry only ARP passes | included in the counts above |
+| same phase, live update | live add and clear of an allow entry under full-rate traffic drop no allowed frame (frames judged within `WIN` + 16 clocks of a write are not checked: 24 clocks in the default build) | included |
+| same phase, contrast | the same add through the normal update protocol drops allowed frames (7 seen, at least 1 asserted), which shows why the live path exists | included |
+| `PERTURB=7` | the model treats the tuple `EXCLUDE` as include in this phase | TEST FAIL as required (expected-fail entry of the regression) |
+| regression `classifier` | `scripts/rtlnet_regression.ps1 -Match classifier` | 10 entries as required: 7 pass, `neg`, `small_neg`, `perturb7` fail |
+
+The firmware side (allow list composition, slot shadow, whole-state rewrite order) is in CPU document section 5b with its
+host demonstration (496 checks).
+
+## 15. Revision history
 
 | Revision | Change |
 |---|---|
@@ -707,3 +785,4 @@ four limits.
 | 10-22-2026 | Binding timing structure for 10G/25G line rates: two LUT levels per stage, pipelined compares and reductions, derived verdict latency |
 | 10-22-2026 | As built: RTL, driver, bench and timing gate; section 10 records the as-built latencies, register-map additions (`LATENCY`, `OVERRUN_DROPPED`, `BUDGET`), deviations, verification and timing results |
 | 11-14-2026 | Small-FPGA parameters (sections 11, 12): pass-through from `rtlnet_eth_protocol`, measured cost of `"distributed"`, CAPS bit 27, capacity-aware driver (`get_build`, policer index checks), protection profile (section 13, driver `config_protect`) |
+| 11-16-2026 | CPU-path firewall (section 14): default-deny from the existing hardware (MODE drop-on-match, EtherType `EXCLUDE` pair for ARP, tuple `EXCLUDE` allow list), driver `firewall_apply`, `protect_load`, `tuple_live_set` / `_clear`, `RTLNET_CLS_ERR_IN_USE`; bench firewall phase in every build, `PERTURB=7`; section 13.2 points to it; the revision history is section 15. Built and simulated, not yet run on hardware |

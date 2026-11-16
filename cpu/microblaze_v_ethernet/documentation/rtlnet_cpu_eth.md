@@ -2,7 +2,7 @@
 
 | Item | Value |
 |---|---|
-| Document revision | 11-14-2026 |
+| Document revision | 11-16-2026 |
 | Folder | `cpu/microblaze_v_ethernet/` |
 | Wrapper module | `rtlnet_cpu_eth` (`hdl/rtlnet_cpu_eth.sv`), block design `rtlnet_cpu_eth_bd` (`hdl/rtlnet_cpu_eth_bd.tcl`), simulation stub `rtlnet_cpu_eth_sim_stub` |
 | Board dependence | none: the folder names no board, pin, part, PHY type or clock rate |
@@ -180,7 +180,7 @@ auto-negotiates. There is no duplex, autoneg or advertise command.
 |---|---|
 | user exec | `show version`, `show system`, `show interfaces`, `show phy`, `show ip`, `show arp`, `show dhcp`, `show iperf`, `show sockets`, `show counters`, `show tcp`, `show cpu-path`, `show offload`, `show classifier` |
 | privileged exec (`enable`) | `show running-config`, `disable`, `debug read|write`, `phy read|write|dump|reset`, `clear counters`, `led <n> on|off`, `reload` |
-| `configure terminal` | `ip default-gateway`, `echo enable|socket`, `iperf port`, `iperf tcp enable|disable|port`, `tcp echo enable|disable|port`, `offload <what> <state>`, `classifier policer <class> <frames> <window-ms>`, `interface eth0`, `ip dhcp`, `socket <n>` |
+| `configure terminal` | `ip default-gateway`, `echo enable|socket`, `iperf port`, `iperf tcp enable|disable|port`, `tcp echo enable|disable|port`, `offload <what> <state>`, `classifier policer <class> <frames> <window-ms>`, `classifier firewall enable|disable`, `classifier acl`, `no classifier acl`, `interface eth0`, `ip dhcp`, `socket <n>` |
 | `interface eth0` | `speed`, `shutdown`, `no shutdown`, `ip address`, `ip netmask`, `mac-address` |
 | `ip dhcp` | `start`, `stop`, `renew`, `auto`, `no auto` |
 | `socket <n>` | `open`, `close`, `remote`, `connect-on-receive` |
@@ -216,7 +216,7 @@ CLI: `show classifier` prints the built sizes (table and tuple entries, rules, p
 mode, the profile state, and per class the limit, window, seen, passed and dropped counts. `classifier policer <broadcast|udp|arp|icmp>
 <frames> <window-ms>` (configuration mode) changes one class (frames 0..100000, window 1..60000 ms; frames 0 drops the whole
 class). `clear counters` clears the classifier and every policer counter; `show running-config` lists the four limits. There is no
-generic rule or table editor and no whitelist command.
+generic rule or table editor; the whitelist is the firewall of section 5b.
 
 Hardware test: `test/flood_test.ps1 -Port <COM> -Nic <adapter> [-Board <ip>] [-Kinds ...] [-Seconds 10] [-Rate 1000]` runs one flood per kind with normal
 sockets (Python standard library, iphlpapi through ctypes): UDP to the board (closed port, echo port), UDP broadcast (limited and subnet),
@@ -254,6 +254,92 @@ per second multicast or broadcast flood, including the multicast flood that the 
 the CPU path (hence the `-MaxPingLossPct` default of 40). A broadcast ICMP echo flood needs 32 sender threads to exceed the policer rate (at 4
 threads the 88 frames of a 10 s run all pass: reported as not exercised). With about 500 frames per second arriving against a policer rate of 100 per
 second (10 per 100 ms), the udp class drops 88 to 94 % of the broadcast frames that reach it.
+
+### 5b. Firewall of the CPU path (11-16-2026, built and simulated, not yet run on hardware)
+
+`classifier firewall enable` makes the CPU path default-deny: only ARP and an allow list reach lwIP, the classifier drops everything
+else in hardware (register mapping, frame classes and driver: classifier document, section 14). The firewall is off at boot, so the
+power-up behaviour of section 5a is unchanged. Hardware leaves (ARP responder, ICMP echo, UDP echo, DHCP, iperf and socket leaves)
+are in front of the classifier and keep working; a ping is still answered. With the firewall on, a TCP connect to a port that is not
+in the list gets no RST and a UDP datagram to a closed port gets no ICMP port unreachable.
+
+| Command (mode) | Effect |
+|---|---|
+| `classifier firewall enable` (config) | firewall on; refused, with the needed and available slot counts and before any register write, when the allow list does not fit |
+| `classifier firewall disable` (config) | firewall off; the protection profile of section 5a is back |
+| `classifier acl [<n>] tcp|udp|any src <ip>/<len> dst <ip>/<len> [sport <lo>[-<hi>]] [dport <lo>[-<hi>]] gate|classify|police <p>` (config) | ACL entry; the index is limited to the tuple slots behind the profile's two (0..13 on the Nexys Video, 0..5 on the Arty A7-100), firewall on or off; with the firewall on every entry allows its traffic |
+| `no classifier acl [<n>]` (config) | clears one ACL entry |
+
+The allow list is composed, in this order, from:
+
+| Source | Entries |
+|---|---|
+| Services | TCP echo (`tcp echo port`), TCP iperf server (`iperf tcp port`), and the listener of an iperf dual or tradeoff session while it waits for the connect-back: protocol, destination port, any source. A service is left out when an ACL entry already covers its protocol and port |
+| Client flows | the connections the board opens (iperf connect-back): TCP from the remote address (/32) and port to the local port; added right after `tcp_connect`, removed on close or error |
+| ACL entries | every `classifier acl` entry; a police action keeps its policer |
+
+The EtherType entries of the configuration are not applied while the firewall is on (the Ethernet firmware has no command for them).
+The list is limited by the tuple slots of the classifier: 16 on the Nexys Video build, 8 on the small classifier of the Arty A7-100.
+An entry that does not fit stays blocked and is counted in `show classifier`.
+
+Live update: with the firewall on, a change of a service port, a service enable or disable, a client flow or an ACL entry is written to
+the hardware as the difference against a shadow of the allow slots (`rtlnet_classifier_tuple_live_clear` for a removed entry, then
+`rtlnet_classifier_tuple_live_set` into a free slot, value words first and `VALID` last). The tables are not disabled and `MODE` is not
+written, so no allowed frame is dropped and established connections are not disturbed. Any other classifier edit rewrites the whole
+state (`hw_sync`): clear, profile, MAC entries, policers, the firewall or the ACL entries behind the profile's two tuple slots, and `MODE`
+as the last write. The firewall owner is `src/rtlnet_firewall.[ch]`; `rtlnet_cpupath.c` is the only owner of the classifier context.
+An earlier firmware kept a second classifier context in `rtlnet_protect.c`, and a classifier edit then wiped the protection profile;
+the whole-state rewrite now re-installs the profile with its current limits, so an edit never drops it.
+
+Worked example: only ARP and telnet-port access to the echo server.
+
+```
+rtlnet# configure terminal
+rtlnet(config)# tcp echo port 23
+rtlnet(config)# iperf tcp disable
+rtlnet(config)# classifier firewall enable
+rtlnet(config)# end
+rtlnet# show classifier
+```
+
+The Firewall block at the end of the `show classifier` output (the build, mode, profile and class lines before it are as in section 5a;
+the dropped count is an example):
+
+```
+Firewall (CPU path)
+  State           : enabled (default deny)
+  Allowed         : ARP (policer arp 20 per 100 ms), and the allow list below
+  Slot 0  tcp-echo   : tcp src 0.0.0.0/0 dst 0.0.0.0/0 sport 0-65535 dport 23-23
+  Free slots      : 15 of 16
+  Dropped         : 37 frames (not ARP and not allowed)
+```
+
+`show running-config` lists the session (the services are listed by their own commands, the flows are dynamic and not listed):
+
+```
+tcp echo port 23
+iperf tcp disable
+classifier firewall enable
+```
+
+`classifier firewall enable` is the last classifier line, so a replay configures the ACL entries first. Optional: restrict the echo
+server to one subnet. The ACL entry replaces the any-source service entry of its port:
+
+```
+rtlnet(config)# classifier acl 0 tcp src 192.0.2.0/24 dst 0.0.0.0/0 dport 23 gate
+```
+
+The slot then reads `Slot 0  acl 0      : tcp src 192.0.2.0/24 dst 0.0.0.0/0 sport 0-65535 dport 23-23` and `show running-config` lists
+`classifier acl 0 tcp src 192.0.2.0/24 dst 0.0.0.0/0 dport 23-23 gate`. `no classifier acl 0` brings the service entry back.
+
+Verification: the host harness (`firmware/host`, firewall session) passes 496 checks (TCP echo port 23 with the iperf server
+disabled, enable, live port change writing only tuple words, a flow added and removed, a source-restricted ACL replacing the service entry,
+capacity refusal on the 8-tuple build, the profile kept after an ACL edit, disable restoring the profile image, no pass-all write
+before the last write; negative control TEST FAIL); the lwIP iperf loopback passes 69 checks; the Arty target build links with the
+LMB at 239,200 of 262,144 bytes. Hardware test: `test/firewall_test.ps1 -Port <COM> -Nic <adapter> [-Board <ip>]` (written, not yet run on
+the board): firewall off and a closed port is refused; firewall on and echo on port 7 works while TCP connects to ports 5001 and 23 time out, a
+UDP datagram to a closed port gets no ICMP port unreachable, ping is answered and the drop count rises; echo moved to port 23; the
+configuration restored.
 
 ### Build
 
@@ -464,6 +550,7 @@ scatter-gather DMA; the simple-mode DMA of the design sends one contiguous buffe
 
 ## 8. Revision history
 
+* 11-16-2026: firewall of the CPU path (section 5b): `classifier firewall enable|disable`, `classifier acl`, `no classifier acl`, allow list from services, client flows and ACL entries, live update, fix of the protection profile wipe on a classifier edit; host harness, `test/firewall_test.ps1` written, not yet run on hardware.
 * 11-14-2026: Arty A7-100T measured on the board: release image `arty_rel`, DP83848 found at MDIO address 1, `ETH_SUITE` 8/8 at 10 and 100 Mb/s, flood tests, in-place and copied counters (section 6a, verification and build rows, PHY table).
 * 11-14-2026: release build `eth_rel` and the release campaign results (sections 6 and 6c); the demo documents are in `demos/ethernet/`.
 * 11-14-2026: ACK coalescing on at boot (500 us), receive batching off (CLI section, measured matrix in 6e); data segments of the iperf server copied into one pbuf in the frame buffer RAM and sent in place (6f); flood test criteria, default thread count and measured table (5a).

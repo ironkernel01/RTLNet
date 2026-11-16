@@ -7,15 +7,16 @@ Overview:
   * Optionally sets the link with `speed <n>` first (-LinkMbps 10|100|1000; 1000 = speed auto, the power-up default),
     waits for the board (and, with -Direct, the PC adapter: board cabled straight to it) to report that speed, then runs, each as its own script with the same
     -Port, -Nic and -Board: console_test, ping_test, arp_test, dhcp_test, udp_echo_test, udp_iperf_test, tcp_echo_test,
-    tcp_throughput_test. link_test (which changes the link speed itself) runs with -IncludeLink, last.
+    tcp_throughput_test, firewall_test (changes the firewall and the echo port and restores them). link_test (which changes the link speed itself) runs with -IncludeLink, last.
   * Each script appends its rows to <OutDir>/results_<speed>.csv (test, metric, value, unit, verdict); this script
     writes <OutDir>/results_<speed>.txt (the table) and prints one summary line per script and the final line
     ETH_SUITE: PASS n/n scripts (link <n> Mb/s) or ETH_SUITE: FAIL f/n scripts.
   * Transcripts: <OutDir>/<test>_transcript.txt per script.
 Usage:
   powershell -NoProfile -ExecutionPolicy Bypass -File cpu/microblaze_v_ethernet/test/run_all.ps1 -Port <COM port> -Nic <PC adapter> [-LinkMbps 1000] [-IncludeLink] [-Direct] [-Iperf <iperf.exe>] [-OutDir <dir>]
-Revision: 11-14-2026
+Revision: 11-16-2026
   * 11-14-2026: initial version.
+  * 11-16-2026: firewall_test added after tcp_throughput_test.
 -------------------------------------------------------------------------------
 #>
 param(
@@ -53,7 +54,7 @@ $sp.Close()
 Write-Output ("eth_suite: link {0} Mb/s: board {1}, PC adapter {2}, board address {3}" -f $LinkMbps, $okB, $okN, $board)
 if (-not ($okB -and $okN) -or -not $board) { Write-Output "ETH_SUITE: FAIL link at $LinkMbps Mb/s not established"; exit 1 }
 
-$scripts = @('console_test', 'ping_test', 'arp_test', 'dhcp_test', 'udp_echo_test', 'udp_iperf_test', 'tcp_echo_test', 'tcp_throughput_test')
+$scripts = @('console_test', 'ping_test', 'arp_test', 'dhcp_test', 'udp_echo_test', 'udp_iperf_test', 'tcp_echo_test', 'tcp_throughput_test', 'firewall_test')
 $results = @()
 foreach ($name in $scripts) {
     $psArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $PSScriptRoot "$name.ps1"), '-Port', $Port, '-Nic', $Nic, '-OutDir', $out, '-Csv', $csv)
