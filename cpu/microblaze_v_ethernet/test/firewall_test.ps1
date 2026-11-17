@@ -7,10 +7,16 @@ Overview:
   * Needs the console (-Port) to change the firmware configuration and the PC adapter (-Nic): every socket binds to the
     adapter's address, ping leaves from it.
   * Step a, firewall off: a TCP connect to a closed port (23, the echo server is on 7) is refused with a RST within
-    -RefuseMs; a UDP datagram to a closed port is answered by lwIP with an ICMP port unreachable (the contrast to step b).
+    -RefuseMs (Windows retries the SYN after a RST and reports the refusal after about 2 s); -UdpProbes UDP datagrams
+    to a closed port are each answered by lwIP with an ICMP port unreachable (the contrast to step b).
+  * The ICMP port unreachable is counted on the board: the `CPU path DMA ... tx` counter of `show counters` rises by
+    at least one frame per probe. The PC's view (unreachable or silent) is reported in the row but not required,
+    because the default Windows Firewall rules drop inbound ICMPv4 destination unreachable other than
+    fragmentation needed, so the socket never sees it.
   * Step b, `iperf tcp disable`, `classifier firewall enable`: `show classifier` shows the Firewall block enabled; the TCP
     echo server on port 7 echoes a line; TCP connects to 5001 and to 23 get no answer in -TimeoutMs (no RST, no refusal);
-    a UDP datagram to a closed port gets no ICMP port unreachable; ping is answered by the hardware responder; the drop
+    UDP datagrams to a closed port get no ICMP port unreachable (the PC sees nothing and the board's CPU-path tx
+    counter rises by fewer frames than probes were sent); ping is answered by the hardware responder; the drop
     count of the Firewall block rises across the step.
   * Step c, `tcp echo port 23`: echo works on 23, a connect to 7 gets no answer.
   * Step d, restore (always runs, also after a failed step or an exception): `tcp echo port 7`, `iperf tcp enable`,
@@ -18,10 +24,12 @@ Overview:
   * One verdict line per step (firewall_test: step <x>: PASS|FAIL), then the rows and the final line.
   * The board address comes from the console (`show ip`) unless -Board is given.
   * Final line: FIREWALL_TEST: PASS n/n or FIREWALL_TEST: FAIL f/n.
-  * Written 11-16-2026; not yet run on a board.
+  * Run on the Arty A7-100T on 11-17-2026.
 Usage:
-  powershell -NoProfile -ExecutionPolicy Bypass -File cpu/microblaze_v_ethernet/test/firewall_test.ps1 -Port <COM port> -Nic <PC adapter> [-Board <ip>] [-EchoPort 7] [-AltPort 23] [-IperfPort 5001] [-TimeoutMs 4000] [-RefuseMs 2000] [-OutDir <dir>] [-Csv <file>]
-Revision: 11-16-2026
+  powershell -NoProfile -ExecutionPolicy Bypass -File cpu/microblaze_v_ethernet/test/firewall_test.ps1 -Port <COM port> -Nic <PC adapter> [-Board <ip>] [-EchoPort 7] [-AltPort 23] [-IperfPort 5001] [-TimeoutMs 4000] [-RefuseMs 3000] [-UdpProbes 3] [-OutDir <dir>] [-Csv <file>]
+Revision: 11-17-2026
+  * 11-17-2026: closed-port UDP answer counted on the board (CPU-path tx counter) instead of the PC socket, which the
+    Windows Firewall blinds; -RefuseMs default 3000 (Windows reports a refused connect after about 2 s); -UdpProbes.
   * 11-16-2026: initial version.
 -------------------------------------------------------------------------------
 #>
@@ -33,7 +41,8 @@ param(
     [int]$AltPort = 23,
     [int]$IperfPort = 5001,
     [int]$TimeoutMs = 4000,
-    [int]$RefuseMs = 2000,
+    [int]$RefuseMs = 3000,
+    [int]$UdpProbes = 3,
     [string]$OutDir = '',
     [string]$Csv = ''
 )
@@ -121,6 +130,28 @@ function Test-FwUdpClosed([int]$RemotePort) {
     }
 }
 
+# CPU-path DMA tx counter of show counters (-1 when the line is absent).
+function Get-FwCpuTx {
+    [void](Enter-EthPriv $sp)
+    $o = Send-EthCli $sp 'show counters' 8000
+    if ($o -match 'CPU path DMA\s+: rx \d+ \([^)]*\), tx (\d+)') { return [int64]$Matches[1] }
+    return -1
+}
+
+# -UdpProbes datagrams to a closed port. Returns @{ Pc = the PC results joined; Unreach = PC unreachable count;
+# Tx = board CPU-path tx frames during the probes (-1 when unreadable) }.
+function Test-FwUdpBoard([int]$RemotePort) {
+    $tx0 = Get-FwCpuTx
+    $res = @()
+    $saved = $script:TimeoutMs
+    $script:TimeoutMs = 1000
+    for ($i = 0; $i -lt $UdpProbes; $i++) { $res += Test-FwUdpClosed $RemotePort }
+    $script:TimeoutMs = $saved
+    $tx1 = Get-FwCpuTx
+    $d = if (($tx0 -ge 0) -and ($tx1 -ge 0)) { $tx1 - $tx0 } else { -1 }
+    return [pscustomobject]@{ Pc = ($res -join ','); Unreach = @($res | Where-Object { $_ -eq 'unreachable' }).Count; Tx = $d }
+}
+
 # Configuration commands in configuration mode; returns the console text (a line with % reports a refused command).
 function Set-FwConfig([string[]]$Commands) {
     $text = ''
@@ -161,8 +192,8 @@ try {
     $c = Connect-FwTcp $board $AltPort $TimeoutMs
     if ($c.Sock) { $c.Sock.Close() }
     Add-EthRow "a: TCP connect to closed port $AltPort refused" ("{0} in {1}" -f $c.Result, $c.Ms) 'ms' (($c.Result -eq 'refused') -and ($c.Ms -le $RefuseMs))
-    $u = Test-FwUdpClosed $udpPort
-    Add-EthRow "a: UDP to closed port $udpPort answered by ICMP unreachable" $u '' ($u -eq 'unreachable')
+    $u = Test-FwUdpBoard $udpPort
+    Add-EthRow "a: UDP x$UdpProbes to closed port $udpPort answered by ICMP unreachable" ("board tx +{0}, PC {1}" -f $u.Tx, $u.Pc) '' ($u.Tx -ge $UdpProbes)
     Write-FwStep 'a' $first
 
     # ---- Step b: firewall on, echo on 7 only.
@@ -180,8 +211,8 @@ try {
     $c = Connect-FwTcp $board $AltPort $TimeoutMs
     if ($c.Sock) { $c.Sock.Close() }
     Add-EthRow "b: TCP connect to $AltPort times out (no RST)" ("{0} in {1}" -f $c.Result, $c.Ms) 'ms' ($c.Result -eq 'timeout')
-    $u = Test-FwUdpClosed $udpPort
-    Add-EthRow "b: UDP to closed port $udpPort, no ICMP unreachable" $u '' ($u -eq 'silent')
+    $u = Test-FwUdpBoard $udpPort
+    Add-EthRow "b: UDP x$UdpProbes to closed port $udpPort, no ICMP unreachable" ("board tx +{0}, PC {1}" -f $u.Tx, $u.Pc) '' (($u.Unreach -eq 0) -and ($u.Tx -ge 0) -and ($u.Tx -lt $UdpProbes))
     $p = Invoke-EthPing $board $src 4 32
     Add-EthRow 'b: ping answered by the hardware responder' $p.Lost 'of 4 lost' ($p.Lost -eq 0)
     $blk1 = Get-FwBlock
