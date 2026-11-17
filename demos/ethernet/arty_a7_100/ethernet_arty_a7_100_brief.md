@@ -36,16 +36,13 @@
 
 ### Highlights
 
-- Hardware ARP, ICMP echo, DHCP client, UDP echo and UDP iperf 2 server in FPGA fabric; UDP iperf carries 94.1 and 94.4 Mb/s at 100 Mb/s and 9.4 Mb/s at 10 Mb/s with no loss and the CPU not involved
-- lwIP TCP echo (port 7) and TCP iperf 2 server (port 5001) on a MicroBlaze V in block RAM: 94.7 Mb/s PC to board and 94.9 Mb/s board to PC at 100 Mb/s, 9.5 Mb/s at 10 Mb/s: the line rate of the link in both directions, with the firewall on or off
-- Protection profile (always on): policers on UDP, ICMP, ARP and broadcast traffic toward the CPU; under a flood of 1,000,000 frames in 10 s (100,000 per s offered, 909,447 reached the board) the TCP echo stays byte-exact, the console answers within 248 ms and the board does not reset
-- CPU-path firewall (`classifier firewall enable`, off at boot): only ARP and an allow list of up to 8 TCP/UDP entries reach lwIP; the allow list follows the running services (TCP echo port, TCP iperf port) and the `classifier acl` entries, and a port change opens the new port and closes the old one without dropping a frame of an open connection; a closed port gives no RST and no ICMP unreachable, and ping is still answered by the hardware
-- 10/100 Mb/s MII with a TI DP83848J PHY, full duplex; the PHY is found by its MDIO ID (ID 0x20005C90 at address 1); `speed 10|100|auto` is the only link control and half duplex is never advertised
-- The firmware runs in a small-memory profile (256 KiB LMB, 64 KiB frame buffer); the classifier is in distributed RAM (no block RAM) and every other buffer is sized to fit 135 block RAM tiles (105.5 used)
-- Hierarchical, switch-style console (`show ip`, `show phy`, `show offload`, `show classifier`, `configure terminal`, `interface eth0`)
-- Hardware tests for every service at both speeds: `ETH_SUITE: PASS 10/10` at 100 Mb/s and `9/9` at 10 Mb/s, `FIREWALL_TEST: PASS 21/21` at both speeds; `FLOOD_TEST: PASS 95/95` and `50/50`
-- No build needed: the free Vivado license programs the board over JTAG
-- Source-available: the RTL, the CPU and the firmware are in the repository, and this image has no time limit
+- ARP, ping, DHCP, UDP echo and UDP iperf 2 in FPGA fabric: 94.4 Mb/s at 100 Mb/s with no loss, no CPU involved
+- lwIP TCP echo and iperf 2 on a MicroBlaze V: 94.7 / 94.9 Mb/s at 100 Mb/s, the line rate of the link
+- Default-deny firewall (`classifier firewall enable`): only ARP and the open TCP ports reach the CPU, with no throughput cost
+- Protection profile: a 1,000,000-frame flood leaves TCP echo byte-exact and the console responsive
+- 10/100 Mb/s MII (TI DP83848J); 256 KiB of block RAM, no DDR3
+- Switch-style console; every service, the firewall and the floods tested on the board
+- Programs over JTAG with the free Vivado license; no time limit
 
 </div>
 <div>
