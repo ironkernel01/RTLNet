@@ -97,6 +97,8 @@ A paid license carries no royalty and no per-unit fee. This demo contains no pai
 4. The classifier (`rtlnet_classifier`) judges every frame on its way to the CPU. At boot it is in pass-all mode with the protection profile: policers of 20 ARP, 10 ICMP, 10 UDP and 10 other broadcast frames per 100 ms window on the traffic the hardware did not answer. TCP and other unicast traffic is not policed. `classifier firewall enable` switches it to drop-on-match with an ARP exception and an allow list, so every frame that is neither ARP nor allowed is dropped in hardware (section CPU-path firewall). The protocol ingress filter discards multicast before the CPU. On this board the classifier tables are in distributed RAM (8 table entries, 8 tuples, 1 rule, 4 policers; 4,670 LUT, no block RAM tile).
 5. lwIP on the MicroBlaze V serves TCP echo on port 7 and the TCP iperf 2 server on port 5001. The firmware reads the PHY ID by MDIO at start-up and picks the driver from it (`show phy` prints it; the Arty PHY answers as ID 0x20005C90 at MDIO address 1, driver DP83848). `speed auto` advertises 10 and 100 Mb/s full duplex; half duplex is never advertised.
 
+<div style="page-break-inside:avoid;">
+
 ### Board resources
 
 | Item | Arty A7-100T |
@@ -108,6 +110,8 @@ A paid license carries no royalty and no per-unit fee. This demo contains no pai
 | Firewall allow entries | 8 tuple slots |
 | TCP data frames | copied (segments kept by reference); ACKs sent in place |
 | Auto-MDIX | off on the board: use a straight cable to a switch |
+
+</div>
 
 ## What you need and run it
 
