@@ -45,6 +45,7 @@
  *  Revision    Author                          Description
  * ---------------------------------------------------------------------------
  *  11-14-2026  MenuBuilder AI / Steve Spano    Initial command set of the Ethernet demo; speed 10|100|auto is the only link control
+ *  11-17-2026  MenuBuilder AI / Steve Spano    SHOW CLASSIFIER: with the firewall on, the Profile line names the firewall and the udp and icmp rows say the allow list judges them
  * ===========================================================================
  */
 #include "cli_commands.h"
@@ -2560,6 +2561,7 @@ int cli_show_classifier(const MenuCommandContext *ctx)
     protect_info_t info;
     cpupath_cls_counters_t ck;
     protect_class_t pc;
+    int fwon;
     (void)ctx;
     fmt_printf("Classifier (CPU path)\n");
     if (protect_info(&info) != PROTECT_OK || !info.valid) {
@@ -2572,10 +2574,15 @@ int cli_show_classifier(const MenuCommandContext *ctx)
                info.ram_distributed ? "distributed" : "block");
     fmt_printf("  Latency         : %u beats (verdict %u)\n", (unsigned)info.delay_beats,
                (unsigned)info.verdict_latency);
+    fwon = fw_enabled();
     fmt_printf("  Mode            : %s\n", cpupath_mode_name(info.mode));
-    fmt_printf("  Profile         : %s\n", info.installed ?
-               "protection profile installed: everything passes except the classes below" :
-               "protection profile NOT installed (build too small): broadcast storm limiter only");
+    if (!info.installed) {
+        fmt_printf("  Profile         : protection profile NOT installed (build too small): broadcast storm limiter only\n");
+    } else if (fwon) {
+        fmt_printf("  Profile         : firewall on: only ARP and the allow list pass; the arp and broadcast policers apply\n");
+    } else {
+        fmt_printf("  Profile         : protection profile installed: everything passes except the classes below\n");
+    }
     if (cpupath_cls_counters(&ck) == CPUPATH_OK) {
         fmt_printf("  Counters        : frames %u, passed %u, dropped %u (policers %u, mode %u, overrun %u)\n",
                    (unsigned)ck.frames, (unsigned)ck.passed, (unsigned)ck.dropped, (unsigned)ck.police_dropped,
@@ -2584,6 +2591,12 @@ int cli_show_classifier(const MenuCommandContext *ctx)
     if (info.installed) {
         fmt_printf("  Class      Limit / window      Seen    Passed   Dropped  Polices\n");
         for (unsigned c = 0u; c < PROTECT_CLASSES; c++) {
+            if (fwon && (c == 1u || c == 3u)) {
+                /* Classes 1 (udp) and 3 (icmp) are tuple entries of the profile; the firewall's allow list takes
+                 * their tuple slots, so their counters stand still while it is on. */
+                fmt_printf("  %-9s  firewall on: judged by the allow list, not policed\n", protect_class_name(c));
+                continue;
+            }
             if (protect_class_get(c, &pc) != PROTECT_OK) {
                 fmt_printf("  %% class %s not readable\n", protect_class_name(c));
                 continue;

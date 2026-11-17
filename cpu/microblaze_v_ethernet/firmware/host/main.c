@@ -434,6 +434,11 @@ static void demo_firewall(void)
                "show classifier: the dport 23 slot");
     demo_check(strstr(host_capture_text(), "Free slots      : 15 of 16") != NULL, "show classifier: free slots");
     demo_check(strstr(host_capture_text(), "Dropped         :") != NULL, "show classifier: dropped line");
+    demo_check(strstr(host_capture_text(), "Profile         : firewall on: only ARP and the allow list pass") != NULL &&
+               strstr(host_capture_text(), "everything passes") == NULL, "show classifier: Profile line names the firewall");
+    demo_check(strstr(host_capture_text(), "udp        firewall on: judged by the allow list") != NULL &&
+               strstr(host_capture_text(), "icmp       firewall on: judged by the allow list") != NULL &&
+               strstr(host_capture_text(), "arp           50 /") != NULL, "show classifier: udp and icmp rows name the allow list, arp row kept");
     host_capture_clear();
     demo_type("show running-config\r");
     demo_check(strstr(host_capture_text(), "tcp echo port 23\n") != NULL && strstr(host_capture_text(), "iperf tcp disable\n") != NULL &&
@@ -511,6 +516,12 @@ static void demo_firewall(void)
     demo_check(fw_enabled() == 0, "firewall disable: off");
     demo_cls(RTLNET_CLS_REG_CTRL, RTLNET_CLS_MODE_PASS_ALL, "firewall disable: MODE pass-all");
     demo_cls_image_equal(g_img, "firewall disable: the registers equal the plain profile image");
+    demo_type("end\r");
+    host_capture_clear();
+    demo_type("show classifier\r");
+    demo_check(strstr(host_capture_text(), "protection profile installed: everything passes except the classes below") != NULL &&
+               strstr(host_capture_text(), "judged by the allow list") == NULL, "show classifier: profile wording back after disable");
+    demo_type("configure terminal\r");
 
     /* ---- Wipe regression: whole-state rewrites keep the protection profile. */
     demo_type("classifier policer arp 50 250\r");

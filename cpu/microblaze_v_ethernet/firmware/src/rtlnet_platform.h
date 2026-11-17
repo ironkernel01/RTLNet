@@ -88,7 +88,7 @@
 
 /* Firmware identity. */
 #define RTLNET_FW_NAME              "rtlnet-eth-fw"
-#define RTLNET_FW_VERSION           "11-14-2026"
+#define RTLNET_FW_VERSION           "11-17-2026"
 
 /* Free-running tick (AXI Timer 0 at cpu_clk). */
 #define RTLNET_PLAT_TICKS_PER_US    (RTLNET_PLAT_CPU_CLK_HZ / 1000000u)
