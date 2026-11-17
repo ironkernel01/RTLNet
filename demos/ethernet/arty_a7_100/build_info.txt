@@ -16,5 +16,5 @@ cdc_classes   fifo {10 80} sync {20 82} axil_cdc {5 344} gray {6 192} reset {4 1
 bitstream_hw  rtlnet_arty_a7_100_eth_hw.bit
 mmi           rtlnet_arty_a7_100_eth.mmi
 xsa           rtlnet_arty_a7_100_eth.xsa
-firmware_git  20fe3b9 (tree clean), merged into bitstream_hw by updatemem 2026-11-16 14:51
-firmware      rtlnet-eth-fw with the CPU-path firewall (classifier firewall enable|disable)
+firmware_git  f82d4f1 (tree clean), merged into bitstream_hw by updatemem 2026-11-17 10:03
+firmware      rtlnet-eth-fw 11-17-2026 with the CPU-path firewall (classifier firewall enable|disable)

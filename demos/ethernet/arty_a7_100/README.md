@@ -2,10 +2,10 @@
 
 Revision 11-17-2026
 
-The RTLNet Ethernet stack on a Digilent Arty A7-100T: 10/100 Mb/s MII (TI DP83848J PHY), hardware ARP, ICMP echo, DHCP client, UDP echo and a UDP iperf 2 server in FPGA fabric, plus lwIP TCP (echo on port 7, iperf 2 server on port 5001) on a small MicroBlaze V. One 100 MHz system clock runs the CPU and the protocol blocks; the CPU has 256 KiB of block RAM and no DDR3, no caches, no video and no H.264. A classifier with per-class policers (in distributed RAM on this board) protects the CPU from floods; `classifier firewall enable` turns it into a default-deny firewall in which only ARP and the ports of the running TCP services reach the CPU. The console is a hierarchical, switch-style CLI on the USB-UART. There is no time limit and no netlist in this image.
+The RTLNet Ethernet stack on a Digilent Arty A7-100T: 10/100 Mb/s MII (TI DP83848J PHY), hardware ARP, ICMP echo, DHCP client, UDP echo and a UDP iperf 2 server in FPGA fabric, plus lwIP TCP (echo on port 7, iperf 2 server on port 5001) on a small MicroBlaze V. One 100 MHz system clock runs the CPU and the protocol blocks; the CPU runs from 256 KiB of on-chip block RAM with no caches. A classifier with per-class policers (in distributed RAM on this board) protects the CPU from floods; `classifier firewall enable` turns it into a default-deny firewall in which only ARP and the ports of the running TCP services reach the CPU. The console is a hierarchical, switch-style CLI on the USB-UART. There is no time limit and no netlist in this image.
 License: `LICENSE.md` in the repository root.
 
-The image file is `rtlnet_arty_a7_100_eth.bit`: the hardware of `boards/arty_a7_100/scripts/build_ethernet.ps1 -Tag arty_rel` with the firmware merged in by `build_ethernet.ps1 -Tag arty_fw1 -SkipBitstream` (`build_info.txt` lists both revisions). The firmware is the same source as the Nexys Video Ethernet demo, built in its small-memory profile.
+The image file is `rtlnet_arty_a7_100_eth.bit`: the hardware of `boards/arty_a7_100/scripts/build_ethernet.ps1 -Tag arty_rel` with the firmware merged in by `build_ethernet.ps1 -Tag arty_fw2 -SkipBitstream` (`build_info.txt` lists both revisions). The firmware runs in its small-memory profile.
 
 ## What you need
 
@@ -34,7 +34,7 @@ The image file is `rtlnet_arty_a7_100_eth.bit`: the hardware of `boards/arty_a7_
 
 3. Check the board: `show ip` prints the address, `show phy` the link speed. From the PC: `ping <board address>`.
 
-The CLI is the one of the Nexys Video demo (hierarchical like a network switch: `configure terminal`, `interface eth0`, `end`). The `show` commands are `show version`, `show system`, `show interfaces`, `show phy`, `show ip`, `show dhcp`, `show arp`, `show counters`, `show tcp`, `show iperf`, `show offload` and `show classifier`. Link speed is the only link control:
+The CLI is hierarchical like a network switch (`configure terminal`, `interface eth0`, `end`). The `show` commands are `show version`, `show system`, `show interfaces`, `show phy`, `show ip`, `show dhcp`, `show arp`, `show counters`, `show tcp`, `show iperf`, `show offload` and `show classifier`. Link speed is the only link control:
 
 ```
 configure terminal
@@ -73,7 +73,7 @@ show classifier
 
 ## Hardware tests
 
-The tests are the PowerShell scripts of `cpu/microblaze_v_ethernet/test/` (the same as for the Nexys Video; no change was needed for this board). Find the COM port of the board in the Device Manager.
+The tests are the PowerShell scripts of `cpu/microblaze_v_ethernet/test/`. Find the COM port of the board in the Device Manager.
 
 ```
 powershell -NoProfile -ExecutionPolicy Bypass -File cpu/microblaze_v_ethernet/test/run_all.ps1 -Port <COM port> -Nic <adapter> -LinkMbps 100
@@ -92,21 +92,21 @@ powershell -NoProfile -ExecutionPolicy Bypass -File cpu/microblaze_v_ethernet/te
 
 ## Expected results
 
-Measured on this image (`arty_fw1`, build info in `build_info.txt`) in the campaign of 11-17-2026: the board on a switch to a PC with a Gigabit adapter, iperf 2, 10 s runs (TCP: mean of 3 runs), 64-byte echoes x 2000. The brief (`ethernet_arty_a7_100_brief.md`, `ethernet_arty_a7_100_brief.pdf`) holds the same table with the method.
+Measured on this image (`arty_fw2`, build info in `build_info.txt`) in the campaign of 11-17-2026: the board on a switch to a PC with a Gigabit adapter, iperf 2, 10 s runs (TCP: mean of 3 runs), 64-byte echoes x 2000. The brief (`ethernet_arty_a7_100_brief.md`, `ethernet_arty_a7_100_brief.pdf`) holds the same table with the method.
 
 | Test | 10 Mb/s | 100 Mb/s |
 |---|---|---|
 | Ping, 64 B x 100, lost | 0 | 0 |
-| UDP echo, 64 B, mean / p99, loss | 0.370 / 0.449 ms, 0 | 0.162 / 0.205 ms, 0 |
-| UDP iperf PC to board, loss | 9.4 Mb/s, 0 | 94.1 Mb/s, 0 |
+| UDP echo, 64 B, mean / p99, loss | 0.365 / 0.426 ms, 0 | 0.165 / 0.221 ms, 0 |
+| UDP iperf PC to board, loss | 9.4 Mb/s, 0 | 94.0 Mb/s, 0 |
 | UDP iperf board to PC, loss | 9.4 Mb/s, 0 | 94.4 Mb/s, 0 |
-| TCP iperf PC to board, mean (min to max) | 9.5 (9.5 to 9.5) Mb/s | 94.7 (94.6 to 94.7) Mb/s |
+| TCP iperf PC to board, mean (min to max) | 9.5 (9.5 to 9.5) Mb/s | 94.5 (94.3 to 94.7) Mb/s |
 | TCP iperf board to PC, mean (min to max) | 9.5 (9.5 to 9.5) Mb/s | 94.9 (94.9 to 94.9) Mb/s |
-| TCP iperf with the firewall on, PC to board / board to PC | | 94.7 / 94.9 Mb/s |
+| TCP iperf with the firewall on, PC to board / board to PC | | 94.4 / 94.9 Mb/s |
 | `firewall_test.ps1` | `FIREWALL_TEST: PASS 21/21` | `FIREWALL_TEST: PASS 21/21` |
 | `run_all.ps1` | `ETH_SUITE: PASS 9/9 scripts` | `ETH_SUITE: PASS 10/10 scripts` (with `-IncludeLink`) |
 
-Flood test at 100 Mb/s: `FLOOD_TEST: PASS 95/95` (all kinds, 1000 frames per second) and `FLOOD_TEST: PASS 50/50` (four kinds at 100,000 frames per second offered; a first pass gave `FAIL 1/50` with 4 of 9 pings lost during the broadcast flood, a loss upstream of the board). `link_test.ps1`: `LINK_TEST: PASS 18/18`. With the firewall on, every flood frame that reaches the board is dropped by the classifier and the TCP echo stays byte-exact; a 100,000 per second unicast flood fills the 100 Mb/s wire and slows the echo upstream of the board (brief, section CPU-path firewall).
+Flood test at 100 Mb/s: `FLOOD_TEST: PASS 95/95` (all kinds, 1000 frames per second) and `FLOOD_TEST: PASS 50/50` (four kinds at 100,000 frames per second offered). `link_test.ps1`: `LINK_TEST: PASS 18/18`. With the firewall on, every flood frame that reaches the board is dropped by the classifier and the TCP echo stays byte-exact; a 100,000 per second unicast flood fills the 100 Mb/s wire and slows the echo upstream of the board (brief, section CPU-path firewall).
 
 `build_info.txt` in this folder lists the source revision, the timing result and the utilization of the image: 24,981 LUT, 36,059 flip-flops, 105.5 block RAM tiles, 6 DSP blocks, WNS +0.142 ns at the one 100 MHz system clock.
 

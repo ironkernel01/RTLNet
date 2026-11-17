@@ -332,20 +332,21 @@ rtlnet(config)# classifier acl 0 tcp src 192.0.2.0/24 dst 0.0.0.0/0 dport 23 gat
 The slot then reads `Slot 0  acl 0      : tcp src 192.0.2.0/24 dst 0.0.0.0/0 sport 0-65535 dport 23-23` and `show running-config` lists
 `classifier acl 0 tcp src 192.0.2.0/24 dst 0.0.0.0/0 dport 23-23 gate`. `no classifier acl 0` brings the service entry back.
 
-Verification: the host harness (`firmware/host`, firewall session) passes 496 checks (TCP echo port 23 with the iperf server
+Verification: the host harness (`firmware/host`, firewall session) passes 499 checks (TCP echo port 23 with the iperf server
 disabled, enable, live port change writing only tuple words, a flow added and removed, a source-restricted ACL replacing the service entry,
-capacity refusal on the 8-tuple build, the profile kept after an ACL edit, disable restoring the profile image, no pass-all write
+capacity refusal on the 8-tuple build, the profile kept after an ACL edit, the `show classifier` wording with the firewall on and off, disable restoring the profile image, no pass-all write
 before the last write; negative control TEST FAIL); the lwIP iperf loopback passes 69 checks; the Arty target build links with the
-LMB at 239,200 of 262,144 bytes. Hardware test: `test/firewall_test.ps1 -Port <COM> -Nic <adapter> [-Board <ip>]`: firewall off, a closed
+LMB at 239,888 of 262,144 bytes. Hardware test: `test/firewall_test.ps1 -Port <COM> -Nic <adapter> [-Board <ip>]`: firewall off, a closed
 TCP port is refused and UDP datagrams to a closed port are answered with ICMP port unreachable (counted on the board: the CPU-path DMA tx
 counter rises by one per probe, because the default Windows Firewall rules drop that ICMP before the PC socket sees it; Windows reports a
 refused connect after about 2 s, hence `-RefuseMs` 3000); firewall on, echo on port 7 works while TCP connects to ports 5001 and 23 time out,
 UDP datagrams to a closed port get no answer, ping is answered and the drop count rises; echo moved to port 23; the configuration restored.
 
-Hardware: Arty A7-100T, image `arty_fw1` (hardware `arty_rel`, firmware 20fe3b9), 11-17-2026, LAN through a switch: `firewall_test.ps1` PASS 21/21 at 100 and at 10 Mb/s; `ETH_SUITE` PASS 10/10 (100 Mb/s, with the link test) and 9/9 (10 Mb/s); TCP iperf with the firewall on 94.7 / 94.9 Mb/s, the same as with it off; `FLOOD_TEST` PASS 95/95 and 50/50 (firewall off); with the firewall on, every flood frame that reached the board was dropped by the classifier (959,310 of 959,620 at 100,000 per second offered, the rest the TCP echo segments and filtered frames), the TCP echo stayed byte-exact and the console answered within 298 ms.
+Hardware: Arty A7-100T, image `arty_fw2` (hardware `arty_rel`, firmware f82d4f1), 11-17-2026, LAN through a switch: `firewall_test.ps1` PASS 21/21 at 100 and at 10 Mb/s; `ETH_SUITE` PASS 10/10 (100 Mb/s, with the link test) and 9/9 (10 Mb/s); TCP iperf with the firewall on 94.4 / 94.9 Mb/s, the same as with it off (94.5 / 94.9); `FLOOD_TEST` PASS 95/95 and 50/50 (firewall off); with the firewall on, every flood frame that reached the board was dropped by the classifier (957,174 of 957,712 at 100,000 per second offered, the rest the TCP echo segments and filtered frames), the TCP echo stayed byte-exact and the console answered within 267 ms.
 
-Two display details of this firmware: with the firewall on, the `Profile` line of `show classifier` keeps its pass-all wording and the `udp`
-and `icmp` class rows stop counting (their tuple slots carry the allow list); `show version` prints the firmware date 11-14-2026.
+With the firewall on, the `Profile` line of `show classifier` reads "firewall on: only ARP and the allow list pass; the arp and broadcast
+policers apply", and the `udp` and `icmp` rows read "firewall on: judged by the allow list, not policed" (their tuple slots carry the allow
+list, so those two policers see no frame); with the firewall off the profile wording and the four class rows are shown.
 
 ### Build
 
@@ -556,7 +557,7 @@ scatter-gather DMA; the simple-mode DMA of the design sends one contiguous buffe
 
 ## 8. Revision history
 
-* 11-17-2026: section 5b measured on the Arty A7-100T (image `arty_fw1`); `firewall_test.ps1` counts the ICMP port unreachable on the board.
+* 11-17-2026: section 5b measured on the Arty A7-100T (image `arty_fw2`); `firewall_test.ps1` counts the ICMP port unreachable on the board; `show classifier` names the firewall in the `Profile` line and the `udp` and `icmp` rows while it is on.
 * 11-16-2026: firewall of the CPU path (section 5b): `classifier firewall enable|disable`, `classifier acl`, `no classifier acl`, allow list from services, client flows and ACL entries, live update, fix of the protection profile wipe on a classifier edit; host harness, `test/firewall_test.ps1` written, not yet run on hardware.
 * 11-14-2026: Arty A7-100T measured on the board: release image `arty_rel`, DP83848 found at MDIO address 1, `ETH_SUITE` 8/8 at 10 and 100 Mb/s, flood tests, in-place and copied counters (section 6a, verification and build rows, PHY table).
 * 11-14-2026: release build `eth_rel` and the release campaign results (sections 6 and 6c); the demo documents are in `demos/ethernet/`.

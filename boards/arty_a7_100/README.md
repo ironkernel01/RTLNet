@@ -92,7 +92,7 @@ unchanged. The IP address comes from DHCP (192.0.2.x in examples) or `ip address
 | Other clocks | the PHY's MII receive and transmit clocks (25 MHz at 100 Mb/s, 2.5 MHz at 10 Mb/s, pins F15 SRCC and H16 MRCC, each through a BUFG) and the 25 MHz PHY reference output (MMCM, ODDR). No 125 or 200 MHz clock, no IDELAYCTRL |
 | MAC | `rtlnet_eth_mac_mii`: SDR MII, full duplex, first receive and last transmit registers in the I/O cells; 4 KiB receive and transmit FIFOs |
 | Classifier | `rtlnet_classifier` stays on the CPU path, enabled, with the protection profile; distributed RAM and the small profile (8 table entries, 8 tuple entries, 1 rule, 4 policers): 0 block RAM tiles, 4670 LUT |
-| Firewall | the Ethernet demo firmware has the CPU-path firewall (`classifier firewall enable`, off at boot): only ARP and the allow list reach lwIP; the 8 tuple slots of the small classifier hold the allow list (an enable that needs more is refused). LMB end 239,200 of 262,144 bytes. Measured 11-17-2026 (image `arty_fw1`, released in `demos/ethernet/arty_a7_100/`): `FIREWALL_TEST: PASS 21/21` at 100 and 10 Mb/s, TCP iperf unchanged with the firewall on; see `cpu/microblaze_v_ethernet/documentation/rtlnet_cpu_eth.md` section 5b |
+| Firewall | the Ethernet demo firmware has the CPU-path firewall (`classifier firewall enable`, off at boot): only ARP and the allow list reach lwIP; the 8 tuple slots of the small classifier hold the allow list (an enable that needs more is refused). LMB end 239,888 of 262,144 bytes. Measured 11-17-2026 (image `arty_fw2`, released in `demos/ethernet/arty_a7_100/`): `FIREWALL_TEST: PASS 21/21` at 100 and 10 Mb/s, TCP iperf unchanged with the firewall on; see `cpu/microblaze_v_ethernet/documentation/rtlnet_cpu_eth.md` section 5b |
 | Address map | as `cpu/microblaze_v_ethernet/documentation/rtlnet_cpu_eth.md`: SYS 0x44A0_0000, MAC 0x44A0_1000, MDIO 0x44A0_2000, UDP echo 0x44A0_3000, protocol 0x44A1_0000; LMB 256 KiB at 0, frame buffer RAM 64 KiB (CPU 0x0010_0000, DMA 0xC000_0000) |
 | System registers | `BOARD_ID` `ARTY`, 4 LEDs, 4 switches, 4 buttons, `LINK_CAPS` 0x3 |
 
@@ -176,6 +176,6 @@ Not verified:
 
 | Revision | Change |
 |---|---|
-| 11-17-2026 | Firewall measured on the board (`arty_fw1`); the demo release carries it |
+| 11-17-2026 | Firewall measured on the board (`arty_fw2`); the demo release carries it |
 | 11-16-2026 | Firewall of the CPU path in the Ethernet demo firmware (Design summary): 8 tuple slots, built and simulated, not yet run on hardware |
 | 11-14-2026 | Built, programmed and measured on a board (`arty_rel`) |

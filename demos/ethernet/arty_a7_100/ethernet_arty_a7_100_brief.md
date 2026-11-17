@@ -37,10 +37,10 @@
 ### Highlights
 
 - ARP, ping, DHCP, UDP echo and UDP iperf 2 in FPGA fabric: 94.4 Mb/s at 100 Mb/s with no loss, no CPU involved
-- lwIP TCP echo and iperf 2 on a MicroBlaze V: 94.7 / 94.9 Mb/s at 100 Mb/s, the line rate of the link
+- lwIP TCP echo and iperf 2 on a MicroBlaze V: 94.5 / 94.9 Mb/s at 100 Mb/s, the line rate of the link
 - Default-deny firewall (`classifier firewall enable`): only ARP and the open TCP ports reach the CPU, with no throughput cost
 - Protection profile: a 1,000,000-frame flood leaves TCP echo byte-exact and the console responsive
-- 10/100 Mb/s MII (TI DP83848J); 256 KiB of block RAM, no DDR3
+- 10/100 Mb/s MII (TI DP83848J); firmware in 256 KiB of on-chip block RAM
 - Switch-style console; every service, the firewall and the floods tested on the board
 - Programs over JTAG with the free Vivado license; no time limit
 
@@ -55,13 +55,13 @@
 | Hardware protocols | ARP, ICMP echo, DHCP client, UDP echo, UDP iperf 2 server |
 | TCP | lwIP: echo port 7, iperf 2 server port 5001 |
 | CPU-path firewall | default deny, off at boot: ARP plus up to 8 allow entries (services, client flows, `classifier acl`) |
-| CPU | MicroBlaze V, 100 MHz, 256 KiB block RAM, no DDR3, no caches |
+| CPU | MicroBlaze V, 100 MHz, 256 KiB block RAM, no caches |
 | Clock | one 100 MHz system clock (plus the PHY's MII clocks and the 25 MHz PHY reference) |
 | Console | USB-UART, 115200 8N1 |
 | FPGA | xc7a100tcsg324-1 |
 | Utilization | 24,981 LUT (39.40 %), 36,059 FF (28.44 %), 105.5 block RAM tiles (78.15 %), 6 DSP |
 | Routed timing | WNS +0.142 ns, WHS +0.051 ns, WPWS +3.000 ns |
-| Source revision | hardware git ab3e1d17, firmware git 20fe3b9, both trees clean |
+| Source revision | hardware git ab3e1d17, firmware git f82d4f1, both trees clean |
 | Time limit | none |
 | License | `LICENSE.md` |
 
@@ -92,8 +92,8 @@ A paid license carries no royalty and no per-unit fee. This demo contains no pai
 <img src="../../../diagrams/out/png/demo-ethernet-2.png" alt="Arty A7-100T, PC and the Ethernet data path of the demo" style="width:88%;">
 
 1. The MAC receives frames from the PHY and the protocol wrapper answers ARP requests, ping, DHCP and the UDP echo and UDP iperf 2 ports in fabric. The CPU sees none of this traffic. The MAC, the protocol blocks and the CPU side run from one 100 MHz clock; only the two MII clocks (receive and transmit, 25 MHz at 100 Mb/s and 2.5 MHz at 10 Mb/s, both outputs of the PHY) and the 25 MHz PHY reference clock are separate.
-2. Frames the wrapper does not handle (TCP, for example) pass the classifier and go to the CPU through an AXI DMA into a dual-port frame buffer RAM of 64 KiB on the CPU's data-side LMB. In the small-memory profile lwIP keeps the data segments by reference, so every TCP data frame leaves as a chained buffer and is copied; only ACKs and other single-buffer frames are sent in place. After the six 10 s TCP runs at 100 Mb/s this image had sent 245,897 frames in place and 243,777 copied (`show offload`).
-3. The checksum offload core (`rtlnet_tcp_offload`) patches the IP and TCP/UDP checksums of transmitted frames in place and verifies the checksums of received frames, so lwIP does not compute them. ACK coalescing, on at boot with a 500 microsecond timer, holds back pure TCP ACKs and merges them (121,905 candidates, 79,291 dropped, 42,614 forwarded in the 100 Mb/s runs). Receive batching is available and is off at boot.
+2. Frames the wrapper does not handle (TCP, for example) pass the classifier and go to the CPU through an AXI DMA into a dual-port frame buffer RAM of 64 KiB on the CPU's data-side LMB. In the small-memory profile lwIP keeps the data segments by reference, so every TCP data frame leaves as a chained buffer and is copied; only ACKs and other single-buffer frames are sent in place. After the six 10 s TCP runs at 100 Mb/s this image had sent 245,538 frames in place and 243,746 copied (`show offload`).
+3. The checksum offload core (`rtlnet_tcp_offload`) patches the IP and TCP/UDP checksums of transmitted frames in place and verifies the checksums of received frames, so lwIP does not compute them. ACK coalescing, on at boot with a 500 microsecond timer, holds back pure TCP ACKs and merges them (121,887 candidates, 79,826 dropped, 42,061 forwarded in the 100 Mb/s runs). Receive batching is available and is off at boot.
 4. The classifier (`rtlnet_classifier`) judges every frame on its way to the CPU. At boot it is in pass-all mode with the protection profile: policers of 20 ARP, 10 ICMP, 10 UDP and 10 other broadcast frames per 100 ms window on the traffic the hardware did not answer. TCP and other unicast traffic is not policed. `classifier firewall enable` switches it to drop-on-match with an ARP exception and an allow list, so every frame that is neither ARP nor allowed is dropped in hardware (section CPU-path firewall). The protocol ingress filter discards multicast before the CPU. On this board the classifier tables are in distributed RAM (8 table entries, 8 tuples, 1 rule, 4 policers; 4,670 LUT, no block RAM tile).
 5. lwIP on the MicroBlaze V serves TCP echo on port 7 and the TCP iperf 2 server on port 5001. The firmware reads the PHY ID by MDIO at start-up and picks the driver from it (`show phy` prints it; the Arty PHY answers as ID 0x20005C90 at MDIO address 1, driver DP83848). `speed auto` advertises 10 and 100 Mb/s full duplex; half duplex is never advertised.
 
@@ -127,7 +127,7 @@ An Arty A7-100T with one micro-USB cable (J10: power, JTAG and the console), an 
 
 ## Device utilization and timing
 
-Release image (`arty_fw1`: hardware git ab3e1d17, firmware git 20fe3b9 merged into the bitstream by `updatemem`, trees clean, Vivado 2026.1) on the XC7A100T:
+Release image (`arty_fw2`: hardware git ab3e1d17, firmware git f82d4f1 merged into the bitstream by `updatemem`, trees clean, Vivado 2026.1) on the XC7A100T:
 
 <table class="num wrap">
 <thead><tr><th></th><th>LUTs</th><th>Flip-flops</th><th>Block RAM tiles</th><th>DSP blocks</th></tr></thead>
@@ -146,16 +146,16 @@ Method: the release image was programmed over JTAG and every number below was me
 <table class="num wrap">
 <thead><tr><th>Test</th><th>10 Mb/s</th><th>100 Mb/s</th></tr></thead>
 <tbody>
-<tr><td>TCP iperf 2, PC to board, Mb/s, mean (min to max)</td><td>9.5 (9.5 to 9.5)</td><td>94.7 (94.6 to 94.7)</td></tr>
+<tr><td>TCP iperf 2, PC to board, Mb/s, mean (min to max)</td><td>9.5 (9.5 to 9.5)</td><td>94.5 (94.3 to 94.7)</td></tr>
 <tr><td>TCP iperf 2, board to PC, Mb/s, mean (min to max)</td><td>9.5 (9.5 to 9.5)</td><td>94.9 (94.9 to 94.9)</td></tr>
-<tr><td>TCP iperf 2 with the firewall on, PC to board / board to PC, Mb/s, mean</td><td></td><td>94.7 / 94.9</td></tr>
-<tr><td>TCP echo, 64 B, mean / median / p99 round trip, ms</td><td>0.440 / 0.432 / 0.497</td><td>0.246 / 0.240 / 0.314</td></tr>
-<tr><td>TCP echo with the firewall on, 64 B, mean / median / p99, ms</td><td></td><td>0.242 / 0.231 / 0.305</td></tr>
-<tr><td>UDP iperf 2, PC to board, Mb/s, loss</td><td>9.4 at 9 offered, 0 of 3,995</td><td>94.1 at 90 offered, 0 of 40,072</td></tr>
+<tr><td>TCP iperf 2 with the firewall on, PC to board / board to PC, Mb/s, mean</td><td></td><td>94.4 / 94.9</td></tr>
+<tr><td>TCP echo, 64 B, mean / median / p99 round trip, ms</td><td>0.434 / 0.426 / 0.491</td><td>0.237 / 0.229 / 0.295</td></tr>
+<tr><td>TCP echo with the firewall on, 64 B, mean / median / p99, ms</td><td></td><td>0.236 / 0.229 / 0.296</td></tr>
+<tr><td>UDP iperf 2, PC to board, Mb/s, loss</td><td>9.4 at 9 offered, 0 of 4,009</td><td>94.0 at 90 offered, 0 of 40,102</td></tr>
 <tr><td>UDP iperf 2, board to PC, Mb/s, loss</td><td>9.4 at 9 offered, 0 of 4,014</td><td>94.4 at 90 offered, 0 of 40,126</td></tr>
 <tr><td>UDP iperf 2, highest zero-loss rate in the sweep, PC to board</td><td>98 % of the link</td><td>95 % of the link</td></tr>
 <tr><td>UDP iperf 2, highest zero-loss rate in the sweep, board to PC</td><td>98 % of the link</td><td>98 % of the link</td></tr>
-<tr><td>UDP echo, 64 B, mean / median / p99 round trip, ms, loss</td><td>0.370 / 0.357 / 0.449, 0 of 2000</td><td>0.162 / 0.160 / 0.205, 0 of 2000</td></tr>
+<tr><td>UDP echo, 64 B, mean / median / p99 round trip, ms, loss</td><td>0.365 / 0.357 / 0.426, 0 of 2000</td><td>0.165 / 0.160 / 0.221, 0 of 2000</td></tr>
 <tr><td>UDP echo, 0 to 1472 B, 400 datagrams byte-exact</td><td>400 of 400</td><td>400 of 400</td></tr>
 <tr><td>Ping, 64 B x 100, lost; round trip min / avg / max, ms</td><td>0 of 100; 0 / 0 / 1</td><td>0 of 100; 0 / 0 / 1</td></tr>
 <tr><td>DHCP lease and renew, ARP responder</td><td>pass</td><td>pass</td></tr>
@@ -164,28 +164,28 @@ Method: the release image was programmed over JTAG and every number below was me
 
 <div style="page-break-inside:avoid;"><img src="../images/ethernet_arty_perf_100.png" alt="Performance at 100 Mb/s" style="width:62%;"><br><strong>Figure 3.</strong> Performance at 100 Mb/s from the campaign, with the three-run TCP means and the TCP echo latency with the firewall off and on (the capture for 10 Mb/s is <code>ethernet_arty_perf_10.png</code>)</div>
 
-**What limits each figure.** The UDP echo, UDP iperf, ping, ARP and DHCP paths are RTL and carry no CPU load; the UDP iperf figures are the line rate of the link (the data rate is below the link speed because of the Ethernet, IP and UDP headers). TCP runs on the soft CPU: a 100 MHz MicroBlaze V with block RAM only, no caches and no DDR3, handles every TCP segment in lwIP. At 100 and 10 Mb/s the CPU is fast enough and TCP reaches the line rate of the link in both directions, even though every data frame is copied in this memory profile. The CPU would be the limit only at a gigabit rate, which this board does not have. The 10 Mb/s TCP echo round trip (0.44 ms, against 0.25 ms at 100 Mb/s) is dominated by the time the frames take on a 10 Mb/s wire. The firewall adds no measurable cost: the classifier judges every frame in hardware either way, and TCP throughput and echo latency with the firewall on match the figures with it off. After the test campaign the lwIP heap of the small-memory profile had peaked at 23,228 of 24,576 bytes with 30 allocation failures since start-up (`show tcp`); no test failed, but the heap headroom is thin and the frame buffer RAM can grow to 128 KiB by a build parameter if a load needs it.
+**What limits each figure.** The UDP echo, UDP iperf, ping, ARP and DHCP paths are RTL and carry no CPU load; the UDP iperf figures are the line rate of the link (the data rate is below the link speed because of the Ethernet, IP and UDP headers). TCP runs on the soft CPU: a 100 MHz MicroBlaze V with block RAM only and no caches handles every TCP segment in lwIP. At 100 and 10 Mb/s the CPU is fast enough and TCP reaches the line rate of the link in both directions, even though every data frame is copied in this memory profile. The CPU would be the limit only at a gigabit rate, which this board does not have. The 10 Mb/s TCP echo round trip (0.43 ms, against 0.24 ms at 100 Mb/s) is dominated by the time the frames take on a 10 Mb/s wire. The firewall adds no measurable cost: the classifier judges every frame in hardware either way, and TCP throughput and echo latency with the firewall on match the figures with it off. After the last suite of the campaign the lwIP heap of the small-memory profile had peaked at 23,228 of 24,576 bytes with 21 allocation failures since start-up (`show tcp`); no test failed, but the heap headroom is thin and the frame buffer RAM can grow to 128 KiB by a build parameter if a load needs it.
 
 ## Protection profile and flood test
 
-The classifier is always on and the policers of the profile are installed at every boot (`show classifier`, `classifier policer <broadcast|udp|arp|icmp> <frames> <window-ms>`). `flood_test.ps1` sends one flood per kind with normal sockets for 10 s while one TCP echo connection exchanges data, the console answers `show classifier` and `show system`, and the board is pinged. All kinds at 1000 frames per second give `FLOOD_TEST: PASS 95/95`; udp-closed, udp-bcast-net, mcast and icmp-bcast at 100,000 frames per second offered give `FLOOD_TEST: PASS 50/50`. All floods ran with the link at 100 Mb/s and the firewall off. In every flood the TCP echo stays byte-exact, no console answer takes longer than 248 ms, the board's uptime shows no reset and the profile stays installed.
+The classifier is always on and the policers of the profile are installed at every boot (`show classifier`, `classifier policer <broadcast|udp|arp|icmp> <frames> <window-ms>`). `flood_test.ps1` sends one flood per kind with normal sockets for 10 s while one TCP echo connection exchanges data, the console answers `show classifier` and `show system`, and the board is pinged. All kinds at 1000 frames per second give `FLOOD_TEST: PASS 95/95`; udp-closed, udp-bcast-net, mcast and icmp-bcast at 100,000 frames per second offered give `FLOOD_TEST: PASS 50/50`. All floods ran with the link at 100 Mb/s and the firewall off. In every flood the TCP echo stays byte-exact, no console answer takes longer than 251 ms, the board's uptime shows no reset and the profile stays installed.
 
 <table class="num wrap">
 <thead><tr><th>Kind</th><th>Offered per s</th><th>Frames sent</th><th>Reached the board</th><th>Policed class: passed / dropped</th></tr></thead>
 <tbody>
-<tr><td>udp-closed (unicast, closed port)</td><td>1,000</td><td>10,000</td><td>10,001</td><td>udp: 1,010 / 8,991</td></tr>
-<tr><td>udp-closed</td><td>100,000</td><td>1,000,000</td><td>909,447</td><td>udp: 1,010 / 908,437</td></tr>
-<tr><td>udp-bcast-lim (255.255.255.255)</td><td>1,000</td><td>10,000</td><td>5,260</td><td>udp: 620 / 4,640</td></tr>
-<tr><td>udp-bcast-net (subnet broadcast)</td><td>1,000</td><td>10,000</td><td>4,852</td><td>udp: 582 / 4,270</td></tr>
-<tr><td>udp-bcast-net</td><td>100,000</td><td>1,000,000</td><td>4,997</td><td>udp: 301 / 4,696</td></tr>
-<tr><td>mcast (group the board never joined)</td><td>1,000</td><td>10,000</td><td>4,994</td><td>none; all 4,994 counted as filtered</td></tr>
-<tr><td>mcast</td><td>100,000</td><td>1,000,000</td><td>5,498</td><td>none; all 5,498 counted as filtered</td></tr>
-<tr><td>icmp-bcast (32 sender threads)</td><td>1,000</td><td>672</td><td>672</td><td>icmp: 210 / 462</td></tr>
+<tr><td>udp-closed (unicast, closed port)</td><td>1,000</td><td>10,000</td><td>10,000</td><td>udp: 1,010 / 8,990</td></tr>
+<tr><td>udp-closed</td><td>100,000</td><td>1,000,000</td><td>891,430</td><td>udp: 1,010 / 890,420</td></tr>
+<tr><td>udp-bcast-lim (255.255.255.255)</td><td>1,000</td><td>10,000</td><td>4,801</td><td>udp: 568 / 4,233</td></tr>
+<tr><td>udp-bcast-net (subnet broadcast)</td><td>1,000</td><td>10,000</td><td>4,850</td><td>udp: 590 / 4,260</td></tr>
+<tr><td>udp-bcast-net</td><td>100,000</td><td>1,000,000</td><td>5,000</td><td>udp: 286 / 4,714</td></tr>
+<tr><td>mcast (group the board never joined)</td><td>1,000</td><td>10,000</td><td>5,049</td><td>none; all 5,049 counted as filtered</td></tr>
+<tr><td>mcast</td><td>100,000</td><td>1,000,000</td><td>5,004</td><td>none; all 5,004 counted as filtered</td></tr>
+<tr><td>icmp-bcast (32 sender threads)</td><td>1,000</td><td>672</td><td>672</td><td>icmp: 200 / 472</td></tr>
 <tr><td>icmp-bcast</td><td>100,000</td><td>992</td><td>992</td><td>icmp: 310 / 682</td></tr>
 </tbody>
 </table>
 
-The generator is a PC with normal sockets and the network between it and the board limits it: broadcast and multicast frames arrive at about 500 per second whatever the offered rate (4,852 to 5,498 in 10 s), while a unicast flood arrives at close to the full rate of the 100 Mb/s link: 909,447 of 1,000,000 frames in 10 s, against at most 96,150 frames per second that the link carries for a 64-byte datagram (a 110-byte frame). The board's counters show exactly what arrived. During the 100,000 per second broadcast and multicast floods 3 of 12 pings were lost (25 %), and none during the unicast and ICMP floods; the loss is upstream of the board, which discards the multicast at its ingress filter before the CPU. A first pass of the 100,000 per second floods lost 4 of 9 pings during the broadcast flood, above the 40 % limit of the test (`FLOOD_TEST: FAIL 1/50`); the repeat gives the 50/50 above. The `udp-echo` and `icmp-board` floods are answered by the hardware and add nothing to the CPU path counters; the `arp` flood (152 requests sent) is reported, not required: 400 ARP frames seen, 307 passed, 93 dropped.
+The generator is a PC with normal sockets and the network between it and the board limits it: broadcast and multicast frames arrive at about 500 per second whatever the offered rate (4,801 to 5,049 in 10 s), while a unicast flood arrives at close to the full rate of the 100 Mb/s link: 891,430 of 1,000,000 frames in 10 s, against at most 96,150 frames per second that the link carries for a 64-byte datagram (a 110-byte frame). The board's counters show exactly what arrived. During the 100,000 per second floods 3 of 9 pings were lost during the multicast flood (33 %, below the 40 % limit of the test) and 1 of 12 during the unicast flood, none during the broadcast and ICMP floods; the loss is upstream of the board, which discards the multicast at its ingress filter before the CPU. The `udp-echo` and `icmp-board` floods are answered by the hardware and add nothing to the CPU path counters; the `arp` flood (149 requests sent) is reported, not required: 401 ARP frames seen, 323 passed, 78 dropped.
 
 <div style="page-break-inside:avoid;"><img src="../images/ethernet_arty_classifier.png" alt="show classifier after the flood test" style="width:66%;"><br><strong>Figure 4.</strong> <code>show classifier</code> after the flood tests: dropped frames per class, the profile limits, the pass-all mode, the distributed RAM build and the firewall state</div>
 
@@ -220,7 +220,7 @@ The firmware builds the allow list from three sources, one tuple slot per entry,
 
 This board has 8 tuple slots, so the allow list holds up to 8 entries; `classifier firewall enable` is refused, before any register write, when the list does not fit. A change of a service port, a service enable or disable, a client flow or an ACL entry is written to the hardware as the difference against the current slots: a removed entry is cleared with one write, a new entry is written into a free slot with its valid bit last. The tables stay enabled and the mode is not touched, so frames of open connections keep passing during the change.
 
-The session of Figure 5 leaves only ARP and the echo server, moved to the telnet port 23, open to the CPU. `show classifier` lists the slots by source and the frames the firewall has dropped. While the firewall is on, the `udp` and `icmp` class rows stop counting, because their tuple slots carry the allow list; the `arp` and `broadcast` policers keep working. `show running-config` lists `classifier firewall enable` as the last classifier line.
+The session of Figure 5 leaves only ARP and the echo server, moved to the telnet port 23, open to the CPU. `show classifier` lists the slots by source and the frames the firewall has dropped. While the firewall is on, the `Profile` line names the firewall and the `udp` and `icmp` rows read "judged by the allow list, not policed", because their tuple slots carry the allow list; the `arp` and `broadcast` policers keep working. `show running-config` lists `classifier firewall enable` as the last classifier line.
 
 <div style="page-break-inside:avoid;"><img src="../images/ethernet_arty_firewall.png" alt="Firewall session: tcp echo port 23, iperf tcp disable, classifier firewall enable, show classifier" style="width:80%;"><br><strong>Figure 5.</strong> Only ARP and the echo server on port 23: the commands, <code>show classifier</code> with the Firewall block (one slot used, 7 free) and the lines of <code>show running-config</code> (addresses replaced by documentation values)</div>
 
@@ -233,15 +233,15 @@ Floods with the firewall on (100 Mb/s link, echo server on port 7 and iperf serv
 <table class="num wrap">
 <thead><tr><th>Kind</th><th>Offered per s</th><th>Frames sent</th><th>Dropped by the firewall</th><th>Frames to the CPU</th><th>TCP echo rounds, slowest round</th></tr></thead>
 <tbody>
-<tr><td>udp-closed</td><td>1,000</td><td>10,000</td><td>10,007</td><td>14,340</td><td>14,334, 3.2 ms</td></tr>
-<tr><td>udp-closed</td><td>85,000</td><td>850,000</td><td>850,005</td><td>3,909</td><td>3,904, 6.8 ms</td></tr>
-<tr><td>udp-closed</td><td>100,000</td><td>1,000,000</td><td>959,310</td><td>287</td><td>274, 1,386 ms</td></tr>
-<tr><td>udp-bcast-net</td><td>100,000</td><td>1,000,000</td><td>5,505</td><td>13,489</td><td>13,486, 273 ms</td></tr>
-<tr><td>icmp-bcast (32 sender threads)</td><td>1,000</td><td>640</td><td>646</td><td>14,321</td><td>14,310, 3.1 ms</td></tr>
+<tr><td>udp-closed</td><td>1,000</td><td>10,000</td><td>10,007</td><td>14,594</td><td>14,584, 2.9 ms</td></tr>
+<tr><td>udp-closed</td><td>85,000</td><td>850,000</td><td>850,008</td><td>3,923</td><td>3,915, 6.8 ms</td></tr>
+<tr><td>udp-closed</td><td>100,000</td><td>1,000,000</td><td>957,174</td><td>442</td><td>434, 1,110 ms</td></tr>
+<tr><td>udp-bcast-net</td><td>100,000</td><td>1,000,000</td><td>5,002</td><td>14,094</td><td>14,091, 2.9 ms</td></tr>
+<tr><td>icmp-bcast (32 sender threads)</td><td>1,000</td><td>672</td><td>678</td><td>14,591</td><td>14,579, 3.0 ms</td></tr>
 </tbody>
 </table>
 
-Every flood frame that reaches the board is dropped by the firewall (the drop counts include a few frames from other hosts of the network), the frames to the CPU are the TCP echo segments, every echo is byte-exact with no error, the console answers within 298 ms and the board does not reset. At 100,000 per second offered the unicast flood fills the wire: 959,620 frames reached the board in 10 s, the full rate of the link for these frames. The echo segments from the PC then wait in the switch port toward the board behind the flood and the echo slows to 274 rounds, with two segments retransmitted by the PC; the board passes every echo segment that arrives (classifier passed, CPU path frames and lwIP TCP segments received are equal, no drop). At 85,000 per second, below the full rate, the echo makes 3,904 rounds with a slowest round of 6.8 ms. With the firewall off, fewer frames of the same floods reach the board: 913,000 to 919,000 at 100,000 per second, with 2,700 to 3,000 echo rounds, and 808,000 of 850,000 at 85,000 per second. The frames that do not arrive are lost upstream of the board (its receive overflow counter stays 0), at a place not determined in this campaign.
+Every flood frame that reaches the board is dropped by the firewall (the drop counts include a few frames from other hosts of the network), the frames to the CPU are the TCP echo segments, every echo is byte-exact with no error, the console answers within 267 ms and the board does not reset. At 100,000 per second offered the unicast flood fills the wire: 957,000 to 958,000 frames reached the board in 10 s in each of three runs, the full rate of the link for these frames. The echo segments from the PC then wait in the switch port toward the board behind the flood and the echo slows to 434 to 503 rounds, with at most one segment retransmitted by the PC; the board drops none of the echo segments that arrive (CPU path no-buffer drops 0, lwIP TCP drops 0). At 85,000 per second, below the full rate, the echo makes 3,915 rounds with a slowest round of 6.8 ms. With the firewall off, fewer frames of the same floods reach the board: 886,000 to 904,000 at 100,000 per second, with 3,713 to 4,118 echo rounds, and 804,000 of 850,000 at 85,000 per second. The frames that do not arrive are lost upstream of the board (its receive overflow counter stays 0), at a place not determined in this campaign.
 
 ## Test results
 
@@ -289,8 +289,7 @@ Further captures are in `demos/ethernet/images/`: `ethernet_arty_perf_10.png` (1
 - The link is 10 or 100 Mb/s, full duplex only; there is no gigabit mode on this board. Auto-MDIX is off on the board, so a direct cable to a PC needs a crossover unless the PC port does auto-MDIX; the campaign used a switch.
 - The firmware memory is small (256 KiB, 64 KiB frame buffer): every TCP data frame is copied, and the lwIP heap of 24 KiB has thin headroom. At 100 Mb/s the CPU still reaches the line rate of the link.
 - The classifier is a small build in distributed RAM (8 table entries, 8 tuple slots, 4 policers). It polices traffic by class, or with the firewall on drops everything outside the allow list; it limits a flood that reaches the board and does not stop a flood on the wire. A flood that fills the wire slows the allowed traffic upstream of the board. The flood figures come from a PC with normal sockets, not from a hardware traffic generator.
-- The firewall holds up to 8 allow entries, judges IPv4 TCP and UDP by protocol, addresses and ports, and drops IPv4 fragments, IPv4 with options and IPv6 while it is on. It keeps no connection state: an allow entry for a port admits every frame to that port from the sources it names. The `udp` and `icmp` class counters of `show classifier` do not count while the firewall is on.
+- The firewall holds up to 8 allow entries, judges IPv4 TCP and UDP by protocol, addresses and ports, and drops IPv4 fragments, IPv4 with options and IPv6 while it is on. It keeps no connection state: an allow entry for a port admits every frame to that port from the sources it names. While it is on, UDP and ICMP frames that reach the CPU path are judged by the allow list, not policed by class.
 - Ping round trips are whole milliseconds (the PC's ping tool); the latency figures are the UDP echo and TCP echo round trips.
-- The demo has no DDR3, no video and no H.264; it is the network stack alone.
 - Programming is over JTAG only; a power cycle removes the image. Boot from the Quad-SPI flash and the behavior with JP2 shorted were not verified.
 </div>

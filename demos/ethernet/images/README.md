@@ -19,7 +19,7 @@ Captures of the release campaign of the Ethernet demo (image `eth_rel`, git 2c2c
 
 ## Arty A7-100T captures
 
-Captures of the campaign of the Ethernet demo on the Arty A7-100T (image `arty_fw1`: hardware git ab3e1d17, firmware git 20fe3b9, 11-17-2026), rendered and redacted the same way. The Arty brief (`../arty_a7_100/ethernet_arty_a7_100_brief.md`) uses all of them.
+Captures of the campaign of the Ethernet demo on the Arty A7-100T (image `arty_fw2`: hardware git ab3e1d17, firmware git f82d4f1, 11-17-2026), rendered and redacted the same way. The Arty brief (`../arty_a7_100/ethernet_arty_a7_100_brief.md`) uses all of them.
 
 | File | Shows |
 |---|---|

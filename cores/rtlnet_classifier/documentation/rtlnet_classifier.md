@@ -770,7 +770,7 @@ and reports the needed and available counts (CPU document, section 5b).
 | same phase, contrast | the same add through the normal update protocol drops allowed frames (7 seen, at least 1 asserted), which shows why the live path exists | included |
 | `PERTURB=7` | the model treats the tuple `EXCLUDE` as include in this phase | TEST FAIL as required (expected-fail entry of the regression) |
 | regression `classifier` | `scripts/rtlnet_regression.ps1 -Match classifier` | 10 entries as required: 7 pass, `neg`, `small_neg`, `perturb7` fail |
-| hardware, Arty A7-100T (small classifier, distributed RAM), 11-17-2026 | Ethernet demo image `arty_fw1`, `firewall_test.ps1` and floods with the firewall on (CPU document, section 5b) | `FIREWALL_TEST` PASS 21/21 at 100 and 10 Mb/s; at 100,000 frames per second offered 959,310 of the 959,620 frames that reached the board dropped by `MODE` (the rest TCP echo segments to an allowed port and filtered frames), overrun 0 |
+| hardware, Arty A7-100T (small classifier, distributed RAM), 11-17-2026 | Ethernet demo image `arty_fw2`, `firewall_test.ps1` and floods with the firewall on (CPU document, section 5b) | `FIREWALL_TEST` PASS 21/21 at 100 and 10 Mb/s; at 100,000 frames per second offered 957,174 of the 957,712 frames that reached the board dropped by `MODE` (the rest TCP echo segments to an allowed port and filtered frames), overrun 0 |
 
 The firmware side (allow list composition, slot shadow, whole-state rewrite order) is in CPU document section 5b with its
 host demonstration (496 checks).
