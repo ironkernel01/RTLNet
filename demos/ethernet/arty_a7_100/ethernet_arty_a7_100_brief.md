@@ -74,9 +74,7 @@ The RTLNet sources and this image are under the RTLNet source-available license 
 
 **Free, no fee:**
 
-- Evaluation and development, including prototypes and demonstrations that are not sold
-- Research and teaching
-- Hobby and personal projects
+- Evaluation, development, research, teaching, hobby and personal projects, including prototypes and demonstrations that are not sold
 - A commercial product whose complete design sources are public under the RTLNet license and whose changes to RTLNet files are offered back as pull requests
 
 **Paid license from IronKernel (ironkernel.com), before the product ships:**
