@@ -759,7 +759,7 @@ profile (Arty A7-100) 8; the driver reads the count from `CAPS`. `firewall_apply
 longer than the build, before any write. The Ethernet firmware refuses to enable the firewall when its list does not fit
 and reports the needed and available counts (CPU document, section 5b).
 
-### 14.5 Verification record (11-16-2026, built and simulated; no hardware run yet)
+### 14.5 Verification record
 
 | Run | Configuration | Result |
 |---|---|---|
@@ -770,6 +770,7 @@ and reports the needed and available counts (CPU document, section 5b).
 | same phase, contrast | the same add through the normal update protocol drops allowed frames (7 seen, at least 1 asserted), which shows why the live path exists | included |
 | `PERTURB=7` | the model treats the tuple `EXCLUDE` as include in this phase | TEST FAIL as required (expected-fail entry of the regression) |
 | regression `classifier` | `scripts/rtlnet_regression.ps1 -Match classifier` | 10 entries as required: 7 pass, `neg`, `small_neg`, `perturb7` fail |
+| hardware, Arty A7-100T (small classifier, distributed RAM), 11-17-2026 | Ethernet demo image `arty_fw1`, `firewall_test.ps1` and floods with the firewall on (CPU document, section 5b) | `FIREWALL_TEST` PASS 21/21 at 100 and 10 Mb/s; at 100,000 frames per second offered 959,310 of the 959,620 frames that reached the board dropped by `MODE` (the rest TCP echo segments to an allowed port and filtered frames), overrun 0 |
 
 The firmware side (allow list composition, slot shadow, whole-state rewrite order) is in CPU document section 5b with its
 host demonstration (496 checks).
@@ -785,4 +786,5 @@ host demonstration (496 checks).
 | 10-22-2026 | Binding timing structure for 10G/25G line rates: two LUT levels per stage, pipelined compares and reductions, derived verdict latency |
 | 10-22-2026 | As built: RTL, driver, bench and timing gate; section 10 records the as-built latencies, register-map additions (`LATENCY`, `OVERRUN_DROPPED`, `BUDGET`), deviations, verification and timing results |
 | 11-14-2026 | Small-FPGA parameters (sections 11, 12): pass-through from `rtlnet_eth_protocol`, measured cost of `"distributed"`, CAPS bit 27, capacity-aware driver (`get_build`, policer index checks), protection profile (section 13, driver `config_protect`) |
-| 11-16-2026 | CPU-path firewall (section 14): default-deny from the existing hardware (MODE drop-on-match, EtherType `EXCLUDE` pair for ARP, tuple `EXCLUDE` allow list), driver `firewall_apply`, `protect_load`, `tuple_live_set` / `_clear`, `RTLNET_CLS_ERR_IN_USE`; bench firewall phase in every build, `PERTURB=7`; section 13.2 points to it; the revision history is section 15. Built and simulated, not yet run on hardware |
+| 11-16-2026 | CPU-path firewall (section 14): default-deny from the existing hardware (MODE drop-on-match, EtherType `EXCLUDE` pair for ARP, tuple `EXCLUDE` allow list), driver `firewall_apply`, `protect_load`, `tuple_live_set` / `_clear`, `RTLNET_CLS_ERR_IN_USE`; bench firewall phase in every build, `PERTURB=7`; section 13.2 points to it; the revision history is section 15. Built and simulated |
+| 11-17-2026 | Section 14.5: hardware row (Arty A7-100T) |
