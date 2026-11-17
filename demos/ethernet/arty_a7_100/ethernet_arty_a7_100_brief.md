@@ -31,8 +31,6 @@
 
 <div class="brief-band">A ready-to-run FPGA image: 10/100 Mb/s Ethernet with ARP, ping, DHCP, UDP echo and UDP iperf 2 in FPGA fabric, lwIP TCP echo and iperf 2 on a small MicroBlaze V with 256 KiB of block RAM, a protection profile that holds a flood away from the CPU, a default-deny firewall that lets only ARP and the open TCP ports reach the CPU, and a switch-style console.</div>
 
-This demo is a prebuilt bitstream of the IronKernel RTLNet Ethernet stack, with its firmware inside, for a Digilent Arty A7-100T (AMD Artix-7 XC7A100T). The MII MAC and the protocol blocks (ARP, ICMP echo, DHCP client, UDP echo, UDP iperf 2 server) are RTL and work with no CPU in the data path. One 100 MHz system clock runs the MAC client side, the protocol blocks and a small MicroBlaze V. The MicroBlaze V has 256 KiB of block RAM and no DDR3, no caches, no video and no H.264; it runs lwIP for TCP (echo on port 7, iperf 2 server on port 5001) and the console on the USB-UART. A classifier with per-class policers sits in front of the CPU and is always on; one console command turns it into a default-deny firewall in which only ARP and the ports of the running TCP services reach the CPU. Programming takes one script; the image has no time limit. It is the second board of the Ethernet demo: the CPU, the protocol cores and the firmware source are those of the Nexys Video image (see `../nexys_video/ethernet_nexys_video_brief.pdf`).
-
 <div class="brief-cols">
 <div>
 
@@ -43,7 +41,7 @@ This demo is a prebuilt bitstream of the IronKernel RTLNet Ethernet stack, with 
 - Protection profile (always on): policers on UDP, ICMP, ARP and broadcast traffic toward the CPU; under a flood of 1,000,000 frames in 10 s (100,000 per s offered, 909,447 reached the board) the TCP echo stays byte-exact, the console answers within 248 ms and the board does not reset
 - CPU-path firewall (`classifier firewall enable`, off at boot): only ARP and an allow list of up to 8 TCP/UDP entries reach lwIP; the allow list follows the running services (TCP echo port, TCP iperf port) and the `classifier acl` entries, and a port change opens the new port and closes the old one without dropping a frame of an open connection; a closed port gives no RST and no ICMP unreachable, and ping is still answered by the hardware
 - 10/100 Mb/s MII with a TI DP83848J PHY, full duplex; the PHY is found by its MDIO ID (ID 0x20005C90 at address 1); `speed 10|100|auto` is the only link control and half duplex is never advertised
-- The same firmware source as the Nexys Video demo, in its small-memory profile; the classifier is in distributed RAM (no block RAM) and every other buffer is sized to fit 135 block RAM tiles (105.5 used)
+- The firmware runs in a small-memory profile (256 KiB LMB, 64 KiB frame buffer); the classifier is in distributed RAM (no block RAM) and every other buffer is sized to fit 135 block RAM tiles (105.5 used)
 - Hierarchical, switch-style console (`show ip`, `show phy`, `show offload`, `show classifier`, `configure terminal`, `interface eth0`)
 - Hardware tests for every service at both speeds: `ETH_SUITE: PASS 10/10` at 100 Mb/s and `9/9` at 10 Mb/s, `FIREWALL_TEST: PASS 21/21` at both speeds; `FLOOD_TEST: PASS 95/95` and `50/50`
 - No build needed: the free Vivado license programs the board over JTAG
@@ -104,17 +102,17 @@ A paid license carries no royalty and no per-unit fee. This demo contains no pai
 4. The classifier (`rtlnet_classifier`) judges every frame on its way to the CPU. At boot it is in pass-all mode with the protection profile: policers of 20 ARP, 10 ICMP, 10 UDP and 10 other broadcast frames per 100 ms window on the traffic the hardware did not answer. TCP and other unicast traffic is not policed. `classifier firewall enable` switches it to drop-on-match with an ARP exception and an allow list, so every frame that is neither ARP nor allowed is dropped in hardware (section CPU-path firewall). The protocol ingress filter discards multicast before the CPU. On this board the classifier tables are in distributed RAM (8 table entries, 8 tuples, 1 rule, 4 policers; 4,670 LUT, no block RAM tile).
 5. lwIP on the MicroBlaze V serves TCP echo on port 7 and the TCP iperf 2 server on port 5001. The firmware reads the PHY ID by MDIO at start-up and picks the driver from it (`show phy` prints it; the Arty PHY answers as ID 0x20005C90 at MDIO address 1, driver DP83848). `speed auto` advertises 10 and 100 Mb/s full duplex; half duplex is never advertised.
 
-### What differs from the Nexys Video demo
+### Board resources
 
-| Item | Nexys Video | Arty A7-100T |
-|---|---|---|
-| FPGA | xc7a200t | xc7a100t (135 block RAM tiles) |
-| PHY and interface | RGMII, 10/100/1000 Mb/s | TI DP83848J on MII, 10/100 Mb/s; the FPGA drives the PHY's 25 MHz reference clock |
-| Firmware memory | 512 KiB LMB, 128 KiB frame buffer | 256 KiB LMB, 64 KiB frame buffer, small-memory lwIP profile |
-| Classifier tables | block RAM (30 tiles) | distributed RAM (0 tiles), small profile |
-| Firewall allow entries | 16 tuple slots | 8 tuple slots |
-| TCP data frames | most sent in place | copied (segments kept by reference); ACKs in place |
-| Auto-MDIX | not applicable | off on the board: use a straight cable to a switch |
+| Item | Arty A7-100T |
+|---|---|
+| FPGA | xc7a100t (135 block RAM tiles) |
+| PHY and interface | TI DP83848J on MII, 10/100 Mb/s; the FPGA drives the PHY's 25 MHz reference clock |
+| Firmware memory | 256 KiB LMB, 64 KiB frame buffer, small-memory lwIP profile |
+| Classifier tables | distributed RAM (0 block RAM tiles), small profile |
+| Firewall allow entries | 8 tuple slots |
+| TCP data frames | copied (segments kept by reference); ACKs sent in place |
+| Auto-MDIX | off on the board: use a straight cable to a switch |
 
 ## What you need and run it
 
