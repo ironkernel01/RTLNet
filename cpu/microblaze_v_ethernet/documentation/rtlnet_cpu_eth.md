@@ -255,7 +255,7 @@ the CPU path (hence the `-MaxPingLossPct` default of 40). A broadcast ICMP echo 
 threads the 88 frames of a 10 s run all pass: reported as not exercised). With about 500 frames per second arriving against a policer rate of 100 per
 second (10 per 100 ms), the udp class drops 88 to 94 % of the broadcast frames that reach it.
 
-### 5b. Firewall of the CPU path (11-16-2026; measured on the Arty A7-100T 11-17-2026)
+### 5b. Firewall of the CPU path (11-16-2026; measured on the Arty A7-100T and the Nexys Video 11-17-2026)
 
 `classifier firewall enable` makes the CPU path default-deny: only ARP and an allow list reach lwIP, the classifier drops everything
 else in hardware (register mapping, frame classes and driver: classifier document, section 14). The firewall is off at boot, so the
@@ -343,6 +343,8 @@ refused connect after about 2 s, hence `-RefuseMs` 3000); firewall on, echo on p
 UDP datagrams to a closed port get no answer, ping is answered and the drop count rises; echo moved to port 23; the configuration restored.
 
 Hardware: Arty A7-100T, image `arty_fw2` (hardware `arty_rel`, firmware f82d4f1), 11-17-2026, LAN through a switch: `firewall_test.ps1` PASS 21/21 at 100 and at 10 Mb/s; `ETH_SUITE` PASS 10/10 (100 Mb/s, with the link test) and 9/9 (10 Mb/s); TCP iperf with the firewall on 94.4 / 94.9 Mb/s, the same as with it off (94.5 / 94.9); `FLOOD_TEST` PASS 95/95 and 50/50 (firewall off); with the firewall on, every flood frame that reached the board was dropped by the classifier (957,174 of 957,712 at 100,000 per second offered, the rest the TCP echo segments and filtered frames), the TCP echo stayed byte-exact and the console answered within 267 ms.
+
+Hardware: Nexys Video, image `eth_fw2` (hardware `eth_rel`, firmware f82d4f1), 11-17-2026, LAN through a switch: `firewall_test.ps1` PASS 21/21 at 1000, 100 and 10 Mb/s; `ETH_SUITE` PASS 10/10 (1000 Mb/s, with the link test), 9/9 (100 Mb/s) and 9/9 (10 Mb/s); ping, UDP echo, UDP iperf, TCP echo and TCP throughput pass with the firewall on at all three speeds, with the figures of the firewall-off runs (TCP iperf at 1000 Mb/s 337.7 / 280.3 Mb/s on, 336.0 / 281.0 off); a port scan (199 closed TCP ports, 100 closed UDP ports) is answered with 199 RST and 100 ICMP port unreachable with the firewall off and with nothing with it on (600 SYN frames and 103 datagrams dropped by the classifier), the allowed ports 7 and 5001 connecting in both states; with the firewall on, all 1,000,000 frames of a 100,000 per second unicast flood reached the board and were dropped by the classifier, the TCP echo kept 21,107 rounds in 10 s against 21,084 with the firewall off.
 
 With the firewall on, the `Profile` line of `show classifier` reads "firewall on: only ARP and the allow list pass; the arp and broadcast
 policers apply", and the `udp` and `icmp` rows read "firewall on: judged by the allow list, not policed" (their tuple slots carry the allow
@@ -557,7 +559,7 @@ scatter-gather DMA; the simple-mode DMA of the design sends one contiguous buffe
 
 ## 8. Revision history
 
-* 11-17-2026: section 5b measured on the Arty A7-100T (image `arty_fw2`); `firewall_test.ps1` counts the ICMP port unreachable on the board; `show classifier` names the firewall in the `Profile` line and the `udp` and `icmp` rows while it is on.
+* 11-17-2026: section 5b measured on the Arty A7-100T (image `arty_fw2`) and on the Nexys Video (image `eth_fw2`, 10/100/1000 Mb/s); `firewall_test.ps1` counts the ICMP port unreachable on the board; `show classifier` names the firewall in the `Profile` line and the `udp` and `icmp` rows while it is on.
 * 11-16-2026: firewall of the CPU path (section 5b): `classifier firewall enable|disable`, `classifier acl`, `no classifier acl`, allow list from services, client flows and ACL entries, live update, fix of the protection profile wipe on a classifier edit; host harness, `test/firewall_test.ps1` written, not yet run on hardware.
 * 11-14-2026: Arty A7-100T measured on the board: release image `arty_rel`, DP83848 found at MDIO address 1, `ETH_SUITE` 8/8 at 10 and 100 Mb/s, flood tests, in-place and copied counters (section 6a, verification and build rows, PHY table).
 * 11-14-2026: release build `eth_rel` and the release campaign results (sections 6 and 6c); the demo documents are in `demos/ethernet/`.

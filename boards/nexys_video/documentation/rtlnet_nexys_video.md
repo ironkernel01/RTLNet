@@ -3,12 +3,12 @@
 | Item | Value |
 |---|---|
 | Board | Digilent Nexys Video, XC7A200T-1SBG484C, Realtek RTL8211E-VL |
-| Document revision | 11-16-2026 |
+| Document revision | 11-17-2026 |
 | Top | `boards/nexys_video/hdl/rtlnet_nexys_video_top.sv` (`rtlnet_nexys_video_top`) |
 | Builds | network (`build.ps1 -Network`, `RTLNET_WITH_NETWORK`: MAC, MDIO, protocol wrapper with ARP/ICMP/DHCP/iperf/UDP socket leaves, CPU network path with its classifier, UDP echo) and CPU-only (default); both built, timing met, on hardware |
 | Tools | Vivado 2026.1, GNU GCC 13.4 (RISC-V, MicroBlaze V), Active-HDL 11.1 |
 | Firmware | one image for both builds (`cpu/microblaze_v_h264/firmware`, standalone BSP generated from the build's XSA, lwIP TCP echo on the CPU network path); absent cores are probed and reported "not present in this build" |
-| Ethernet demo firewall | the Ethernet demo firmware (`cpu/microblaze_v_ethernet/firmware`) has a CPU-path firewall (`classifier firewall enable` or `disable`, off at boot): only ARP and the allow list reach lwIP; the classifier of this board has 16 tuple slots for the list. Built and simulated, not yet run on hardware; see `cpu/microblaze_v_ethernet/documentation/rtlnet_cpu_eth.md` section 5b and `cores/rtlnet_classifier/documentation/rtlnet_classifier.md` section 14 |
+| Ethernet demo firewall | the Ethernet demo firmware (`cpu/microblaze_v_ethernet/firmware`) has a CPU-path firewall (`classifier firewall enable` or `disable`, off at boot): only ARP and the allow list reach lwIP; the classifier of this board has 16 tuple slots for the list. Measured 11-17-2026 (image `eth_fw2`, released in `demos/ethernet/nexys_video/`): `FIREWALL_TEST: PASS 21/21` at 1000, 100 and 10 Mb/s, the services unchanged with the firewall on, closed ports silent in a port scan, a 1,000,000-frame flood dropped in hardware; see `cpu/microblaze_v_ethernet/documentation/rtlnet_cpu_eth.md` section 5b and `cores/rtlnet_classifier/documentation/rtlnet_classifier.md` section 14 |
 
 ## 1. Files
 
@@ -1726,8 +1726,9 @@ Open:
 ## 8. Revision history
 
 | Revision | Change |
-| 11-16-2026 | Ethernet demo firewall of the CPU path (header table): off at boot, 16 tuple slots, built and simulated, not yet run on hardware |
 |---|---|
+| 11-17-2026 | Ethernet demo firewall measured on the board (`eth_fw2`); the demo release carries it |
+| 11-16-2026 | Ethernet demo firewall of the CPU path (header table): off at boot, 16 tuple slots, built and simulated |
 | 11-14-2026 | The MicroBlaze V CPU moved from `microblaze/` to `cpu/microblaze_v_h264/` (paths in the build scripts and in this document); no build or board result changed |
 | 11-13-2026 | Section 6.24: release rebuild of `rel_base_dbk` and `rel_demo_cab_dbk` from the board branches with clean build ids, board results; build outputs no longer tracked in git |
 | 11-13-2026 | Section 6.23: the three release images of the merged tree (`rel_base_dbk`, `rel_demo_cab_dbk`, `rel_full_cab_dbk`, each met timing on the first attempt with `AltSpreadLogic_high`), the DDR3 arbiter in two clocks, the filter's multiplier in a DSP block (no `SYNTH-9`, no waiver), board gates, `hp_expiry_test.ps1` of the demo image; sections 6.21 and 6.22 stay as the 6.21 of the interrupt merge and the CABAC-only image of the filter branch |

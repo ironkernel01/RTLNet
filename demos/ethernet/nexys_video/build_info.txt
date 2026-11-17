@@ -17,3 +17,5 @@ cdc_classes   fifo {10 96} sync {28 110} axil_cdc {5 344} gray {6 192} reset {5 
 bitstream_hw  rtlnet_nexys_video_eth_hw.bit
 mmi           rtlnet_nexys_video_eth.mmi
 xsa           rtlnet_nexys_video_eth.xsa
+firmware_git  f82d4f1 (tree clean), merged into bitstream_hw by updatemem 2026-11-17
+firmware      rtlnet-eth-fw 11-17-2026 with the CPU-path firewall (classifier firewall enable|disable)

@@ -1,11 +1,11 @@
 # Ethernet Demo on the Nexys Video
 
-Revision 11-14-2026
+Revision 11-17-2026
 
-The RTLNet gigabit Ethernet stack on a Digilent Nexys Video: 10/100/1000 Mb/s RGMII, hardware ARP, ICMP echo, DHCP client, UDP echo and a UDP iperf 2 server in FPGA fabric, plus lwIP TCP (echo on port 7, iperf 2 server on port 5001) on a small MicroBlaze V. One 100 MHz system clock runs the CPU and the protocol blocks; the CPU has 512 KiB of block RAM and no DDR3, no caches, no video and no H.264. A classifier with per-class policers protects the CPU from floods. The console is a hierarchical, switch-style CLI on the USB-UART. There is no time limit and no netlist in this image.
+The RTLNet gigabit Ethernet stack on a Digilent Nexys Video: 10/100/1000 Mb/s RGMII, hardware ARP, ICMP echo, DHCP client, UDP echo and a UDP iperf 2 server in FPGA fabric, plus lwIP TCP (echo on port 7, iperf 2 server on port 5001) on a small MicroBlaze V. One 100 MHz system clock runs the CPU and the protocol blocks; the CPU runs from 512 KiB of on-chip block RAM with no caches. A classifier with per-class policers protects the CPU from floods; `classifier firewall enable` turns it into a default-deny firewall in which only ARP and the ports of the running TCP services reach the CPU. The console is a hierarchical, switch-style CLI on the USB-UART. There is no time limit and no netlist in this image.
 License: `LICENSE.md` in the repository root.
 
-The image file is `rtlnet_nexys_video_eth.bit` (built by `boards/nexys_video/scripts/build_ethernet.ps1 -Tag eth_rel`). The name differs from the video demos, which use `rtlnet_nexys_video.bit`.
+The image file is `rtlnet_nexys_video_eth.bit`: the hardware of `boards/nexys_video/scripts/build_ethernet.ps1 -Tag eth_rel` with the firmware merged in by `build_ethernet.ps1 -Tag eth_fw2 -SkipBitstream` (`build_info.txt` lists both revisions). The name differs from the video demos, which use `rtlnet_nexys_video.bit`.
 
 ## What you need
 
@@ -43,7 +43,9 @@ The CLI is hierarchical like a network switch: `configure terminal` enters confi
 | `show tcp` | lwIP TCP connections |
 | `show iperf` | UDP and TCP iperf server counters |
 | `show offload` | checksum offload, ACK coalescing and receive batching counters |
-| `show classifier` | protection profile and per-class counters |
+| `show classifier` | mode, protection profile, per-class counters and the Firewall block |
+| `classifier firewall enable` / `disable` (configuration mode) | the default-deny firewall of the CPU path; off at boot |
+| `classifier acl ...` / `no classifier acl` (configuration mode) | ACL entries 0..13; with the firewall on every entry is an allow entry |
 | `ip dhcp` / `renew` (in interface mode) | use DHCP / ask for the lease again |
 
 Link speed is the only link control:
@@ -56,6 +58,21 @@ end
 ```
 
 `speed` takes `10`, `100` or `auto`. `auto` advertises every full-duplex mode (10, 100 and 1000 Mb/s) and takes the best rate both sides support; half duplex is never advertised. `show phy` prints the result.
+
+## Firewall
+
+The CPU path has a default-deny firewall, off at boot. With it on, only ARP and an allow list reach lwIP; every other frame is dropped by the classifier in hardware, so a closed port gives no RST and no ICMP port unreachable. Ping, DHCP, UDP echo and UDP iperf are answered by the hardware in front of the classifier and keep working. The allow list holds up to 16 entries (the tuple slots of this board): the TCP echo and TCP iperf servers while enabled, the TCP connections the board opens, and the `classifier acl` entries. A service port change opens the new port and closes the old one while the firewall stays on. Example: only ARP and the echo server on the telnet port:
+
+```
+configure terminal
+tcp echo port 23
+iperf tcp disable
+classifier firewall enable
+end
+show classifier
+```
+
+`classifier firewall disable` returns to the protection profile. The firewall is described in the brief and in `cpu/microblaze_v_ethernet/documentation/rtlnet_cpu_eth.md` section 5b.
 
 ## Services in the image
 
@@ -76,23 +93,25 @@ The tests are PowerShell scripts in `cpu/microblaze_v_ethernet/test/`. They need
 powershell -NoProfile -ExecutionPolicy Bypass -File cpu/microblaze_v_ethernet/test/run_all.ps1 -Port <COM port> -Nic <adapter> -LinkMbps 1000
 ```
 
-`-LinkMbps` is `10`, `100` or `1000` and selects the speed the run sets and checks. Run it three times for the three speeds. The individual scripts are `console_test`, `link_test`, `ping_test`, `arp_test`, `dhcp_test`, `udp_echo_test`, `udp_iperf_test`, `tcp_echo_test` and `tcp_throughput_test`. `flood_test` runs the protection profile test. The results land in `cpu/microblaze_v_ethernet/test/out/results_<speed>.txt` and `.csv`.
+`-LinkMbps` is `10`, `100` or `1000` and selects the speed the run sets and checks. Run it three times for the three speeds. The individual scripts are `console_test`, `link_test`, `ping_test`, `arp_test`, `dhcp_test`, `udp_echo_test`, `udp_iperf_test`, `tcp_echo_test`, `tcp_throughput_test` and `firewall_test` (`run_all.ps1` runs `link_test` with `-IncludeLink`). `flood_test` runs the protection profile test; `firewall_test.ps1` also runs alone. The results land in `cpu/microblaze_v_ethernet/test/out/results_<speed>.txt` and `.csv`.
 
 ## Expected results
 
-Measured on this image (`eth_rel`, build info in `build_info.txt`) in the release campaign of 11-14-2026: the board on a switch to a PC with a Gigabit adapter, iperf 2, 10 s runs (TCP: mean of 3 runs), 64-byte echoes x 2000. The brief (`ethernet_nexys_video_brief.md`, `ethernet_nexys_video_brief.pdf`) holds the same table with the method.
+Measured on this image (`eth_fw2`, build info in `build_info.txt`) in the campaign of 11-17-2026: the board on a switch to a PC with a Gigabit adapter, iperf 2, 10 s runs (TCP: mean of 3 runs), 64-byte echoes x 2000, firewall off. The brief (`ethernet_nexys_video_brief.md`, `ethernet_nexys_video_brief.pdf`) holds the full table with the firewall off and on, what each test does, the port scan and the floods.
 
 | Test | 10 Mb/s | 100 Mb/s | 1000 Mb/s |
 |---|---|---|---|
 | Ping, 64 B x 100, lost | 0 | 0 | 0 |
-| UDP echo, 64 B, mean / p99, loss | 1.287 / 1.357 ms, 0 | 0.163 / 0.205 ms, 0 | 0.163 / 0.208 ms, 0 |
-| UDP iperf PC to board, loss | 9.4 Mb/s, 0 | 94.1 Mb/s, 0 | 942.0 Mb/s, 0 |
-| UDP iperf board to PC, loss | 9.4 Mb/s, 0 | 94.4 Mb/s, 0 | 944.0 Mb/s, 0.018 % (71 of 401,242) |
-| TCP iperf PC to board, mean (min to max) | 9.5 (9.5 to 9.5) Mb/s | 94.7 (94.5 to 94.8) Mb/s | 349.7 (347.0 to 352.0) Mb/s |
-| TCP iperf board to PC, mean (min to max) | 9.5 (9.5 to 9.5) Mb/s | 94.6 (94.4 to 94.9) Mb/s | 283.3 (282.0 to 284.0) Mb/s |
-| `run_all.ps1` | `ETH_SUITE: PASS 8/8 scripts` | `ETH_SUITE: PASS 8/8 scripts` | `ETH_SUITE: PASS 8/8 scripts` |
+| UDP echo, 64 B, mean / p99, loss | 1.303 / 1.363 ms, 0 | 0.174 / 0.230 ms, 0 | 0.171 / 0.238 ms, 0 |
+| UDP iperf PC to board, loss | 9.4 Mb/s, 0 | 94.0 Mb/s, 0 | 943.0 Mb/s, 0 |
+| UDP iperf board to PC, loss | 9.4 Mb/s, 0 | 94.4 Mb/s, 0 | 944.0 Mb/s, 0.005 % (20 of 401,242) |
+| TCP iperf PC to board, mean (min to max) | 9.5 (9.5 to 9.5) Mb/s | 94.7 (94.5 to 94.9) Mb/s | 336.0 (332.0 to 343.0) Mb/s |
+| TCP iperf board to PC, mean (min to max) | 9.5 (9.5 to 9.5) Mb/s | 94.9 (94.9 to 94.9) Mb/s | 281.0 (281.0 to 281.0) Mb/s |
+| TCP iperf with the firewall on, PC to board / board to PC | 9.5 / 9.5 Mb/s | 94.5 / 94.9 Mb/s | 337.7 / 280.3 Mb/s |
+| `firewall_test.ps1` | `FIREWALL_TEST: PASS 21/21` | `FIREWALL_TEST: PASS 21/21` | `FIREWALL_TEST: PASS 21/21` |
+| `run_all.ps1` | `ETH_SUITE: PASS 9/9 scripts` | `ETH_SUITE: PASS 9/9 scripts` | `ETH_SUITE: PASS 10/10 scripts` (with `-IncludeLink`) |
 
-The UDP paths are in hardware and reach the line rate of the link; TCP is limited by the soft CPU (100 MHz MicroBlaze V, block RAM only) at 1000 Mb/s. Your numbers depend on the PC, the adapter and the switch.
+The UDP paths are in hardware and reach the line rate of the link; TCP is limited by the soft CPU (100 MHz MicroBlaze V, block RAM only) at 1000 Mb/s. With the firewall on, the same services give the same figures. Your numbers depend on the PC, the adapter and the switch.
 
 ## Protection profile test
 
@@ -100,9 +119,9 @@ The UDP paths are in hardware and reach the line rate of the link; TCP is limite
 
 ```
 powershell -NoProfile -ExecutionPolicy Bypass -File cpu/microblaze_v_ethernet/test/flood_test.ps1 -Port <COM port> -Nic <adapter> -Rate 1000
-powershell -NoProfile -ExecutionPolicy Bypass -File cpu/microblaze_v_ethernet/test/flood_test.ps1 -Port <COM port> -Nic <adapter> -Rate 20000 -Kinds udp-closed,udp-bcast-net,mcast,icmp-bcast
+powershell -NoProfile -ExecutionPolicy Bypass -File cpu/microblaze_v_ethernet/test/flood_test.ps1 -Port <COM port> -Nic <adapter> -Rate 100000 -Kinds udp-closed,udp-bcast-net,mcast,icmp-bcast
 ```
 
-Release campaign: `FLOOD_TEST: PASS 95/95` (all kinds at 1000 frames per second) and `FLOOD_TEST: PASS 50/50` (four kinds at 20000 frames per second). `show classifier` prints the per-class counters afterward.
+Campaign of 11-17-2026 (1000 Mb/s link, firewall off): `FLOOD_TEST: PASS 95/95` (all kinds at 1000 frames per second) and `FLOOD_TEST: PASS 50/50` (four kinds at 100,000 frames per second offered). `show classifier` prints the per-class counters afterward. With the firewall on, every frame of a 1,000,000-frame unicast flood to a closed port reaches the board and is dropped by the classifier while the TCP echo runs unchanged; a port scan of 199 closed TCP ports and 100 closed UDP ports gets no answer (brief, section CPU-path firewall).
 
 `build_info.txt` in this folder lists the source revision, the timing result and the utilization of the image: 23,891 LUT, 33,968 flip-flops, 228.5 block RAM tiles, 6 DSP blocks, WNS +0.154 ns at the one 100 MHz system clock.
