@@ -2,9 +2,11 @@
 
 Revision 11-13-2026
 
-The public RTLNet H.264 encoder: Constrained Baseline profile (CAVLC), in-loop deblocking filter, two engines, 1080p30 and 720p30.
+This RTLNet image integrates the IronH264 encoder: Constrained Baseline profile (CAVLC), in-loop deblocking filter, two engines, 1080p30 and 720p30.
 The board generates test patterns, encodes them and sends an MPEG-TS stream over UDP. There is no time limit.
 License: `LICENSE.md` in the repository root.
+
+For the data path, release measurements and limits, see the [RTLNet Specification](../../../documentation/rtnet_specification.md).
 
 ## What you need
 

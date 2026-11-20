@@ -33,7 +33,7 @@
 
   mermaid.initialize({ startOnLoad: false, theme: 'default', securityLevel: 'loose' });
   await mermaid.run({ querySelector: '.mermaid' });
-  document.title = 'RENDER_DONE';
+  document.title = document.querySelector('#content h1')?.textContent.trim() || 'RTLNet';
 })();
 </script>
 </body>

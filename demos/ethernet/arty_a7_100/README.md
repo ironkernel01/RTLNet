@@ -58,7 +58,7 @@ end
 show classifier
 ```
 
-`classifier firewall disable` returns to the protection profile. The firewall is described in the brief and in `cpu/microblaze_v_ethernet/documentation/rtlnet_cpu_eth.md` section 5b.
+`classifier firewall disable` returns to the protection profile. The firewall is described in the [RTLNet Specification](../../../documentation/rtnet_specification.md#cpu-path-firewall) and in `cpu/microblaze_v_ethernet/documentation/rtlnet_cpu_eth.md` section 5b.
 
 ## Services in the image
 
@@ -92,7 +92,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File cpu/microblaze_v_ethernet/te
 
 ## Expected results
 
-Measured on this image (`arty_fw2`, build info in `build_info.txt`) in the campaign of 11-17-2026: the board on a switch to a PC with a Gigabit adapter, iperf 2, 10 s runs (TCP: mean of 3 runs), 64-byte echoes x 2000. The brief (`ethernet_arty_a7_100_brief.md`, `ethernet_arty_a7_100_brief.pdf`) holds the same table with the method.
+Measured on this image (`arty_fw2`, build info in `build_info.txt`) in the campaign of 11-17-2026: the board on a switch to a PC with a Gigabit adapter, iperf 2, 10 s runs (TCP: mean of 3 runs), 64-byte echoes x 2000. The [RTLNet Specification](../../../documentation/rtnet_specification.md) compares the released Ethernet images and explains the measurement conditions.
 
 | Test | 10 Mb/s | 100 Mb/s |
 |---|---|---|
@@ -106,7 +106,7 @@ Measured on this image (`arty_fw2`, build info in `build_info.txt`) in the campa
 | `firewall_test.ps1` | `FIREWALL_TEST: PASS 21/21` | `FIREWALL_TEST: PASS 21/21` |
 | `run_all.ps1` | `ETH_SUITE: PASS 9/9 scripts` | `ETH_SUITE: PASS 10/10 scripts` (with `-IncludeLink`) |
 
-Flood test at 100 Mb/s: `FLOOD_TEST: PASS 95/95` (all kinds, 1000 frames per second) and `FLOOD_TEST: PASS 50/50` (four kinds at 100,000 frames per second offered). `link_test.ps1`: `LINK_TEST: PASS 18/18`. With the firewall on, every flood frame that reaches the board is dropped by the classifier and the TCP echo stays byte-exact; a 100,000 per second unicast flood fills the 100 Mb/s wire and slows the echo upstream of the board (brief, section CPU-path firewall).
+Flood test at 100 Mb/s: `FLOOD_TEST: PASS 95/95` (all kinds, 1000 frames per second) and `FLOOD_TEST: PASS 50/50` (four kinds at 100,000 frames per second offered). `link_test.ps1`: `LINK_TEST: PASS 18/18`. With the firewall on, every flood frame that reaches the board is dropped by the classifier and the TCP echo stays byte-exact; a 100,000 per second unicast flood fills the 100 Mb/s wire and slows the echo upstream of the board (see the CPU-path firewall section of the specification).
 
 `build_info.txt` in this folder lists the source revision, the timing result and the utilization of the image: 24,981 LUT, 36,059 flip-flops, 105.5 block RAM tiles, 6 DSP blocks, WNS +0.142 ns at the one 100 MHz system clock.
 

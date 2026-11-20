@@ -1,10 +1,9 @@
 // Drawing set: demo-h264 (2 sheets: the H.264 demo set-up and data path on the Nexys Video) for
-//   demos/h264_baseline/h264_baseline_brief.md           (sheet 1: Constrained Baseline encoder)
-//   demos/h264_high_profile_demo/h264_high_profile_demo_brief.md   (sheet 2: the same with the High profile extension)
+//   documentation/rtnet_specification.md (Baseline and High Profile reference sections)
 // The sheets differ only in the encoder block.
 // Build: node diagrams/src/demo-h264.js  ->  diagrams/out/demo-h264.pptx
 // Render: powershell -File diagrams\tools\render.ps1 diagrams\out\demo-h264.pptx  ->  out/png/demo-h264-1.png, -2.png
-// Fills: white = RTLNet RTL core, gray = soft CPU firmware, blue = encoder with the High profile extension,
+// Fills: white = FPGA logic, gray = soft CPU firmware, blue = encoder with the High profile extension,
 // yellow = outside the FPGA.
 const path = require("path");
 const { newDeck, helpers, FILL } = require("../lib/engslides");
@@ -25,18 +24,18 @@ function sheet(high) {
   container(s, 0.5, 0.5, 10.25, 4.45, "Artix-7 XC7A200T on the Nexys Video");
 
   // Video side: pattern generator -> write DMA -> DDR3 arbiter <-> encoder engines
-  box(s, cx[0], r0, w, h0, "Test pattern generator", ["bars, scroll, box, noise", "1080p30 or 720p30"], W);
+  box(s, cx[0], r0, w, h0, "IronCapture pattern source", ["bars, scroll, box, noise", "1080p30 or 720p30"], W);
   box(s, cx[1], r0, w, h0, "Video write DMA", ["2D write bursts into", "the frame buffer"], W);
   if (high) {
-    box(s, cx[2], r0, encW, h0, "Two H.264 encoder engines, High profile",
+    box(s, cx[2], r0, encW, h0, "IronH264 with High Profile extension",
       ["CABAC extension, 30 minutes per configuration, then Constrained Baseline",
        "I and P pictures, whole-sample motion search +-16, in-loop deblocking filter",
-       "1080p30 or 720p30, one slice band per engine"], B);
+       "1080p30 or 720p30, two engines, one band each"], B);
   } else {
-    box(s, cx[2], r0, encW, h0, "Two H.264 encoder engines, Constrained Baseline",
+    box(s, cx[2], r0, encW, h0, "IronH264 Constrained Baseline",
       ["CAVLC entropy coding, no time limit",
        "I and P pictures, whole-sample motion search +-16, in-loop deblocking filter",
-       "1080p30 or 720p30, one slice band per engine"], W);
+       "1080p30 or 720p30, two engines, one band each"], W);
   }
   box(s, cx[0], r1, cx[2] + w - cx[0], h1, "DDR3 arbiter and MIG controller",
     ["4 masters: MicroBlaze V cache, video DMA, 2 encoder engines", "burst-only access, one 90 MHz clock"], W);
@@ -85,8 +84,8 @@ function sheet(high) {
     "The firmware packs the stream into MPEG-TS packets and sends them as UDP datagrams to the PC; the RTL answers ARP, ping and DHCP without the CPU.",
   ]);
   legend(s, 0.6, 6.85, high
-    ? [["RTLNet RTL core", W], ["MicroBlaze V firmware", G], ["Encoder with High profile extension", B], ["Outside the FPGA", Y]]
-    : [["RTLNet RTL core", W], ["MicroBlaze V firmware", G], ["Outside the FPGA", Y]], 3.2);
+    ? [["FPGA logic", W], ["MicroBlaze V firmware", G], ["Encoder with High profile extension", B], ["Outside the FPGA", Y]]
+    : [["FPGA logic", W], ["MicroBlaze V firmware", G], ["Outside the FPGA", Y]], 3.2);
   frame(s);
 }
 

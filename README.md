@@ -2,7 +2,7 @@
 
 RTLNet implements an Ethernet/IPv4 stack in SystemVerilog. ARP, ICMP echo, DHCP and UDP run in hardware. A protected CPU network path adds lwIP TCP. The Ethernet images run on Nexys Video and Arty A7-100T. A separate Nexys media image connects companion IronCapture and IronH264 cores through DDR and streams encoded color bars over Ethernet.
 
-[Product brief (PDF)](documentation/rtlnet_product_brief.pdf) · [Markdown](documentation/rtlnet_product_brief.md) · [Architecture](documentation/rtlnet_architecture.md) · [Contributing](documentation/rtlnet_contributing.md)
+[RTLNet Specification (PDF)](documentation/rtnet_specification.pdf) · [Markdown](documentation/rtnet_specification.md) · [Architecture](documentation/rtlnet_architecture.md) · [Contributing](documentation/rtlnet_contributing.md)
 
 The repository has one branch, `main`. Folders separate the board-independent cores (`cores/`) from the board design
 (`boards/`, `cpu/`) and the released demonstration images (`demos/`); see "Folders" and "Repository layout rule".
@@ -60,13 +60,12 @@ you run it.
 | Demo bitstreams (firmware included), one folder per demo and board | `demos/<demo name>/<board>/rtlnet_<board>.bit` |
 | Demo build record (source revision, timing, utilization) | `demos/<demo name>/<board>/build_info.txt` |
 | Steps to run a demo | `demos/<demo name>/<board>/README.md` |
-| Demo brief (Markdown and PDF), demo pictures | `demos/<demo name>/<demo name>_brief.md`, `.pdf`, `demos/<demo name>/images/` |
+| Demo captures and pattern frames | `demos/<demo name>/images/` |
 | Demo guide and index (what is in `demos/`, what to connect, how to run) | `demos/README.md`, `demos/demos.md` |
 | License of a time-limited demo package | `demos/LICENSE_DEMO.md` |
-| The High profile demo (bitstream, README, brief) | `demos/h264_high_profile_demo/` |
-| The Ethernet demo (10/100/1000, hardware ARP, ping, DHCP, UDP echo and iperf 2, lwIP TCP; bitstream `rtlnet_nexys_video_eth.bit`, README, brief; no time limit) | `demos/ethernet/` |
+| The High profile demo (bitstream, README) | `demos/h264_high_profile_demo/` |
+| The Ethernet demo (10/100/1000, hardware ARP, ping, DHCP, UDP echo and iperf 2, lwIP TCP; bitstream `rtlnet_nexys_video_eth.bit`, README; no time limit) | `demos/ethernet/` |
 | Refresh the demo folders from the board build folders | `demos/demorelease.bat`; it reads `demos/<demo name>/release.txt` and copies `boards/<board>/build/<tag>/rtlnet_<board>.bit` and `build_info.txt` into `demos/<demo name>/<board>/` |
-| Build the PDF of a demo brief | `demos/build_brief_pdf.ps1` (writes next to the brief) |
 | Board build output: bitstream with firmware, bitstream without firmware, `.mmi`, `.xsa`, `build_info.txt`, `build_bitstream.log`, `reports/` (timing, utilization, CDC, DRC), checkpoints | `boards/nexys_video/build/` for an untagged build, `boards/nexys_video/build/<tag>/` for `build.ps1 -Tag <tag> -Image`. Built, git-ignored (the released images are the tracked files under `demos/`). The file list is in `boards/nexys_video/README.md` |
 | Firmware image (merged into the bitstream), DDR3 development image | `cpu/microblaze_v_h264/firmware/build/firmware.elf`, `cpu/microblaze_v_h264/firmware/build/firmware_ddr.elf` (both built, git-ignored) |
 | Firmware host tests and the CLI desktop harness | scripts in `cpu/microblaze_v_h264/firmware/test/` (listed in their `regression.txt`); `cpu/microblaze_v_h264/firmware/build/menu.exe` and `ratectl_test.log` are built |
@@ -74,7 +73,7 @@ you run it.
 | Simulation logs of one bench (Active-HDL) | `.sim/<bench>[_<tag>]/simulation.log`; Verilator runs in `.sim/verilator/<bench>[_<tag>]/` (built, git-ignored) |
 | Regression result | the last line printed by `scripts/rtlnet_regression.ps1` (`RTLNET_REGRESSION: <n> passed, <m> failed`); the lists are `scripts/rtlnet_regression.txt` and every `regression.txt` under `cores/`, `cpu/` and `boards/` (the last two are optional folders) |
 | Host tools built by the core tests (C models, decoders) | `%LOCALAPPDATA%\RTLNet\tools\<name>` (override with `RTLNET_TOOLS_DIR`) |
-| Product brief | `documentation/rtlnet_product_brief.pdf` (source `.md`; rebuild with `documentation/build_pdf.ps1`) |
+| Consolidated RTLNet Specification | `documentation/rtnet_specification.pdf` (source `.md`; rebuild with `documentation/build_pdf.ps1`) |
 | Architecture, contributing rules and repository layout rules | `documentation/rtlnet_architecture.md`, `documentation/rtlnet_contributing.md` |
 | Core documents | `cores/<core>/documentation/<core>.md` |
 | Board document and board guide | `boards/nexys_video/documentation/rtlnet_nexys_video.md`, `boards/nexys_video/README.md`; CPU documents in `cpu/microblaze_v_h264/documentation/` |
@@ -90,9 +89,9 @@ you run it.
 | `cores/` | the board-independent cores above, each with `hdl/`, `driver/`, `testbench/`, `documentation/`; it targets no board |
 | `boards/` | Nexys Video in `boards/nexys_video/` (Ethernet and media) and Arty A7-100T in `boards/arty_a7_100/` (Ethernet). Each board has its own top, constraints, scripts and board guide |
 | `cpu/` | one folder per CPU, each independent with its own block design, driver, firmware, CLI, tests and documents; today `cpu/microblaze_v_h264/` (the MicroBlaze V CPU of the H.264 demos: block design, driver, documents, and the firmware with CLI, lwIP application and host tests; written for the Nexys Video today) and `cpu/microblaze_v_ethernet/` (the board-independent MicroBlaze V of the Ethernet demo: no DDR3, no caches, no video; firmware, CLI, host tests and hardware tests shared by every board) |
-| `demos/` | released demonstration bitstreams, one folder per demo with its brief, `release.txt` and the license of a time-limited demo (`demos/LICENSE_DEMO.md`) |
+| `demos/` | released demonstration bitstreams, one folder per demo with `release.txt` and the license of a time-limited demo (`demos/LICENSE_DEMO.md`) |
 | `scripts/` | simulation runner, regression, synthesis/timing checks, CDC constraints, Vivado launcher, name check, tool discovery (`rtlnet_tools.ps1`) |
-| `documentation/` | `rtlnet_architecture.md` (the system contract: stream and register conventions, address map, port lists), `rtlnet_contributing.md` (rules and repository layout rules), `rtlnet_product_brief.md` and its PDF |
+| `documentation/` | `rtlnet_architecture.md` (the system contract: stream and register conventions, address map, port lists), `rtlnet_contributing.md` (rules and repository layout rules), `rtnet_specification.md` and its PDF |
 | `diagrams/` | sources (`src/`) and renderings (`out/`) of the drawings |
 | `LICENSE.md` | the RTLNet source-available license |
 

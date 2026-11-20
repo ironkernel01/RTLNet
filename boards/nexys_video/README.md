@@ -115,7 +115,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File cpu/microblaze_v_ethernet/te
 | Broadcast storm limiter | 10 frames per 100 ms toward the CPU, under a 400 frame/s flood |
 
 The video, encoder and gigabit results are in the board guide and in `demos/`. The released Ethernet image
-(`rtlnet_nexys_video_eth.bit`, build tag `eth_rel`) and its brief are in `demos/ethernet/`.
+(`rtlnet_nexys_video_eth.bit`) is in `demos/ethernet/nexys_video/`. See the [RTLNet Specification](../../documentation/rtnet_specification.md) for the current release measurements.
 
 ### Release image `eth_rel` (11-14-2026)
 
@@ -128,7 +128,7 @@ Build `eth_rel` (git 2c2c686b, tree clean, one 100 MHz clock, 512 KiB LMB, 128 K
 | UDP iperf PC to board / board to PC (Mb/s) | 942.0 / 944.0 | 94.1 / 94.4 | 9.4 / 9.4 |
 | UDP echo 64 B mean / p99 (ms) | 0.163 / 0.208 | 0.163 / 0.205 | 1.287 / 1.357 |
 
-`flood_test.ps1`: `FLOOD_TEST: PASS 95/95` (1000 frames per second, all kinds) and `PASS 50/50` (20000, four kinds). The brief, the captures and the demo steps are in `demos/ethernet/`.
+`flood_test.ps1`: `FLOOD_TEST: PASS 95/95` (1000 frames per second, all kinds) and `PASS 50/50` (20000, four kinds). The captures and run instructions are in `demos/ethernet/`. The [RTLNet Specification](../../documentation/rtnet_specification.md) compares the released board configurations.
 
 ## Quick start
 

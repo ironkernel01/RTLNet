@@ -2,7 +2,7 @@
 
 Revision 11-17-2026
 
-Captures of the campaign of the Ethernet demo on the Nexys Video (image `eth_fw2`: hardware git 2c2c686b, firmware git f82d4f1, 11-17-2026). Each picture is a rendering of the console or test text (`cpu/microblaze_v_ethernet/test/render_capture.py`); the IP and MAC addresses in them are replaced by documentation values (192.0.2.x, 00:00:5E:00:53:xx). The Nexys Video brief (`../nexys_video/ethernet_nexys_video_brief.md`) uses the first ten.
+Captures of the campaign of the Ethernet demo on the Nexys Video (image `eth_fw2`: hardware git 2c2c686b, firmware git f82d4f1, 11-17-2026). Each picture is a rendering of the console or test text (`cpu/microblaze_v_ethernet/test/render_capture.py`); the IP and MAC addresses in them are replaced by documentation values (192.0.2.x, 00:00:5E:00:53:xx). The [RTLNet Specification](../../../documentation/rtnet_specification.md) summarizes these measurements.
 
 | File | Shows |
 |---|---|
@@ -23,7 +23,7 @@ Captures of the campaign of the Ethernet demo on the Nexys Video (image `eth_fw2
 
 ## Arty A7-100T captures
 
-Captures of the campaign of the Ethernet demo on the Arty A7-100T (image `arty_fw2`: hardware git ab3e1d17, firmware git f82d4f1, 11-17-2026), rendered and redacted the same way. The Arty brief (`../arty_a7_100/ethernet_arty_a7_100_brief.md`) uses all of them.
+Captures of the campaign of the Ethernet demo on the Arty A7-100T (image `arty_fw2`: hardware git ab3e1d17, firmware git f82d4f1, 11-17-2026), rendered and redacted the same way. The [RTLNet Specification](../../../documentation/rtnet_specification.md) summarizes these measurements.
 
 | File | Shows |
 |---|---|

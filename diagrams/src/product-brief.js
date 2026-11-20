@@ -1,5 +1,5 @@
 // Drawing set: product-brief (1 sheet: RTLNet in the FPGA and what it connects to) for
-// documentation/rtlnet_product_brief.md.
+// documentation/rtnet_specification.md.
 // Build: node diagrams/src/product-brief.js  ->  diagrams/out/product-brief.pptx
 // Render: powershell -File diagrams\tools\render.ps1 diagrams\out\product-brief.pptx  ->  out/png/product-brief-1.png
 // Fills: white = RTLNet RTL cores, blue = CPU-path accelerators, gray = soft CPU subsystem,

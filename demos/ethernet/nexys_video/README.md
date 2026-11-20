@@ -72,7 +72,7 @@ end
 show classifier
 ```
 
-`classifier firewall disable` returns to the protection profile. The firewall is described in the brief and in `cpu/microblaze_v_ethernet/documentation/rtlnet_cpu_eth.md` section 5b.
+`classifier firewall disable` returns to the protection profile. The firewall is described in the [RTLNet Specification](../../../documentation/rtnet_specification.md#cpu-path-firewall) and in `cpu/microblaze_v_ethernet/documentation/rtlnet_cpu_eth.md` section 5b.
 
 ## Services in the image
 
@@ -97,7 +97,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File cpu/microblaze_v_ethernet/te
 
 ## Expected results
 
-Measured on this image (`eth_fw2`, build info in `build_info.txt`) in the campaign of 11-17-2026: the board on a switch to a PC with a Gigabit adapter, iperf 2, 10 s runs (TCP: mean of 3 runs), 64-byte echoes x 2000, firewall off. The brief (`ethernet_nexys_video_brief.md`, `ethernet_nexys_video_brief.pdf`) holds the full table with the firewall off and on, what each test does, the port scan and the floods.
+Measured on this image (`eth_fw2`, build info in `build_info.txt`) in the campaign of 11-17-2026: the board on a switch to a PC with a Gigabit adapter, iperf 2, 10 s runs (TCP: mean of 3 runs), 64-byte echoes x 2000, firewall off. The [RTLNet Specification](../../../documentation/rtnet_specification.md) compares the released Ethernet images and explains the measurement conditions.
 
 | Test | 10 Mb/s | 100 Mb/s | 1000 Mb/s |
 |---|---|---|---|
@@ -122,6 +122,6 @@ powershell -NoProfile -ExecutionPolicy Bypass -File cpu/microblaze_v_ethernet/te
 powershell -NoProfile -ExecutionPolicy Bypass -File cpu/microblaze_v_ethernet/test/flood_test.ps1 -Port <COM port> -Nic <adapter> -Rate 100000 -Kinds udp-closed,udp-bcast-net,mcast,icmp-bcast
 ```
 
-Campaign of 11-17-2026 (1000 Mb/s link, firewall off): `FLOOD_TEST: PASS 95/95` (all kinds at 1000 frames per second) and `FLOOD_TEST: PASS 50/50` (four kinds at 100,000 frames per second offered). `show classifier` prints the per-class counters afterward. With the firewall on, every frame of a 1,000,000-frame unicast flood to a closed port reaches the board and is dropped by the classifier while the TCP echo runs unchanged; a port scan of 199 closed TCP ports and 100 closed UDP ports gets no answer (brief, section CPU-path firewall).
+Campaign of 11-17-2026 (1000 Mb/s link, firewall off): `FLOOD_TEST: PASS 95/95` (all kinds at 1000 frames per second) and `FLOOD_TEST: PASS 50/50` (four kinds at 100,000 frames per second offered). `show classifier` prints the per-class counters afterward. With the firewall on, every frame of a 1,000,000-frame unicast flood to a closed port reaches the board and is dropped by the classifier while the TCP echo runs unchanged; a port scan of 199 closed TCP ports and 100 closed UDP ports gets no answer (see the CPU-path firewall section of the specification).
 
 `build_info.txt` in this folder lists the source revision, the timing result and the utilization of the image: 23,891 LUT, 33,968 flip-flops, 228.5 block RAM tiles, 6 DSP blocks, WNS +0.154 ns at the one 100 MHz system clock.

@@ -36,7 +36,7 @@ CPU also configures and monitors the RTL.
 | Processor subsystem | Ethernet or media MicroBlaze V configuration | AXI DMA carries CPU-path frames. lwIP handles TCP echo and iperf 2. |
 | Board integration | Nexys Video and Arty A7-100T | Board logic connects the PHY, clocks, resets, local memory and registers. |
 
-Wired tests confirmed 10/100/1000 Mb/s operation on Nexys Video and 10/100 Mb/s on Arty. With the CPU-path firewall enabled on the gigabit Nexys link, UDP reached 942 Mb/s from PC to board and 944 Mb/s in reverse, with zero reported loss. The [product brief](rtlnet_product_brief.md) gives both boards’ throughput and the test conditions.
+Wired tests confirmed 10/100/1000 Mb/s operation on Nexys Video and 10/100 Mb/s on Arty. With the CPU-path firewall enabled on the gigabit Nexys link, UDP reached 942 Mb/s from PC to board and 944 Mb/s in reverse, with zero reported loss. The [RTLNet Specification](rtnet_specification.md) gives both boards’ throughput and the test conditions.
 
 ---
 
@@ -67,7 +67,7 @@ RTLNet/
     rtlnet_ddr/                   DDR3 controller behind a vendor-neutral AXI4 slave (MIG IP generated from the board's project file)
     rtlnet_axi_cdc/               AXI clock-domain crossing for DDR clients
     rtlnet_vdma_s2mm/             stream-to-memory frame writer for the Nexys media design
-    rtlnet_framebuf/              on-chip frame memory for the Ethernet DMA path
+    rtlnet_framebuf/              DDR video slot ownership, reference counts and frame metadata
   ip/                             local bindings to the IronCapture receiver and IronH264 encoder
   media-sources.json              companion repositories, revisions and expected core trees
   cpu/microblaze_v_ethernet/      shared Ethernet firmware and processor subsystem

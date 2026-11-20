@@ -1,5 +1,5 @@
 # build_pdf.ps1 - Markdown to PDF for the documents in this folder (headless Chrome, pdf_generator.md).
-#   powershell -NoProfile -ExecutionPolicy Bypass -File Documentation\build_pdf.ps1 [rtlnet_product_brief] [-Sync]
+#   powershell -NoProfile -ExecutionPolicy Bypass -File Documentation\build_pdf.ps1 [rtnet_specification] [-Sync]
 # -Sync uploads the new PDF to the project's Google Drive folder (diagrams\tools\sync_drive.py),
 # updating the same Drive file so its links stay valid.
 # The page is the Markdown between pdf\head.html and pdf\foot.html, rendered in the browser
@@ -7,7 +7,7 @@
 # render.html is assembled next to the .md so the drawing paths (..\diagrams\out\png) resolve,
 # and is deleted after the print. Mermaid 10.9.1 shows the label break &#10; as a space, so it
 # becomes <br/> inside mermaid fences only; the .md keeps &#10;.
-param([string]$Name = 'rtlnet_product_brief', [switch]$Sync)
+param([string]$Name = 'rtnet_specification', [switch]$Sync)
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '..\scripts\rtlnet_tools.ps1')
 

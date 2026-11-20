@@ -2,7 +2,7 @@
 
 Revision 11-13-2026
 
-The RTLNet H.264 encoder with the High profile extension: CABAC entropy coding, in-loop deblocking filter, two engines, 1080p30 and 720p30.
+This RTLNet image integrates IronH264 and its High Profile extension: CABAC entropy coding, in-loop deblocking filter, two engines, 1080p30 and 720p30.
 The board generates test patterns, encodes them and sends an MPEG-TS stream over UDP.
 
 This is the demonstration form: **High profile runs for 30 minutes after each configuration of the FPGA.** At the end of the 30 minutes the
@@ -11,6 +11,8 @@ encoder sends one IDR picture and continues in Constrained Baseline; the stream 
 License: `LICENSE_DEMO.md` in the `demos` folder. The extension without the time limit is a paid feature: a paid license from IronKernel (ironkernel.com).
 
 The demonstration is this bitstream only. Using the High profile extension in your own design or in simulation needs a paid license.
+
+For the data path, release measurements and limits, see the [RTLNet Specification](../../../documentation/rtnet_specification.md).
 
 ## What you need
 
