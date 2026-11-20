@@ -2,7 +2,7 @@
   {
     "name": "IronCapture",
     "repository": "https://github.com/ironkernel01/IronCapture.git",
-    "commit": "8fa50e6f2f0409faa32302b589fa39eec6a38d13",
+    "commit": "0a665116dd55e9ef412500f9c9dff9da2a72f862",
     "core": "rtlnet_csi2_rx",
     "tree": "5d04dcf2171979ccfc024841ac489de722e4cb81"
   },
