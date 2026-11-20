@@ -54,36 +54,78 @@ The MAC client interface uses 64-bit AXI4-Stream. Byte zero occupies the low byt
 </div>
 <div class="brief-page">
 
-## Ethernet, IPv4 and application cores
+## Ethernet MAC and PHY management
 
-| RTLNet core | Function and interface |
-|---|---|
-| `rtlnet_eth_mac` | Bridges complete Ethernet frames to the packet stream. The RGMII implementation supports 10/100/1000 Mb/s. The same core directory supplies `rtlnet_eth_mac_mii` for the 10/100 Mb/s MII interface. Both handle FCS and transmit padding. |
-| `rtlnet_mdio` | Exposes MDC, MDIO, PHY reset and interrupt to the processor. The C driver issues Clause 22 and Clause 45 management transactions. Board-specific PHY handling covers RTL8211E and DP83848 devices. |
-| `rtlnet_eth_protocol` | Filters by destination MAC, buffers frames between the MAC and protocol clocks, and dispatches each frame to enabled protocol blocks. A transmit arbiter selects a complete reply or CPU frame. Unclaimed traffic can enter the CPU receive path. |
-| `rtlnet_arp` | Answers requests for the configured IPv4 address with the local MAC. The responder operates without a firmware lookup. |
-| `rtlnet_icmp` | Returns the payload of a local IPv4 echo request and recomputes checksums. The reference configuration accepts echo payloads up to 1,472 bytes. |
-| `rtlnet_dhcp` | Obtains and renews an IPv4 lease and withdraws the address on expiry. Firmware starts the client and reads lease state through registers. |
-| `rtlnet_udp_socket` | Binds local UDP ports and exchanges payloads with FPGA applications. Two 64-bit metadata beats carry peer address, port, length, socket, flags and MAC. Application backpressure can fill the receive FIFO. Drops are counted. |
-| `rtlnet_udp_echo` | Consumes a socket datagram and returns its bytes to the sender. A byte-for-byte echo tests both directions of the application interface. |
-| `rtlnet_iperf` | Implements the iperf 2 UDP server in logic. Receive mode counts bytes, sequence gaps and jitter. Reverse mode generates a timed datagram stream toward the client. |
+### Ethernet MAC (rtlnet_eth_mac)
 
-**Choosing a path.** An instrument producing UDP samples can feed the socket interface directly. A TCP service runs in lwIP on the MicroBlaze V and uses the CPU DMA path. The same board can serve both.
+The MAC connects a full-duplex PHY to a 64-bit frame stream. Nexys Video uses RGMII at 10, 100 or 1,000 Mb/s. Arty uses the four-bit MII implementation at 10 or 100 Mb/s. Both accept a whole Ethernet frame from the client, pad a short transmission, append the FCS and enforce the inter-frame gap. On receive the MAC checks and strips the FCS. Store-and-forward queues cross from the PHY clocks to the client clock.
+
+### PHY management (rtlnet_mdio)
+
+Firmware uses MDC and MDIO to identify the PHY, manage negotiation and read link speed and duplex. The MDIO driver supports Clause 22 and Clause 45 accesses. In the Nexys design firmware programs the MAC speed from the RTL8211E status and the receive-clock detector qualifies it. On Arty the DP83848 supplies the MII clocks. Check link status, then MAC frame and error counters, before debugging an IP service.
+
+### Protocol wrapper (rtlnet_eth_protocol)
+
+The wrapper owns the local MAC and IPv4 configuration. It filters ingress by destination MAC and queues accepted frames across the MAC and protocol clocks. Each enabled protocol leaf sees the frame and can claim it. With the CPU path enabled, unclaimed frames enter its receive queue. On transmit the arbiter selects a source for a complete frame in fixed priority order, from UDP socket, ICMP, ARP, DHCP and iperf through to CPU traffic. A stalled CPU receiver and a stalled UDP application have separate queues and counters.
 
 </div>
 <div class="brief-page">
 
-## CPU protection, checksums and shared primitives
+## Hardware UDP and IPv4 services
 
-| RTLNet core | Function and observability |
+### UDP socket (rtlnet_udp_socket)
+
+Bind an enabled socket to a local UDP port. A matching datagram reaches the application's receive stream as two 64-bit metadata beats followed by zero to 1,472 payload bytes. The metadata identifies the socket, peer MAC, IPv4 address, port, flags and length. Payload begins in the low byte lane. A reply supplies destination metadata and the declared number of payload bytes. The core constructs Ethernet, IPv4 and UDP headers.
+
+A receive FIFO absorbs application stalls until its slots fill. Socket counters distinguish delivered datagrams from drops. The receiver checks the IPv4 header checksum and can optionally verify a nonzero UDP checksum. The transmitter uses the zero checksum permitted for UDP over IPv4. A transmit length mismatch increments the drop count.
+
+### UDP echo and throughput (rtlnet_udp_echo and rtlnet_iperf)
+
+UDP echo returns the socket payload to the sender. A byte-exact comparison exercises metadata, payload alignment and final byte enables. The iperf 2 UDP server counts received bytes, sequence gaps and jitter. Reverse mode generates a timed stream toward the peer, so the two directions can be measured separately.
+
+### Address and reachability services
+
+| Core | Hardware service |
 |---|---|
-| `rtlnet_classifier` | Examines Ethernet, IPv4 and transport fields before CPU DMA. A rule can pass, drop or police traffic. Per-class counters let firmware distinguish a rule match from a DMA or application failure. The block resets to drop-all until configured. |
-| `rtlnet_tcp_offload` | Inserts IPv4, TCP and UDP checksums in outbound CPU frames. On receive, it verifies checksums and appends an eight-byte result trailer for the DMA consumer. Hardware UDP services have their own packet path. |
-| `rtlnet_common` | Supplies RAM wrappers, register slices, packet FIFOs, synchronizers, reset release and AXI4-Lite plumbing. These blocks carry frame boundaries and control transactions across clock domains. |
+| rtlnet_arp | Answers ARP requests for the local IPv4 address with the configured MAC. |
+| rtlnet_icmp | Echoes local IPv4 ping payloads and updates the checksums. The reference accepts up to 1,472 payload bytes. |
+| rtlnet_dhcp | Acquires and renews an IPv4 lease and withdraws it on expiry. Firmware can read lease state. |
 
-### CPU-path firewall
+</div>
+<div class="brief-page">
 
-The Ethernet firmware installs a protection profile at boot. The optional default-deny firewall admits ARP and allowed TCP services. The Nexys Ethernet configuration has 16 allow entries. Arty has eight and uses distributed RAM for its classifier tables. Both expose classifier and checksum counters on the serial console.
+## Classifier (rtlnet_classifier)
+
+The Ethernet references place the classifier between the CPU receive queue and checksum offload. It acts on whole frames before DMA consumes a descriptor or lwIP spends CPU time. Hardware-claimed ARP, ping and UDP service traffic bypasses this instance. This placement protects the processor during a flood. Traffic can still occupy the physical link.
+
+| Match engine | What it can select |
+|---|---|
+| Field tables | MAC address, EtherType, VLAN ID, IPv4 address or transport port, with exact, masked or range comparisons. |
+| IPv4 tuple ACL | IP protocol, masked source and destination addresses, and source and destination port ranges in one entry. Port matching requires a supported, unfragmented TCP or UDP header. |
+| Positional rules | Masked byte comparisons within a configurable prefix, 64 bytes by default. A rule can recognize a header pattern for counting or policing. |
+
+### Filtering and the CPU firewall
+
+The core resets to drop-all. Gating tables participate in the admission decision. Classify-only entries can count or police a match independently. The global modes are drop-all, pass-all, pass-on-match and drop-on-match. The Ethernet firmware can enable a default-deny policy that admits ARP and configured IPv4 tuples. A TCP service needs both a listener and an allow entry. The reference designs have 16 tuple slots on Nexys and eight on Arty. The driver can add a live tuple by writing its fields before setting its valid bit.
+
+### Storm protection and counters
+
+Four fixed-window policers bound CPU arrivals in frames per interval. The Ethernet protection profile allows 10 broadcast, 10 UDP, 20 ARP and 10 ICMP frames per respective 100 ms window. A frame selects one policer when matches overlap. Enabling the firewall replaces the UDP and ICMP classification tuples with the allow list and retains ARP and broadcast policing. Use the classifier counters to distinguish policy drops, exhausted budgets and internal overruns.
+
+In the recorded Nexys test at 100,000 offered flood frames/s, the classifier dropped all 1,000,000 flood frames. Both boards passed 21 of 21 firewall checks. These measurements apply to the CPU path in the released Ethernet images.
+
+</div>
+<div class="brief-page">
+
+## TCP checksum offload (rtlnet_tcp_offload)
+
+On transmit, the core accepts CPU DMA frames, computes the IPv4 header and TCP or UDP checksum and inserts the results before the CPU TX queue. On receive it checks frames admitted by the classifier and appends an eight-byte result trailer for the DMA driver. Firmware inspects the result and removes the trailer before passing the packet to lwIP. The trailer stays on the internal CPU path. lwIP retains TCP connection state, retransmission and flow control.
+
+Both directions are pass-through after reset. Firmware can enable TX and RX offload separately. Build-time options include pure TCP ACK coalescing and receive batching. The driver and receive buffer layout must support the selected options.
+
+### Shared primitives (rtlnet_common)
+
+Packet FIFOs, register slices, synchronizers, reset release and AXI4-Lite helpers implement the queue and clock boundaries. Use the frame counters on each side of a boundary to separate a classifier decision from a stalled DMA consumer.
 
 | Observation from the released images | What it tests |
 |---|---|

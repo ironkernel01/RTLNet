@@ -26,29 +26,31 @@ This Markdown guide connects RTL, drivers and reference firmware for engineers a
 
 ## Cores
 
-Every core has the same layout: `hdl/`, `driver/` (C), `testbench/` and `documentation/`.
+Use each Markdown guide for the core interface, configuration and verification. For a change, open the guide beside its `hdl/` implementation and the corresponding testbench. Register-controlled cores also supply C driver definitions.
 
-| Core | Function |
+| Core integration guide | What to connect, configure or verify |
 |---|---|
-| `cores/rtlnet_common` | Shared library: technology include, RAM wrapper (`rtlnet_ram_core`), shift register (`rtlnet_shift_reg_core`), synchronizers, packet FIFO, AXI4-Lite slave/CDC/decoder |
-| `cores/rtlnet_eth_mac` | 10/100/1000 Mb/s RGMII and 10/100 Mb/s MII MACs: FCS, padding, IFG, store-and-forward queues |
-| `cores/rtlnet_mdio` | Bit-banged MDIO (Clause 22 and Clause 45) plus RTL8211E and DP83848 PHY drivers |
-| `cores/rtlnet_eth_protocol` | Protocol wrapper: MAC filter, queues, leaf fan-out, arbiter, address registers, CPU network path |
-| `cores/rtlnet_arp` | ARP responder |
-| `cores/rtlnet_icmp` | ICMP echo (ping) |
-| `cores/rtlnet_dhcp` | DHCP client |
-| `cores/rtlnet_iperf` | iperf 2 UDP server |
-| `cores/rtlnet_udp_socket` | UDP socket layer with N bound ports |
-| `cores/rtlnet_udp_echo` | UDP echo application |
-| `cores/rtlnet_classifier` | Configurable L2-L4 filter/classifier with policers. It drops everything at power-up until configured; the first configuration is the broadcast storm limiter |
-| `cores/rtlnet_tcp_offload` | Checksum offload on the CPU DMA streams: inserts IPv4/TCP/UDP checksums on transmit, and checks them on receive with an 8-byte result trailer |
-| `cores/rtlnet_axi_arbiter` | N:1 AXI4 arbiter in front of the DDR3 port |
-| `cores/rtlnet_axi_cdc` | AXI4 clock-domain bridge |
-| `cores/rtlnet_ddr` | DDR3 memory controller behind a vendor-neutral AXI4 slave; the MIG project file comes from the board |
-| `ip/rtlnet_csi2_rx` | IronCapture receiver binding. The Nexys media board uses the internal test pattern |
-| `cores/rtlnet_vdma_s2mm` | 2D video write DMA |
-| `cores/rtlnet_framebuf` | Tear-free frame-buffer slot manager |
-| `ip/rtlnet_h264_enc` | IronH264 encoder binding (Constrained Baseline, in-loop deblocking filter, interrupt-driven driver layer); a default-off seam for an optional High profile extension |
+| [rtlnet_eth_mac](cores/rtlnet_eth_mac/documentation/rtlnet_eth_mac.md) | Select RGMII on Nexys or MII on Arty. Feed the negotiated PHY speed to the MAC. Check receive clock, FCS errors, queue drops and transmitted frames. |
+| [rtlnet_mdio](cores/rtlnet_mdio/documentation/rtlnet_mdio.md) | Drive PHY reset and management over MDC/MDIO. Identify the PHY and read its negotiated speed and duplex before enabling the MAC. |
+| [rtlnet_eth_protocol](cores/rtlnet_eth_protocol/documentation/rtlnet_eth_protocol.md) | Set the local MAC and IPv4 address, enable leaves and connect the application and CPU clocks. Trace ingress filtering, leaf claims, unclaimed RX frames and transmit arbitration. |
+| [rtlnet_arp](cores/rtlnet_arp/documentation/rtlnet_arp.md) | Enable the hardware responder for the active local IPv4 address. Test a peer ARP request and compare the returned IP and MAC. |
+| [rtlnet_icmp](cores/rtlnet_icmp/documentation/rtlnet_icmp.md) | Send an IPv4 echo request to the configured address. Check the echoed payload and both checksums. |
+| [rtlnet_dhcp](cores/rtlnet_dhcp/documentation/rtlnet_dhcp.md) | Start address acquisition and monitor lease state. Exercise renewal and expiry when using the lease as the effective node address. |
+| [rtlnet_udp_socket](cores/rtlnet_udp_socket/documentation/rtlnet_udp_socket.md) | Bind a local port per enabled socket. Implement the two metadata beats, declared payload length and stream handshakes. Compare socket drops against application backpressure. |
+| [rtlnet_udp_echo](cores/rtlnet_udp_echo/documentation/rtlnet_udp_echo.md) | Use this application as a socket client example. Send short and maximum-length datagrams and compare the returned payload byte for byte. |
+| [rtlnet_iperf](cores/rtlnet_iperf/documentation/rtlnet_iperf.md) | Use an iperf 2 UDP peer to exercise receive and reverse-transmit paths. Compare bytes, sequencing and reported loss at the negotiated link speed. |
+| [rtlnet_classifier](cores/rtlnet_classifier/documentation/rtlnet_classifier.md) | Choose a CPU admission policy, read built table capacities, configure field tables or ACL tuples and set fixed-window policers. Sections 13 and 14 describe storm protection and the default-deny firewall, including live rule updates. |
+| [rtlnet_tcp_offload](cores/rtlnet_tcp_offload/documentation/rtlnet_tcp_offload.md) | Pair TX checksum insertion with the lwIP checksum configuration. On RX allocate room for the eight-byte status trailer, inspect its flags and remove it before delivering the frame to lwIP. |
+| [rtlnet_common](cores/rtlnet_common/documentation/rtlnet_common.md) | Use the common packet FIFO, RAM, reset and AXI4-Lite primitives. Select synchronous or crossing variants according to the clocks on each interface. |
+| [rtlnet_vdma_s2mm](cores/rtlnet_vdma_s2mm/documentation/rtlnet_vdma_s2mm.md) | Set line geometry and stride, supply a writable slot and verify end-of-line and end-of-frame handling before publishing a DDR frame. |
+| [rtlnet_framebuf](cores/rtlnet_framebuf/documentation/rtlnet_framebuf.md) | Allocate and commit a writer slot, acquire the completed slot for a reader and release it when finished. The manager tracks ownership and metadata. |
+| [rtlnet_axi_arbiter](cores/rtlnet_axi_arbiter/documentation/rtlnet_axi_arbiter.md) | Map DDR requesters to master ports, configure priorities and inspect per-master service under simultaneous traffic. |
+| [rtlnet_axi_cdc](cores/rtlnet_axi_cdc/documentation/rtlnet_axi_cdc.md) | Cross the five memory-mapped AXI channels between clock domains. Follow the reset and FIFO requirements in the core guide. |
+| [rtlnet_ddr](cores/rtlnet_ddr/documentation/rtlnet_ddr.md) | Connect the board memory controller and wait for calibration before issuing memory transactions. Check the board-specific width, clock and address range. |
+
+### Companion IP used in the Nexys media design
+
+IronCapture provides the receiver and internal pattern generator. IronH264 supplies the Baseline encoder. Resolve the pinned siblings before building the media image. The resolver creates local bindings under `ip/`. For the source revisions and binding procedure, see the [media manifest](media-sources.json) and [Nexys board guide](boards/nexys_video/README.md).
 
 ## Where to find the files
 
