@@ -1,9 +1,0 @@
-Purpose: Digilent Zybo Z7-20 board-file provenance.
-Revision: 11-14-2026.
-Origin: Digilent vivado-boards, zybo-z7-20/A.0 (board.xml, part0_pins.xml, preset.xml).
-The files keep their original MIT notices. Board identity: digilentinc.com:zybo-z7-20:part0:1.2,
-xc7z020clg400-1. No processing-system preset is applied implicitly.
-SHA256 manifest (paths relative to this directory):
-650c4ca19979c156f059eee2b2f9a1862cbc1eb25927f2ab1d1904968ab342cc  zybo-z7-20/A.0/board.xml
-62a5f2d025828c3a400734e457e75584db43e40e6065a26a4e5351cd50989ad3  zybo-z7-20/A.0/part0_pins.xml
-f1da413772d4be2d6c2a703ceb54502304840e11fe8fd8c2b02dc450c86335e6  zybo-z7-20/A.0/preset.xml

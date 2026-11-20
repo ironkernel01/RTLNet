@@ -1,8 +1,0 @@
-Purpose: local SDK source provenance.
-Revision: 11-14-2026.
-Origin: data\embeddedsw\ThirdParty\sw_services\lwip220_v1_4\src\lwip-2.2.0\contrib\ports\xilinx\netif\xemacpsif_physpeed.c
-SHA256 original: bb58d502d22544d34827c1262e15c2b5a6dc139c267dbb1ba29f110e8958b8d1
-Original BSD license retained. Two Realtek functions replaced; installation unchanged.
-The local SDK lwIP tree retains its original source/license notices.
-Local data/lwip220.yaml removes its BOM and restricts dependency metadata to emacps.
-PCN: https://files.digilent.com/resources/programmable-logic/documents/RTL8211F_PCN.pdf

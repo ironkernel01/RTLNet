@@ -19,8 +19,6 @@ rem
 rem   file <board> <source file> <name>
 rem             copies one more file into the board folder: the source is a path
 rem             relative to the repository root, <name> the file name in the folder
-rem             (the Zybo Z7-20 demo needs the ARM firmware and ps7_init.tcl besides
-rem             the bitstream; the first column is the word file, not a board)
 rem
 rem   board      = folder under boards\ and under the demo (example nexys_video)
 rem   build tag  = folder under boards\<board>\build\  (the -Tag of build.ps1)

@@ -40,7 +40,6 @@ Role: two independent checks that need no decoder library.
        Cuts the capture before the PAT of its n-th IDR picture (random access indicator, default the second) and rewrites the file; the start-up part
        is judged by nobody. Prints "SKIPIDR cut_packets=<p> cut_access_units=<a> cc_errors=<e>": the video-PID continuity errors that lay in the
        cut part (reported, not judged). Without a n-th IDR picture the file is left unchanged and "SKIPIDR none" is printed (exit 1).
-       stream_test.ps1 of the Zybo Z7-20 calls it after trim; the Nexys Video test does not use it.
   trim <file.ts>
        Cuts the capture before its last video access unit (the one the capture stopped in is incomplete; FFmpeg and JM report it as a corrupted
        macroblock or an out-of-range mb_qp_delta). stream_test.ps1 calls it before every check.

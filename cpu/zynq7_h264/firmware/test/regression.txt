@@ -1,8 +1,0 @@
-# Purpose: host tests applicable to the ARM port. Revision: 11-14-2026.
-tsmux_arm script:cpu/zynq7_h264/firmware/test/tsmux_host_test.ps1
-picq_arm script:cpu/zynq7_h264/firmware/test/picq_host_test.ps1
-cli_phy_ratectl_arm script:cpu/zynq7_h264/firmware/test/rtlnet_host_tests.ps1
-encoder_models_arm script:cpu/zynq7_h264/firmware/test/rtlnet_encoder_host_tests.ps1
-venc_irq_arm script:cpu/zynq7_h264/firmware/test/venc_irq_host_test.ps1
-# MicroBlaze TX ring is absent: PS UART polls. Its test is inapplicable.
-# The retained IRQ session model checks logical APIs, not physical PS GIC behavior.

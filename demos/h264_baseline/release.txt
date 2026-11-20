@@ -1,7 +1,2 @@
 # demorelease.bat: <board> <build tag>   (boards/<board>/build/<tag>/ holds the image)
 nexys_video  rel_base_dbk
-# Zybo Z7-20 camera demo: the bitstream and build_info.txt of image own9, then the ARM firmware (fw19) and the PS initialization
-# (ps7_init.tcl) that the JTAG load needs besides the bitstream:  file <board> <source path in the repository> <file name>
-zybo_z7_20   own9
-file zybo_z7_20 boards/zybo_z7_20/build/own9/ps7_init.tcl ps7_init.tcl
-file zybo_z7_20 cpu/zynq7_h264/firmware/build/fw19/rtlnet_zybo.elf rtlnet_zybo.elf

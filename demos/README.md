@@ -39,7 +39,5 @@ The Ethernet demo also runs on the Digilent Arty A7-100T (10/100 Mb/s MII, 256 K
 `ethernet/arty_a7_100/rtlnet_arty_a7_100_eth.bit` (release image `arty_rel`, built by `boards/arty_a7_100/scripts/build_ethernet.ps1 -Tag arty_rel`),
 steps in `ethernet/arty_a7_100/README.md`, brief `ethernet/arty_a7_100/ethernet_arty_a7_100_brief.pdf` with the measured results at 10 and 100 Mb/s.
 
-The Zybo Z7-20 camera demo (`h264_baseline/zybo_z7_20/`) streams a real camera (Digilent Pcam 5C, MIPI CSI-2, received by `rtlnet_csi2_rx`) through one RTLNet H.264 Baseline engine as MPEG-TS over UDP, 720p30 and 1080p15. On a Zynq the bitstream alone does not run the demo: the folder holds the bitstream `rtlnet_zybo_z7_20.bit`, the ARM firmware `rtlnet_zybo.elf` and the PS initialization script `ps7_init.tcl`, and `boards/zybo_z7_20/scripts/program_demo.ps1` loads them over JTAG (volatile). Steps: `h264_baseline/zybo_z7_20/README.md`; brief: `h264_baseline/zybo_z7_20/h264_baseline_zybo_z7_20_brief.pdf`; its pictures: `h264_baseline/images/` (the frames are to be retaken in daylight).
-
 License: `LICENSE.md` in the repository root for RTLNet. A demo that is under other terms names its license file in its
 README and brief.
