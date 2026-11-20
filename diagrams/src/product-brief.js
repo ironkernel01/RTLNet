@@ -1,4 +1,4 @@
-// Drawing set: product-brief (1 sheet: RTLNet in the FPGA and what it connects to) for
+// Drawing set: product-brief (2 sheets: reference Ethernet board and 10 Gb/s integration) for
 // documentation/rtnet_specification.md.
 // Build: node diagrams/src/product-brief.js  ->  diagrams/out/product-brief.pptx
 // Render: powershell -File diagrams\tools\render.ps1 diagrams\out\product-brief.pptx  ->  out/png/product-brief-1.png
@@ -25,13 +25,13 @@ box(s, xe, r[2], ew, h, "Service PC", ["USB-UART console", "JTAG program and deb
 
 // Line-rate RTL data path
 box(s, c[0], r[0], w, h, "Ethernet MAC", ["10/100/1000 Mb/s, RGMII", "FCS, padding, IFG", "8 KiB RX and TX queues"], W);
-box(s, c[1], r[0], w, h, "Protocol wrapper", ["destination MAC filter", "ingress and egress queues", "leaf fan-out, arbiter"], W);
+box(s, c[1], r[0], w, h, "Protocol wrapper", ["64-bit AXI4-Stream", "ingress and egress queues", "leaf fan-out, arbiter"], W);
 box(s, c[2], r[0], w, h, "Protocol leaves", ["ARP, ICMP echo, DHCP client", "iperf 2 UDP server", "UDP sockets, 4 ports"], W);
 box(s, c[0], r[1], w, h, "MDIO", ["Clause 22 and Clause 45", "PHY reset and interrupt", "RTL8211E driver in C"], W);
 box(s, c[2], r[1], w, h, "UDP application", ["UDP echo, or user logic", "on the socket payload streams"], W);
 
 // CPU network path
-box(s, c[1], r[1], w, h, "Frame classifier", ["L2-L4 filter, policers", "broadcast storm limiter", "drop-all until configured"], B);
+box(s, c[1], r[1], w, h, "Frame classifier", ["64-bit CPU path at 100 MHz", "L2-L4 filter and policers", "drop-all until configured"], B);
 box(s, c[1], r[2], w, h, "Checksum offload", ["IPv4, TCP, UDP checksum insert", "receive check, 8-byte trailer"], B);
 box(s, c[0], r[2], w, h, "Soft CPU", ["MicroBlaze 100 MHz, AXI DMA", "lwIP 2.2.0: TCP, TCP iperf", "network manager, CLI"], G);
 
@@ -69,5 +69,34 @@ notes(s, 0.6, 5.6, 12.1, 1.0, [
 ]);
 legend(s, 0.6, 6.8, [["RTLNet RTL core", W], ["CPU-path accelerator", B], ["Soft CPU subsystem", G], ["Outside the FPGA", Y]], 2.6);
 frame(s);
+
+// The second sheet shows main ingress in a 10 Gb/s system, separate from the board image.
+const g = pres.addSlide();
+container(g, 0.55, 0.62, 12.2, 5.75, "10 Gb/s system integration");
+box(g, 0.95, 1.45, 2.75, 1.20, "10 Gb/s MAC + PCS/PHY",
+    ["Board-selected interface", "Ethernet frames, FCS stripped"], Y);
+box(g, 5.0, 1.45, 3.15, 1.20, "RTLNet classifier",
+    ["64 bits at 156.25 MHz", "1 beat/clock, legal frames", "Pass, filter or police"], B);
+box(g, 9.45, 1.45, 2.85, 1.20, "Forward / steer",
+    ["Admitted frames at line rate", "Ready output required"], W);
+wire(g, 3.7, 2.05, 5.0, 2.05);
+wire(g, 8.15, 2.05, 9.45, 2.05);
+label(g, 3.72, 1.76, 1.25, "10 Gb/s RX", 9, "center");
+label(g, 8.17, 1.76, 1.25, "10 Gb/s", 9, "center");
+box(g, 8.95, 3.52, 3.3, 1.15, "Service queues",
+    ["Selected packets and replies", "Optional clock-domain crossing"], W);
+box(g, 4.85, 3.52, 3.40, 1.15, "RTLNet protocol services",
+    ["ARP, ICMP, DHCP, UDP sockets", "64-bit RX and TX streams"], W);
+wire(g, 10.70, 2.65, 10.70, 3.52, { start: true });
+wire(g, 8.25, 4.10, 8.95, 4.10, { start: true });
+box(g, 0.95, 3.52, 2.95, 1.15, "Application / firmware",
+    ["UDP payload or CPU service", "Rate set by the application"], G);
+wire(g, 3.90, 4.10, 4.85, 4.10, { start: true });
+notes(g, 1.00, 5.00, 11.10, 1.05, [
+    "Classifier capacity: 64 bits x 156.25 MHz = 10.00 Gb/s. Standalone Artix-7 timing: +1.515 ns setup and +0.059 ns hold.",
+    "Minimum-frame traffic: 14.88 million frames/s on the wire. The classifier handles one 60-byte client frame per eight beats, or 19.53 million frames/s.",
+    "Size service queues for the selected traffic. Their processing rate is independent of the classifier's line-rate forwarding contract.",
+]);
+frame(g);
 
 pres.writeFile({ fileName: path.join(__dirname, "..", "out", "product-brief.pptx") }).then((f) => console.log("wrote", f));

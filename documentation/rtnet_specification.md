@@ -94,6 +94,24 @@ UDP echo returns the socket payload to the sender. A byte-exact comparison exerc
 </div>
 <div class="brief-page">
 
+## 10 Gb/s interconnect and line-rate classification
+
+**The classifier is rated for lossless inspection at 100% of a 10 Gb/s Ethernet link.** Its 64-bit AXI4-Stream datapath accepts one beat per 156.25 MHz clock. With a ready downstream consumer, every legal frame admitted by policy can pass at the input rate. Firewall and policer drops are intentional and counted separately.
+
+<img src="../diagrams/out/png/product-brief-2.png" alt="10 Gb/s MAC client, inline 64-bit classifier, forwarded traffic and separately queued protocol services" style="width:95%;">
+
+| Core or interface | Capacity and evidence |
+|---|---|
+| 64-bit AXI4-Stream | 64 bits × 156.25 million transfers/s = 10.00 Gb/s, or 1.25 GB/s per direction. One transfer takes 6.4 ns. |
+| rtlnet_classifier | Back-to-back 60-byte MAC-client frames take eight beats each. The testbench passed 200 such frames in 1,600 beats with input ready continuously. The standalone default block-RAM design closed at 156.25 MHz on XC7A200T-1 with +1.515 ns setup and +0.059 ns hold slack. |
+| Minimum Ethernet frames | 64 bytes including FCS, eight preamble/SFD bytes and 12 inter-frame-gap byte times give 84 byte times per frame. At 10 Gb/s that is 14.88 million frames/s. The eight-beat classifier cadence can service 19.53 million minimum client frames/s. |
+| ARP, DHCP, ICMP, UDP socket, echo and iperf | These services can exchange their selected packets on a 10 Gb/s interconnect. Frame queues can cross to a service clock. A directly clocked instance needs timing closure at 156.25 MHz. Queue depth, per-frame processing and the application determine sustained service throughput. |
+| TCP checksum offload | 64-bit CPU DMA streams. RX adds one trailer beat per admitted frame. DMA and lwIP determine endpoint throughput. The core timing result and trailer contract are in its integration guide. |
+| Ethernet MAC | A 10 Gb/s integration supplies a suitable MAC and PCS/PHY. The released RTLNet RGMII and MII images reach 1 Gb/s and 100 Mb/s respectively. |
+
+</div>
+<div class="brief-page">
+
 ## Classifier (rtlnet_classifier)
 
 The Ethernet references place the classifier between the CPU receive queue and checksum offload. It acts on whole frames before DMA consumes a descriptor or lwIP spends CPU time. Hardware-claimed ARP, ping and UDP service traffic bypasses this instance. This placement protects the processor during a flood. Traffic can still occupy the physical link.

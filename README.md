@@ -24,6 +24,14 @@ This Markdown guide connects RTL, drivers and reference firmware for engineers a
 4. Issuing CPU accesses to the Ethernet boards uses the common 32-bit AXI4-Lite map. SYS, MAC, MDIO and UDP echo begin at `0x44A00000`, `0x44A01000`, `0x44A02000` and `0x44A03000`. The protocol window begins at `0x44A10000`. The [architecture guide](documentation/rtlnet_architecture.md) gives subwindows, port conventions and clock domains.
 5. Change a network core in its owning directory and update its C register definitions and self-checking bench together. For a firmware service change, test both permitted and dropped traffic. For a media dependency change, pin the accepted tree, run the resolver, build the Nexys Baseline image and decode its UDP stream. For an Ethernet-only change, verify both link directions with UDP loss counts and TCP throughput at the negotiated speed.
 
+## Integrating a 10 Gb/s packet path
+
+Use a 64-bit MAC-client AXI4-Stream at 156.25 MHz for 10.00 Gb/s in each direction. Place the classifier at main ingress to inspect all frames. In a passing configuration with a ready output it can inspect legal frames losslessly at 100% line rate. The default block-RAM configuration closed timing out of context on XC7A200T-1 (+1.515 ns setup, +0.059 ns hold). Set the stream clock parameter to the actual frequency so policing windows remain calibrated. Preserve byte order, TKEEP and TLAST at the MAC boundary.
+
+A minimum frame occupies 84 byte times on the wire including preamble and inter-frame gap. A 10 Gb/s link can present 14.88 million such frames/s. The classifier receives 60 client bytes after FCS removal, requiring eight cycles, or 19.53 million frames/s of classifier capacity. Its regression checks continuous input readiness and back-to-back output for legal minimum frames. Compare passed, mode-dropped, police-dropped and overrun counters during integration.
+
+Use a 10 Gb/s MAC and PCS/PHY appropriate to the target board. Steer selected control and application traffic into a bounded service queue. ARP, DHCP, ICMP, UDP sockets, echo and iperf can share the 10 Gb/s bus. Each leaf only needs to service its selected packets at the provisioned rate. When clocking a leaf directly at 156.25 MHz, close timing on that instance. For a slower service domain, cross with a whole-frame FIFO and size it for bursts. Keep service backpressure isolated from the inline forwarding path. The Nexys and Arty Ethernet references place the classifier on the CPU branch and use 1 Gb/s and 100 Mb/s PHYs respectively. See the [classifier verification and timing record](cores/rtlnet_classifier/documentation/rtlnet_classifier.md).
+
 ## Cores
 
 Use each Markdown guide for the core interface, configuration and verification. For a change, open the guide beside its `hdl/` implementation and the corresponding testbench. Register-controlled cores also supply C driver definitions.

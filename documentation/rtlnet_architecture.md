@@ -559,7 +559,7 @@ UDP echo and bidirectional iperf 2). Nexys hardware tests cover 10, 100 and 1,00
 
 ## 12. Packet-stream bandwidth
 
-The released RGMII design supports up to 1 Gb/s and the MII design up to 100 Mb/s. A 64-bit interface transferring one beat every cycle carries 10 Gb/s at 156.25 MHz or 25 Gb/s at 390.625 MHz before overhead. Those figures are interface arithmetic. No 10G or 25G MAC implementation, timing closure or board throughput is claimed here.
+A 64-bit AXI4-Stream at 156.25 MHz transfers 10.00 Gb/s per direction. The classifier is rated for 100% line-rate, lossless inspection of legal packets with an accepting sink. Its bench exercises back-to-back minimum frames. The default block-RAM configuration closed at 6.400 ns on XC7A200T-1 (+1.515 ns setup and +0.059 ns hold). The configured filter and policers may discard traffic by policy. A 10 Gb/s system places this instance at main ingress and provides the appropriate Ethernet MAC and PHY. Protocol leaves can RX/TX their selected packets on this fabric using service queues and clock crossings as needed. The released CPU-path examples use RGMII up to 1 Gb/s and MII up to 100 Mb/s. See the [classifier timing record](../cores/rtlnet_classifier/documentation/rtlnet_classifier.md).
 
 ---
 
