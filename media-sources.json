@@ -9,8 +9,8 @@
   {
     "name": "IronH264",
     "repository": "https://github.com/ironkernel01/IronH264.git",
-    "commit": "edfa19860a802c3fb595b3c82def3ece4b4efe2d",
+    "commit": "d3f4113f101bf28513eb36b5830d8d437290ed4c",
     "core": "rtlnet_h264_enc",
-    "tree": "9bb4c1c5f1d372f7fb0a00e7640d4da0ecb1dc56"
+    "tree": "64cb982d23ff9f79e68f66dbf370a7a056aa0134"
   }
 ]

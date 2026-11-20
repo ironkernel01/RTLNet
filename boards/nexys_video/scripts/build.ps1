@@ -30,7 +30,7 @@ Usage:
     build/<name>/rtlnet_nexys_video.bit (program it with program.ps1 -Bit). The default image in build/ is still not touched. Example:
     -Network -HighProfile demo -Tag hp_demo -Image.
   * -HighProfile <none|full|demo> (default none): none is the flow above, unchanged. full or demo builds rtlnet_h264_top with HIGH_PROFILE 1 and
-    the netlist of that variant from the High profile repository (H264HighProfile\netlist\<variant>, found through $env:H264_HIGHPROFILE_ROOT or
+    the netlist of that variant from the High profile repository (ironh264_highprofile\netlist\<variant>, found through $env:H264_HIGHPROFILE_ROOT or
     next to this repository); the build refuses to start when the netlist is missing. none = the CAVLC Baseline encoder alone (no High profile netlist).
     full = High profile without a time limit, demo = High profile that ends 30 minutes after configuration (the encoder then falls back to Baseline).
   * -HpTools <cabac|t8|all> (default all; only with -HighProfile full|demo): which tools the High profile build contains. CABAC entropy coding is always
@@ -84,7 +84,7 @@ $net = $(if ($Network) { '1' } else { '0' })
 $tclArgs = "network,$net"
 $hpArgs = ''
 if ($HighProfile -ne 'none') {
-    $hpRoot = if ($env:H264_HIGHPROFILE_ROOT) { $env:H264_HIGHPROFILE_ROOT } else { Join-Path $Repo '..\H264HighProfile' }
+    $hpRoot = if ($env:H264_HIGHPROFILE_ROOT) { $env:H264_HIGHPROFILE_ROOT } else { Join-Path $Repo '..\ironh264_highprofile' }
     $hpName = if ($HpTools -eq 'all') { $HighProfile } else { "${HighProfile}_$HpTools" }
     $hpNetlist = Join-Path $hpRoot "netlist\$hpName"
     if (-not (Test-Path -LiteralPath (Join-Path $hpNetlist 'rtlnet_h264_hp.edf'))) {
