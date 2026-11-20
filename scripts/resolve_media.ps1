@@ -20,7 +20,7 @@ foreach ($item in $pins) {
     $root = (Resolve-Path -LiteralPath $root).Path
     $origin = git -C $root remote get-url origin
     if (($origin -replace '^https://[^/@]+@github\.com/', 'https://github.com/') -ne $item.repository) { throw "Unexpected $($item.name) origin" }
-    if ((git -C $root rev-parse HEAD) -ne $item.commit) { throw "Expected $($item.name) at $($item.commit)" }
+    if ((git -C $root rev-parse "HEAD:ip/$($item.core)") -ne $item.tree) { throw "Expected $($item.name) at $($item.commit)" }
     if (git -C $root status --porcelain -- "ip/$($item.core)") { throw "Local edits in $($item.name) media core" }
     $target = (Resolve-Path -LiteralPath (Join-Path $root "ip/$($item.core)")).Path
     if (Test-Path -LiteralPath $link) {
