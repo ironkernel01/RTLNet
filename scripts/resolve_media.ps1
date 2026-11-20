@@ -8,13 +8,11 @@ foreach ($item in $pins) {
     $root = if ($item.name -eq 'IronCapture') { $IronCapture } else { $IronH264 }
     $link = Join-Path $ip $item.core
     if (!$root) {
-        $candidates = @( (Join-Path (Split-Path $repo) $item.name),
-            (Join-Path (Split-Path $repo) "IronForge/rtl/$($item.name)") )
         if (Test-Path -LiteralPath $link) {
             $target = (Get-Item -LiteralPath $link).Target
             if ($target) { $root = Split-Path (Split-Path $target[0]) }
         }
-        if (!$root) { $root = $candidates | Where-Object { Test-Path -LiteralPath (Join-Path $_ '.git') } | Select-Object -First 1 }
+        if (!$root) { $root = Join-Path (Split-Path $repo) $item.name }
     }
     if (!$root) { throw "Supply the $($item.name) checkout at $($item.commit) using -$($item.name)." }
     $root = (Resolve-Path -LiteralPath $root).Path
