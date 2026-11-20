@@ -4,7 +4,7 @@
  * Copyright (C) 2026 IronKernel. All rights reserved.
  *
  * Role: implementation of the contract in rtlnet_venc.h. The encoder core is controlled only through the driver layer
- * (cores/rtlnet_h264_enc/driver/rtlnet_h264_enc_ctl.h): this file holds the application glue, that is the frame buffer handshake, the stream
+ * (ip/rtlnet_h264_enc/driver/rtlnet_h264_enc_ctl.h): this file holds the application glue, that is the frame buffer handshake, the stream
  * state (GOP, frame_num, PTS), the rate controller calls, the picture queue and the transport stream multiplexer hand-off.
  *
  * Execution contexts. Polled mode: everything runs from venc_poll in the main loop. Interrupt mode: the encoder's interrupt handler (venc_isr,

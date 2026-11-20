@@ -63,6 +63,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $Board = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $Repo  = (Resolve-Path (Join-Path $Board '..\..')).Path
+& (Join-Path $Repo 'scripts/resolve_media.ps1')
 $Build = Join-Path $Board 'build'
 New-Item -ItemType Directory -Force -Path $Build | Out-Null
 if ($Program -or $Test) {

@@ -24,7 +24,7 @@ $Runner = Join-Path $PSScriptRoot 'rtlnet_run_sim.ps1'
 $VlRunner = Join-Path $PSScriptRoot 'rtlnet_run_verilator.ps1'
 $list   = @(Get-Content -LiteralPath (Join-Path $PSScriptRoot 'rtlnet_regression.txt'))
 # cores/ always; cpu/ and boards/ only on the branches that have them.
-$roots = @('cores', 'cpu', 'boards') | ForEach-Object { Join-Path $Repo $_ } | Where-Object { Test-Path -LiteralPath $_ -PathType Container }
+$roots = @('cores', 'cpu', 'boards', 'ip/rtlnet_csi2_rx', 'ip/rtlnet_h264_enc') | ForEach-Object { Join-Path $Repo $_ } | Where-Object { Test-Path -LiteralPath $_ -PathType Container }
 foreach ($f in (Get-ChildItem -Path $roots -Recurse -Filter regression.txt | Sort-Object FullName)) {
     $list += Get-Content -LiteralPath $f.FullName
 }

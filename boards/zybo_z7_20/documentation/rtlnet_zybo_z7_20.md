@@ -3,7 +3,7 @@
 Revision: 11-15-2026.
 
 The target is the Digilent Zybo Z7-20 (`xc7z020clg400-1`). The camera (Digilent Pcam 5C, OV5640, two MIPI lanes) is received by the
-IronKernel receiver `rtlnet_csi2_rx` (`cores/rtlnet_csi2_rx`, parameter `CAMERA_RX` = 1): D-PHY front end on the camera pins, CSI-2 packet
+IronKernel receiver `rtlnet_csi2_rx` (`ip/rtlnet_csi2_rx`, parameter `CAMERA_RX` = 1): D-PHY front end on the camera pins, CSI-2 packet
 layer, Bayer conversion with white balance and YUV422 output. The picture is encoded with one RTLNet H.264 Baseline engine (deblocking filter on)
 and the ARM application streams the result over the PS Gigabit Ethernet. The design is one flow: the capture DMA with its frame buffer, one
 deblocking encoder surround the receiver in the module `rtlnet_zybo_video`. The capture DMA and the encoder are 64-bit masters (parameter `AXI_DATA_W` 64) and connect straight to the two
@@ -175,7 +175,7 @@ failing endpoints permit the deviation. Full WNS/WHS and WNS/WHS excluding them 
 timing requirements.` qualify only under this predicate, only in implementation and parent logs; changed IDs or messages, synthesis occurrences and other critical warnings fail. The bitstream, the XSA and `gate_pass 1`
 appear only after all remaining gates pass.
 
-The evidence for the margin is the measurement on the board, not the static model: the tap sweep (`scripts/rx_test.ps1 -Action sweep`, section 12.1 of `cores/rtlnet_csi2_rx/documentation/rtlnet_csi2_rx.md`) shows the receiver
+The evidence for the margin is the measurement on the board, not the static model: the tap sweep (`scripts/rx_test.ps1 -Action sweep`, section 12.1 of `ip/rtlnet_csi2_rx/documentation/rtlnet_csi2_rx.md`) shows the receiver
 error-free over a wide range of taps. It does not replace the static model (one board, one cable, room temperature) and the deviation stays named and open in `build_info.txt` (`dphy_hardware_verification open`).
 
 ### Reviewed CDC and methodology findings
@@ -214,7 +214,7 @@ frames and 720p admits every frame. Firmware PTS steps are 3000 or 6000 at 90 kH
 ## Bench
 
 `tb_rtlnet_zybo_video` instantiates the wrapper (behavioural D-PHY front end, `DPHY_TARGET` "GENERIC") with the complete encoder-stage hierarchy against the GP and HP models. The D-PHY transmitter model of the receiver
-benches (`cores/rtlnet_csi2_rx/testbench/rtlnet_csi2_tb_phy.sv`) sends CSI-2 RAW10 frames of 32 x 16 pixels (diagonal ramps that the demosaic reproduces exactly in the interior) on two lanes at 420 and 280 Mb/s per lane.
+benches (`ip/rtlnet_csi2_rx/testbench/rtlnet_csi2_tb_phy.sv`) sends CSI-2 RAW10 frames of 32 x 16 pixels (diagonal ramps that the demosaic reproduces exactly in the interior) on two lanes at 420 and 280 Mb/s per lane.
 It checks: the camera block and receiver core identities and versions; in the 1080p mode 3 of 5 frames admitted and the stored frame of the second admission (geometry 32 x 16, the luma of every interior pixel within
 one step of the expected value, neutral chroma) with a held slot never overwritten; in the 720p mode every frame admitted; the receiver `FRAMES` counter 7 and every error counter 0 read over AXI-Lite; the publication
 and encoder IRQs; one real lossy/deblocked IDR encode whose Annex B stream and reconstruction `scripts/check_board_encode.ps1` decodes with the repository's three reference decoders (a mutated reconstruction and a damaged
@@ -265,7 +265,7 @@ Not shown on the board: a saturated coloured object (a bright saturated red or o
 
 ### Receiver margin (IDELAY sweep)
 
-Margin (`rx_test.ps1 -Action sweep`, 3 s per tap, section 12.1 of `cores/rtlnet_csi2_rx/documentation/rtlnet_csi2_rx.md`; measured on image `own6`, same receiver sources and constraints): both lanes at one tap, 720p error-free taps 0 to 29 (30 taps, 2,340 ps), 1080p
+Margin (`rx_test.ps1 -Action sweep`, 3 s per tap, section 12.1 of `ip/rtlnet_csi2_rx/documentation/rtlnet_csi2_rx.md`; measured on image `own6`, same receiver sources and constraints): both lanes at one tap, 720p error-free taps 0 to 29 (30 taps, 2,340 ps), 1080p
 error-free taps 0 to 21 (22 taps, 1,716 ps; errors at 22 to 26, clean again from 27, the next bit period). Default taps 11 (lane 0) and 10 (lane 1). The lower edge of the window lies below tap 0 and is not measured. Not
 measured: temperature, supply, other cables and boards. The sweep was not repeated on `own9`.
 

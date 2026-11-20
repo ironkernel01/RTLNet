@@ -221,7 +221,7 @@ read_filelist $REPO cores/rtlnet_common/hdl/rtlnet_common.f
 if {$NETWORK} { read_filelist $REPO boards/nexys_video/hdl/rtlnet_nexys_video_network.f }
 read_filelist $REPO boards/nexys_video/hdl/rtlnet_nexys_video.f
 if {$::HP_NETLIST ne ""} {
-  read_verilog -sv [file join $REPO cores rtlnet_h264_enc hdl hp rtlnet_h264_hp_bb.sv]
+  read_verilog -sv [file join $REPO ip rtlnet_h264_enc hdl hp rtlnet_h264_hp_bb.sv]
   read_edif [file join $::HP_NETLIST rtlnet_h264_hp.edf]
   puts "rtlnet_build: High profile netlist $opt(highprofile) from $::HP_NETLIST"
 }

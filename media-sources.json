@@ -1,0 +1,14 @@
+[
+  {
+    "name": "IronCapture",
+    "repository": "https://github.com/ironkernel01/IronCapture.git",
+    "commit": "8fa50e6f2f0409faa32302b589fa39eec6a38d13",
+    "core": "rtlnet_csi2_rx"
+  },
+  {
+    "name": "IronH264",
+    "repository": "https://github.com/ironkernel01/IronH264.git",
+    "commit": "ba4b73e43702b324ce1833f9575827202a480892",
+    "core": "rtlnet_h264_enc"
+  }
+]

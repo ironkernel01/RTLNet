@@ -30,11 +30,11 @@ $Run = Join-Path $Repo ".sim/${Bench}_$Tag"
 foreach ($Name in 'board_stream.hex', 'board_rec0.hex', 'board_info.txt') {
     if (-not (Test-Path -LiteralPath (Join-Path $Run $Name))) { throw "board bench output missing: $Run/$Name" }
 }
-$Tb = Join-Path $Repo 'cores/rtlnet_h264_enc/testbench'
+$Tb = Join-Path $Repo 'ip/rtlnet_h264_enc/testbench'
 $Check = Join-Path $Tb 'h264_check.py'
 $Sps = Join-Path $Run 'spspps.exe'
 & $Cc -std=c11 -Wall -Wextra -Werror -DRTLNET_HOST_TEST "-I$Repo/cores/rtlnet_common/driver" `
-    "-I$Repo/cores/rtlnet_h264_enc/driver" "$Repo/cores/rtlnet_h264_enc/driver/rtlnet_h264_enc.c" `
+    "-I$Repo/ip/rtlnet_h264_enc/driver" "$Repo/ip/rtlnet_h264_enc/driver/rtlnet_h264_enc.c" `
     "$Tb/h264_spspps_tool.c" -o $Sps
 if ($LASTEXITCODE -ne 0) { throw 'SPS/PPS writer compilation failed' }
 & $Sps 32 16 32 16 30 4 (Join-Path $Run 'sps.bin')

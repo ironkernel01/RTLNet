@@ -15,8 +15,8 @@
  *
  * Build and run (repository root; gcc from Resolve-RtlnetHostCc in scripts/rtlnet_tools.ps1):
  *   gcc -std=c11 -Wall -Wextra -Werror -DRTLNET_HOST_TEST -Icores/rtlnet_common/driver
- *       -Icores/rtlnet_h264_enc/driver cores/rtlnet_h264_enc/driver/rtlnet_h264_enc.c
- *       cores/rtlnet_h264_enc/testbench/test_rtlnet_h264_enc_driver.c -o test_h264 && ./test_h264
+ *       -Icores/rtlnet_h264_enc/driver ip/rtlnet_h264_enc/driver/rtlnet_h264_enc.c
+ *       ip/rtlnet_h264_enc/testbench/test_rtlnet_h264_enc_driver.c -o test_h264 && ./test_h264
  */
 #include "rtlnet_h264_enc.h"
 #include "rtlnet_mmio.h"

@@ -3,7 +3,7 @@
  *
  * Copyright (C) 2026 IronKernel. All rights reserved.
  *
- * Role: drives the controller with a synthetic encoder model and checks the gates of cores/rtlnet_h264_enc/documentation/rtlnet_ratectl.md
+ * Role: drives the controller with a synthetic encoder model and checks the gates of ip/rtlnet_h264_enc/documentation/rtlnet_ratectl.md
  * (section 7). Model: the bits of a picture are complexity x 2^((34 - QP) / 6) x (1 + noise), an IDR picture is RATIO times a P
  * picture at equal QP, noise is uniform within +-10 %. The test uses double for the model only; the controller is fixed point.
  * Sequences: static, constant motion, a 3 s noise burst, a scene cut, ramps. Cases: 720p30 1000 kb/s, 1080p30 2000 kb/s,

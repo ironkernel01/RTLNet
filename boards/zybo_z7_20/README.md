@@ -3,7 +3,7 @@
 Revision: 11-15-2026.
 
 This is the real-camera H.264 design for the Digilent Zybo Z7-20 (XC7Z020-1CLG400): a Digilent Pcam 5C (OV5640,
-MIPI CSI-2) is received by the IronKernel receiver `rtlnet_csi2_rx` (`cores/rtlnet_csi2_rx`), encoded by one RTLNet
+MIPI CSI-2) is received by the IronKernel receiver `rtlnet_csi2_rx` (`ip/rtlnet_csi2_rx`), encoded by one RTLNet
 Baseline H.264 engine and streamed as MPEG-TS over UDP by a bare-metal ARM application (`cpu/zynq7_h264`) through the PS
 Gigabit Ethernet and lwIP. The PHY sits on PS MIO pins, so the RTLNet RTL network stack is not used on this board. HDMI is absent.
 

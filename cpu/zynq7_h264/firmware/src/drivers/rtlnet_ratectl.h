@@ -16,7 +16,7 @@
  * would overflow is counted (overflow, and overflow_below_max when the picture's QP was below the range maximum) and the fill
  * saturates at 100 %; a buffer that runs empty (static content at the minimum QP) is counted as underflow.
  *
- * Model (section 2 of cores/rtlnet_h264_enc/documentation/rtlnet_ratectl.md): the size of a picture of type t at QP q is 2^(K_t - q/6) bits;
+ * Model (section 2 of ip/rtlnet_h264_enc/documentation/rtlnet_ratectl.md): the size of a picture of type t at QP q is 2^(K_t - q/6) bits;
  * K_t is tracked in the log domain (Q8) for the I and the P type separately. The QP of the next picture solves "the pictures of the
  * next H coded at one QP use the bit budget of H picture periods plus the distance of the buffer from its set point"; the result is
  * clamped to the QP range, limited to +-2 from the previous picture and rounded with error feedback so the average QP is exact.

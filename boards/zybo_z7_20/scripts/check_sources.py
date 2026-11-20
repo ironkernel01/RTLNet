@@ -84,7 +84,7 @@ def closure(repo, sources, incdirs):
             found = next((p for p in candidates if p.is_file()), None)
             if found is None:
                 raise ValueError(f'Missing include {name} from {relative}')
-            header = found.resolve().relative_to(repo.resolve()).as_posix()
+            header = found.relative_to(repo).as_posix()
             if header not in headers:
                 headers.append(header)
                 visit(header)

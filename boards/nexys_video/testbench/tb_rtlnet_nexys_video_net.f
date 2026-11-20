@@ -12,10 +12,10 @@
 -f cores/rtlnet_axi_arbiter/hdl/rtlnet_axi_arbiter.f
 -f cores/rtlnet_axi_cdc/hdl/rtlnet_axi_cdc.f
 -f cores/rtlnet_ddr/hdl/rtlnet_ddr_sim.f
--f cores/rtlnet_csi2_rx/hdl/rtlnet_csi2_rx.f
+-f ip/rtlnet_csi2_rx/hdl/rtlnet_csi2_rx.f
 -f cores/rtlnet_vdma_s2mm/hdl/rtlnet_vdma_s2mm.f
 -f cores/rtlnet_framebuf/hdl/rtlnet_framebuf.f
--f cores/rtlnet_h264_enc/hdl/rtlnet_h264_enc.f
+-f ip/rtlnet_h264_enc/hdl/rtlnet_h264_enc.f
 cores/rtlnet_eth_protocol/testbench/rtlnet_tb_eth_frames_pkg.sv
 cores/rtlnet_eth_mac/testbench/rtlnet_rtl8211e_model.sv
 cpu/microblaze_v_h264/rtlnet_microblaze_sim_stub.sv

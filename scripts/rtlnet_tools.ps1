@@ -39,7 +39,7 @@ Overview:
   * Get-RtlnetToolDir <name> -> %LOCALAPPDATA%/RTLNet/tools/<name> (created);
     $env:RTLNET_TOOLS_DIR replaces the %LOCALAPPDATA%/RTLNet/tools root.
   * Resolve-RtlnetLdecod / Resolve-RtlnetH264dec -> the JM ldecod and OpenH264
-    h264dec executables built by cores/rtlnet_h264_enc/testbench/h264_build_decoders.ps1:
+    h264dec executables built by ip/rtlnet_h264_enc/testbench/h264_build_decoders.ps1:
     $env:RTLNET_LDECOD / $env:RTLNET_H264DEC, else the tool directory; $null when
     not built.
   * Resolve-RtlnetVerilator -> object Root, Bash of the MSYS2 install holding ucrt64/bin/verilator

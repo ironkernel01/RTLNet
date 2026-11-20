@@ -44,7 +44,7 @@ Overview:
     test of the DMA netif (test/netif_host: rtlnet_lwip_netif.c, rtlnet_offload.c and the core
     drivers on lwIP from the install, a mock of the AXI DMA driver and a register model of the
     protocol wrapper and the checksum offload core); each run ends with NETIF_HOST: PASS / FAIL.
-    -RatectlTest: build and run the host unit test of the rate controller (cores/rtlnet_h264_enc/testbench/test_rtlnet_ratectl.c, the synthetic encoder model;
+    -RatectlTest: build and run the host unit test of the rate controller (ip/rtlnet_h264_enc/testbench/test_rtlnet_ratectl.c, the synthetic encoder model;
     log build/ratectl_test.log); -Demo runs it as well; the exit code follows the anchored RATECTL_TEST: PASS / FAIL line.
     -NoFirmware: harness only. -Bsp: regenerate
     the BSP even when it is up to date. -Xsa: another hardware export. -Define:
@@ -80,7 +80,7 @@ Revision: 11-14-2026
     linker script is unchanged (the DDR3 window is not linked: the firmware uses it only through the memory test).
   * 11-09-2026: video cores (Phase 1): the rtlnet_csi2_rx, rtlnet_vdma_s2mm and rtlnet_framebuf drivers and src/rtlnet_fbcrc.c.
   * 11-10-2026: rate control (Phase 2d): rtlnet_ratectl.c in the firmware and the harness; -RatectlTest and the unit test in -Demo.
-  * 11-12-2026: the rate controller and the encoder control layer (rtlnet_h264_enc_ctl.c) are driver files of cores/rtlnet_h264_enc; host/host_h264_model.c.
+  * 11-12-2026: the rate controller and the encoder control layer (rtlnet_h264_enc_ctl.c) are driver files of ip/rtlnet_h264_enc; host/host_h264_model.c.
   * 11-09-2026: -Ddr: development image linked into DDR3 (build/firmware_ddr.elf); boot banner names the image.
 -------------------------------------------------------------------------------
 #>
@@ -136,13 +136,13 @@ $drvSrcs = @(
     'cores/rtlnet_dhcp/driver/rtlnet_dhcp.c', 'cores/rtlnet_iperf/driver/rtlnet_iperf.c',
     'cores/rtlnet_udp_socket/driver/rtlnet_udp_socket.c', 'cores/rtlnet_udp_echo/driver/rtlnet_udp_echo.c',
     'cores/rtlnet_classifier/driver/rtlnet_classifier.c', 'cores/rtlnet_tcp_offload/driver/rtlnet_tcp_offload.c',
-    'cores/rtlnet_axi_arbiter/driver/rtlnet_axi_arbiter.c', 'cores/rtlnet_csi2_rx/driver/rtlnet_csi2_rx.c',
+    'cores/rtlnet_axi_arbiter/driver/rtlnet_axi_arbiter.c', 'ip/rtlnet_csi2_rx/driver/rtlnet_csi2_rx.c',
     'cores/rtlnet_vdma_s2mm/driver/rtlnet_vdma_s2mm.c', 'cores/rtlnet_framebuf/driver/rtlnet_framebuf.c',
-    'cores/rtlnet_h264_enc/driver/rtlnet_h264_enc.c', 'cores/rtlnet_h264_enc/driver/rtlnet_h264_enc_ctl.c', 'cores/rtlnet_h264_enc/driver/rtlnet_ratectl.c'
+    'ip/rtlnet_h264_enc/driver/rtlnet_h264_enc.c', 'ip/rtlnet_h264_enc/driver/rtlnet_h264_enc_ctl.c', 'ip/rtlnet_h264_enc/driver/rtlnet_ratectl.c'
 ) | Where-Object { Test-Path -LiteralPath (Join-Path $Repo $_) }
 $inc = @(
     "-I$Fw/src", "-I$Fw/src/lwip", "-I$Fw/src/video", "-I$Fw/cli",
-    "-I$Repo/cores/rtlnet_common/driver",
+    "-I$Repo/cores/rtlnet_common/driver", "-I$Repo/ip/rtlnet_csi2_rx/driver", "-I$Repo/ip/rtlnet_h264_enc/driver",
     "-I$Repo/cpu/microblaze_v_h264/driver"
 ) + ($drvCores | Where-Object { Test-Path -LiteralPath (Join-Path $Repo "cores/$_/driver") } |
      ForEach-Object { "-I$Repo/cores/$_/driver" })
@@ -318,11 +318,11 @@ if ($HostHarness -or $Demo) {
     }
 }
 
-# Host unit test of the rate controller (cores/rtlnet_h264_enc/testbench/test_rtlnet_ratectl.c against the driver's rtlnet_ratectl.c); part of -Demo.
+# Host unit test of the rate controller (ip/rtlnet_h264_enc/testbench/test_rtlnet_ratectl.c against the driver's rtlnet_ratectl.c); part of -Demo.
 if ($RatectlTest -or $Demo) {
     $rcExe = Join-Path $Out 'test_ratectl.exe'
     $rcLogFile = Join-Path $Out 'ratectl_test.log'
-    Invoke-Step $HostCc ($common + @('-O2', "-I$Repo/cores/rtlnet_h264_enc/driver", "$Repo/cores/rtlnet_h264_enc/testbench/test_rtlnet_ratectl.c", "$Repo/cores/rtlnet_h264_enc/driver/rtlnet_ratectl.c", '-lm', '-o', $rcExe))
+    Invoke-Step $HostCc ($common + @('-O2', "-I$Repo/ip/rtlnet_h264_enc/driver", "$Repo/ip/rtlnet_h264_enc/testbench/test_rtlnet_ratectl.c", "$Repo/ip/rtlnet_h264_enc/driver/rtlnet_ratectl.c", '-lm', '-o', $rcExe))
     $rcLog = & $rcExe
     $rcRc = $LASTEXITCODE
     $rcLog | Set-Content -LiteralPath $rcLogFile -Encoding ascii
@@ -372,7 +372,7 @@ if ($NetifTest) {
         if (Test-Path -LiteralPath $nt) { Remove-Item -Recurse -Force -LiteralPath $nt }
         New-Item -ItemType Directory -Force -Path $nt | Out-Null
         $zc = @("-DRTLNET_NETIF_ZERO_COPY_RX=$($combo[0])", "-DRTLNET_NETIF_ZERO_COPY_TX=$($combo[1])", '-DRTLNET_HOST_TEST')
-        $ntInc = @("-I$Fw/test/netif_host", "-I$Fw/src", "-I$Fw/src/lwip", "-I$Repo/cores/rtlnet_common/driver",
+        $ntInc = @("-I$Fw/test/netif_host", "-I$Fw/src", "-I$Fw/src/lwip", "-I$Repo/cores/rtlnet_common/driver", "-I$Repo/ip/rtlnet_csi2_rx/driver", "-I$Repo/ip/rtlnet_h264_enc/driver",
                    "-I$Repo/cpu/microblaze_v_h264/driver", "-I$Repo/cores/rtlnet_eth_protocol/driver", "-I$Repo/cores/rtlnet_classifier/driver",
                    "-I$Repo/cores/rtlnet_tcp_offload/driver", '-isystem', "$LwipDir/src/include", '-isystem', "$LwipDir/contrib/ports/xilinx/include")
         $ntObjs = @()

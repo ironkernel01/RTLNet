@@ -2,12 +2,12 @@
 -------------------------------------------------------------------------------
 File: stream_check_selftest.ps1
 Purpose: host test of the pattern PSNR path of stream_check.py (the board stream checker): streams are built from the
-  Python pattern model (cores/rtlnet_csi2_rx/testbench/pattern_model.py) through ffmpeg libx264, pictures are left out and
+  Python pattern model (ip/rtlnet_csi2_rx/testbench/pattern_model.py) through ffmpeg libx264, pictures are left out and
   k is resynced. Regression entry of boards/nexys_video/testbench/regression.txt (script: type, passes on exit code 0).
   Without ffmpeg (RTLNET_FFMPEG or PATH) the step prints SKIP and passes.
 Usage: powershell -NoProfile -ExecutionPolicy Bypass -File stream_check_selftest.ps1
 Revision: 11-13-2026
-  * 11-13-2026: initial version (moved out of cores/rtlnet_csi2_rx/testbench/csi2_bars_model.ps1 -Verify).
+  * 11-13-2026: initial version (moved out of ip/rtlnet_csi2_rx/testbench/csi2_bars_model.ps1 -Verify).
 -------------------------------------------------------------------------------
 #>
 $ErrorActionPreference = 'Stop'

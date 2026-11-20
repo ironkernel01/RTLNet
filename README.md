@@ -29,10 +29,10 @@ Every core has the same layout: `hdl/`, `driver/` (C), `testbench/` and `documen
 | `cores/rtlnet_axi_arbiter` | N:1 AXI4 arbiter in front of the DDR3 port |
 | `cores/rtlnet_axi_cdc` | AXI4 clock-domain bridge |
 | `cores/rtlnet_ddr` | DDR3 memory controller behind a vendor-neutral AXI4 slave; the MIG project file comes from the board |
-| `cores/rtlnet_csi2_rx` | CSI-2 capture core: test-pattern generator and video source switch |
+| `ip/rtlnet_csi2_rx` | CSI-2 capture core: test-pattern generator and video source switch |
 | `cores/rtlnet_vdma_s2mm` | 2D video write DMA |
 | `cores/rtlnet_framebuf` | Tear-free frame-buffer slot manager |
-| `cores/rtlnet_h264_enc` | H.264 encoder (Constrained Baseline, in-loop deblocking filter, interrupt-driven driver layer); a default-off seam for an optional High profile extension |
+| `ip/rtlnet_h264_enc` | H.264 encoder (Constrained Baseline, in-loop deblocking filter, interrupt-driven driver layer); a default-off seam for an optional High profile extension |
 
 ## Where to find the files
 
@@ -127,3 +127,5 @@ Building and programming a bitstream is described in the board guide (`boards/ne
 
 `LICENSE.md` (source-available). Copyright (C) 2026 IronKernel. lwIP-derived files under `cpu/microblaze_v_h264/` keep the lwIP
 BSD license.
+
+The media demos use the receiver from IronCapture and the encoder from IronH264. The exact revisions are in media-sources.json. Run scripts/resolve_media.ps1 with -IronCapture and -IronH264 pointing to the respective checkouts before running the media regressions. The resolver links these checkouts under ip/.

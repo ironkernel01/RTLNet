@@ -3,7 +3,7 @@
  *
  * Copyright (C) 2026 IronKernel. All rights reserved.
  *
- * Role: the register model of cores/rtlnet_h264_enc for the host build (host_h264_model.c), called by the register hooks of host_platform.c. The
+ * Role: the register model of ip/rtlnet_h264_enc for the host build (host_h264_model.c), called by the register hooks of host_platform.c. The
  * model is functional enough to run the encoder session end to end: START with a busy time counted in model ticks, picture entries and bytes
  * written into the DDR3 model, STATUS, the interrupt registers and the irq line (host_irq_set_line of host_platform.c), the High profile status with
  * PROFILE_CHG at a changed profile, an older core without the interrupt registers. The harness controls are declared in host_platform.h.

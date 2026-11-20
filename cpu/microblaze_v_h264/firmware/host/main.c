@@ -714,7 +714,7 @@ static int demo_has(const char *needle)
  */
 static void demo_video(void)
 {
-    /* The CRC-32 of the frames of the C bar model (cores/rtlnet_csi2_rx/testbench/csi2_bars_model.c). */
+    /* The CRC-32 of the frames of the C bar model (ip/rtlnet_csi2_rx/testbench/csi2_bars_model.c). */
     static const char *const crc_720  = "0x6D3DF810 (frame 150, slot 2, 1280x720, pattern, 1843200 bytes)";
     static const char *const crc_1080 = "0x8ED9EC2B (frame 150, slot 2, 1920x1080, pattern, 4147200 bytes)";
 

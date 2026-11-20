@@ -3,5 +3,5 @@
 -f boards/zybo_z7_20/hdl/rtlnet_zybo_video.f
 cores/rtlnet_common/testbench/rtlnet_tb_pkg.sv
 cores/rtlnet_common/testbench/rtlnet_tb_axil_master.sv
--f cores/rtlnet_csi2_rx/testbench/rtlnet_csi2_tb_common.f
+-f ip/rtlnet_csi2_rx/testbench/rtlnet_csi2_tb_common.f
 boards/zybo_z7_20/testbench/tb_rtlnet_zybo_video.sv

@@ -7,7 +7,7 @@ Revision: 11-13-2026 (the stream start resolves the receiver's ARP entry; 11-11-
 ## 1. Purpose
 
 Two firmware modules in `cpu/microblaze_v_h264/firmware/src/video/` turn the access units of the two-engine H.264 encoder
-(`cores/rtlnet_h264_enc`) into an MPEG-2 transport stream and send it over lwIP UDP:
+(`ip/rtlnet_h264_enc`) into an MPEG-2 transport stream and send it over lwIP UDP:
 
 | File | Role |
 |---|---|
@@ -76,7 +76,7 @@ driver's `rtlnet_h264_ctl_irq_service()` through the handler `venc_isr`; at pict
 the queue has room, step 1 for the next picture, so the encoder does not wait for the main loop. **Polled**: `venc_poll` calls `rtlnet_h264_ctl_poll()`, which
 reads STATUS and does steps 2 and 3 as before; the core's interrupts stay disabled. Both modes run the same driver turnaround and the same callbacks
 (`on_picture_done`, `on_picture_error`); only the context differs (section 5.3). All control of the core, the registers and the stream parameters is in the driver
-(`cores/rtlnet_h264_enc/driver/rtlnet_h264_enc_ctl.{h,c}`, `rtlnet_h264_enc.md` section 18); the firmware keeps the frame buffer handshake, the stream state (GOP,
+(`ip/rtlnet_h264_enc/driver/rtlnet_h264_enc_ctl.{h,c}`, `rtlnet_h264_enc.md` section 18); the firmware keeps the frame buffer handshake, the stream state (GOP,
 frame_num, PTS), the rate controller calls, the picture queue and the multiplexer hand-off.
 
 1. Idle: LATEST_VALID set and LATEST_FRAME different from the last coded frame: take the slot (`rtlnet_framebuf_fw_take`, the

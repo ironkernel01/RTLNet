@@ -6,7 +6,7 @@ Purpose: board gate of Phase 1: the color bars run into the frame buffer with no
   DDR3 arbiter reports no errors. Talks to the firmware CLI over the board USB-UART (115200 8N1) like cli_test.ps1.
 Overview:
   * Takes the machine-wide board lock (rtlnet_board_lock.ps1).
-  * The expected CRC-32 values come from the C model (cores/rtlnet_csi2_rx/testbench/csi2_bars_model.ps1, MODEL lines).
+  * The expected CRC-32 values come from the C model (ip/rtlnet_csi2_rx/testbench/csi2_bars_model.ps1, MODEL lines).
   * Steps (one result line each):
       a  sync, enable (no other write before step b)
       b  show camera: 720p30, source pattern, FRAME_COUNT rate 30.0 fps +/- 0.3 over 4 s of the PC clock
@@ -41,7 +41,7 @@ if (-not $Transcript) { $Transcript = Join-Path $Board 'build\phase1_gate_transc
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Transcript) | Out-Null
 
 # Expected CRCs from the C model.
-$modelOut = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Repo 'cores\rtlnet_csi2_rx\testbench\csi2_bars_model.ps1')
+$modelOut = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Repo 'ip\rtlnet_csi2_rx\testbench\csi2_bars_model.ps1')
 $model = @{}
 foreach ($l in $modelOut) {
     if ($l -match '^MODEL (\S+) width=(\d+) height=(\d+) bytes=(\d+) crc32=0x([0-9A-Fa-f]{8})$') {

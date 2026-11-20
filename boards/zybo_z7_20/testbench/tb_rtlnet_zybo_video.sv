@@ -1,5 +1,5 @@
 // Purpose: PS-free end-to-end camera path of the Zybo wrapper: D-PHY pins, receiver, admission, capture, slot ownership and H.264 encode.
-// Overview: the D-PHY transmitter model of the camera receiver benches (cores/rtlnet_csi2_rx/testbench, behavioural front end) sends
+// Overview: the D-PHY transmitter model of the camera receiver benches (ip/rtlnet_csi2_rx/testbench, behavioural front end) sends
 //   CSI-2 RAW10 frames of 32 x 16 pixels on two lanes to the wrapper's camera pins; AXI-Lite GP master BFM and two AXI3 HP byte-memory
 //   slaves replace PS7. The capture DMA and the encoder (64-bit masters) are connected to the slaves directly, no bridge.
 //   The HP slave model rejects what an AXI3 HP port rejects or what breaks the project's burst rules: a burst that is not INCR or not 8

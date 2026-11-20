@@ -89,7 +89,7 @@ source [file join $board scripts rtlnet_add_sources.tcl]
 if {[catch {rtlnet_add_sources $repo $build} detail]} {fail 11 $detail}
 if {$::rtlnet_hp} {
   if {![file exists [file join $opt(hp_netlist) rtlnet_h264_hp.edf]]} {fail 11 "missing High profile netlist"}
-  add_files -norecurse [file join $repo cores rtlnet_h264_enc hdl hp rtlnet_h264_hp_bb.sv]
+  add_files -norecurse [file join $repo ip rtlnet_h264_enc hdl hp rtlnet_h264_hp_bb.sv]
   read_edif [file join $opt(hp_netlist) rtlnet_h264_hp.edf]
 }
 set_property STEPS.OPT_DESIGN.TCL.PRE [file join $board scripts rtlnet_cdc_hook.tcl] [get_runs impl_1]

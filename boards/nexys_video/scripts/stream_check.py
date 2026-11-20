@@ -23,7 +23,7 @@ Role: two independent checks that need no decoder library.
        pixels, chroma 4:2:0 of flat bars equals the bar chroma), and prints the PSNR of Y, Cb and Cr per sampled frame and the
        minimum. "CHECK psnr PASS|FAIL ...".
        With --pattern N --speed S (Phase 2d) every decoded picture, in order, is compared with the pattern of
-       cores/rtlnet_csi2_rx/testbench/pattern_model.py (the rtlnet_csi2_rx pattern N at speed S in 4:2:0, the encoder's chroma rule): the
+       ip/rtlnet_csi2_rx/testbench/pattern_model.py (the rtlnet_csi2_rx pattern N at speed S in 4:2:0, the encoder's chroma rule): the
        pattern frame counter k of a picture is searched among k_prev + 1 .. k_prev + 4 (the first picture among 0 .. --k-first-max) and the
        best match (lowest luma error) is kept, so a picture the board dropped resyncs the sequence. Prints "PSNR frame f k K ..." lines,
        "PSNR_K resyncs=<n> dropped=<d> ..." and "CHECK psnr PASS|FAIL ..." (PSNR floor on the best match; a picture whose best match
@@ -723,7 +723,7 @@ def _plane_psnr(dec, exp):
 def check_psnr_pattern(path, w, h, floor, max_frames, pattern, speed, k_first_max, step=1):
     """PSNR of every decoded picture against the pattern, k tracked per picture (see the module text)."""
     import numpy as np
-    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', 'cores', 'rtlnet_csi2_rx', 'testbench'))
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', 'ip', 'rtlnet_csi2_rx', 'testbench'))
     import pattern_model as pm
     c = Checker()
     fsize = w * h * 3 // 2
@@ -786,7 +786,7 @@ def selftest(ffmpeg, keep):
     import subprocess
     import tempfile
     import numpy as np
-    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', 'cores', 'rtlnet_csi2_rx', 'testbench'))
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', 'ip', 'rtlnet_csi2_rx', 'testbench'))
     import pattern_model as pm
     c = Checker()
     w, h = 640, 352

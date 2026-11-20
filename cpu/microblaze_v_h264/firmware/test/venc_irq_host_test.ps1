@@ -3,7 +3,7 @@
 File: venc_irq_host_test.ps1
 Purpose: build and run the host test of the encoder session in both notification modes (venc_irq_host_test.c) with the host C compiler found by
   Resolve-RtlnetHostCc: the positive run and the negative control (--neg). The test links the firmware's encoder session, the driver layer of
-  cores/rtlnet_h264_enc, the picture queue, the multiplexer and the harness models (host/host_platform.c, host/host_h264_model.c).
+  ip/rtlnet_h264_enc, the picture queue, the multiplexer and the harness models (host/host_platform.c, host/host_h264_model.c).
   Exit code 0 when the positive run passes and the negative control fails as required.
 Usage: powershell -NoProfile -ExecutionPolicy Bypass -File cpu/microblaze_v_h264/firmware/test/venc_irq_host_test.ps1
 Revision: 11-14-2026

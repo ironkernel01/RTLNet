@@ -41,9 +41,9 @@ if(-not(Test-Path -LiteralPath $lib)){throw 'No BSP library directory'}
 $cc=Join-Path $x.Vitis 'gnu/aarch32/nt/gcc-arm-none-eabi/bin/arm-none-eabi-gcc.exe'
 if(-not(Test-Path -LiteralPath $cc)){throw 'Resolved Vitis has no AArch32 GNU compiler'}
 $includes=@("-I$out","-I$inc","-I$fw/src","-I$fw/src/video","-I$fw/src/drivers","-I$fw/src/lwip","-I$fw/cli",
- "-I$repo/cores/rtlnet_common/driver","-I$repo/cores/rtlnet_framebuf/driver","-I$repo/cores/rtlnet_vdma_s2mm/driver","-I$repo/cores/rtlnet_csi2_rx/driver")
+ "-I$repo/cores/rtlnet_common/driver","-I$repo/cores/rtlnet_framebuf/driver","-I$repo/cores/rtlnet_vdma_s2mm/driver","-I$repo/ip/rtlnet_csi2_rx/driver")
 $sources=@(Get-ChildItem "$fw/src/*.c","$fw/src/video/*.c","$fw/src/drivers/*.c","$fw/src/lwip/*.c","$fw/cli/*.c" | ForEach-Object {$_.FullName})
-$sources+=@("$repo/cores/rtlnet_framebuf/driver/rtlnet_framebuf.c","$repo/cores/rtlnet_vdma_s2mm/driver/rtlnet_vdma_s2mm.c","$repo/cores/rtlnet_csi2_rx/driver/rtlnet_csi2_rx.c")
+$sources+=@("$repo/cores/rtlnet_framebuf/driver/rtlnet_framebuf.c","$repo/cores/rtlnet_vdma_s2mm/driver/rtlnet_vdma_s2mm.c","$repo/ip/rtlnet_csi2_rx/driver/rtlnet_csi2_rx.c")
 $objects=@()
 $buildId=(& git -C $repo rev-parse --short HEAD).Trim()
 $dirty=if((& git -C $repo status --porcelain)){'1'}else{'0'}

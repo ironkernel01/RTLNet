@@ -17,7 +17,7 @@ Overview:
   * Prints `RTLNET_SIM: PASS|FAIL <bench>[<tag>] ...` and exits 0 on PASS, 1 otherwise.
 Usage:
   powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rtlnet_run_verilator.ps1 `
-      -Bench tb_rtlnet_h264_bitpack -Filelist cores/rtlnet_h264_enc/testbench/tb_rtlnet_h264_bitpack.f
+      -Bench tb_rtlnet_h264_bitpack -Filelist ip/rtlnet_h264_enc/testbench/tb_rtlnet_h264_bitpack.f
   Options: -Tag <name>, -Defines A,B=1, -PlusArgs INJECT_FAILURE,SEED=5, -ExpectFail, -Threads 4,
     -TimeoutSeconds 3600, -Trace (write waves.fst).
 Revision: 11-09-2026
