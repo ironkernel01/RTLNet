@@ -1,12 +1,28 @@
-# IronKernel RTLNet
+# RTLNet integration and design guide
 
-RTLNet is a library of FPGA cores in SystemVerilog: a line-rate Ethernet/IPv4 stack (MAC, ARP, ICMP, DHCP, UDP, iperf
-UDP, classifier), an optional soft-CPU network path for TCP, a DDR3 memory path, a video capture and frame-buffer
-path, and an H.264 encoder. Every core has the same layout, an AXI4-Lite register slave, a C driver, an Active-HDL bench
-and a core guide. The cores are vendor-neutral RTL (AMD is the default technology); a board design ties them together.
+RTLNet implements an Ethernet/IPv4 stack in SystemVerilog. ARP, ICMP echo, DHCP and UDP run in hardware. A protected CPU network path adds lwIP TCP. The Ethernet images run on Nexys Video and Arty A7-100T. A separate Nexys media image connects companion IronCapture and IronH264 cores through DDR and streams encoded color bars over Ethernet.
+
+[Product brief (PDF)](documentation/rtlnet_product_brief.pdf) · [Markdown](documentation/rtlnet_product_brief.md) · [Architecture](documentation/rtlnet_architecture.md) · [Contributing](documentation/rtlnet_contributing.md)
 
 The repository has one branch, `main`. Folders separate the board-independent cores (`cores/`) from the board design
 (`boards/`, `cpu/`) and the released demonstration images (`demos/`); see "Folders" and "Repository layout rule".
+
+This Markdown guide connects RTL, drivers and reference firmware for engineers and AI coding assistants such as Claude and Codex. Choose the board and traffic path first. A hardware UDP service and a CPU TCP service share the PHY and MAC, but use different queues, configuration and counters.
+
+## Integrating a network endpoint
+
+| Work area | Start here | Contract |
+|---|---|---|
+| Board and PHY | [Nexys Video](boards/nexys_video/README.md), [Arty A7-100T](boards/arty_a7_100/README.md), [MDIO driver](cores/rtlnet_mdio/driver/) | Match RGMII or MII, PHY clock/reset, full-duplex link speed and pin constraints. |
+| Hardware UDP service | [Socket interface](cores/rtlnet_udp_socket/documentation/rtlnet_udp_socket.md), [UDP echo example](cores/rtlnet_udp_echo/) | Bind a local port, consume two metadata beats and payload, then return destination metadata and payload through the TX stream. |
+| CPU service | [Ethernet firmware](cpu/microblaze_v_ethernet/firmware/), [classifier](cores/rtlnet_classifier/), [checksum offload](cores/rtlnet_tcp_offload/) | Unclaimed traffic admitted to the CPU passes through DMA and lwIP. Application sockets, classifier allow rules and checksum status must agree. |
+| Media over Ethernet | [Nexys media integration](boards/nexys_video/), [dependency manifest](media-sources.json), [source resolver](scripts/resolve_media.ps1) | IronCapture supplies the source, IronH264 the encoder. The reference uses internal color bars, DDR and MPEG-TS over UDP. |
+
+1. Check MDIO discovery, negotiated speed and MAC RX/TX counters before starting higher-layer services. Configure a local MAC and IPv4 address or enable the hardware DHCP client. Verify ARP and ICMP echo.
+2. At the MAC client boundary use 64-bit AXI4-Stream, first wire byte in bits 7:0, contiguous final TKEEP and TLAST on the final beat. Keep valid data stable until ready. The MAC handles FCS and padding. At the socket boundary use the [UDP metadata layout](cores/rtlnet_udp_socket/documentation/rtlnet_udp_socket.md) and exchange application payloads.
+3. For CPU traffic, check the enabled hardware leaves, classifier rules, DMA ownership and lwIP listener. When a service stalls, compare MAC RX, protocol claims, classifier drops, checksum results and CPU DMA completion in that order. Successful hardware ping can coexist with a blocked TCP service.
+4. Issuing CPU accesses to the Ethernet boards uses the common 32-bit AXI4-Lite map. SYS, MAC, MDIO and UDP echo begin at `0x44A00000`, `0x44A01000`, `0x44A02000` and `0x44A03000`. The protocol window begins at `0x44A10000`. The [architecture guide](documentation/rtlnet_architecture.md) gives subwindows, port conventions and clock domains.
+5. Change a network core in its owning directory and update its C register definitions and self-checking bench together. For a firmware service change, test both permitted and dropped traffic. For a media dependency change, pin the accepted tree, run the resolver, build the Nexys Baseline image and decode its UDP stream. For an Ethernet-only change, verify both link directions with UDP loss counts and TCP throughput at the negotiated speed.
 
 ## Cores
 
@@ -15,8 +31,8 @@ Every core has the same layout: `hdl/`, `driver/` (C), `testbench/` and `documen
 | Core | Function |
 |---|---|
 | `cores/rtlnet_common` | Shared library: technology include, RAM wrapper (`rtlnet_ram_core`), shift register (`rtlnet_shift_reg_core`), synchronizers, packet FIFO, AXI4-Lite slave/CDC/decoder |
-| `cores/rtlnet_eth_mac` | 10/100/1000 Mb/s RGMII MAC: FCS, padding, IFG, store-and-forward queues |
-| `cores/rtlnet_mdio` | Bit-banged MDIO (Clause 22 and Clause 45) plus the RTL8211E driver (LEDs, EEE off) |
+| `cores/rtlnet_eth_mac` | 10/100/1000 Mb/s RGMII and 10/100 Mb/s MII MACs: FCS, padding, IFG, store-and-forward queues |
+| `cores/rtlnet_mdio` | Bit-banged MDIO (Clause 22 and Clause 45) plus RTL8211E and DP83848 PHY drivers |
 | `cores/rtlnet_eth_protocol` | Protocol wrapper: MAC filter, queues, leaf fan-out, arbiter, address registers, CPU network path |
 | `cores/rtlnet_arp` | ARP responder |
 | `cores/rtlnet_icmp` | ICMP echo (ping) |
@@ -29,10 +45,10 @@ Every core has the same layout: `hdl/`, `driver/` (C), `testbench/` and `documen
 | `cores/rtlnet_axi_arbiter` | N:1 AXI4 arbiter in front of the DDR3 port |
 | `cores/rtlnet_axi_cdc` | AXI4 clock-domain bridge |
 | `cores/rtlnet_ddr` | DDR3 memory controller behind a vendor-neutral AXI4 slave; the MIG project file comes from the board |
-| `ip/rtlnet_csi2_rx` | CSI-2 capture core: test-pattern generator and video source switch |
+| `ip/rtlnet_csi2_rx` | IronCapture receiver binding. The Nexys media board uses the internal test pattern |
 | `cores/rtlnet_vdma_s2mm` | 2D video write DMA |
 | `cores/rtlnet_framebuf` | Tear-free frame-buffer slot manager |
-| `ip/rtlnet_h264_enc` | H.264 encoder (Constrained Baseline, in-loop deblocking filter, interrupt-driven driver layer); a default-off seam for an optional High profile extension |
+| `ip/rtlnet_h264_enc` | IronH264 encoder binding (Constrained Baseline, in-loop deblocking filter, interrupt-driven driver layer); a default-off seam for an optional High profile extension |
 
 ## Where to find the files
 
@@ -72,7 +88,7 @@ you run it.
 | Folder | Contents |
 |---|---|
 | `cores/` | the board-independent cores above, each with `hdl/`, `driver/`, `testbench/`, `documentation/`; it targets no board |
-| `boards/` | one folder per board design; today `boards/nexys_video/` (top, constraints, MIG project file, build and test scripts, board bench, board guide); a second board, an Arty A7-100, is planned as `boards/arty_a7_100/` |
+| `boards/` | Nexys Video in `boards/nexys_video/` (Ethernet and media) and Arty A7-100T in `boards/arty_a7_100/` (Ethernet). Each board has its own top, constraints, scripts and board guide |
 | `cpu/` | one folder per CPU, each independent with its own block design, driver, firmware, CLI, tests and documents; today `cpu/microblaze_v_h264/` (the MicroBlaze V CPU of the H.264 demos: block design, driver, documents, and the firmware with CLI, lwIP application and host tests; written for the Nexys Video today) and `cpu/microblaze_v_ethernet/` (the board-independent MicroBlaze V of the Ethernet demo: no DDR3, no caches, no video; firmware, CLI, host tests and hardware tests shared by every board) |
 | `demos/` | released demonstration bitstreams, one folder per demo with its brief, `release.txt` and the license of a time-limited demo (`demos/LICENSE_DEMO.md`) |
 | `scripts/` | simulation runner, regression, synthesis/timing checks, CDC constraints, Vivado launcher, name check, tool discovery (`rtlnet_tools.ps1`) |
@@ -90,17 +106,17 @@ All work is committed on `main`. The folders keep board-independent code apart f
   scripts) live there.
 - Released images are only under `demos/`; no build output is tracked in git.
 
-The measured results of the cores in their guides are results on the Nexys Video. The rules are in
+Published board measurements identify the Nexys Video or Arty A7-100T image and negotiated link speed. The rules are in
 `documentation/rtlnet_contributing.md` section 8.
 
 ## Conventions
 
 - **Language:** all RTL and benches are SystemVerilog-2012 (`.sv`). Drivers and firmware are C11.
-- **Buses:** a common 64-bit AXI4-Stream data bus (`tdata`/`tkeep`/`tlast`, sized for a 10G/25G MAC) and AXI4-Lite control.
+- **Buses:** a common 64-bit AXI4-Stream data bus (`tdata`/`tkeep`/`tlast`) and AXI4-Lite control.
   Every core has an ID/VERSION/CAPS register header.
 - **Portability:** the technology is selected in `rtlnet_technology.svh` (AMD default). RAM and shift registers
   go through the common wrappers, so a retarget changes only those files.
-- **Timing:** at most two LUT levels per register stage, so the cores can scale to 10G/25G clock rates.
+- **Timing:** check post-route setup and hold slack for the chosen board. Nexys RGMII supports up to 1 Gb/s and Arty MII up to 100 Mb/s.
 
 ## Tools
 

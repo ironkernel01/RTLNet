@@ -7,8 +7,8 @@
   .brief-cols > div { flex: 1; }
   .markdown-body table { font-size: 12px; }
   .markdown-body table td, .markdown-body table th { padding: 1px 6px; line-height: 1.25; }
-  .markdown-body { line-height: 1.38; }
-  .markdown-body p, .markdown-body li { margin-bottom: 5px; }
+  .markdown-body { line-height: 1.32; }
+  .markdown-body p, .markdown-body li { margin-bottom: 4px; }
   .markdown-body ul, .markdown-body ol, .markdown-body table { margin-bottom: 8px; }
   .markdown-body li + li { margin-top: 2px; }
   @page { size: letter; margin: 10mm 11mm; }
@@ -37,6 +37,7 @@ This demo is a prebuilt bitstream, with its firmware inside, of the IronKernel R
 
 ### Highlights
 
+- IronKernel includes Markdown integration guides for engineers, Claude, and Codex. The guides connect the RTL and firmware interfaces to the tests used on this board.
 - CABAC against CAVLC at the same QP: 12.5 % fewer bits on pattern `all` at QP 28, 18.3 % at QP 40, 46.0 % on `box` and 52.3 % on `scroll` at QP 28, with equal PSNR
 - At 8 Mb/s on pattern `all`, CABAC runs at a lower QP (average 46.5 against 48.7) and gains 1.54 dB minimum and 1.86 dB mean PSNR
 - License end measured on the demo image: one IDR picture 1,799.82 s after configuration, High (profile_idc 100, CABAC) before it and Constrained Baseline (profile_idc 66, CAVLC) after it, 59,404 pictures sent and 0 dropped over the 1,980 s capture
@@ -238,3 +239,7 @@ Set the speed before `stream h264`; the link returns in 3 to 4 s and `show phy` 
 - The pictures are test patterns; the demo has no camera, and PSNR is against the pattern model. The 8x8 transform, sub-sample motion search and B pictures are not in this image.
 - High profile runs for 30 minutes after each configuration of the FPGA. Programming the board again restores the 30 minutes; `stream stop`, `stream h264` and a firmware `reload` do not. `encoder transform8x8 on` is refused by name (`hp_caps` 0001).
 - The firmware multiplexer limits the rate at 1080p30: 27.5 Mb/s runs with no drop; pictures drop at 31 to 32 Mb/s. The image loads over JTAG only.
+
+## Contact IronKernel
+
+For FPGA integration, reference designs, board bring-up, or custom firmware and driver development, send IronKernel your target board and project goal. [IronKernel.com](https://ironkernel.com/) · [support@ironkernel.com](mailto:support@ironkernel.com)

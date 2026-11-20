@@ -3,27 +3,25 @@
 | Item | Value |
 |---|---|
 | Product line | IronKernel RTLNet |
-| Document revision | 11-14-2026 |
-| First target | Digilent Nexys Video (Artix-7 XC7A200T-1SBG484C, Realtek RTL8211E RGMII PHY) |
+| Ethernet reference boards | Digilent Nexys Video (Artix-7 XC7A200T, RTL8211E RGMII) and Arty A7-100T (Artix-7 XC7A100T, DP83848J MII) |
 | Toolchain | Vivado 2026.1 (synthesis, implementation), Aldec Active-HDL 11.1 (simulation), MicroBlaze GCC 13.4 |
 | Languages | SystemVerilog-2012 for all RTL and benches (`.sv`), C11 for drivers and firmware |
 
-This document is the contract every RTLNet core is built against. A core that follows it can be dropped into
-any RTLNet carrier, retargeted to another FPGA vendor, and widened from the 1G MAC to a 10G/25G MAC without
-touching the protocol layer.
+This guide describes the packet interfaces, register conventions and board integrations of RTLNet. The Ethernet-only images run the shared networking firmware from local RAM. The Nexys media image adds a DDR path and companion capture and encoder IP.
 
 ---
 
 ## 1. Scope
 
-The first RTLNet build is an RTL Ethernet/IPv4 stack on the Nexys Video. ARP, ICMP, DHCP, UDP and iperf UDP run
+The Nexys Video and Arty A7-100T Ethernet designs implement the same RTL Ethernet/IPv4 stack. ARP, ICMP, DHCP, UDP and iperf UDP run
 in logic. TCP runs in lwIP on the MicroBlaze through the CPU network path, with hardware checksum offload; the
 CPU also configures and monitors the RTL.
 
 | Function | Core | Notes |
 |---|---|---|
 | 10/100/1000 Mb/s MAC, RGMII | `rtlnet_eth_mac` | full duplex, FCS insert/check, pad, IFG, store-and-forward queues |
-| PHY management | `rtlnet_mdio` | bit-banged Clause 22 MDIO from a GPIO register core; the C driver is the MDIO master |
+| 10/100 Mb/s MAC, MII | `rtlnet_eth_mac_mii` | Arty A7-100T, full duplex, separate MII receive and transmit clocks |
+| PHY management | `rtlnet_mdio` | bit-banged Clause 22 and Clause 45 MDIO from a GPIO register core; the C driver is the MDIO master |
 | Protocol wrapper | `rtlnet_eth_protocol` | destination-MAC filter, ingress/egress packet queues, leaf fan-out, arbiter, local address registers |
 | ARP responder | `rtlnet_arp` | RFC 826 replies for the local IPv4 address |
 | ICMP echo (ping) | `rtlnet_icmp` | RFC 792 echo reply, payload up to 1472 bytes |
@@ -34,12 +32,11 @@ CPU also configures and monitors the RTL.
 | UDP echo server | `rtlnet_udp_echo` | application on the socket payload streams: returns every datagram to its sender |
 | Frame filter/classifier | `rtlnet_classifier` | on the CPU receive path: configurable L2-L4 filter with policers, drop-all until configured, broadcast storm limiter at boot (section 13) |
 | Checksum offload | `rtlnet_tcp_offload` | on the CPU DMA stream: inserts IPv4 / TCP / UDP checksums into frames the CPU sends (store-and-forward patch); checks them on frames the CPU receives and appends an 8-byte trailer beat with the result (cut-through) |
-| CPU network path | `rtlnet_eth_protocol` CPU port + `cpu/microblaze_v_h264/` | every frame no enabled leaf claims goes to the CPU (`cpu_axis_ethernet_stream`, AXI DMA); the CPU sends frames back the same way; lwIP runs a TCP echo server on it; the CPU-path classifier and the checksum offload sit on the two streams |
-| CPU core | `rtlnet_cpu_microblaze` | MicroBlaze block design behind a vendor-neutral core port list; replaceable by a Nios V / RISC-V core with the same ports |
-| Board top | `boards/nexys_video/hdl/rtlnet_nexys_video_top.sv` | the Nexys Video "Top.sv": clocks, resets, pins, CPU core, address decode, LEDs |
+| CPU network path | `rtlnet_eth_protocol` CPU port + board-selected CPU subsystem | every frame no enabled leaf claims goes to the CPU (`cpu_axis_ethernet_stream`, AXI DMA); the CPU sends frames back the same way; lwIP runs a TCP echo server on it; the CPU-path classifier and the checksum offload sit on the two streams |
+| Processor subsystem | Ethernet or media MicroBlaze V configuration | AXI DMA carries CPU-path frames. lwIP handles TCP echo and iperf 2. |
+| Board integration | Nexys Video and Arty A7-100T | Board logic connects the PHY, clocks, resets, local memory and registers. |
 
-Hardware test constraint (10-22-2026): the board is cabled to a 10/100 router. 10 and 100 Mb/s are tested on
-hardware; 1000 Mb/s is built, simulated and constrained, and is hardware-tested when a gigabit switch is fitted.
+Wired tests confirmed 10/100/1000 Mb/s operation on Nexys Video and 10/100 Mb/s on Arty. With the CPU-path firewall enabled on the gigabit Nexys link, UDP reached 942 Mb/s from PC to board and 944 Mb/s in reverse, with zero reported loss. The [product brief](rtlnet_product_brief.md) gives both boards’ throughput and the test conditions.
 
 ---
 
@@ -59,8 +56,8 @@ RTLNet/
   documentation/                  system documents (this file)
   cores/
     rtlnet_common/                shared primitives (RAM core, FIFOs, synchronizers, AXI-Lite plumbing)
-    rtlnet_eth_mac/               10/100/1000 RGMII MAC
-    rtlnet_mdio/                  MDIO GPIO core + Clause 22 / RTL8211E driver
+    rtlnet_eth_mac/               10/100/1000 RGMII and 10/100 MII MACs
+    rtlnet_mdio/                  MDIO GPIO core + Clause 22/45 access and RTL8211E / DP83848 drivers
     rtlnet_eth_protocol/          protocol wrapper
     rtlnet_arp/  rtlnet_icmp/  rtlnet_dhcp/  rtlnet_iperf/
     rtlnet_udp_socket/  rtlnet_udp_echo/
@@ -68,18 +65,20 @@ RTLNet/
     rtlnet_tcp_offload/           IPv4 / TCP / UDP checksum insert (TX) and check with trailer (RX) on the CPU path
     rtlnet_axi_arbiter/           N:1 AXI4 arbiter in front of the DDR3 controller (illegal-burst guard, per-master counters)
     rtlnet_ddr/                   DDR3 controller behind a vendor-neutral AXI4 slave (MIG IP generated from the board's project file)
-  cpu/<cpu>/                      one folder per CPU, each independent (own block design, firmware, CLI, tests); today
-                                  cpu/microblaze_v_h264/: MicroBlaze CPU core (hdl, driver, documentation) and
-                                  firmware/ (CLI + lwIP TCP echo application; BSP, drivers and lwIP are generated or
-                                  compiled in place from the AMD install, never copied)
-  boards/nexys_video/             board top ("Top.sv"), XDC, build scripts, board bench
-  scripts/                        shared simulation and constraint scripts
+    rtlnet_axi_cdc/               AXI clock-domain crossing for DDR clients
+    rtlnet_vdma_s2mm/             stream-to-memory frame writer for the Nexys media design
+    rtlnet_framebuf/              on-chip frame memory for the Ethernet DMA path
+  ip/                             local bindings to the IronCapture receiver and IronH264 encoder
+  media-sources.json              companion repositories, revisions and expected core trees
+  cpu/microblaze_v_ethernet/      shared Ethernet firmware and processor subsystem
+  cpu/microblaze_v_h264/          Nexys media firmware and processor subsystem
+  boards/nexys_video/             RGMII Ethernet and DDR-backed media designs
+  boards/arty_a7_100/             MII Ethernet design
+  demos/                          published Ethernet and Nexys media images
+  scripts/                        simulation, synthesis and dependency resolution
 ```
 
-The repository has one branch, `main`; folders separate the parts. `cores/` is board-independent and does not depend on
-`boards/`, `cpu/` or `demos/`; `boards/<board>/` holds one board design (today `boards/nexys_video/`); `cpu/` holds one folder per CPU (today
-`cpu/microblaze_v_h264/`), each with its own CPU block design and firmware; `demos/` holds the released demo bitstreams. The board results quoted in this document are results
-on the Nexys Video (layout rules: `rtlnet_contributing.md` section 8).
+The Ethernet-only designs use local RAM. The Nexys media build uses IronCapture's internal color bars, a DDR frame writer and the IronH264 encoder to stream compressed video over Ethernet. Its external camera input is tied off. The physical-camera Linux reference belongs to IronForge. Run `scripts/resolve_media.ps1` to bind the companion cores before building a media image.
 
 Generated output (Vivado runs, Active-HDL work directories, firmware objects, bitstreams) is never committed;
 released bitstreams go in `demos/`.
@@ -120,9 +119,7 @@ recur in every RTLNet file:
 
 ## 4. The common stream bus
 
-Every data path between RTLNet cores is the **RTLNet stream**: AXI4-Stream with 64-bit `tdata`, the width the
-10G/25G MAC needs (one beat per 156.25 MHz clock at 10G, 390.625 MHz at 25G). The 1G MAC uses the same bus at
-62.5 MHz. The protocol layer therefore runs unchanged on any of the three MACs.
+The packet data path uses AXI4-Stream with 64-bit `tdata` between the MAC, protocol wrapper and applications. Both Ethernet reference designs use the same byte ordering and frame boundary rules.
 
 | Signal | Width | Rule |
 |---|---|---|
@@ -137,8 +134,7 @@ no SFD, no FCS. The MAC pads short transmit frames to 60 bytes and keeps receive
 fields are big-endian on the wire, so a 16-bit field at an even frame offset `2m` sits in lanes `2m mod 8`
 (high byte) and `2m+1 mod 8` (low byte); cores use the shared `be16/be32/be48` helpers of `rtlnet_pkg`.
 
-Throughput rule: `64 bits x f_clk` must exceed the line rate. 1G: `f >= 31.25 MHz` (62.5 MHz used).
-10G: 156.25 MHz. 25G: 390.625 MHz.
+At one accepted 64-bit beat per cycle the raw transport capacity is `64 × f_clk` bits per second. Backpressure, frame gaps and protocol overhead reduce the application rate.
 
 The stream at the socket/application boundary (section 7.7) is the same bus with two metadata beats ahead of
 the payload; it is still a plain AXI4-Stream.
@@ -173,7 +169,24 @@ driver header, mirrored by `localparam`s in its register file with a pointer com
 
 ---
 
-## 6. System block diagram
+## 6. Board integration
+
+The released Ethernet images share this CPU-visible map. The MAC block implements RGMII on Nexys Video and MII on Arty A7-100T. Software can inspect the same protocol and protection counters on both boards.
+
+| Base address | Block | Use |
+|---|---|---|
+| `0x40400000` | AXI DMA | Simple-mode transmit and receive channels for CPU network frames |
+| `0x44A00000` | System registers | Board capabilities, identification and diagnostics |
+| `0x44A01000` | MAC | Configure the MAC and read link and frame counters |
+| `0x44A02000` | MDIO | Drive PHY management transactions |
+| `0x44A03000` | UDP echo | Control and observe the echo application |
+| `0x44A10000` | Protocol window, 64 KiB | Wrapper at offset zero. ARP, ICMP, DHCP, UDP iperf and UDP sockets occupy successive 4 KiB windows from `0x1000` to `0x5000`. |
+| `0x44A18000` | Classifier | CPU receive rules and policers inside the protocol window |
+| `0x44A19000` | Checksum offload | CPU-path checksum control and statistics inside the protocol window |
+
+**Nexys multi-clock example**
+
+The diagram and address table describe the earlier multi-clock Nexys integration. The released Ethernet-only designs use the board-specific address decoder and a 100 MHz system domain. The released Nexys media design runs its main system at 90 MHz.
 
 ```
                  Nexys Video
@@ -195,10 +208,10 @@ driver header, mirrored by `localparam`s in its register file with a pointer com
                    |  ^         PHY reset)   | ARP ICMP DHCP iperf UDP-sock |      |
                    |  |                      |   payload streams ----------+------+
                    v  |                      v
-              m_axis_rx --> [classifier, future] --> s_axis (protocol) ; m_axis (protocol) --> s_axis_tx
+              m_axis_rx --> s_axis (protocol) ; m_axis (protocol) --> s_axis_tx
 ```
 
-### 6.1 Address map
+### 6.1 Address map for the multi-clock example
 
 MicroBlaze sees the RTLNet window at `0x44A0_0000`, 1 MiB. Offsets inside the window:
 
@@ -273,6 +286,8 @@ s_axis_tx -> tx frame guard (min 14) -> TX packet FIFO (axis_clk -> clk125) -> r
   TX frames), `RX_DELAY_TAP` readback.
 - Pin-layer timing: PHY RX delay on (set by the MDIO driver), FPGA TX skew from a 90-degree `clk125_90`.
 
+The Arty design uses `rtlnet_eth_mac_mii` with four data pins per direction. It shares the 64-bit client stream with the RGMII MAC and operates at 10 or 100 Mb/s.
+
 ### 7.3 `rtlnet_mdio` — PHY management by bit-banged MDIO
 
 The RTL is a GPIO register core: `MDC` output, `MDIO` output data and output enable, `MDIO` input through a
@@ -286,13 +301,14 @@ buffer. The C driver is the MDIO master:
   of bits 13/11, readback), auto-negotiation enable/restart, advertisement selection (10/100/1000, full duplex only: the half-duplex bits are always written 0),
   forced speed, status decode from BMSR/PHYSR, loopback, register dump.
 
-The CLI uses the driver to report link, speed, duplex and partner abilities, to set the link speed (`speed`, by the
+The MDIO driver also supports native Clause 45 transactions and MMD access through Clause 22. The Arty `rtlnet_phy_dp83848` driver manages the 10/100 MII PHY.
+
+The Nexys CLI uses the driver to report link, speed, duplex and partner abilities, to set the link speed (`speed`, by the
 advertised full-duplex modes), and to keep the MAC speed register in step with PHYSR.
 
 ### 7.4 `rtlnet_eth_protocol` — protocol wrapper
 
-Two clocks: `axis_clk` (MAC client, scales to 156.25/390.625 MHz) and `proto_clk` (the leaves, 50 MHz on the
-Nexys Video). Only the input slice, the destination-MAC filter, the ingress queue write side and the egress
+The wrapper has a MAC-client clock (`axis_clk`) and a protocol-leaf clock (`proto_clk`). Board logic can drive both with the system clock. Only the input slice, the destination-MAC filter, the ingress queue write side and the egress
 queue read side run on `axis_clk`. Everything else is `proto_clk`.
 
 ```
@@ -432,7 +448,7 @@ register(s) with synchronous active-low reset):
 Every buffer in a core states its size as a total-kilobyte parameter (`*_BUF_KB`, `*_FIFO_KB`); the core
 derives the depth from it and stops elaboration with `$fatal` on a size it cannot build.
 
-## 9. Clocks and resets (Nexys Video)
+## 9. Clocks and resets in the multi-clock Nexys example
 
 | Clock | Source | Frequency | Domain contents |
 |---|---|---|---|
@@ -466,8 +482,7 @@ asynchronous clock groups.
 
 ## 10. CPU core and firmware
 
-The processor is a core like any other, `rtlnet_cpu_microblaze`, instanced in the board top. Its port list is
-vendor neutral so another soft or hard processor drops in with a wrapper of the same ports:
+The Ethernet-only subsystem uses 512 KiB of firmware RAM and 128 KiB of frame storage on Nexys, or 256 KiB and 64 KiB respectively on Arty. The following port list describes the DDR-capable media CPU wrapper, `rtlnet_cpu_microblaze`.
 
 | Port group | Ports |
 |---|---|
@@ -538,18 +553,13 @@ mode or the next keywords of a partial command, unique prefixes are accepted (`s
 
 Hardware: Vivado batch build with exit-code gates (synthesis, timing setup and hold, CDC report, utilization),
 JTAG programming, CLI over COM port, host tests from the PC (`arping`, `ping -l` sweep, `iperf -c -u`,
-UDP echo client script), all at 10 and 100 Mb/s until a gigabit partner is available.
+UDP echo and bidirectional iperf 2). Nexys hardware tests cover 10, 100 and 1,000 Mb/s. Arty hardware tests cover 10 and 100 Mb/s. The Ethernet release records give negotiated speeds, loss counts and firewall settings.
 
 ---
 
-## 12. Scaling to 10G/25G
+## 12. Packet-stream bandwidth
 
-The protocol wrapper, every leaf, the socket layer and the applications use only the RTLNet stream and
-`proto_clk`; the MAC side of the wrapper is `axis_clk`. Moving to a 10G/25G MAC changes the MAC instance and
-the `axis_clk` frequency (156.25 / 390.625 MHz); the wrapper's `axis_clk` logic is limited to one or two LUT
-levels per stage for that reason. `proto_clk` throughput (64 x 50 MHz = 3.2 Gb/s on Artix-7) bounds the
-leaves; a 10G build raises `proto_clk` or widens the leaf fan-out, which is a parameter change, not a
-re-architecture.
+The released RGMII design supports up to 1 Gb/s and the MII design up to 100 Mb/s. A 64-bit interface transferring one beat every cycle carries 10 Gb/s at 156.25 MHz or 25 Gb/s at 390.625 MHz before overhead. Those figures are interface arithmetic. No 10G or 25G MAC implementation, timing closure or board throughput is claimed here.
 
 ---
 

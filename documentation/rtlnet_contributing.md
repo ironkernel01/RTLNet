@@ -2,7 +2,6 @@
 
 | Item | Value |
 |---|---|
-| Document revision | 11-14-2026 |
 | Applies to | every file under `cores/`, `scripts/`, `cpu/`, `boards/` and `demos/` |
 
 Read `documentation/rtlnet_architecture.md` first (bus, register conventions, address map, leaf contract,
@@ -81,9 +80,7 @@ section 15 port lists). This page lists the rules a core must follow to be accep
 - Run: `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rtlnet_run_sim.ps1 -Bench <tb> -Filelist <f>`.
   The runner serializes the single Active-HDL seat machine-wide; just call it. Do not start the Active-HDL GUI.
 - Prove each new check can fail (perturb the bench once, see TEST FAIL, restore).
-- **Board-level benches never simulate the processor.** (They live under `boards/`.) The CPU core is replaced by `cpu/microblaze_v_h264/rtlnet_microblaze_sim_stub.sv`
-  (same ports): scripted AXI4-Lite register sequences do what firmware does, and frame source/sink tasks stand in for
-  the DMA streams. Firmware (lwIP, CLI) is verified on hardware and by the host-side harnesses.
+- Board integration benches drive register and DMA transactions through the matching processor stub. The Ethernet configuration uses `cpu/microblaze_v_ethernet/rtlnet_cpu_eth_sim_stub.sv`. The media configuration uses `cpu/microblaze_v_h264/rtlnet_microblaze_sim_stub.sv`. Check lwIP and CLI behavior on hardware and in host-side tests.
 
 ## 6. Synthesis check
 
@@ -112,25 +109,31 @@ The repository has one branch, `main`; all work is committed on it. Folders keep
 
 | Folder | Holds |
 |---|---|
-| `cores/` | all board-independent RTL, drivers, benches and core documents |
+| `cores/` | RTLNet-owned RTL, drivers, benches and core documents |
 | `scripts/` | generic scripts (simulation, regression, synthesis check, tool discovery) |
 | `documentation/`, `diagrams/` | the generic documents and drawings |
-| `boards/<board>/` | one board design per folder (top, constraints, MIG project file, build and test scripts, board bench, board guide); today `boards/nexys_video/`, a second board (Arty A7-100) is planned as `boards/arty_a7_100/` |
-| `cpu/` | one folder per CPU, each independent with its own block design, driver, firmware, CLI, tests and documents; today `cpu/microblaze_v_h264/` (written for the Nexys Video today) and the board-independent `cpu/microblaze_v_ethernet/` (names no board, pin, part or PHY type; board facts come from its system registers and the PHY ID) |
+| `boards/<board>/` | Board tops, constraints, scripts and benches for Nexys Video (RGMII, Ethernet and media variants) and Arty A7-100T (MII Ethernet). |
+| `cpu/` | Shared Ethernet processor and firmware in `microblaze_v_ethernet/`. Nexys media firmware and DDR-capable processor integration in `microblaze_v_h264/`. |
+| `media-sources.json`, `ip/` | Manifest and checkout-local bindings for the receiver in IronCapture and the encoder in IronH264. |
 | `demos/` | released demonstration bitstreams |
 
 Rules:
 
 1. **`cores/` and generic `scripts/` never depend on `boards/`, `cpu/` or `demos/`.** The regression of the cores
    (`scripts/rtlnet_regression.ps1`) runs with those folders absent; it runs every `cpu/<cpu>/` and `boards/<board>/testbench`
-   when they exist.
+   when they exist. It also discovers tests in the two bound media core directories when available.
 2. **Board-specific files live under `boards/<board>/`**: board top, constraints, MIG project file, build and test scripts.
    No board path, pin, part or board address in core RTL, drivers, benches, generic scripts or filelists. The cores take
    such data as parameters or arguments (for example `rtlnet_ddr_mig_create <dir> <prj>` takes the MIG project file of the
    board). A default part in a script is a documented parameter default. If a board needs a different version of a shared
    file, the board gets its own file under `boards/<board>/` instead of a variant of the shared one.
-3. **Demos**: one folder per demo under `demos/` with a `release.txt`; bitstreams only. A demo folder never holds a High
-   profile netlist or source, and never an image without its time limit.
+3. **Demos**. Keep approved images and release metadata under `demos/`. The Nexys High Profile evaluation image enforces its 30-minute limit. The Ethernet and Baseline images run continuously. Keep private High Profile sources and netlists in their owning repository.
 4. **No build output is tracked in git** (bitstreams, `.mmi`, `.xsa`, firmware images, reports). The released images are the
    files under `demos/`.
 5. **Work is committed on `main`.**
+
+## 9. Updating media dependencies
+
+Edit and test the CSI-2 receiver in IronCapture or the encoder in IronH264. Record the accepted upstream commit and core tree in `media-sources.json`, then run `scripts/resolve_media.ps1` from the RTLNet checkout. The resolver checks the origin, the tracked core tree and local edits before binding `ip/rtlnet_csi2_rx` and `ip/rtlnet_h264_enc`. A documentation-only upstream commit can retain the same core tree. Keep local bindings out of Git.
+
+For a change to either core, build the Nexys Baseline image and check that the color-bar source reaches DDR, the encoder emits access units and a network receiver decodes the stream. Record the hardware and firmware revisions with the test result.

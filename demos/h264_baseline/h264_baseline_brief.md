@@ -37,12 +37,13 @@ This demo is a prebuilt bitstream of the IronKernel RTLNet H.264 Constrained Bas
 
 ### Highlights
 
+- IronKernel includes Markdown integration guides for engineers, Claude, and Codex. The guides connect the RTL and firmware interfaces to the tests used on this board.
 - 1080p30 and 720p30 H.264 Constrained Baseline from two engines: 560 to 571 clocks per macroblock at 1080p30 against a budget of 735
 - 10-minute soak at 1080p30: 18,002 pictures, 0 dropped, 27.54 Mb/s, PSNR 44.28 dB or better over 1,801 checked frames
 - Constant bit rate within 0.2 % of the setting: 7.99 to 8.02 Mb/s at a setting of 8 Mb/s and 15.99 to 16.01 Mb/s at 16 Mb/s, with 0 dropped pictures
 - FFmpeg decodes every stream without an error line, JM decodes every access unit; the deblocking filter switches on or off in the middle of a stream without an IDR picture
 - MPEG-TS over UDP port 5004, played directly by VLC or ffplay; no build needed, the free Vivado license programs the board over JTAG
-- Source-available: the encoder RTL is in the repository, and this image has no time limit
+- Source-available: IronH264 provides the encoder RTL, and this image has no time limit
 
 </div>
 <div>
@@ -240,3 +241,7 @@ The board negotiates 10/100/1000 Mb/s after programming. `speed 100` runs the li
 - This image has no time limit.
 - The firmware multiplexer limits the rate at 1080p30: 27.5 Mb/s runs at 85 % load with no drop; at 31 to 32 Mb/s the load reaches 99 % and 13 to 16 pictures drop in 20 s.
 - On these patterns the filter moves the rate by up to 5 % and lowers PSNR by 0.03 to 0.8 dB. The image loads over JTAG only; a power cycle removes it.
+
+## Contact IronKernel
+
+For FPGA integration, reference designs, board bring-up, or custom firmware and driver development, send IronKernel your target board and project goal. [IronKernel.com](https://ironkernel.com/) · [support@ironkernel.com](mailto:support@ironkernel.com)

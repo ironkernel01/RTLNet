@@ -36,6 +36,7 @@
 
 ### Highlights
 
+- IronKernel includes Markdown integration guides for engineers, Claude, and Codex. The guides connect the RTL and firmware interfaces to the tests used on this board.
 - ARP, ping, DHCP, UDP echo and UDP iperf 2 in FPGA fabric: 94.4 Mb/s at 100 Mb/s with no loss, no CPU involved
 - lwIP TCP echo and iperf 2 on a MicroBlaze V: 94.5 / 94.9 Mb/s at 100 Mb/s, the line rate of the link
 - Default-deny firewall (`classifier firewall enable`): only ARP and the open TCP ports reach the CPU, with no throughput cost
@@ -293,3 +294,7 @@ Further captures are in `demos/ethernet/images/`: `ethernet_arty_perf_10.png` (1
 - Ping round trips are whole milliseconds (the PC's ping tool); the latency figures are the UDP echo and TCP echo round trips.
 - Programming is over JTAG only; a power cycle removes the image. Boot from the Quad-SPI flash and the behavior with JP2 shorted were not verified.
 </div>
+
+## Contact IronKernel
+
+For FPGA integration, reference designs, board bring-up, or custom firmware and driver development, send IronKernel your target board and project goal. [IronKernel.com](https://ironkernel.com/) · [support@ironkernel.com](mailto:support@ironkernel.com)
