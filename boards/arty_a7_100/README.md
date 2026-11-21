@@ -2,7 +2,7 @@
 
 | Item | Value |
 |---|---|
-| Document revision | 11-17-2026 |
+| Document revision | 11-20-2026 |
 | Board | Digilent Arty A7-100T (Rev. D/E/E.2 documents), Artix-7 XC7A100T-1CSG324C, TI DP83848J PHY (MII, 10/100 Mb/s) |
 | Top | `hdl/rtlnet_arty_a7_100_eth_top.sv` (`rtlnet_arty_a7_100_eth_top`) |
 | Design | the Ethernet demo of `boards/nexys_video/` (RTLNet network cores, MicroBlaze V CPU with lwIP TCP, hierarchical CLI on the USB-UART), 10/100 Mb/s only, no DDR3, no camera, no video, no H.264 |
@@ -14,6 +14,18 @@ names no board: it reads `BOARD_ID` (`ARTY`), `CPU_CLK_HZ` and `LINK_CAPS` (10 a
 registers and finds the PHY by scanning the MDIO bus for its ID (DP83848: `0x2000` / `0x5C9x`), so no PHY address is hard-coded. This
 folder holds only what differs: the board top (clocks, pins, the MII MAC `rtlnet_eth_mac_mii`, the 25 MHz PHY reference clock), the
 constraints, the build scripts and the board bench.
+
+## November 20 Ethernet retest
+
+The released Ethernet demo negotiated 100 Mb/s full duplex on the DP83848.
+Six-second TCP tests measured 94.9 Mb/s in each direction. All 400 UDP echoes
+matched byte-for-byte. In a separate UDP throughput test, the receivers
+reported 89.6 Mb/s from PC to board and 90.0 Mb/s in reverse, with zero
+lost datagrams in either direction.
+
+IronForge Linux on the same board uses AMD EthernetLite. Its separate NFS-root
+and TCP results and its U-Boot MAC address policy are in the
+[IronForge Arty board guide](https://github.com/ironkernel01/IronForge/blob/main/platforms/arty-a7-100t/COMMANDS.md#ethernet-address).
 
 ## Folders
 
