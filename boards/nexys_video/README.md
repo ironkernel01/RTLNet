@@ -8,6 +8,16 @@ The design is the RTLNet Ethernet stack, the MicroBlaze V network path running l
 video source and the two-engine H.264 Constrained Baseline encoder, on one 90 MHz clock. The board guide with the design,
 the measurements and the build log is `documentation/rtlnet_nexys_video.md`.
 
+## IronForge Linux integration
+
+IronForge uses the RTLNet MAC and MDIO cores in its Nexys Video FPGA design.
+Its MicroBlaze U-Boot and Linux images, DMA drivers, boot media and board tests
+live in IronForge. The standalone RTLNet image and test commands below use
+the RTLNet firmware and lwIP CLI.
+
+See the [IronForge integration and board checks](documentation/rtlnet_nexys_video.md#ironforge-linux-integration)
+and the [IronForge Nexys Video commands](https://github.com/ironkernel01/IronForge/blob/main/platforms/nexys-video/COMMANDS.md).
+
 ## Folders
 
 | Folder | Contents |
@@ -129,6 +139,11 @@ Build `eth_rel` (git 2c2c686b, tree clean, one 100 MHz clock, 512 KiB LMB, 128 K
 | UDP echo 64 B mean / p99 (ms) | 0.163 / 0.208 | 0.163 / 0.205 | 1.287 / 1.357 |
 
 `flood_test.ps1`: `FLOOD_TEST: PASS 95/95` (1000 frames per second, all kinds) and `PASS 50/50` (20000, four kinds). The captures and run instructions are in `demos/ethernet/`. The [RTLNet Specification](../../documentation/rtnet_specification.md) compares the released board configurations.
+
+The November 20 physical retest of the released standalone Ethernet image
+verified 1000 Mb/s full duplex, DHCP, UDP and TCP echo, and TCP iperf at
+335 Mb/s PC to board and 280 Mb/s board to PC.
+[Standalone Ethernet demo retest](documentation/rtlnet_nexys_video.md#standalone-ethernet-demo-retest-11-20-2026)
 
 ## Quick start
 

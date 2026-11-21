@@ -10,6 +10,52 @@
 | Firmware | one image for both builds (`cpu/microblaze_v_h264/firmware`, standalone BSP generated from the build's XSA, lwIP TCP echo on the CPU network path); absent cores are probed and reported "not present in this build" |
 | Ethernet demo firewall | the Ethernet demo firmware (`cpu/microblaze_v_ethernet/firmware`) has a CPU-path firewall (`classifier firewall enable` or `disable`, off at boot): only ARP and the allow list reach lwIP; the classifier of this board has 16 tuple slots for the list. Measured 11-17-2026 (image `eth_fw2`, released in `demos/ethernet/nexys_video/`): `FIREWALL_TEST: PASS 21/21` at 1000, 100 and 10 Mb/s, the services unchanged with the firewall on, closed ports silent in a port scan, a 1,000,000-frame flood dropped in hardware; see `cpu/microblaze_v_ethernet/documentation/rtlnet_cpu_eth.md` section 5b and `cores/rtlnet_classifier/documentation/rtlnet_classifier.md` section 14 |
 
+## IronForge Linux integration
+
+The IronForge Nexys Video FPGA image uses the pinned RTLNet raw Ethernet MAC
+and MDIO with the board's RTL8211E PHY. AMD AXI DMA moves Ethernet frames in
+scatter-gather mode. U-Boot and Linux own ARP, DHCP and IP. The bring-up
+commands in the numbered sections below apply to RTLNet's standalone
+MicroBlaze V firmware and lwIP designs. [IronForge hardware integration](https://github.com/ironkernel01/IronForge/blob/main/platforms/nexys-video/hardware/README.md)
+
+U-Boot keeps a valid `ethaddr`. When that variable is absent, board
+initialization reads the factory EUI-48 from offsets `0xfa` through `0xff`
+on the 24AA025E48 at I²C address `0x57`. It accepts a valid globally
+administered unicast address. Otherwise, the board device tree supplies the
+locally administered fallback. For a physical factory-MAC check, capture
+the U-Boot EEPROM selection message and `printenv ethaddr`, then compare
+the selected address with Linux's Ethernet interface address after boot.
+[IronForge software integration](https://github.com/ironkernel01/IronForge/blob/main/platforms/nexys-video/software/README.md)
+
+IronForge's documented network boot serves `uImage` and `system.dtb` by
+TFTP and mounts the full root filesystem over NFSv3/TCP. The boot uses no
+initramfs. Linux 7.3.4 #18 passed this path and warm Master SPI boots before
+and after it. The JFFS2 `/data` marker survived the round trip and passed
+its hash check. [IronForge Nexys boot qualification](https://github.com/ironkernel01/IronForge/blob/main/platforms/nexys-video/README.md#spi-and-nfs-qualification)
+
+See the [current IronForge Nexys Video board brief](https://github.com/ironkernel01/IronForge/blob/main/platforms/nexys-video/documentation/ironforge_nexys_video_brief.md#linux-and-rtlnet-qualification)
+for Linux hardware measurements.
+
+## Standalone Ethernet demo retest (11-20-2026)
+
+The JTAG test used the released
+[`rtlnet_nexys_video_eth.bit`](../../../demos/ethernet/nexys_video/rtlnet_nexys_video_eth.bit)
+(SHA-256 `6cfe7d37b1d2c04c5060619d0a92497b8b0e11523616f322cc79cc1a516cff7c`).
+The console reported FPGA build `2c2c686b` and `rtlnet-eth-fw 11-17-2026`.
+The PHY negotiated 1000 Mb/s full duplex and the standalone firmware obtained
+an IPv4 address through DHCP. These measurements apply to the standalone
+RTLNet Ethernet demo and its lwIP firmware.
+
+| Check | Physical result |
+|---|---|
+| UDP echo | 400 of 400 exact replies, zero losses, late replies or mismatches |
+| TCP echo | 373,952 bytes echoed across four connections |
+| TCP iperf, 6 seconds per direction | 335 Mb/s PC to board and 280 Mb/s board to PC |
+
+UART, Vivado and host test logs are in
+`platforms/nexys-video/hardware/generated/operations/nexys-refactor-20261120/standalone-*.log`
+in the IronForge test workspace.
+
 ## 1. Files
 
 | File | Content |
